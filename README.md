@@ -110,3 +110,23 @@ python main.py --config config/default.yaml
 - 检测与追踪严格解耦，避免状态逻辑污染检测层
 - 所有关键参数集中在配置文件，便于不同视频快速调参
 - 调试日志保留每帧候选数量、评分结果、选中原因、状态和丢失计数
+
+## Repo Skill
+
+仓库内已经附带当前项目使用的 Codex skill，路径如下：
+
+```text
+skills/
+└─ high-resolution-football-ball-tracking-system-designer/
+   ├─ SKILL.md
+   └─ agents/
+      └─ openai.yaml
+```
+
+如果你在其他机器上继续开发，可以把该目录复制到本机的 `$CODEX_HOME/skills/` 下。例如在 Windows 上：
+
+```powershell
+Copy-Item -Recurse -Force .\skills\high-resolution-football-ball-tracking-system-designer $env:USERPROFILE\.codex\skills\
+```
+
+复制后即可通过 `$high-resolution-football-ball-tracking-system-designer` 调用同一套技能约束继续开发。
