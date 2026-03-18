@@ -1,0 +1,89 @@
+# 输入输出配置
+input_video: "./data/input.mp4"
+output_dir: "./outputs/run_001"
+
+# 日志与调试配置
+logging:
+  level: "INFO"
+  save_debug_jsonl: true
+
+# 检测层配置
+detector:
+  model_path: "./weights/football_ball_yolo.pt"
+  device: "cuda:0"
+  confidence_threshold: 0.15
+  image_size: 1280
+  use_half: true
+  allowed_labels:
+    - "sports ball"
+    - "ball"
+
+# SAHI 切片配置
+sahi:
+  slice_height: 720
+  slice_width: 1280
+  overlap_height_ratio: 0.20
+  overlap_width_ratio: 0.20
+  perform_standard_pred: false
+  postprocess_type: "NMS"
+  postprocess_match_metric: "IOS"
+  postprocess_match_threshold: 0.50
+  verbose: 0
+
+# 候选过滤层配置
+filtering:
+  min_confidence: 0.15
+  min_width: 4
+  max_width: 80
+  min_height: 4
+  max_height: 80
+  min_aspect_ratio: 0.50
+  max_aspect_ratio: 1.80
+  roi: null
+
+# 唯一目标选择层配置
+selection:
+  min_accept_score: 0.18
+  stable_history_length: 12
+  weights:
+    distance_score: 0.32
+    direction_score: 0.20
+    velocity_score: 0.18
+    acceleration_penalty: 0.14
+    trajectory_length_bonus: 0.10
+    confidence: 0.06
+
+# 状态机追踪层配置
+tracking:
+  max_lost_frames: 8
+  match_distance: 120.0
+  max_speed: 160.0
+  max_acceleration: 120.0
+  min_history_for_tracking: 3
+  history_size: 128
+  prediction_mode: "constant_velocity"
+  predicted_confidence_decay: 0.90
+
+# 输出层配置
+output:
+  video_name: "annotated.mp4"
+  frame_dir: "frames"
+  csv_name: "ball_track.csv"
+  debug_jsonl_name: "debug.jsonl"
+  video_codec: "mp4v"
+  frame_image_ext: ".jpg"
+  save_video: true
+  save_frames: true
+  save_debug_jsonl: true
+  draw_radius: 18
+  draw_thickness: 4
+  frame_text_scale: 1.0
+  frame_text_thickness: 2
+  draw_status_text: true
+
+# 运行时优化配置
+runtime:
+  use_gpu_if_available: true
+  enable_cudnn_benchmark: true
+  opencv_threads: 2
+  capture_backend: "CAP_FFMPEG"

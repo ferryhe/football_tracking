@@ -1,0 +1,8 @@
+# 建议先按 README 安装与本机 CUDA 对应的 GPU 版 PyTorch，再执行 pip install -r requirements.txt
+numpy>=1.26.4
+opencv-python>=4.10.0.84
+PyYAML>=6.0.2
+sahi>=0.11.22
+torch>=2.5.0
+torchvision>=0.20.0
+ultralytics>=8.3.0
