@@ -1,0 +1,4 @@
+interface:
+  display_name: "High-Resolution Football Ball Tracking System Designer"
+  short_description: "Design a robust single-ball tracking system for football video."
+  default_prompt: "Use $high-resolution-football-ball-tracking-system-designer to design or implement a modular football ball tracking pipeline for high-resolution match video."
