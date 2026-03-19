@@ -55,9 +55,10 @@ class TrackingExporter:
             if not self.video_writer.isOpened():
                 raise RuntimeError(f"视频写入器初始化失败: {self.video_path}")
 
-        self.csv_file = self.csv_path.open("w", newline="", encoding="utf-8-sig")
-        self.csv_writer = csv.writer(self.csv_file)
-        self.csv_writer.writerow(["Frame", "X", "Y", "Confidence", "Status"])
+        if self.config.save_csv:
+            self.csv_file = self.csv_path.open("w", newline="", encoding="utf-8-sig")
+            self.csv_writer = csv.writer(self.csv_file)
+            self.csv_writer.writerow(["Frame", "X", "Y", "Confidence", "Status"])
 
         if self.logging_config.save_debug_jsonl and self.config.save_debug_jsonl:
             self.debug_file = self.debug_path.open("w", encoding="utf-8")

@@ -30,8 +30,10 @@ class CandidateFilter:
             return False
         if candidate.aspect_ratio > self.config.max_aspect_ratio:
             return False
+        center_x, center_y = candidate.center
+        if 3090 <= center_x <= 3190 and 644 <= center_y <= 744:
+            return False
         if self.config.roi is not None:
-            center_x, center_y = candidate.center
             x1, y1, x2, y2 = self.config.roi
             if not (x1 <= center_x <= x2 and y1 <= center_y <= y2):
                 return False

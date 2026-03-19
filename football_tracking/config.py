@@ -87,6 +87,7 @@ class OutputConfig:
     frame_image_ext: str = ".jpg"
     save_video: bool = True
     save_frames: bool = True
+    save_csv: bool = True
     save_debug_jsonl: bool = True
     draw_radius: int = 18
     draw_thickness: int = 4
@@ -101,6 +102,7 @@ class RuntimeConfig:
     enable_cudnn_benchmark: bool = True
     opencv_threads: int = 2
     capture_backend: str = "CAP_FFMPEG"
+    max_frames: int | None = None
 
 
 @dataclass(slots=True)
@@ -227,6 +229,7 @@ def load_config(config_path: Path) -> AppConfig:
         frame_image_ext=str(output_raw.get("frame_image_ext", ".jpg")),
         save_video=bool(output_raw.get("save_video", True)),
         save_frames=bool(output_raw.get("save_frames", True)),
+        save_csv=bool(output_raw.get("save_csv", True)),
         save_debug_jsonl=bool(output_raw.get("save_debug_jsonl", True)),
         draw_radius=int(output_raw.get("draw_radius", 18)),
         draw_thickness=int(output_raw.get("draw_thickness", 4)),
@@ -236,11 +239,19 @@ def load_config(config_path: Path) -> AppConfig:
     )
 
     runtime_raw = raw.get("runtime", {})
+    raw_max_frames = runtime_raw.get("max_frames")
+    max_frames = None
+    if raw_max_frames not in (None, ""):
+        max_frames = int(raw_max_frames)
+        if max_frames <= 0:
+            max_frames = None
+
     runtime = RuntimeConfig(
         use_gpu_if_available=bool(runtime_raw.get("use_gpu_if_available", True)),
         enable_cudnn_benchmark=bool(runtime_raw.get("enable_cudnn_benchmark", True)),
         opencv_threads=int(runtime_raw.get("opencv_threads", 2)),
         capture_backend=str(runtime_raw.get("capture_backend", "CAP_FFMPEG")),
+        max_frames=max_frames,
     )
 
     mock_raw = raw.get("mock", {})

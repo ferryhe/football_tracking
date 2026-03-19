@@ -2,3 +2,6 @@ __pycache__/
 *.py[cod]
 .venv/
 outputs/
+data/
+weights/
+yolov8*.pt

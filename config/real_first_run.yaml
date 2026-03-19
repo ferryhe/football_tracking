@@ -1,49 +1,43 @@
-# 输入输出配置
-input_video: "./data/input.mp4"
-output_dir: "./outputs/run_001"
+input_video: "./data/raw5760x144020fps.mp4"
+output_dir: "./outputs/real_first_run_full_accept000"
 
-# 日志与调试配置
 logging:
   level: "INFO"
   save_debug_jsonl: true
 
-# 检测层配置
 detector:
   model_path: "./weights/football_ball_yolo.pt"
   device: "cuda:0"
-  confidence_threshold: 0.15
+  confidence_threshold: 0.24
   image_size: 1280
-  use_half: true
+  use_half: false
   allowed_labels:
     - "sports ball"
     - "ball"
 
-# SAHI 切片配置
 sahi:
-  slice_height: 720
-  slice_width: 1280
-  overlap_height_ratio: 0.20
-  overlap_width_ratio: 0.20
+  slice_height: 640
+  slice_width: 960
+  overlap_height_ratio: 0.10
+  overlap_width_ratio: 0.10
   perform_standard_pred: false
   postprocess_type: "NMS"
   postprocess_match_metric: "IOS"
   postprocess_match_threshold: 0.50
   verbose: 0
 
-# 候选过滤层配置
 filtering:
-  min_confidence: 0.15
-  min_width: 4
+  min_confidence: 0.24
+  min_width: 8
   max_width: 80
-  min_height: 4
+  min_height: 8
   max_height: 80
   min_aspect_ratio: 0.50
   max_aspect_ratio: 1.80
-  roi: null
+  roi: [100, 300, 5000, 1400]
 
-# 唯一目标选择层配置
 selection:
-  min_accept_score: 0.18
+  min_accept_score: 0.0
   stable_history_length: 12
   weights:
     distance_score: 0.32
@@ -53,18 +47,16 @@ selection:
     trajectory_length_bonus: 0.10
     confidence: 0.06
 
-# 状态机追踪层配置
 tracking:
-  max_lost_frames: 8
-  match_distance: 120.0
-  max_speed: 160.0
-  max_acceleration: 120.0
+  max_lost_frames: 12
+  match_distance: 150.0
+  max_speed: 220.0
+  max_acceleration: 180.0
   min_history_for_tracking: 3
   history_size: 128
   prediction_mode: "constant_velocity"
   predicted_confidence_decay: 0.90
 
-# 输出层配置
 output:
   video_name: "annotated.mp4"
   frame_dir: "frames"
@@ -73,7 +65,7 @@ output:
   video_codec: "mp4v"
   frame_image_ext: ".jpg"
   save_video: true
-  save_frames: true
+  save_frames: false
   save_csv: true
   save_debug_jsonl: true
   draw_radius: 18
@@ -82,10 +74,9 @@ output:
   frame_text_thickness: 2
   draw_status_text: true
 
-# 运行时优化配置
 runtime:
   use_gpu_if_available: true
   enable_cudnn_benchmark: true
   opencv_threads: 2
   capture_backend: "CAP_FFMPEG"
-  max_frames: null
+  max_frames:

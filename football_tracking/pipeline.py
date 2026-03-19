@@ -78,13 +78,20 @@ class BallTrackingPipeline:
         self.logger.info("输入参数: width=%s, height=%s, fps=%.2f", width, height, fps)
 
         frame_index = -1
+        processed_frames = 0
+        max_frames = self.config.runtime.max_frames
         try:
             while True:
+                if max_frames is not None and processed_frames >= max_frames:
+                    self.logger.info("Reached max_frames=%s, stopping early.", max_frames)
+                    break
+
                 ok, frame = capture.read()
                 if not ok:
                     break
 
                 frame_index += 1
+                processed_frames += 1
                 track_result = self._process_frame(frame, frame_index)
                 try:
                     annotated_frame = self.renderer.render(frame, track_result)
