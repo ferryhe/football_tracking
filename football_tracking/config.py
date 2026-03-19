@@ -49,6 +49,45 @@ class FilteringConfig:
 
 
 @dataclass(slots=True)
+class RelaxedFilteringConfig:
+    min_confidence: float | None = None
+    min_width: float | None = None
+    min_height: float | None = None
+
+
+@dataclass(slots=True)
+class SceneZoneConfig:
+    name: str
+    roi: tuple[int, int, int, int] | None = None
+    points: tuple[tuple[int, int], ...] = ()
+    active_states: tuple[str, ...] = ()
+    frame_range: tuple[int, int] | None = None
+    relaxed_filtering: RelaxedFilteringConfig = field(default_factory=RelaxedFilteringConfig)
+    selection_bonus: float = 0.0
+
+
+@dataclass(slots=True)
+class SceneBiasConfig:
+    enabled: bool = False
+    ground_zones: list[SceneZoneConfig] = field(default_factory=list)
+    positive_rois: list[SceneZoneConfig] = field(default_factory=list)
+    negative_rois: list[SceneZoneConfig] = field(default_factory=list)
+    dynamic_air_recovery: "DynamicAirRecoveryConfig" = field(default_factory=lambda: DynamicAirRecoveryConfig())
+
+
+@dataclass(slots=True)
+class DynamicAirRecoveryConfig:
+    enabled: bool = False
+    profile: str = "fisheye_180_indoor"
+    active_states: tuple[str, ...] = ("PREDICTING", "LOST")
+    relaxed_filtering: RelaxedFilteringConfig = field(default_factory=RelaxedFilteringConfig)
+    selection_bonus: float = 0.0
+    reacquire_enabled: bool = True
+    reacquire_confidence_threshold: float = 0.10
+    reacquire_image_size: int = 1536
+
+
+@dataclass(slots=True)
 class SelectionWeights:
     distance_score: float = 0.32
     direction_score: float = 0.20
@@ -75,6 +114,9 @@ class TrackingConfig:
     history_size: int = 128
     prediction_mode: str = "constant_velocity"
     predicted_confidence_decay: float = 0.90
+    prediction_velocity_decay: float = 0.96
+    prediction_boundary_extra_decay: float = 0.85
+    prediction_boundary_margin_ratio: float = 0.08
 
 
 @dataclass(slots=True)
@@ -102,6 +144,7 @@ class RuntimeConfig:
     enable_cudnn_benchmark: bool = True
     opencv_threads: int = 2
     capture_backend: str = "CAP_FFMPEG"
+    start_frame: int = 0
     max_frames: int | None = None
 
 
@@ -125,6 +168,7 @@ class AppConfig:
     detector: DetectorConfig
     sahi: SahiConfig
     filtering: FilteringConfig
+    scene_bias: SceneBiasConfig
     selection: SelectionConfig
     tracking: TrackingConfig
     output: OutputConfig
@@ -145,6 +189,109 @@ def _to_roi(raw_roi: Any) -> tuple[int, int, int, int] | None:
     if not isinstance(raw_roi, list) or len(raw_roi) != 4:
         raise ValueError("ROI 必须为 [x1, y1, x2, y2] 或 null")
     return tuple(int(value) for value in raw_roi)
+
+
+def _to_points(raw_points: Any) -> tuple[tuple[int, int], ...]:
+    if raw_points in (None, "", []):
+        return ()
+    if not isinstance(raw_points, list) or len(raw_points) < 3:
+        raise ValueError("points 必须为至少 3 个点的列表")
+
+    points: list[tuple[int, int]] = []
+    for raw_point in raw_points:
+        if not isinstance(raw_point, list) or len(raw_point) != 2:
+            raise ValueError("polygon 点必须为 [x, y]")
+        points.append((int(raw_point[0]), int(raw_point[1])))
+    return tuple(points)
+
+
+def _to_frame_range(raw_frame_range: Any) -> tuple[int, int] | None:
+    if raw_frame_range in (None, "", []):
+        return None
+    if not isinstance(raw_frame_range, list) or len(raw_frame_range) != 2:
+        raise ValueError("frame_range 必须为 [start_frame, end_frame] 或 null")
+    start_frame = int(raw_frame_range[0])
+    end_frame = int(raw_frame_range[1])
+    if end_frame < start_frame:
+        raise ValueError("frame_range 的 end_frame 不能小于 start_frame")
+    return (start_frame, end_frame)
+
+
+def _to_active_states(raw_active_states: Any) -> tuple[str, ...]:
+    if raw_active_states in (None, "", []):
+        return ()
+    if not isinstance(raw_active_states, list):
+        raise ValueError("active_states 必须为 TrackState 列表或 null")
+    return tuple(str(value).upper() for value in raw_active_states)
+
+
+def _to_relaxed_filtering(raw_relaxed_filtering: Any) -> RelaxedFilteringConfig:
+    if raw_relaxed_filtering in (None, "", []):
+        return RelaxedFilteringConfig()
+    if not isinstance(raw_relaxed_filtering, dict):
+        raise ValueError("relaxed_filtering 必须为 dict 或 null")
+    return RelaxedFilteringConfig(
+        min_confidence=(
+            None
+            if raw_relaxed_filtering.get("min_confidence") in (None, "")
+            else float(raw_relaxed_filtering.get("min_confidence"))
+        ),
+        min_width=(
+            None
+            if raw_relaxed_filtering.get("min_width") in (None, "")
+            else float(raw_relaxed_filtering.get("min_width"))
+        ),
+        min_height=(
+            None
+            if raw_relaxed_filtering.get("min_height") in (None, "")
+            else float(raw_relaxed_filtering.get("min_height"))
+        ),
+    )
+
+
+def _to_scene_zones(raw_zones: Any) -> list[SceneZoneConfig]:
+    if raw_zones in (None, "", []):
+        return []
+    if not isinstance(raw_zones, list):
+        raise ValueError("scene_bias 区域配置必须为 list")
+
+    zones: list[SceneZoneConfig] = []
+    for index, raw_zone in enumerate(raw_zones):
+        if not isinstance(raw_zone, dict):
+            raise ValueError(f"scene_bias 区域 #{index} 必须为 dict")
+        roi = _to_roi(raw_zone.get("roi"))
+        points = _to_points(raw_zone.get("points"))
+        if roi is None and not points:
+            raise ValueError(f"scene_bias 区域 {raw_zone.get('name', index)} 必须配置 roi 或 points")
+        zones.append(
+            SceneZoneConfig(
+                name=str(raw_zone.get("name", f"zone_{index}")),
+                roi=roi,
+                points=points,
+                active_states=_to_active_states(raw_zone.get("active_states")),
+                frame_range=_to_frame_range(raw_zone.get("frame_range")),
+                relaxed_filtering=_to_relaxed_filtering(raw_zone.get("relaxed_filtering")),
+                selection_bonus=float(raw_zone.get("selection_bonus", 0.0)),
+            )
+        )
+    return zones
+
+
+def _to_dynamic_air_recovery(raw_dynamic_air_recovery: Any) -> DynamicAirRecoveryConfig:
+    if raw_dynamic_air_recovery in (None, "", []):
+        return DynamicAirRecoveryConfig()
+    if not isinstance(raw_dynamic_air_recovery, dict):
+        raise ValueError("dynamic_air_recovery 必须为 dict 或 null")
+    return DynamicAirRecoveryConfig(
+        enabled=bool(raw_dynamic_air_recovery.get("enabled", False)),
+        profile=str(raw_dynamic_air_recovery.get("profile", "fisheye_180_indoor")),
+        active_states=_to_active_states(raw_dynamic_air_recovery.get("active_states", ["PREDICTING", "LOST"])),
+        relaxed_filtering=_to_relaxed_filtering(raw_dynamic_air_recovery.get("relaxed_filtering")),
+        selection_bonus=float(raw_dynamic_air_recovery.get("selection_bonus", 0.0)),
+        reacquire_enabled=bool(raw_dynamic_air_recovery.get("reacquire_enabled", True)),
+        reacquire_confidence_threshold=float(raw_dynamic_air_recovery.get("reacquire_confidence_threshold", 0.10)),
+        reacquire_image_size=int(raw_dynamic_air_recovery.get("reacquire_image_size", 1536)),
+    )
 
 
 def load_config(config_path: Path) -> AppConfig:
@@ -193,6 +340,15 @@ def load_config(config_path: Path) -> AppConfig:
         roi=_to_roi(filtering_raw.get("roi")),
     )
 
+    scene_bias_raw = raw.get("scene_bias", {})
+    scene_bias = SceneBiasConfig(
+        enabled=bool(scene_bias_raw.get("enabled", False)),
+        ground_zones=_to_scene_zones(scene_bias_raw.get("ground_zones")),
+        positive_rois=_to_scene_zones(scene_bias_raw.get("positive_rois")),
+        negative_rois=_to_scene_zones(scene_bias_raw.get("negative_rois")),
+        dynamic_air_recovery=_to_dynamic_air_recovery(scene_bias_raw.get("dynamic_air_recovery")),
+    )
+
     weights_raw = raw.get("selection", {}).get("weights", {})
     selection = SelectionConfig(
         min_accept_score=float(raw.get("selection", {}).get("min_accept_score", 0.18)),
@@ -217,6 +373,9 @@ def load_config(config_path: Path) -> AppConfig:
         history_size=int(tracking_raw.get("history_size", 128)),
         prediction_mode=str(tracking_raw.get("prediction_mode", "constant_velocity")),
         predicted_confidence_decay=float(tracking_raw.get("predicted_confidence_decay", 0.90)),
+        prediction_velocity_decay=float(tracking_raw.get("prediction_velocity_decay", 0.96)),
+        prediction_boundary_extra_decay=float(tracking_raw.get("prediction_boundary_extra_decay", 0.85)),
+        prediction_boundary_margin_ratio=float(tracking_raw.get("prediction_boundary_margin_ratio", 0.08)),
     )
 
     output_raw = raw.get("output", {})
@@ -239,7 +398,11 @@ def load_config(config_path: Path) -> AppConfig:
     )
 
     runtime_raw = raw.get("runtime", {})
+    raw_start_frame = runtime_raw.get("start_frame", 0)
     raw_max_frames = runtime_raw.get("max_frames")
+    start_frame = int(raw_start_frame or 0)
+    if start_frame < 0:
+        start_frame = 0
     max_frames = None
     if raw_max_frames not in (None, ""):
         max_frames = int(raw_max_frames)
@@ -251,6 +414,7 @@ def load_config(config_path: Path) -> AppConfig:
         enable_cudnn_benchmark=bool(runtime_raw.get("enable_cudnn_benchmark", True)),
         opencv_threads=int(runtime_raw.get("opencv_threads", 2)),
         capture_backend=str(runtime_raw.get("capture_backend", "CAP_FFMPEG")),
+        start_frame=start_frame,
         max_frames=max_frames,
     )
 
@@ -279,6 +443,7 @@ def load_config(config_path: Path) -> AppConfig:
         detector=detector,
         sahi=sahi,
         filtering=filtering,
+        scene_bias=scene_bias,
         selection=selection,
         tracking=tracking,
         output=output,

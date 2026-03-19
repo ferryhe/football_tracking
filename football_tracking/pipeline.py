@@ -11,6 +11,7 @@ from football_tracking.exporter import TrackingExporter
 from football_tracking.filtering import CandidateFilter
 from football_tracking.mock_mode import MockFrameSource
 from football_tracking.renderer import FrameRenderer
+from football_tracking.scene_bias import SceneBiasResolver
 from football_tracking.selector import UniqueBallSelector
 from football_tracking.tracker import BallTracker
 from football_tracking.types import SelectionDecision
@@ -24,8 +25,9 @@ class BallTrackingPipeline:
         self._configure_runtime()
         self.logger = self._build_logger()
         self.detector = self._build_detector()
-        self.candidate_filter = CandidateFilter(config.filtering)
-        self.selector = UniqueBallSelector(config.selection, config.tracking)
+        self.scene_bias = SceneBiasResolver(config.scene_bias)
+        self.candidate_filter = CandidateFilter(config.filtering, self.scene_bias)
+        self.selector = UniqueBallSelector(config.selection, config.tracking, self.scene_bias)
         self.tracker = BallTracker(config.tracking)
         self.renderer = FrameRenderer(config.output)
 
@@ -77,9 +79,12 @@ class BallTrackingPipeline:
             self.logger.info("开始处理视频: %s", self.config.input_video)
         self.logger.info("输入参数: width=%s, height=%s, fps=%.2f", width, height, fps)
 
-        frame_index = -1
+        frame_index = self.config.runtime.start_frame - 1
         processed_frames = 0
+        start_frame = self.config.runtime.start_frame
         max_frames = self.config.runtime.max_frames
+        if start_frame > 0:
+            self.logger.info("Starting from frame=%s", start_frame)
         try:
             while True:
                 if max_frames is not None and processed_frames >= max_frames:
@@ -139,21 +144,75 @@ class BallTrackingPipeline:
         fps = capture.get(cv2.CAP_PROP_FPS) or 20.0
         width = int(capture.get(cv2.CAP_PROP_FRAME_WIDTH))
         height = int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        self._seek_to_start_frame(capture)
         return capture, width, height, fps
+
+    def _seek_to_start_frame(self, capture) -> None:
+        start_frame = self.config.runtime.start_frame
+        if start_frame <= 0:
+            return
+
+        seek_ok = capture.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
+        actual_frame = int(capture.get(cv2.CAP_PROP_POS_FRAMES))
+        if seek_ok and abs(actual_frame - start_frame) <= 1:
+            return
+
+        capture.set(cv2.CAP_PROP_POS_FRAMES, 0)
+        skipped = 0
+        while skipped < start_frame:
+            ok, _ = capture.read()
+            if not ok:
+                break
+            skipped += 1
+        if skipped != start_frame:
+            raise RuntimeError(f"无法跳转到起始帧: start_frame={start_frame}, skipped={skipped}")
 
     def _process_frame(self, frame, frame_index: int):
         """处理单帧，任何异常都退化为预测或丢失，不让整体流程中断。"""
         try:
             raw_candidates = self.detector.detect(frame, frame_index=frame_index)
-            filtered_candidates = self.candidate_filter.filter(raw_candidates)
             context = self.tracker.build_context()
-            decision = self.selector.select(filtered_candidates, context)
+            filtered_candidates, filter_rejections, filter_rejection_counts = self.candidate_filter.filter(
+                raw_candidates,
+                context,
+                frame_index,
+            )
+            decision = self.selector.select(filtered_candidates, context, frame_index)
+            reacquire_attempted = False
+            reacquire_candidates = []
+            reacquire_window = None
+
+            (
+                raw_candidates,
+                filtered_candidates,
+                filter_rejections,
+                filter_rejection_counts,
+                decision,
+                reacquire_attempted,
+                reacquire_candidates,
+                reacquire_window,
+            ) = self._maybe_run_dynamic_reacquire(
+                frame=frame,
+                frame_index=frame_index,
+                context=context,
+                raw_candidates=raw_candidates,
+                filtered_candidates=filtered_candidates,
+                filter_rejections=filter_rejections,
+                filter_rejection_counts=filter_rejection_counts,
+                decision=decision,
+            )
             track_result = self.tracker.update(
                 frame_index=frame_index,
                 decision=decision,
                 raw_candidate_count=len(raw_candidates),
                 filtered_candidate_count=len(filtered_candidates),
+                frame_size=(frame.shape[1], frame.shape[0]),
             )
+            track_result.filter_rejections = filter_rejections
+            track_result.filter_rejection_counts = filter_rejection_counts
+            track_result.reacquire_attempted = reacquire_attempted
+            track_result.reacquire_candidate_count = len(reacquire_candidates)
+            track_result.reacquire_window = None if reacquire_window is None else list(reacquire_window)
         except Exception as exc:
             self.logger.exception("第 %s 帧处理异常，系统将退化为预测/丢失: %s", frame_index, exc)
             decision = SelectionDecision(
@@ -168,7 +227,13 @@ class BallTrackingPipeline:
                 raw_candidate_count=0,
                 filtered_candidate_count=0,
                 missing_reason=f"frame_exception: {exc}",
+                frame_size=(frame.shape[1], frame.shape[0]),
             )
+            track_result.filter_rejections = []
+            track_result.filter_rejection_counts = {}
+            track_result.reacquire_attempted = False
+            track_result.reacquire_candidate_count = 0
+            track_result.reacquire_window = None
 
         self.logger.debug(
             "frame=%s raw_candidates=%s filtered_candidates=%s status=%s state=%s lost_frames=%s reason=%s",
@@ -181,3 +246,110 @@ class BallTrackingPipeline:
             track_result.reason,
         )
         return track_result
+
+    def _maybe_run_dynamic_reacquire(
+        self,
+        frame,
+        frame_index: int,
+        context,
+        raw_candidates,
+        filtered_candidates,
+        filter_rejections,
+        filter_rejection_counts,
+        decision: SelectionDecision,
+    ):
+        dynamic_config = self.config.scene_bias.dynamic_air_recovery
+        if decision.selected_candidate is not None:
+            return (
+                raw_candidates,
+                filtered_candidates,
+                filter_rejections,
+                filter_rejection_counts,
+                decision,
+                False,
+                [],
+                None,
+            )
+        if not dynamic_config.enabled or not dynamic_config.reacquire_enabled:
+            return (
+                raw_candidates,
+                filtered_candidates,
+                filter_rejections,
+                filter_rejection_counts,
+                decision,
+                False,
+                [],
+                None,
+            )
+        if not self.scene_bias.is_dynamic_air_recovery_active(context):
+            return (
+                raw_candidates,
+                filtered_candidates,
+                filter_rejections,
+                filter_rejection_counts,
+                decision,
+                False,
+                [],
+                None,
+            )
+        if not hasattr(self.detector, "detect_direct_in_roi"):
+            return (
+                raw_candidates,
+                filtered_candidates,
+                filter_rejections,
+                filter_rejection_counts,
+                decision,
+                False,
+                [],
+                None,
+            )
+
+        reacquire_window = self.scene_bias.get_dynamic_air_window(context, frame.shape[:2])
+        if reacquire_window is None:
+            return (
+                raw_candidates,
+                filtered_candidates,
+                filter_rejections,
+                filter_rejection_counts,
+                decision,
+                False,
+                [],
+                None,
+            )
+
+        reacquire_candidates = self.detector.detect_direct_in_roi(
+            frame,
+            frame_index=frame_index,
+            roi=reacquire_window,
+            confidence_threshold=dynamic_config.reacquire_confidence_threshold,
+            image_size=dynamic_config.reacquire_image_size,
+        )
+        if not reacquire_candidates:
+            return (
+                raw_candidates,
+                filtered_candidates,
+                filter_rejections,
+                filter_rejection_counts,
+                decision,
+                True,
+                [],
+                reacquire_window,
+            )
+
+        combined_raw_candidates = [*raw_candidates, *reacquire_candidates]
+        combined_filtered_candidates, combined_filter_rejections, combined_filter_rejection_counts = self.candidate_filter.filter(
+            combined_raw_candidates,
+            context,
+            frame_index,
+        )
+        combined_decision = self.selector.select(combined_filtered_candidates, context, frame_index)
+        return (
+            combined_raw_candidates,
+            combined_filtered_candidates,
+            combined_filter_rejections,
+            combined_filter_rejection_counts,
+            combined_decision,
+            True,
+            reacquire_candidates,
+            reacquire_window,
+        )

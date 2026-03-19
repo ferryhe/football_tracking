@@ -1,5 +1,5 @@
 input_video: "./data/raw5760x144020fps.mp4"
-output_dir: "./outputs/real_v11_full_polygon"
+output_dir: "./outputs/real_v12_reacquire_2130_2450"
 
 logging:
   level: "INFO"
@@ -114,5 +114,5 @@ runtime:
   enable_cudnn_benchmark: true
   opencv_threads: 2
   capture_backend: "CAP_FFMPEG"
-  start_frame: 0
-  max_frames:
+  start_frame: 2130
+  max_frames: 321

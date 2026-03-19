@@ -1,5 +1,5 @@
 input_video: "./data/raw5760x144020fps.mp4"
-output_dir: "./outputs/real_v11_full_polygon"
+output_dir: "./outputs/real_v11_validate_2050_2350"
 
 logging:
   level: "INFO"
@@ -57,19 +57,55 @@ scene_bias:
         - [3190, 644]
         - [3190, 744]
         - [3090, 744]
-  positive_rois: []
-  dynamic_air_recovery:
-    enabled: true
-    profile: "fisheye_180_indoor"
-    active_states: ["PREDICTING", "LOST"]
-    relaxed_filtering:
-      min_confidence: 0.18
-      min_width: 6
-      min_height: 6
-    selection_bonus: 0.06
-    reacquire_enabled: true
-    reacquire_confidence_threshold: 0.10
-    reacquire_image_size: 1536
+  positive_rois:
+    - name: "air_track_zone"
+      points:
+        - [700, 820]
+        - [700, 650]
+        - [1100, 430]
+        - [1800, 250]
+        - [2560, 180]
+        - [3320, 250]
+        - [4040, 380]
+        - [4700, 620]
+        - [4700, 820]
+        - [3800, 940]
+        - [2560, 980]
+        - [1320, 940]
+      active_states: ["TRACKING", "PREDICTING", "LOST"]
+      relaxed_filtering:
+        min_confidence: 0.18
+        min_width: 6
+        min_height: 6
+      selection_bonus: 0.05
+    - name: "right_corner_recovery"
+      points:
+        - [4050, 820]
+        - [5000, 900]
+        - [5120, 1100]
+        - [5120, 1440]
+        - [4480, 1440]
+        - [4020, 1080]
+      active_states: ["TRACKING", "PREDICTING", "LOST"]
+      relaxed_filtering:
+        min_confidence: 0.18
+        min_width: 6
+        min_height: 6
+      selection_bonus: 0.08
+    - name: "left_corner_recovery"
+      points:
+        - [0, 1080]
+        - [0, 1440]
+        - [640, 1440]
+        - [1080, 1120]
+        - [960, 900]
+        - [120, 860]
+      active_states: ["TRACKING", "PREDICTING", "LOST"]
+      relaxed_filtering:
+        min_confidence: 0.18
+        min_width: 6
+        min_height: 6
+      selection_bonus: 0.08
 
 selection:
   min_accept_score: 0.0
@@ -114,5 +150,5 @@ runtime:
   enable_cudnn_benchmark: true
   opencv_threads: 2
   capture_backend: "CAP_FFMPEG"
-  start_frame: 0
-  max_frames:
+  start_frame: 2050
+  max_frames: 301

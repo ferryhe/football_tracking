@@ -17,6 +17,7 @@ class YOLOSahiBallDetector:
         self.sahi_config = sahi_config
         self.model = self._build_model()
         self.get_sliced_prediction = self._load_sahi_predictor()
+        self.direct_model = None
 
     def _build_model(self):
         """只初始化一次检测模型，避免重复占用显存。"""
@@ -47,6 +48,13 @@ class YOLOSahiBallDetector:
 
         return get_sliced_prediction
 
+    def _get_direct_model(self):
+        if self.direct_model is None:
+            from ultralytics import YOLO
+
+            self.direct_model = YOLO(str(self.detector_config.model_path))
+        return self.direct_model
+
     def detect(self, frame, frame_index: int) -> list[Candidate]:
         """检测当前帧中的候选球，返回原始候选列表。"""
         prediction_result = self.get_sliced_prediction(
@@ -64,6 +72,63 @@ class YOLOSahiBallDetector:
         )
 
         return list(self._to_candidates(prediction_result.object_prediction_list, frame_index))
+
+    def detect_direct(
+        self,
+        frame,
+        frame_index: int,
+        confidence_threshold: float | None = None,
+        image_size: int | None = None,
+    ) -> list[Candidate]:
+        """在整帧或裁剪区域上直接运行 YOLO，不使用 SAHI 切片。"""
+        model = self._get_direct_model()
+        prediction_results = model.predict(
+            frame,
+            conf=confidence_threshold if confidence_threshold is not None else self.detector_config.confidence_threshold,
+            imgsz=image_size if image_size is not None else self.detector_config.image_size,
+            device=self.detector_config.device,
+            verbose=False,
+            half=self.detector_config.use_half and self.detector_config.device.startswith("cuda"),
+        )
+        if not prediction_results:
+            return []
+        return list(self._to_direct_candidates(prediction_results[0], frame_index, source="yolo_direct"))
+
+    def detect_direct_in_roi(
+        self,
+        frame,
+        frame_index: int,
+        roi: tuple[int, int, int, int],
+        confidence_threshold: float | None = None,
+        image_size: int | None = None,
+    ) -> list[Candidate]:
+        """对局部 ROI 做更激进的二次重检，再映射回全图坐标。"""
+        left, top, right, bottom = roi
+        crop = frame[top:bottom, left:right]
+        if crop.size == 0:
+            return []
+
+        local_candidates = self.detect_direct(
+            crop,
+            frame_index=frame_index,
+            confidence_threshold=confidence_threshold,
+            image_size=image_size,
+        )
+        global_candidates: list[Candidate] = []
+        for candidate in local_candidates:
+            global_candidates.append(
+                Candidate(
+                    frame_index=frame_index,
+                    x1=candidate.x1 + left,
+                    y1=candidate.y1 + top,
+                    x2=candidate.x2 + left,
+                    y2=candidate.y2 + top,
+                    confidence=candidate.confidence,
+                    label=candidate.label,
+                    source=f"{candidate.source}_roi",
+                )
+            )
+        return global_candidates
 
     def _to_candidates(self, predictions: Iterable, frame_index: int) -> Iterable[Candidate]:
         """将 SAHI 输出转换为统一候选结构。"""
@@ -86,6 +151,39 @@ class YOLOSahiBallDetector:
                 confidence=float(prediction.score.value),
                 label=label,
                 source="yolo_sahi",
+            )
+
+    def _to_direct_candidates(self, prediction_result, frame_index: int, source: str) -> Iterable[Candidate]:
+        allow_all = len(self.detector_config.allowed_labels) == 0
+        allowed_labels = {label.lower() for label in self.detector_config.allowed_labels}
+
+        boxes = getattr(prediction_result, "boxes", None)
+        if boxes is None:
+            return
+
+        names = getattr(prediction_result, "names", {})
+        xyxy = boxes.xyxy.cpu().tolist()
+        confidences = boxes.conf.cpu().tolist()
+        class_ids = boxes.cls.cpu().tolist()
+
+        for bbox, score, class_id in zip(xyxy, confidences, class_ids):
+            class_index = int(class_id)
+            if isinstance(names, dict):
+                label = str(names.get(class_index, "ball"))
+            else:
+                label = str(names[class_index])
+            if not allow_all and label.lower() not in allowed_labels:
+                continue
+
+            yield Candidate(
+                frame_index=frame_index,
+                x1=float(bbox[0]),
+                y1=float(bbox[1]),
+                x2=float(bbox[2]),
+                y2=float(bbox[3]),
+                confidence=float(score),
+                label=label,
+                source=source,
             )
 
 

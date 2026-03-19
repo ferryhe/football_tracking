@@ -1,5 +1,5 @@
 input_video: "./data/raw5760x144020fps.mp4"
-output_dir: "./outputs/real_v11_full_polygon"
+output_dir: "./outputs/real_v13_prediction_taming_2130_2450"
 
 logging:
   level: "INFO"
@@ -91,6 +91,9 @@ tracking:
   history_size: 128
   prediction_mode: "constant_velocity"
   predicted_confidence_decay: 0.90
+  prediction_velocity_decay: 0.96
+  prediction_boundary_extra_decay: 0.85
+  prediction_boundary_margin_ratio: 0.08
 
 output:
   video_name: "annotated.mp4"
@@ -114,5 +117,5 @@ runtime:
   enable_cudnn_benchmark: true
   opencv_threads: 2
   capture_backend: "CAP_FFMPEG"
-  start_frame: 0
-  max_frames:
+  start_frame: 2130
+  max_frames: 321

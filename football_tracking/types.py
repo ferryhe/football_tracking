@@ -81,6 +81,8 @@ class CandidateScore:
     acceleration_penalty: float
     trajectory_length_bonus: float
     confidence_score: float
+    scene_bonus: float
+    scene_zone: str | None
     reason: str
 
     def to_debug_dict(self) -> dict[str, Any]:
@@ -94,6 +96,7 @@ class CandidateScore:
             ],
             "confidence": round(self.candidate.confidence, 4),
             "label": self.candidate.label,
+            "source": self.candidate.source,
             "total_score": round(self.total_score, 4),
             "distance_score": round(self.distance_score, 4),
             "direction_score": round(self.direction_score, 4),
@@ -101,6 +104,8 @@ class CandidateScore:
             "acceleration_penalty": round(self.acceleration_penalty, 4),
             "trajectory_length_bonus": round(self.trajectory_length_bonus, 4),
             "confidence_score": round(self.confidence_score, 4),
+            "scene_bonus": round(self.scene_bonus, 4),
+            "scene_zone": self.scene_zone,
             "reason": self.reason,
         }
 
@@ -112,6 +117,7 @@ class TrackerContext:
     state: TrackState
     last_position: tuple[float, float] | None = None
     predicted_position: tuple[float, float] | None = None
+    last_detected_position: tuple[float, float] | None = None
     velocity: tuple[float, float] = (0.0, 0.0)
     acceleration: tuple[float, float] = (0.0, 0.0)
     history_length: int = 0
@@ -143,6 +149,11 @@ class TrackResult:
     filtered_candidate_count: int
     selected_score: float = 0.0
     selected_candidate_scores: list[CandidateScore] = field(default_factory=list)
+    filter_rejection_counts: dict[str, int] = field(default_factory=dict)
+    filter_rejections: list[dict[str, Any]] = field(default_factory=list)
+    reacquire_attempted: bool = False
+    reacquire_candidate_count: int = 0
+    reacquire_window: list[int] | None = None
 
     def to_debug_dict(self) -> dict[str, Any]:
         return {
@@ -163,4 +174,9 @@ class TrackResult:
             "filtered_candidate_count": self.filtered_candidate_count,
             "selected_score": round(self.selected_score, 4),
             "candidate_scores": [item.to_debug_dict() for item in self.selected_candidate_scores],
+            "filter_rejection_counts": self.filter_rejection_counts,
+            "filter_rejections": self.filter_rejections,
+            "reacquire_attempted": self.reacquire_attempted,
+            "reacquire_candidate_count": self.reacquire_candidate_count,
+            "reacquire_window": self.reacquire_window,
         }

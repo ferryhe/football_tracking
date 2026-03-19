@@ -41,6 +41,18 @@ filtering:
   max_aspect_ratio: 1.80
   roi: null
 
+scene_bias:
+  enabled: false
+  ground_zones: []
+  positive_rois: []
+  negative_rois: []
+  dynamic_air_recovery:
+    enabled: false
+    profile: "fisheye_180_indoor"
+    active_states: ["PREDICTING", "LOST"]
+    relaxed_filtering: {}
+    selection_bonus: 0.0
+
 # 唯一目标选择层配置
 selection:
   min_accept_score: 0.18
@@ -88,4 +100,5 @@ runtime:
   enable_cudnn_benchmark: true
   opencv_threads: 2
   capture_backend: "CAP_FFMPEG"
+  start_frame: 0
   max_frames: null

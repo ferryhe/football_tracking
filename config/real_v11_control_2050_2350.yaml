@@ -1,5 +1,5 @@
 input_video: "./data/raw5760x144020fps.mp4"
-output_dir: "./outputs/real_v11_full_polygon"
+output_dir: "./outputs/real_v11_control_2050_2350"
 
 logging:
   level: "INFO"
@@ -58,18 +58,6 @@ scene_bias:
         - [3190, 744]
         - [3090, 744]
   positive_rois: []
-  dynamic_air_recovery:
-    enabled: true
-    profile: "fisheye_180_indoor"
-    active_states: ["PREDICTING", "LOST"]
-    relaxed_filtering:
-      min_confidence: 0.18
-      min_width: 6
-      min_height: 6
-    selection_bonus: 0.06
-    reacquire_enabled: true
-    reacquire_confidence_threshold: 0.10
-    reacquire_image_size: 1536
 
 selection:
   min_accept_score: 0.0
@@ -114,5 +102,5 @@ runtime:
   enable_cudnn_benchmark: true
   opencv_threads: 2
   capture_backend: "CAP_FFMPEG"
-  start_frame: 0
-  max_frames:
+  start_frame: 2050
+  max_frames: 301
