@@ -1,4 +1,32 @@
-# High-Resolution Football Ball Tracking
+﻿# High-Resolution Football Ball Tracking
+
+## v1.0 Release Notes
+
+This tag marks the end of the first real-video integration phase.
+
+Current baseline:
+
+- Real-video config is provided in `config/real_first_run.yaml`.
+- The pipeline supports `runtime.max_frames` for short integration runs.
+- CSV export can be enabled with `output.save_csv`.
+- A first practical real-video baseline has been validated on both 200-frame and full-video runs.
+
+What worked in v1.0:
+
+- The system no longer stays locked on the original static false ball for the whole clip.
+- The tracker can reacquire the ball after several occlusion and deflection events.
+- Full-length processing completes and produces `annotated.mp4`, `ball_track.csv`, and `debug.jsonl`.
+
+Known limits:
+
+- Long `Lost` spans still appear in corner-kick, sideline, and dead-ball scenes.
+- `no_filtered_candidates` remains the main failure mode in difficult regions.
+- Long prediction-only stretches can drift outside the frame during full-video runs.
+
+Recommended use for this tag:
+
+- Treat `v1.0` as a stable milestone and debugging baseline.
+- Use it for further scene-specific improvements rather than broad global retuning.
 
 这是一个面向本地 Windows 环境的工程化足球比赛用球唯一追踪项目，针对 `5210 x 1440 / 20 FPS` 广角视频设计。系统严格采用五层架构：
 
@@ -130,3 +158,4 @@ Copy-Item -Recurse -Force .\skills\high-resolution-football-ball-tracking-system
 ```
 
 复制后即可通过 `$high-resolution-football-ball-tracking-system-designer` 调用同一套技能约束继续开发。
+
