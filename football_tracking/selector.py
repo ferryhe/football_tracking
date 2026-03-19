@@ -57,6 +57,7 @@ class UniqueBallSelector:
     def _score_candidate(self, candidate: Candidate, context: TrackerContext, frame_index: int) -> CandidateScore:
         anchor_position = context.predicted_position or context.last_position
         candidate_position = candidate.center
+        match_distance = context.gating_radius or self.tracking_config.match_distance
 
         if context.last_position is None:
             # 冷启动阶段缺少历史轨迹，只能在基础过滤后以轻量规则启动轨迹。
@@ -72,7 +73,7 @@ class UniqueBallSelector:
         distance_component = distance_score(
             candidate_position=candidate_position,
             anchor_position=anchor_position,
-            match_distance=self.tracking_config.match_distance,
+            match_distance=match_distance,
         )
         direction_component = direction_score(context.velocity, displacement)
         velocity_component = velocity_score(
@@ -109,6 +110,7 @@ class UniqueBallSelector:
         reason = self._build_reason(
             candidate=candidate,
             anchor_position=anchor_position,
+            match_distance=match_distance,
             distance_component=distance_component,
             direction_component=direction_component,
             velocity_component=velocity_component,
@@ -136,6 +138,7 @@ class UniqueBallSelector:
         self,
         candidate: Candidate,
         anchor_position: tuple[float, float] | None,
+        match_distance: float,
         distance_component: float,
         direction_component: float,
         velocity_component: float,
@@ -149,7 +152,7 @@ class UniqueBallSelector:
 
         distance = euclidean_distance(candidate.center, anchor_position)
         reason = (
-            f"distance={distance:.2f}, distance_score={distance_component:.3f}, "
+            f"distance={distance:.2f}, gate_radius={match_distance:.2f}, distance_score={distance_component:.3f}, "
             f"direction_score={direction_component:.3f}, velocity_score={velocity_component:.3f}, "
             f"acceleration_penalty={acceleration_component:.3f}, history_bonus={history_component:.3f}"
         )
