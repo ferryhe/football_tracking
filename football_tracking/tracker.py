@@ -30,12 +30,15 @@ class BallTracker:
         self.last_anchor_position: tuple[float, float] | None = None
         self.last_detected_position: tuple[float, float] | None = None
         self.kalman = ConstantAccelerationKalmanFilter() if config.kalman_enabled else None
+        self.reacquire_stabilization_frames_remaining = 0
 
     def build_context(self) -> TrackerContext:
         """给选择层提供当前追踪上下文。"""
         if self.kalman is not None and self.kalman.is_initialized:
             current_position = self.kalman.get_position()
             predicted_position, predicted_velocity, predicted_acceleration, gating_radius = self._peek_kalman_context()
+            if self.reacquire_stabilization_frames_remaining > 0:
+                gating_radius *= self.config.reacquire_stabilization_gate_scale
             return TrackerContext(
                 state=self.state,
                 last_position=current_position,
@@ -112,6 +115,7 @@ class BallTracker:
         candidate_position = candidate.center
         frame_gap = frame_index - previous_point.frame_index if previous_point else 1
         reacquire = self.lost_frames > 0 or "yolo_direct" in candidate.source
+        stabilization_active = self.reacquire_stabilization_frames_remaining > 0
 
         if self.kalman is not None:
             if not self.kalman.is_initialized:
@@ -129,13 +133,16 @@ class BallTracker:
 
             new_velocity = self.kalman.get_velocity()
             new_acceleration = self.kalman.get_acceleration()
-            if reacquire:
+            if reacquire or stabilization_active:
                 new_velocity = self._tame_reacquired_velocity(new_velocity)
                 self.kalman.set_motion(velocity=new_velocity, acceleration=(0.0, 0.0))
                 new_acceleration = (0.0, 0.0)
         else:
             new_velocity = compute_velocity(previous_point, candidate_position, frame_gap=frame_gap)
             new_acceleration = compute_acceleration(self.velocity, new_velocity)
+            if reacquire or stabilization_active:
+                new_velocity = self._tame_reacquired_velocity(new_velocity)
+                new_acceleration = (0.0, 0.0)
 
         point = TrackPoint(
             frame_index=frame_index,
@@ -156,8 +163,9 @@ class BallTracker:
             self.state = TrackState.TRACKING
         else:
             self.state = TrackState.INIT
+        self._advance_reacquire_stabilization(trigger_reacquire=reacquire)
 
-        return TrackResult(
+        result = TrackResult(
             frame_index=frame_index,
             output_status=OutputStatus.DETECTED,
             state=self.state,
@@ -170,6 +178,8 @@ class BallTracker:
             selected_score=decision.selected_score,
             selected_candidate_scores=decision.candidate_scores,
         )
+        result.reacquire_stabilization_frames_remaining = self.reacquire_stabilization_frames_remaining
+        return result
 
     def _handle_missing(
         self,
@@ -199,6 +209,7 @@ class BallTracker:
 
         self.lost_frames += 1
         if self.lost_frames <= self.config.max_lost_frames:
+            stabilization_active = self.reacquire_stabilization_frames_remaining > 0
             if self.kalman is not None and self.kalman.is_initialized:
                 self.kalman.predict(
                     dt=1.0,
@@ -210,6 +221,11 @@ class BallTracker:
                     velocity=self.kalman.get_velocity(),
                     frame_size=frame_size,
                 )
+                if stabilization_active:
+                    decayed_velocity = (
+                        decayed_velocity[0] * self.config.reacquire_stabilization_velocity_decay,
+                        decayed_velocity[1] * self.config.reacquire_stabilization_velocity_decay,
+                    )
                 clamped_position, adjusted_velocity = self._clamp_predicted_motion(
                     predicted_position=predicted_position,
                     velocity=decayed_velocity,
@@ -224,6 +240,11 @@ class BallTracker:
                     velocity=self.velocity,
                     frame_size=frame_size,
                 )
+                if stabilization_active:
+                    decayed_velocity = (
+                        decayed_velocity[0] * self.config.reacquire_stabilization_velocity_decay,
+                        decayed_velocity[1] * self.config.reacquire_stabilization_velocity_decay,
+                    )
                 predicted_position = predict_constant_velocity((last_point.x, last_point.y), decayed_velocity, steps=1)
                 clamped_position, adjusted_velocity = self._clamp_predicted_motion(
                     predicted_position=predicted_position,
@@ -245,7 +266,8 @@ class BallTracker:
             self.acceleration = (0.0, 0.0)
             self.last_anchor_position = clamped_position
             self.state = TrackState.PREDICTING
-            return TrackResult(
+            self._advance_reacquire_stabilization(trigger_reacquire=False)
+            result = TrackResult(
                 frame_index=frame_index,
                 output_status=OutputStatus.PREDICTED,
                 state=self.state,
@@ -258,6 +280,8 @@ class BallTracker:
                 selected_score=decision.selected_score,
                 selected_candidate_scores=decision.candidate_scores,
             )
+            result.reacquire_stabilization_frames_remaining = self.reacquire_stabilization_frames_remaining
+            return result
 
         self.state = TrackState.LOST
         self.velocity = (0.0, 0.0)
@@ -267,7 +291,8 @@ class BallTracker:
         if self.kalman is not None:
             self.kalman.set_motion(velocity=(0.0, 0.0), acceleration=(0.0, 0.0))
         self.history.clear()
-        return TrackResult(
+        self.reacquire_stabilization_frames_remaining = 0
+        result = TrackResult(
             frame_index=frame_index,
             output_status=OutputStatus.LOST,
             state=self.state,
@@ -280,6 +305,8 @@ class BallTracker:
             selected_score=decision.selected_score,
             selected_candidate_scores=decision.candidate_scores,
         )
+        result.reacquire_stabilization_frames_remaining = self.reacquire_stabilization_frames_remaining
+        return result
 
     def _decay_prediction_velocity(
         self,
@@ -373,3 +400,10 @@ class BallTracker:
 
         ratio = speed_cap / speed
         return (blended_velocity[0] * ratio, blended_velocity[1] * ratio)
+
+    def _advance_reacquire_stabilization(self, trigger_reacquire: bool) -> None:
+        if trigger_reacquire:
+            self.reacquire_stabilization_frames_remaining = max(0, self.config.reacquire_stabilization_frames)
+            return
+        if self.reacquire_stabilization_frames_remaining > 0:
+            self.reacquire_stabilization_frames_remaining -= 1

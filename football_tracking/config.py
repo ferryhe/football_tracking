@@ -129,6 +129,9 @@ class TrackingConfig:
     gate_radius_max: float = 260.0
     velocity_blend_after_reacquire: float = 0.35
     speed_cap_after_reacquire: float = 180.0
+    reacquire_stabilization_frames: int = 4
+    reacquire_stabilization_gate_scale: float = 0.70
+    reacquire_stabilization_velocity_decay: float = 0.88
 
 
 @dataclass(slots=True)
@@ -400,6 +403,9 @@ def load_config(config_path: Path) -> AppConfig:
         gate_radius_max=float(tracking_raw.get("gate_radius_max", 260.0)),
         velocity_blend_after_reacquire=float(tracking_raw.get("velocity_blend_after_reacquire", 0.35)),
         speed_cap_after_reacquire=float(tracking_raw.get("speed_cap_after_reacquire", 180.0)),
+        reacquire_stabilization_frames=int(tracking_raw.get("reacquire_stabilization_frames", 4)),
+        reacquire_stabilization_gate_scale=float(tracking_raw.get("reacquire_stabilization_gate_scale", 0.70)),
+        reacquire_stabilization_velocity_decay=float(tracking_raw.get("reacquire_stabilization_velocity_decay", 0.88)),
     )
 
     output_raw = raw.get("output", {})

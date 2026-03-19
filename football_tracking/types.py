@@ -155,6 +155,7 @@ class TrackResult:
     reacquire_attempted: bool = False
     reacquire_candidate_count: int = 0
     reacquire_window: list[int] | None = None
+    reacquire_stabilization_frames_remaining: int = 0
 
     def to_debug_dict(self) -> dict[str, Any]:
         return {
@@ -180,4 +181,5 @@ class TrackResult:
             "reacquire_attempted": self.reacquire_attempted,
             "reacquire_candidate_count": self.reacquire_candidate_count,
             "reacquire_window": self.reacquire_window,
+            "reacquire_stabilization_frames_remaining": self.reacquire_stabilization_frames_remaining,
         }

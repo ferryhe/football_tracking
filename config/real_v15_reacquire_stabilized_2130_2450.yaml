@@ -1,0 +1,136 @@
+input_video: "./data/raw5760x144020fps.mp4"
+output_dir: "./outputs/real_v15_reacquire_stabilized_2130_2450"
+
+logging:
+  level: "INFO"
+  save_debug_jsonl: true
+
+detector:
+  model_path: "./weights/football_ball_yolo.pt"
+  device: "cuda:0"
+  confidence_threshold: 0.24
+  image_size: 1280
+  use_half: false
+  allowed_labels:
+    - "sports ball"
+    - "ball"
+
+sahi:
+  slice_height: 640
+  slice_width: 960
+  overlap_height_ratio: 0.10
+  overlap_width_ratio: 0.10
+  perform_standard_pred: false
+  postprocess_type: "NMS"
+  postprocess_match_metric: "IOS"
+  postprocess_match_threshold: 0.50
+  verbose: 0
+
+filtering:
+  min_confidence: 0.24
+  min_width: 8
+  max_width: 80
+  min_height: 8
+  max_height: 80
+  min_aspect_ratio: 0.50
+  max_aspect_ratio: 1.80
+  roi: null
+
+scene_bias:
+  enabled: true
+  ground_zones:
+    - name: "main_pitch_ground"
+      points:
+        - [0, 560]
+        - [800, 430]
+        - [1700, 350]
+        - [2560, 340]
+        - [3420, 350]
+        - [4320, 420]
+        - [5120, 600]
+        - [5120, 1440]
+        - [0, 1440]
+  negative_rois:
+    - name: "right_static_false_ball"
+      points:
+        - [3090, 644]
+        - [3190, 644]
+        - [3190, 744]
+        - [3090, 744]
+  positive_rois: []
+  dynamic_air_recovery:
+    enabled: true
+    profile: "fisheye_180_indoor"
+    active_states: ["PREDICTING", "LOST"]
+    relaxed_filtering:
+      min_confidence: 0.18
+      min_width: 6
+      min_height: 6
+    selection_bonus: 0.06
+    reacquire_enabled: true
+    reacquire_confidence_threshold: 0.10
+    reacquire_image_size: 1536
+
+selection:
+  min_accept_score: 0.0
+  stable_history_length: 12
+  weights:
+    distance_score: 0.32
+    direction_score: 0.20
+    velocity_score: 0.18
+    acceleration_penalty: 0.14
+    trajectory_length_bonus: 0.10
+    confidence: 0.06
+
+tracking:
+  max_lost_frames: 12
+  match_distance: 150.0
+  max_speed: 220.0
+  max_acceleration: 180.0
+  min_history_for_tracking: 3
+  history_size: 128
+  prediction_mode: "constant_velocity"
+  predicted_confidence_decay: 0.90
+  prediction_velocity_decay: 0.96
+  prediction_boundary_extra_decay: 0.85
+  prediction_boundary_margin_ratio: 0.08
+  kalman_enabled: true
+  kalman_model: "ca"
+  process_noise_base: 4.0
+  process_noise_lost_multiplier: 1.35
+  process_noise_reacquire_multiplier: 1.75
+  measurement_noise_base: 36.0
+  measurement_noise_low_conf_multiplier: 3.0
+  gate_sigma_scale: 3.0
+  gate_radius_min: 90.0
+  gate_radius_max: 260.0
+  velocity_blend_after_reacquire: 0.35
+  speed_cap_after_reacquire: 180.0
+  reacquire_stabilization_frames: 4
+  reacquire_stabilization_gate_scale: 0.70
+  reacquire_stabilization_velocity_decay: 0.88
+
+output:
+  video_name: "annotated.mp4"
+  frame_dir: "frames"
+  csv_name: "ball_track.csv"
+  debug_jsonl_name: "debug.jsonl"
+  video_codec: "mp4v"
+  frame_image_ext: ".jpg"
+  save_video: true
+  save_frames: false
+  save_csv: true
+  save_debug_jsonl: true
+  draw_radius: 18
+  draw_thickness: 4
+  frame_text_scale: 1.0
+  frame_text_thickness: 2
+  draw_status_text: true
+
+runtime:
+  use_gpu_if_available: true
+  enable_cudnn_benchmark: true
+  opencv_threads: 2
+  capture_backend: "CAP_FFMPEG"
+  start_frame: 2130
+  max_frames: 321
