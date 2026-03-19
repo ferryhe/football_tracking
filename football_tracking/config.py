@@ -117,6 +117,18 @@ class TrackingConfig:
     prediction_velocity_decay: float = 0.96
     prediction_boundary_extra_decay: float = 0.85
     prediction_boundary_margin_ratio: float = 0.08
+    kalman_enabled: bool = True
+    kalman_model: str = "ca"
+    process_noise_base: float = 4.0
+    process_noise_lost_multiplier: float = 1.35
+    process_noise_reacquire_multiplier: float = 1.75
+    measurement_noise_base: float = 36.0
+    measurement_noise_low_conf_multiplier: float = 3.0
+    gate_sigma_scale: float = 3.0
+    gate_radius_min: float = 90.0
+    gate_radius_max: float = 260.0
+    velocity_blend_after_reacquire: float = 0.35
+    speed_cap_after_reacquire: float = 180.0
 
 
 @dataclass(slots=True)
@@ -376,6 +388,18 @@ def load_config(config_path: Path) -> AppConfig:
         prediction_velocity_decay=float(tracking_raw.get("prediction_velocity_decay", 0.96)),
         prediction_boundary_extra_decay=float(tracking_raw.get("prediction_boundary_extra_decay", 0.85)),
         prediction_boundary_margin_ratio=float(tracking_raw.get("prediction_boundary_margin_ratio", 0.08)),
+        kalman_enabled=bool(tracking_raw.get("kalman_enabled", True)),
+        kalman_model=str(tracking_raw.get("kalman_model", "ca")),
+        process_noise_base=float(tracking_raw.get("process_noise_base", 4.0)),
+        process_noise_lost_multiplier=float(tracking_raw.get("process_noise_lost_multiplier", 1.35)),
+        process_noise_reacquire_multiplier=float(tracking_raw.get("process_noise_reacquire_multiplier", 1.75)),
+        measurement_noise_base=float(tracking_raw.get("measurement_noise_base", 36.0)),
+        measurement_noise_low_conf_multiplier=float(tracking_raw.get("measurement_noise_low_conf_multiplier", 3.0)),
+        gate_sigma_scale=float(tracking_raw.get("gate_sigma_scale", 3.0)),
+        gate_radius_min=float(tracking_raw.get("gate_radius_min", 90.0)),
+        gate_radius_max=float(tracking_raw.get("gate_radius_max", 260.0)),
+        velocity_blend_after_reacquire=float(tracking_raw.get("velocity_blend_after_reacquire", 0.35)),
+        speed_cap_after_reacquire=float(tracking_raw.get("speed_cap_after_reacquire", 180.0)),
     )
 
     output_raw = raw.get("output", {})

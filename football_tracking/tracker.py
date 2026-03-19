@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 from collections import deque
+import math
 
 from football_tracking.config import TrackingConfig
+from football_tracking.kalman import ConstantAccelerationKalmanFilter
 from football_tracking.physics import compute_acceleration, compute_velocity, predict_constant_velocity
 from football_tracking.types import (
     OutputStatus,
@@ -27,9 +29,25 @@ class BallTracker:
         self.last_detected_confidence = 0.0
         self.last_anchor_position: tuple[float, float] | None = None
         self.last_detected_position: tuple[float, float] | None = None
+        self.kalman = ConstantAccelerationKalmanFilter() if config.kalman_enabled else None
 
     def build_context(self) -> TrackerContext:
         """给选择层提供当前追踪上下文。"""
+        if self.kalman is not None and self.kalman.is_initialized:
+            current_position = self.kalman.get_position()
+            predicted_position, predicted_velocity, predicted_acceleration, gating_radius = self._peek_kalman_context()
+            return TrackerContext(
+                state=self.state,
+                last_position=current_position,
+                predicted_position=predicted_position,
+                last_detected_position=self.last_detected_position,
+                gating_radius=gating_radius,
+                velocity=predicted_velocity,
+                acceleration=predicted_acceleration,
+                history_length=len(self.history),
+                lost_frames=self.lost_frames,
+            )
+
         if self.state == TrackState.LOST or not self.history:
             return TrackerContext(
                 state=self.state,
@@ -93,8 +111,31 @@ class BallTracker:
         previous_point = self.history[-1] if self.history else None
         candidate_position = candidate.center
         frame_gap = frame_index - previous_point.frame_index if previous_point else 1
-        new_velocity = compute_velocity(previous_point, candidate_position, frame_gap=frame_gap)
-        new_acceleration = compute_acceleration(self.velocity, new_velocity)
+        reacquire = self.lost_frames > 0 or "yolo_direct" in candidate.source
+
+        if self.kalman is not None:
+            if not self.kalman.is_initialized:
+                initial_velocity = compute_velocity(previous_point, candidate_position, frame_gap=frame_gap)
+                self.kalman.initialize(candidate_position, velocity=initial_velocity)
+            else:
+                self.kalman.predict(
+                    dt=1.0,
+                    process_noise_scale=self._process_noise_scale(reacquire=reacquire),
+                )
+                self.kalman.update(
+                    candidate_position,
+                    measurement_noise_scale=self._measurement_noise_scale(candidate.confidence),
+                )
+
+            new_velocity = self.kalman.get_velocity()
+            new_acceleration = self.kalman.get_acceleration()
+            if reacquire:
+                new_velocity = self._tame_reacquired_velocity(new_velocity)
+                self.kalman.set_motion(velocity=new_velocity, acceleration=(0.0, 0.0))
+                new_acceleration = (0.0, 0.0)
+        else:
+            new_velocity = compute_velocity(previous_point, candidate_position, frame_gap=frame_gap)
+            new_acceleration = compute_acceleration(self.velocity, new_velocity)
 
         point = TrackPoint(
             frame_index=frame_index,
@@ -158,18 +199,37 @@ class BallTracker:
 
         self.lost_frames += 1
         if self.lost_frames <= self.config.max_lost_frames:
-            last_point = self.history[-1]
-            decayed_velocity = self._decay_prediction_velocity(
-                position=(last_point.x, last_point.y),
-                velocity=self.velocity,
-                frame_size=frame_size,
-            )
-            predicted_position = predict_constant_velocity((last_point.x, last_point.y), decayed_velocity, steps=1)
-            clamped_position, adjusted_velocity = self._clamp_predicted_motion(
-                predicted_position=predicted_position,
-                velocity=decayed_velocity,
-                frame_size=frame_size,
-            )
+            if self.kalman is not None and self.kalman.is_initialized:
+                self.kalman.predict(
+                    dt=1.0,
+                    process_noise_scale=self._process_noise_scale(reacquire=False),
+                )
+                predicted_position = self.kalman.get_position()
+                decayed_velocity = self._decay_prediction_velocity(
+                    position=predicted_position,
+                    velocity=self.kalman.get_velocity(),
+                    frame_size=frame_size,
+                )
+                clamped_position, adjusted_velocity = self._clamp_predicted_motion(
+                    predicted_position=predicted_position,
+                    velocity=decayed_velocity,
+                    frame_size=frame_size,
+                )
+                self.kalman.set_position(clamped_position)
+                self.kalman.set_motion(velocity=adjusted_velocity)
+            else:
+                last_point = self.history[-1]
+                decayed_velocity = self._decay_prediction_velocity(
+                    position=(last_point.x, last_point.y),
+                    velocity=self.velocity,
+                    frame_size=frame_size,
+                )
+                predicted_position = predict_constant_velocity((last_point.x, last_point.y), decayed_velocity, steps=1)
+                clamped_position, adjusted_velocity = self._clamp_predicted_motion(
+                    predicted_position=predicted_position,
+                    velocity=decayed_velocity,
+                    frame_size=frame_size,
+                )
             predicted_confidence = self.last_detected_confidence * (
                 self.config.predicted_confidence_decay ** self.lost_frames
             )
@@ -204,6 +264,8 @@ class BallTracker:
         self.acceleration = (0.0, 0.0)
         if self.history:
             self.last_anchor_position = (self.history[-1].x, self.history[-1].y)
+        if self.kalman is not None:
+            self.kalman.set_motion(velocity=(0.0, 0.0), acceleration=(0.0, 0.0))
         self.history.clear()
         return TrackResult(
             frame_index=frame_index,
@@ -271,3 +333,43 @@ class BallTracker:
             or y <= margin_y
             or y >= frame_height - 1.0 - margin_y
         )
+
+    def _peek_kalman_context(self) -> tuple[tuple[float, float], tuple[float, float], tuple[float, float], float]:
+        assert self.kalman is not None and self.kalman.is_initialized
+        predicted_state, predicted_covariance = self.kalman.peek_predict(
+            dt=1.0,
+            process_noise_scale=self._process_noise_scale(reacquire=False),
+        )
+        predicted_position = (float(predicted_state[0]), float(predicted_state[1]))
+        predicted_velocity = (float(predicted_state[2]), float(predicted_state[3]))
+        predicted_acceleration = (float(predicted_state[4]), float(predicted_state[5]))
+        position_std = math.sqrt(max(0.0, float(max(predicted_covariance[0, 0], predicted_covariance[1, 1]))))
+        gating_radius = self.config.gate_sigma_scale * position_std
+        gating_radius = min(max(gating_radius, self.config.gate_radius_min), self.config.gate_radius_max)
+        return predicted_position, predicted_velocity, predicted_acceleration, gating_radius
+
+    def _process_noise_scale(self, reacquire: bool) -> float:
+        scale = self.config.process_noise_base
+        if self.lost_frames > 0:
+            scale *= 1.0 + self.lost_frames * (self.config.process_noise_lost_multiplier - 1.0)
+        if reacquire:
+            scale *= self.config.process_noise_reacquire_multiplier
+        return max(scale, 1e-6)
+
+    def _measurement_noise_scale(self, confidence: float) -> float:
+        low_confidence_scale = 1.0 + max(0.0, 1.0 - confidence) * self.config.measurement_noise_low_conf_multiplier
+        return self.config.measurement_noise_base * low_confidence_scale
+
+    def _tame_reacquired_velocity(self, new_velocity: tuple[float, float]) -> tuple[float, float]:
+        blend = min(max(self.config.velocity_blend_after_reacquire, 0.0), 1.0)
+        blended_velocity = (
+            self.velocity[0] * (1.0 - blend) + new_velocity[0] * blend,
+            self.velocity[1] * (1.0 - blend) + new_velocity[1] * blend,
+        )
+        speed = math.hypot(blended_velocity[0], blended_velocity[1])
+        speed_cap = max(1e-6, self.config.speed_cap_after_reacquire)
+        if speed <= speed_cap:
+            return blended_velocity
+
+        ratio = speed_cap / speed
+        return (blended_velocity[0] * ratio, blended_velocity[1] * ratio)

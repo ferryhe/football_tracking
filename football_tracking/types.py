@@ -118,6 +118,7 @@ class TrackerContext:
     last_position: tuple[float, float] | None = None
     predicted_position: tuple[float, float] | None = None
     last_detected_position: tuple[float, float] | None = None
+    gating_radius: float | None = None
     velocity: tuple[float, float] = (0.0, 0.0)
     acceleration: tuple[float, float] = (0.0, 0.0)
     history_length: int = 0
