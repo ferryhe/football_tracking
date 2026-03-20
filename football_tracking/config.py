@@ -132,6 +132,13 @@ class TrackingConfig:
     reacquire_stabilization_frames: int = 4
     reacquire_stabilization_gate_scale: float = 0.70
     reacquire_stabilization_velocity_decay: float = 0.88
+    out_of_view_enabled: bool = False
+    out_of_view_top_margin_ratio: float = 0.10
+    out_of_view_side_margin_ratio: float = 0.06
+    out_of_view_bottom_margin_ratio: float = 0.06
+    out_of_view_velocity_threshold: float = 18.0
+    out_of_view_prediction_limit: int = 4
+    out_of_view_extra_decay: float = 0.60
 
 
 @dataclass(slots=True)
@@ -406,6 +413,13 @@ def load_config(config_path: Path) -> AppConfig:
         reacquire_stabilization_frames=int(tracking_raw.get("reacquire_stabilization_frames", 4)),
         reacquire_stabilization_gate_scale=float(tracking_raw.get("reacquire_stabilization_gate_scale", 0.70)),
         reacquire_stabilization_velocity_decay=float(tracking_raw.get("reacquire_stabilization_velocity_decay", 0.88)),
+        out_of_view_enabled=bool(tracking_raw.get("out_of_view_enabled", False)),
+        out_of_view_top_margin_ratio=float(tracking_raw.get("out_of_view_top_margin_ratio", 0.10)),
+        out_of_view_side_margin_ratio=float(tracking_raw.get("out_of_view_side_margin_ratio", 0.06)),
+        out_of_view_bottom_margin_ratio=float(tracking_raw.get("out_of_view_bottom_margin_ratio", 0.06)),
+        out_of_view_velocity_threshold=float(tracking_raw.get("out_of_view_velocity_threshold", 18.0)),
+        out_of_view_prediction_limit=int(tracking_raw.get("out_of_view_prediction_limit", 4)),
+        out_of_view_extra_decay=float(tracking_raw.get("out_of_view_extra_decay", 0.60)),
     )
 
     output_raw = raw.get("output", {})

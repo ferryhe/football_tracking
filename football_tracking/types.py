@@ -156,6 +156,8 @@ class TrackResult:
     reacquire_candidate_count: int = 0
     reacquire_window: list[int] | None = None
     reacquire_stabilization_frames_remaining: int = 0
+    out_of_view_active: bool = False
+    out_of_view_prediction_frames: int = 0
 
     def to_debug_dict(self) -> dict[str, Any]:
         return {
@@ -182,4 +184,6 @@ class TrackResult:
             "reacquire_candidate_count": self.reacquire_candidate_count,
             "reacquire_window": self.reacquire_window,
             "reacquire_stabilization_frames_remaining": self.reacquire_stabilization_frames_remaining,
+            "out_of_view_active": self.out_of_view_active,
+            "out_of_view_prediction_frames": self.out_of_view_prediction_frames,
         }

@@ -31,6 +31,7 @@ class BallTracker:
         self.last_detected_position: tuple[float, float] | None = None
         self.kalman = ConstantAccelerationKalmanFilter() if config.kalman_enabled else None
         self.reacquire_stabilization_frames_remaining = 0
+        self.out_of_view_prediction_frames = 0
 
     def build_context(self) -> TrackerContext:
         """给选择层提供当前追踪上下文。"""
@@ -158,6 +159,7 @@ class BallTracker:
         self.last_detected_confidence = candidate.confidence
         self.last_anchor_position = candidate_position
         self.last_detected_position = candidate_position
+        self.out_of_view_prediction_frames = 0
 
         if len(self.history) >= self.config.min_history_for_tracking:
             self.state = TrackState.TRACKING
@@ -179,6 +181,7 @@ class BallTracker:
             selected_candidate_scores=decision.candidate_scores,
         )
         result.reacquire_stabilization_frames_remaining = self.reacquire_stabilization_frames_remaining
+        result.out_of_view_prediction_frames = self.out_of_view_prediction_frames
         return result
 
     def _handle_missing(
@@ -193,7 +196,7 @@ class BallTracker:
         if not self.history:
             self.state = TrackState.LOST
             self.lost_frames += 1
-            return TrackResult(
+            result = TrackResult(
                 frame_index=frame_index,
                 output_status=OutputStatus.LOST,
                 state=self.state,
@@ -206,10 +209,13 @@ class BallTracker:
                 selected_score=decision.selected_score,
                 selected_candidate_scores=decision.candidate_scores,
             )
+            result.out_of_view_prediction_frames = self.out_of_view_prediction_frames
+            return result
 
         self.lost_frames += 1
         if self.lost_frames <= self.config.max_lost_frames:
             stabilization_active = self.reacquire_stabilization_frames_remaining > 0
+            out_of_view_active = False
             if self.kalman is not None and self.kalman.is_initialized:
                 self.kalman.predict(
                     dt=1.0,
@@ -225,6 +231,20 @@ class BallTracker:
                     decayed_velocity = (
                         decayed_velocity[0] * self.config.reacquire_stabilization_velocity_decay,
                         decayed_velocity[1] * self.config.reacquire_stabilization_velocity_decay,
+                    )
+                decayed_velocity, out_of_view_active, should_stop_prediction = self._apply_out_of_view_decay(
+                    predicted_position=predicted_position,
+                    velocity=decayed_velocity,
+                    frame_size=frame_size,
+                )
+                if should_stop_prediction:
+                    self.last_anchor_position = self.kalman.get_position()
+                    return self._transition_to_lost(
+                        frame_index=frame_index,
+                        decision=decision,
+                        raw_candidate_count=raw_candidate_count,
+                        filtered_candidate_count=filtered_candidate_count,
+                        reason="lost_out_of_view",
                     )
                 clamped_position, adjusted_velocity = self._clamp_predicted_motion(
                     predicted_position=predicted_position,
@@ -246,6 +266,20 @@ class BallTracker:
                         decayed_velocity[1] * self.config.reacquire_stabilization_velocity_decay,
                     )
                 predicted_position = predict_constant_velocity((last_point.x, last_point.y), decayed_velocity, steps=1)
+                decayed_velocity, out_of_view_active, should_stop_prediction = self._apply_out_of_view_decay(
+                    predicted_position=predicted_position,
+                    velocity=decayed_velocity,
+                    frame_size=frame_size,
+                )
+                if should_stop_prediction:
+                    self.last_anchor_position = (last_point.x, last_point.y)
+                    return self._transition_to_lost(
+                        frame_index=frame_index,
+                        decision=decision,
+                        raw_candidate_count=raw_candidate_count,
+                        filtered_candidate_count=filtered_candidate_count,
+                        reason="lost_out_of_view",
+                    )
                 clamped_position, adjusted_velocity = self._clamp_predicted_motion(
                     predicted_position=predicted_position,
                     velocity=decayed_velocity,
@@ -281,8 +315,26 @@ class BallTracker:
                 selected_candidate_scores=decision.candidate_scores,
             )
             result.reacquire_stabilization_frames_remaining = self.reacquire_stabilization_frames_remaining
+            result.out_of_view_active = out_of_view_active
+            result.out_of_view_prediction_frames = self.out_of_view_prediction_frames
             return result
 
+        return self._transition_to_lost(
+            frame_index=frame_index,
+            decision=decision,
+            raw_candidate_count=raw_candidate_count,
+            filtered_candidate_count=filtered_candidate_count,
+            reason="lost_after_prediction_threshold",
+        )
+
+    def _transition_to_lost(
+        self,
+        frame_index: int,
+        decision: SelectionDecision,
+        raw_candidate_count: int,
+        filtered_candidate_count: int,
+        reason: str,
+    ) -> TrackResult:
         self.state = TrackState.LOST
         self.velocity = (0.0, 0.0)
         self.acceleration = (0.0, 0.0)
@@ -292,13 +344,14 @@ class BallTracker:
             self.kalman.set_motion(velocity=(0.0, 0.0), acceleration=(0.0, 0.0))
         self.history.clear()
         self.reacquire_stabilization_frames_remaining = 0
+        self.out_of_view_prediction_frames = 0
         result = TrackResult(
             frame_index=frame_index,
             output_status=OutputStatus.LOST,
             state=self.state,
             point=None,
             confidence=0.0,
-            reason="lost_after_prediction_threshold",
+            reason=reason,
             lost_frames=self.lost_frames,
             raw_candidate_count=raw_candidate_count,
             filtered_candidate_count=filtered_candidate_count,
@@ -306,6 +359,7 @@ class BallTracker:
             selected_candidate_scores=decision.candidate_scores,
         )
         result.reacquire_stabilization_frames_remaining = self.reacquire_stabilization_frames_remaining
+        result.out_of_view_prediction_frames = self.out_of_view_prediction_frames
         return result
 
     def _decay_prediction_velocity(
@@ -323,6 +377,29 @@ class BallTracker:
             vx *= self.config.prediction_boundary_extra_decay
             vy *= self.config.prediction_boundary_extra_decay
         return (vx, vy)
+
+    def _apply_out_of_view_decay(
+        self,
+        predicted_position: tuple[float, float],
+        velocity: tuple[float, float],
+        frame_size: tuple[int, int] | None,
+    ) -> tuple[tuple[float, float], bool, bool]:
+        if frame_size is None or not self.config.out_of_view_enabled:
+            self.out_of_view_prediction_frames = 0
+            return velocity, False, False
+
+        out_of_view_active = self._is_heading_out_of_view(predicted_position, velocity, frame_size)
+        if not out_of_view_active:
+            self.out_of_view_prediction_frames = 0
+            return velocity, False, False
+
+        self.out_of_view_prediction_frames += 1
+        decayed_velocity = (
+            velocity[0] * self.config.out_of_view_extra_decay,
+            velocity[1] * self.config.out_of_view_extra_decay,
+        )
+        should_stop_prediction = self.out_of_view_prediction_frames >= max(1, self.config.out_of_view_prediction_limit)
+        return decayed_velocity, True, should_stop_prediction
 
     def _clamp_predicted_motion(
         self,
@@ -348,6 +425,29 @@ class BallTracker:
             adjusted_vx *= self.config.prediction_boundary_extra_decay
             adjusted_vy *= self.config.prediction_boundary_extra_decay
         return clamped_position, (adjusted_vx, adjusted_vy)
+
+    def _is_heading_out_of_view(
+        self,
+        position: tuple[float, float],
+        velocity: tuple[float, float],
+        frame_size: tuple[int, int],
+    ) -> bool:
+        frame_width, frame_height = frame_size
+        top_margin = frame_height * self.config.out_of_view_top_margin_ratio
+        side_margin = frame_width * self.config.out_of_view_side_margin_ratio
+        bottom_margin = frame_height * self.config.out_of_view_bottom_margin_ratio
+        velocity_threshold = max(0.0, self.config.out_of_view_velocity_threshold)
+        x, y = position
+        vx, vy = velocity
+
+        moving_out_top = (y <= top_margin or y < 0.0) and vy <= -velocity_threshold
+        moving_out_left = (x <= side_margin or x < 0.0) and vx <= -velocity_threshold
+        moving_out_right = (x >= frame_width - 1.0 - side_margin or x > frame_width - 1.0) and vx >= velocity_threshold
+        moving_out_bottom = (
+            (y >= frame_height - 1.0 - bottom_margin or y > frame_height - 1.0)
+            and vy >= velocity_threshold
+        )
+        return moving_out_top or moving_out_left or moving_out_right or moving_out_bottom
 
     def _is_near_boundary(self, position: tuple[float, float], frame_size: tuple[int, int]) -> bool:
         frame_width, frame_height = frame_size
