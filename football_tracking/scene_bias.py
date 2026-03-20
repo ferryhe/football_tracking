@@ -26,8 +26,9 @@ class SceneBiasResolver:
         self,
         context: TrackerContext,
         frame_shape: tuple[int, int] | None = None,
+        force: bool = False,
     ) -> tuple[int, int, int, int] | None:
-        window = self._get_dynamic_air_window(context)
+        window = self._get_dynamic_air_window(context, force=force)
         if window is None:
             return None
         if frame_shape is None:
@@ -40,6 +41,22 @@ class SceneBiasResolver:
         right_i = max(left_i + 1, min(frame_width, int(right)))
         bottom_i = max(top_i + 1, min(frame_height, int(bottom)))
         return (left_i, top_i, right_i, bottom_i)
+
+    def is_point_in_ground_zone(
+        self,
+        position: tuple[float, float] | None,
+        context: TrackerContext,
+        frame_index: int,
+    ) -> bool:
+        if position is None or not self.config.enabled or not self.config.ground_zones:
+            return False
+        x, y = position
+        for zone in self.config.ground_zones:
+            if not self._zone_is_active(zone, context, frame_index):
+                continue
+            if self._point_in_zone(x, y, zone):
+                return True
+        return False
 
     def get_ground_zone_name(
         self,
@@ -160,11 +177,15 @@ class SceneBiasResolver:
         left, top, right, bottom = window
         return left <= center_x <= right and top <= center_y <= bottom
 
-    def _get_dynamic_air_window(self, context: TrackerContext) -> tuple[float, float, float, float] | None:
+    def _get_dynamic_air_window(
+        self,
+        context: TrackerContext,
+        force: bool = False,
+    ) -> tuple[float, float, float, float] | None:
         dynamic = self.config.dynamic_air_recovery
         if not self.config.enabled or not dynamic.enabled:
             return None
-        if dynamic.active_states and context.state.value not in dynamic.active_states:
+        if not force and dynamic.active_states and context.state.value not in dynamic.active_states:
             return None
 
         anchor = self._get_dynamic_air_anchor(context)

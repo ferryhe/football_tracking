@@ -14,7 +14,7 @@ from football_tracking.renderer import FrameRenderer
 from football_tracking.scene_bias import SceneBiasResolver
 from football_tracking.selector import UniqueBallSelector
 from football_tracking.tracker import BallTracker
-from football_tracking.types import SelectionDecision
+from football_tracking.types import SelectionDecision, TrackState, TrackerContext
 
 
 class BallTrackingPipeline:
@@ -30,6 +30,7 @@ class BallTrackingPipeline:
         self.selector = UniqueBallSelector(config.selection, config.tracking, self.scene_bias)
         self.tracker = BallTracker(config.tracking)
         self.renderer = FrameRenderer(config.output)
+        self.air_burst_frames_remaining = 0
 
     def _configure_runtime(self) -> None:
         """集中处理 OpenCV 与 CUDA 相关优化。"""
@@ -191,6 +192,7 @@ class BallTrackingPipeline:
                 reacquire_attempted,
                 reacquire_candidates,
                 reacquire_window,
+                burst_active,
             ) = self._maybe_run_dynamic_reacquire(
                 frame=frame,
                 frame_index=frame_index,
@@ -201,18 +203,31 @@ class BallTrackingPipeline:
                 filter_rejection_counts=filter_rejection_counts,
                 decision=decision,
             )
+            decision = self._maybe_reject_low_quality_reacquire(
+                decision=decision,
+                context=context,
+            )
+            force_lost = self._should_force_ground_exit_lost(
+                context=context,
+                frame_index=frame_index,
+                decision=decision,
+            )
             track_result = self.tracker.update(
                 frame_index=frame_index,
                 decision=decision,
                 raw_candidate_count=len(raw_candidates),
                 filtered_candidate_count=len(filtered_candidates),
                 frame_size=(frame.shape[1], frame.shape[0]),
+                force_lost=force_lost,
             )
             track_result.filter_rejections = filter_rejections
             track_result.filter_rejection_counts = filter_rejection_counts
             track_result.reacquire_attempted = reacquire_attempted
             track_result.reacquire_candidate_count = len(reacquire_candidates)
             track_result.reacquire_window = None if reacquire_window is None else list(reacquire_window)
+            self._advance_air_burst_state(decision)
+            track_result.air_burst_active = burst_active
+            track_result.air_burst_frames_remaining = self.air_burst_frames_remaining
         except Exception as exc:
             self.logger.exception("第 %s 帧处理异常，系统将退化为预测/丢失: %s", frame_index, exc)
             decision = SelectionDecision(
@@ -234,6 +249,9 @@ class BallTrackingPipeline:
             track_result.reacquire_attempted = False
             track_result.reacquire_candidate_count = 0
             track_result.reacquire_window = None
+            self._advance_air_burst_state(None)
+            track_result.air_burst_active = False
+            track_result.air_burst_frames_remaining = self.air_burst_frames_remaining
 
         self.logger.debug(
             "frame=%s raw_candidates=%s filtered_candidates=%s status=%s state=%s lost_frames=%s reason=%s",
@@ -259,6 +277,7 @@ class BallTrackingPipeline:
         decision: SelectionDecision,
     ):
         dynamic_config = self.config.scene_bias.dynamic_air_recovery
+        burst_active = dynamic_config.burst_enabled and self.air_burst_frames_remaining > 0
         if decision.selected_candidate is not None:
             return (
                 raw_candidates,
@@ -269,6 +288,7 @@ class BallTrackingPipeline:
                 False,
                 [],
                 None,
+                burst_active,
             )
         if not dynamic_config.enabled or not dynamic_config.reacquire_enabled:
             return (
@@ -280,8 +300,9 @@ class BallTrackingPipeline:
                 False,
                 [],
                 None,
+                burst_active,
             )
-        if not self.scene_bias.is_dynamic_air_recovery_active(context):
+        if not burst_active and not self.scene_bias.is_dynamic_air_recovery_active(context):
             return (
                 raw_candidates,
                 filtered_candidates,
@@ -291,6 +312,7 @@ class BallTrackingPipeline:
                 False,
                 [],
                 None,
+                burst_active,
             )
         if not hasattr(self.detector, "detect_direct_in_roi"):
             return (
@@ -302,9 +324,10 @@ class BallTrackingPipeline:
                 False,
                 [],
                 None,
+                burst_active,
             )
 
-        reacquire_window = self.scene_bias.get_dynamic_air_window(context, frame.shape[:2])
+        reacquire_window = self.scene_bias.get_dynamic_air_window(context, frame.shape[:2], force=burst_active)
         if reacquire_window is None:
             return (
                 raw_candidates,
@@ -315,14 +338,28 @@ class BallTrackingPipeline:
                 False,
                 [],
                 None,
+                burst_active,
             )
+        if burst_active:
+            reacquire_window = self._scale_roi(
+                reacquire_window,
+                frame.shape[:2],
+                dynamic_config.burst_window_scale,
+            )
+        reacquire_context = self._build_reacquire_context(context, burst_active)
+
+        confidence_threshold = dynamic_config.reacquire_confidence_threshold
+        image_size = dynamic_config.reacquire_image_size
+        if burst_active:
+            confidence_threshold = dynamic_config.burst_confidence_threshold
+            image_size = dynamic_config.burst_image_size
 
         reacquire_candidates = self.detector.detect_direct_in_roi(
             frame,
             frame_index=frame_index,
             roi=reacquire_window,
-            confidence_threshold=dynamic_config.reacquire_confidence_threshold,
-            image_size=dynamic_config.reacquire_image_size,
+            confidence_threshold=confidence_threshold,
+            image_size=image_size,
         )
         if not reacquire_candidates:
             return (
@@ -334,15 +371,16 @@ class BallTrackingPipeline:
                 True,
                 [],
                 reacquire_window,
+                burst_active,
             )
 
         combined_raw_candidates = [*raw_candidates, *reacquire_candidates]
         combined_filtered_candidates, combined_filter_rejections, combined_filter_rejection_counts = self.candidate_filter.filter(
             combined_raw_candidates,
-            context,
+            reacquire_context,
             frame_index,
         )
-        combined_decision = self.selector.select(combined_filtered_candidates, context, frame_index)
+        combined_decision = self.selector.select(combined_filtered_candidates, reacquire_context, frame_index)
         return (
             combined_raw_candidates,
             combined_filtered_candidates,
@@ -352,4 +390,110 @@ class BallTrackingPipeline:
             True,
             reacquire_candidates,
             reacquire_window,
+            burst_active,
         )
+
+    def _build_reacquire_context(self, context: TrackerContext, burst_active: bool) -> TrackerContext:
+        if not burst_active or context.state != TrackState.TRACKING:
+            return context
+        return TrackerContext(
+            state=TrackState.PREDICTING,
+            last_position=context.last_position,
+            predicted_position=context.predicted_position,
+            last_detected_position=context.last_detected_position,
+            gating_radius=context.gating_radius,
+            velocity=context.velocity,
+            acceleration=context.acceleration,
+            history_length=context.history_length,
+            lost_frames=context.lost_frames,
+        )
+
+    def _scale_roi(
+        self,
+        roi: tuple[int, int, int, int],
+        frame_shape: tuple[int, int],
+        scale: float,
+    ) -> tuple[int, int, int, int]:
+        if scale <= 1.0:
+            return roi
+
+        frame_height, frame_width = frame_shape
+        left, top, right, bottom = roi
+        center_x = (left + right) / 2.0
+        center_y = (top + bottom) / 2.0
+        width = (right - left) * scale
+        height = (bottom - top) * scale
+        scaled_left = max(0, int(round(center_x - width / 2.0)))
+        scaled_top = max(0, int(round(center_y - height / 2.0)))
+        scaled_right = min(frame_width, int(round(center_x + width / 2.0)))
+        scaled_bottom = min(frame_height, int(round(center_y + height / 2.0)))
+        scaled_right = max(scaled_left + 1, scaled_right)
+        scaled_bottom = max(scaled_top + 1, scaled_bottom)
+        return (scaled_left, scaled_top, scaled_right, scaled_bottom)
+
+    def _maybe_reject_low_quality_reacquire(
+        self,
+        decision: SelectionDecision,
+        context,
+    ) -> SelectionDecision:
+        dynamic_config = self.config.scene_bias.dynamic_air_recovery
+        candidate = decision.selected_candidate
+        if candidate is None or not dynamic_config.low_quality_reject_enabled:
+            return decision
+        if candidate.source != "yolo_direct_roi":
+            return decision
+        if context.lost_frames < dynamic_config.low_quality_reject_min_lost_frames:
+            return decision
+        if not decision.candidate_scores:
+            return decision
+
+        best_score = decision.candidate_scores[0]
+        if best_score.scene_zone != "dynamic_air_recovery":
+            return decision
+        if candidate.confidence >= dynamic_config.low_quality_reject_confidence:
+            return decision
+        if decision.selected_score >= dynamic_config.low_quality_reject_score:
+            return decision
+
+        return SelectionDecision(
+            selected_candidate=None,
+            selected_score=decision.selected_score,
+            selected_reason="low_quality_reacquire_rejected",
+            candidate_scores=decision.candidate_scores,
+        )
+
+    def _should_force_ground_exit_lost(
+        self,
+        context,
+        frame_index: int,
+        decision: SelectionDecision,
+    ) -> bool:
+        dynamic_config = self.config.scene_bias.dynamic_air_recovery
+        if decision.selected_candidate is not None or not dynamic_config.ground_exit_enabled:
+            return False
+        if context.lost_frames < dynamic_config.ground_exit_min_lost_frames:
+            return False
+        if self.air_burst_frames_remaining > 0:
+            return False
+        if context.predicted_position is None:
+            return False
+        return not self.scene_bias.is_point_in_ground_zone(
+            context.predicted_position,
+            context,
+            frame_index,
+        )
+
+    def _advance_air_burst_state(self, decision: SelectionDecision | None) -> None:
+        dynamic_config = self.config.scene_bias.dynamic_air_recovery
+        if decision is not None and decision.selected_candidate is not None and decision.candidate_scores:
+            best_score = decision.candidate_scores[0]
+            if (
+                dynamic_config.burst_enabled
+                and best_score.scene_zone == "dynamic_air_recovery"
+                and decision.selected_candidate.source == "yolo_direct_roi"
+            ):
+                self.air_burst_frames_remaining = max(0, dynamic_config.burst_frames)
+                return
+
+        if self.air_burst_frames_remaining > 0:
+            self.air_burst_frames_remaining -= 1

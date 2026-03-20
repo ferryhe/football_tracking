@@ -83,6 +83,7 @@ class BallTracker:
         filtered_candidate_count: int,
         missing_reason: str | None = None,
         frame_size: tuple[int, int] | None = None,
+        force_lost: bool = False,
     ) -> TrackResult:
         """根据选择结果更新状态机。"""
         if decision.selected_candidate is not None:
@@ -100,6 +101,7 @@ class BallTracker:
             filtered_candidate_count=filtered_candidate_count,
             missing_reason=missing_reason or decision.selected_reason,
             frame_size=frame_size,
+            force_lost=force_lost,
         )
 
     def _handle_detection(
@@ -192,6 +194,7 @@ class BallTracker:
         filtered_candidate_count: int,
         missing_reason: str,
         frame_size: tuple[int, int] | None,
+        force_lost: bool = False,
     ) -> TrackResult:
         if not self.history:
             self.state = TrackState.LOST
@@ -213,6 +216,14 @@ class BallTracker:
             return result
 
         self.lost_frames += 1
+        if force_lost:
+            return self._transition_to_lost(
+                frame_index=frame_index,
+                decision=decision,
+                raw_candidate_count=raw_candidate_count,
+                filtered_candidate_count=filtered_candidate_count,
+                reason=missing_reason,
+            )
         if self.lost_frames <= self.config.max_lost_frames:
             stabilization_active = self.reacquire_stabilization_frames_remaining > 0
             out_of_view_active = False

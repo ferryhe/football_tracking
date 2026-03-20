@@ -85,6 +85,17 @@ class DynamicAirRecoveryConfig:
     reacquire_enabled: bool = True
     reacquire_confidence_threshold: float = 0.10
     reacquire_image_size: int = 1536
+    burst_enabled: bool = True
+    burst_frames: int = 6
+    burst_confidence_threshold: float = 0.05
+    burst_image_size: int = 1920
+    burst_window_scale: float = 1.35
+    low_quality_reject_enabled: bool = True
+    low_quality_reject_confidence: float = 0.22
+    low_quality_reject_score: float = 0.30
+    low_quality_reject_min_lost_frames: int = 4
+    ground_exit_enabled: bool = True
+    ground_exit_min_lost_frames: int = 8
 
 
 @dataclass(slots=True)
@@ -313,6 +324,17 @@ def _to_dynamic_air_recovery(raw_dynamic_air_recovery: Any) -> DynamicAirRecover
         reacquire_enabled=bool(raw_dynamic_air_recovery.get("reacquire_enabled", True)),
         reacquire_confidence_threshold=float(raw_dynamic_air_recovery.get("reacquire_confidence_threshold", 0.10)),
         reacquire_image_size=int(raw_dynamic_air_recovery.get("reacquire_image_size", 1536)),
+        burst_enabled=bool(raw_dynamic_air_recovery.get("burst_enabled", True)),
+        burst_frames=int(raw_dynamic_air_recovery.get("burst_frames", 6)),
+        burst_confidence_threshold=float(raw_dynamic_air_recovery.get("burst_confidence_threshold", 0.05)),
+        burst_image_size=int(raw_dynamic_air_recovery.get("burst_image_size", 1920)),
+        burst_window_scale=float(raw_dynamic_air_recovery.get("burst_window_scale", 1.35)),
+        low_quality_reject_enabled=bool(raw_dynamic_air_recovery.get("low_quality_reject_enabled", True)),
+        low_quality_reject_confidence=float(raw_dynamic_air_recovery.get("low_quality_reject_confidence", 0.22)),
+        low_quality_reject_score=float(raw_dynamic_air_recovery.get("low_quality_reject_score", 0.30)),
+        low_quality_reject_min_lost_frames=int(raw_dynamic_air_recovery.get("low_quality_reject_min_lost_frames", 4)),
+        ground_exit_enabled=bool(raw_dynamic_air_recovery.get("ground_exit_enabled", True)),
+        ground_exit_min_lost_frames=int(raw_dynamic_air_recovery.get("ground_exit_min_lost_frames", 8)),
     )
 
 
