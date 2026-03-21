@@ -150,6 +150,44 @@ class PostprocessConfig:
 
 
 @dataclass(slots=True)
+class FollowCamConfig:
+    enabled: bool = False
+    prefer_cleaned_track: bool = True
+    output_video_name: str = "follow_cam.mp4"
+    camera_path_name: str = "camera_path.csv"
+    report_name: str = "follow_cam_report.json"
+    target_width: int = 1920
+    target_height: int = 1080
+    min_crop_height: int = 900
+    max_crop_height: int = 1260
+    home_center_x_ratio: float = 0.50
+    home_center_y_ratio: float = 0.66
+    ball_screen_x_ratio: float = 0.50
+    ball_screen_y_ratio: float = 0.58
+    dead_zone_ratio_x: float = 0.12
+    dead_zone_ratio_y: float = 0.10
+    pan_smoothing: float = 0.35
+    zoom_smoothing: float = 0.20
+    velocity_smoothing: float = 0.35
+    max_pan_per_frame_x: float = 90.0
+    max_pan_per_frame_y: float = 55.0
+    look_ahead_gain: float = 0.20
+    look_ahead_max_px: float = 180.0
+    speed_zoom_out_start: float = 22.0
+    speed_zoom_out_end: float = 85.0
+    predicted_zoom_out_bonus: float = 0.12
+    lost_zoom_out_bonus: float = 0.30
+    low_confidence_zoom_out_start: float = 0.40
+    low_confidence_zoom_out_end: float = 0.18
+    predicted_pan_decay: float = 0.75
+    lost_hold_frames: int = 10
+    lost_recenter_frames: int = 28
+    recenter_smoothing: float = 0.08
+    draw_ball_marker: bool = True
+    draw_frame_text: bool = True
+
+
+@dataclass(slots=True)
 class SelectionWeights:
     distance_score: float = 0.32
     direction_score: float = 0.20
@@ -257,6 +295,7 @@ class AppConfig:
     tracking: TrackingConfig
     output: OutputConfig
     postprocess: PostprocessConfig
+    follow_cam: FollowCamConfig
     runtime: RuntimeConfig
     mock: MockConfig
 
@@ -476,6 +515,49 @@ def _to_postprocess(raw_postprocess: Any) -> PostprocessConfig:
     )
 
 
+def _to_follow_cam(raw_follow_cam: Any) -> FollowCamConfig:
+    if raw_follow_cam in (None, "", []):
+        return FollowCamConfig()
+    if not isinstance(raw_follow_cam, dict):
+        raise ValueError("follow_cam 蹇呴』涓?dict 鎴?null")
+    return FollowCamConfig(
+        enabled=bool(raw_follow_cam.get("enabled", False)),
+        prefer_cleaned_track=bool(raw_follow_cam.get("prefer_cleaned_track", True)),
+        output_video_name=str(raw_follow_cam.get("output_video_name", "follow_cam.mp4")),
+        camera_path_name=str(raw_follow_cam.get("camera_path_name", "camera_path.csv")),
+        report_name=str(raw_follow_cam.get("report_name", "follow_cam_report.json")),
+        target_width=int(raw_follow_cam.get("target_width", 1920)),
+        target_height=int(raw_follow_cam.get("target_height", 1080)),
+        min_crop_height=int(raw_follow_cam.get("min_crop_height", 900)),
+        max_crop_height=int(raw_follow_cam.get("max_crop_height", 1260)),
+        home_center_x_ratio=float(raw_follow_cam.get("home_center_x_ratio", 0.50)),
+        home_center_y_ratio=float(raw_follow_cam.get("home_center_y_ratio", 0.66)),
+        ball_screen_x_ratio=float(raw_follow_cam.get("ball_screen_x_ratio", 0.50)),
+        ball_screen_y_ratio=float(raw_follow_cam.get("ball_screen_y_ratio", 0.58)),
+        dead_zone_ratio_x=float(raw_follow_cam.get("dead_zone_ratio_x", 0.12)),
+        dead_zone_ratio_y=float(raw_follow_cam.get("dead_zone_ratio_y", 0.10)),
+        pan_smoothing=float(raw_follow_cam.get("pan_smoothing", 0.35)),
+        zoom_smoothing=float(raw_follow_cam.get("zoom_smoothing", 0.20)),
+        velocity_smoothing=float(raw_follow_cam.get("velocity_smoothing", 0.35)),
+        max_pan_per_frame_x=float(raw_follow_cam.get("max_pan_per_frame_x", 90.0)),
+        max_pan_per_frame_y=float(raw_follow_cam.get("max_pan_per_frame_y", 55.0)),
+        look_ahead_gain=float(raw_follow_cam.get("look_ahead_gain", 0.20)),
+        look_ahead_max_px=float(raw_follow_cam.get("look_ahead_max_px", 180.0)),
+        speed_zoom_out_start=float(raw_follow_cam.get("speed_zoom_out_start", 22.0)),
+        speed_zoom_out_end=float(raw_follow_cam.get("speed_zoom_out_end", 85.0)),
+        predicted_zoom_out_bonus=float(raw_follow_cam.get("predicted_zoom_out_bonus", 0.12)),
+        lost_zoom_out_bonus=float(raw_follow_cam.get("lost_zoom_out_bonus", 0.30)),
+        low_confidence_zoom_out_start=float(raw_follow_cam.get("low_confidence_zoom_out_start", 0.40)),
+        low_confidence_zoom_out_end=float(raw_follow_cam.get("low_confidence_zoom_out_end", 0.18)),
+        predicted_pan_decay=float(raw_follow_cam.get("predicted_pan_decay", 0.75)),
+        lost_hold_frames=int(raw_follow_cam.get("lost_hold_frames", 10)),
+        lost_recenter_frames=int(raw_follow_cam.get("lost_recenter_frames", 28)),
+        recenter_smoothing=float(raw_follow_cam.get("recenter_smoothing", 0.08)),
+        draw_ball_marker=bool(raw_follow_cam.get("draw_ball_marker", True)),
+        draw_frame_text=bool(raw_follow_cam.get("draw_frame_text", True)),
+    )
+
+
 def load_config(config_path: Path) -> AppConfig:
     """从 YAML 加载配置，并将相对路径解析为绝对路径。"""
     if not config_path.exists():
@@ -602,6 +684,7 @@ def load_config(config_path: Path) -> AppConfig:
     )
 
     postprocess = _to_postprocess(raw.get("postprocess"))
+    follow_cam = _to_follow_cam(raw.get("follow_cam"))
 
     runtime_raw = raw.get("runtime", {})
     raw_start_frame = runtime_raw.get("start_frame", 0)
@@ -654,6 +737,7 @@ def load_config(config_path: Path) -> AppConfig:
         tracking=tracking,
         output=output,
         postprocess=postprocess,
+        follow_cam=follow_cam,
         runtime=runtime,
         mock=mock,
     )

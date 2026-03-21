@@ -177,6 +177,42 @@ output:
   frame_text_thickness: 2
   draw_status_text: true
 
+follow_cam:
+  enabled: false
+  prefer_cleaned_track: true
+  output_video_name: "follow_cam.mp4"
+  camera_path_name: "camera_path.csv"
+  report_name: "follow_cam_report.json"
+  target_width: 1920
+  target_height: 1080
+  min_crop_height: 900
+  max_crop_height: 1260
+  home_center_x_ratio: 0.50
+  home_center_y_ratio: 0.66
+  ball_screen_x_ratio: 0.50
+  ball_screen_y_ratio: 0.58
+  dead_zone_ratio_x: 0.12
+  dead_zone_ratio_y: 0.10
+  pan_smoothing: 0.35
+  zoom_smoothing: 0.20
+  velocity_smoothing: 0.35
+  max_pan_per_frame_x: 90.0
+  max_pan_per_frame_y: 55.0
+  look_ahead_gain: 0.20
+  look_ahead_max_px: 180.0
+  speed_zoom_out_start: 22.0
+  speed_zoom_out_end: 85.0
+  predicted_zoom_out_bonus: 0.12
+  lost_zoom_out_bonus: 0.30
+  low_confidence_zoom_out_start: 0.40
+  low_confidence_zoom_out_end: 0.18
+  predicted_pan_decay: 0.75
+  lost_hold_frames: 10
+  lost_recenter_frames: 28
+  recenter_smoothing: 0.08
+  draw_ball_marker: true
+  draw_frame_text: true
+
 runtime:
   use_gpu_if_available: true
   enable_cudnn_benchmark: true

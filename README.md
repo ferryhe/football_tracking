@@ -5,6 +5,7 @@ The current backend is stabilized around two practical workflows:
 
 - raw tracking
 - raw tracking plus conservative post-cleanup
+- raw tracking plus post-cleanup plus 16:9 follow-cam rendering
 
 ## Current Recommended Configs
 
@@ -14,6 +15,7 @@ The current backend is stabilized around two practical workflows:
   Best current full-video raw tracking config.
 - `config/real_v24_full_postclean.yaml`
   Best current full-video delivery config with post-cleanup enabled.
+  It also enables follow-cam rendering.
 
 ## Kept Output Baselines
 
@@ -35,6 +37,7 @@ The active backend flow is:
 5. Tracking: state machine + Kalman CA + adaptive gating + burst recovery
 6. Raw export: video, CSV, debug JSONL
 7. Postprocess cleanup: conservative cleanup of short isolated noise islands
+8. Follow-cam: render a smoothed 16:9 auto-follow view from the cleaned track
 
 ## Main Modules
 
@@ -109,12 +112,25 @@ When postprocess is enabled it also writes:
 - `debug.cleaned.jsonl`
 - `cleanup_report.json`
 
+When follow-cam is enabled it also writes:
+
+- `follow_cam.mp4`
+- `camera_path.csv`
+- `follow_cam_report.json`
+
 `cleanup_report.json` is the main handoff artifact for future UI integration. It records:
 
 - which frames were modified by cleanup
 - why they were modified
 - which nuisance zone was hit
 - which short detected islands were scrubbed
+
+`follow_cam_report.json` records:
+
+- which track source was used (`raw` or `cleaned`)
+- output resolution
+- crop size range
+- status counts carried into follow-cam rendering
 
 ## Postprocess Scope
 
@@ -133,11 +149,22 @@ Current postprocess controls are defined in `config/real_v24_full_postclean.yaml
 - jump distance threshold
 - low-confidence threshold
 
+Current follow-cam controls are also defined in `config/real_v24_full_postclean.yaml`, including:
+
+- output resolution
+- crop size range
+- dead-zone size
+- pan smoothing and max pan speed
+- speed-based zoom out
+- predicted and lost behavior
+- home framing and recenter behavior
+
 ## Known Limits
 
 - Fast airborne ball segments can still drop detector recall.
 - Keeper possession, heavy occlusion, and out-of-field spare balls can still create local noise.
 - Some bad segments are not short isolated islands, so they need stronger temporal logic or manual protection.
+- The first follow-cam version is intentionally conservative and may lag behind very fast ball flight.
 
 ## Repo Conventions
 

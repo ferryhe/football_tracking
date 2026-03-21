@@ -11,6 +11,7 @@ from football_tracking.config import AppConfig
 from football_tracking.detector import MockBallDetector, YOLOSahiBallDetector
 from football_tracking.exporter import TrackingExporter
 from football_tracking.filtering import CandidateFilter
+from football_tracking.follow_cam import FollowCamGenerator
 from football_tracking.mock_mode import MockFrameSource
 from football_tracking.postprocess import TrackPostprocessor
 from football_tracking.renderer import FrameRenderer
@@ -141,9 +142,13 @@ class BallTrackingPipeline:
         finally:
             capture.release()
             exporter.close()
-            if not self.config.mock.enabled and self.config.postprocess.enabled:
-                self.logger.info("Starting postprocess cleanup...")
-                TrackPostprocessor(self.config).run()
+            if not self.config.mock.enabled:
+                if self.config.postprocess.enabled:
+                    self.logger.info("Starting postprocess cleanup...")
+                    TrackPostprocessor(self.config).run()
+                if self.config.follow_cam.enabled:
+                    self.logger.info("Starting follow-cam rendering...")
+                    FollowCamGenerator(self.config).run()
             self.logger.info("处理完成，输出目录: %s", self.config.output_dir)
 
     def _open_frame_source(self):
