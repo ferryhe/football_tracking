@@ -190,3 +190,70 @@ The goal is to reduce visual jitter and avoid amplifying single-frame tracking n
   - `config/real_first_run.yaml`
   - `config/real_best_full.yaml`
   - `config/real_v24_full_postclean.yaml`
+
+## Frontend Planning Docs
+
+- `docs/plans/2026-03-21-ai-native-frontend-plan.md`
+- `docs/plans/2026-03-21-frontend-phase1-execution-plan.md`
+
+## API Shell
+
+The repo now includes a local FastAPI shell for frontend integration.
+
+Run locally:
+
+```powershell
+.\.venv\Scripts\python.exe -m uvicorn football_tracking.api.app:app --reload
+```
+
+Current phase-1 endpoints:
+
+- `GET /api/v1/health`
+- `GET /api/v1/configs`
+- `GET /api/v1/configs/{name}`
+- `POST /api/v1/configs/derive`
+- `GET /api/v1/runs`
+- `POST /api/v1/runs`
+- `GET /api/v1/runs/{run_id}`
+- `GET /api/v1/runs/{run_id}/artifacts`
+- `GET /api/v1/runs/{run_id}/artifacts/{artifact_name}`
+- `GET /api/v1/runs/{run_id}/cleanup-report`
+- `GET /api/v1/runs/{run_id}/follow-cam-report`
+- `GET /api/v1/runs/{run_id}/camera-path`
+- `POST /api/v1/ai/explain`
+- `POST /api/v1/ai/recommend`
+- `POST /api/v1/ai/config-diff`
+
+The API shell is filesystem-backed:
+
+- configs come from `config/`
+- run history comes from `data/run_registry.json`
+- kept baselines are discovered from `outputs/`
+- new API-triggered runs default to `outputs/api_runs/<run_id>/`
+
+## Frontend Shell
+
+The repo now includes a local React/Vite frontend shell in `frontend/`.
+
+Run locally:
+
+```powershell
+# terminal 1
+.\.venv\Scripts\python.exe -m uvicorn football_tracking.api.app:app --reload
+
+# terminal 2
+cd frontend
+npm install
+npm run dev
+```
+
+Current frontend scope:
+
+- Dashboard for kept configs and recent runs
+- Runs page to launch local jobs through the API
+- Review page for raw/cleaned/follow-cam artifacts and reports
+- AI-native side panel that can:
+  - explain a selected run
+  - generate a grounded recommendation
+  - preview a config patch
+  - derive a new generated config with explicit confirmation

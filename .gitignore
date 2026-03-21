@@ -1,7 +1,12 @@
 __pycache__/
 *.py[cod]
 .venv/
+.env
 outputs/
 data/
 weights/
 yolov8*.pt
+config/generated/
+frontend/node_modules/
+frontend/dist/
+*.tsbuildinfo
