@@ -13,6 +13,7 @@ from uuid import uuid4
 
 import yaml
 
+from football_tracking.api.ai_provider import OpenAIResponsesClient, load_provider_settings
 from football_tracking.config import AppConfig, load_config
 from football_tracking.pipeline import BallTrackingPipeline
 
@@ -63,6 +64,8 @@ class ApiService:
         self.generated_config_dir = self.config_dir / "generated"
         self._lock = threading.Lock()
         self._active_threads: dict[str, threading.Thread] = {}
+        self.provider_settings = load_provider_settings(repo_root)
+        self.ai_client = OpenAIResponsesClient(self.provider_settings)
         self._ensure_registry_file()
 
     def health_summary(self) -> dict[str, Any]:
@@ -159,6 +162,22 @@ class ApiService:
         }
 
     def ai_explain(self, run_id: str | None, config_name: str | None, focus: str | None) -> dict[str, Any]:
+        if self.ai_client.is_enabled():
+            try:
+                return self._ai_explain_with_model(run_id=run_id, config_name=config_name, focus=focus)
+            except Exception:
+                pass
+        return self._ai_explain_heuristic(run_id=run_id, config_name=config_name, focus=focus)
+
+    def ai_recommend(self, run_id: str, objective: str | None) -> dict[str, Any]:
+        if self.ai_client.is_enabled():
+            try:
+                return self._ai_recommend_with_model(run_id=run_id, objective=objective)
+            except Exception:
+                pass
+        return self._ai_recommend_heuristic(run_id=run_id, objective=objective)
+
+    def _ai_explain_heuristic(self, run_id: str | None, config_name: str | None, focus: str | None) -> dict[str, Any]:
         evidence: list[str] = []
         summary_parts: list[str] = []
 
@@ -206,7 +225,7 @@ class ApiService:
             "evidence": evidence,
         }
 
-    def ai_recommend(self, run_id: str, objective: str | None) -> dict[str, Any]:
+    def _ai_recommend_heuristic(self, run_id: str, objective: str | None) -> dict[str, Any]:
         run = self.get_run(run_id)
         config_name = run.get("config_name")
         if not config_name:
@@ -314,6 +333,66 @@ class ApiService:
             "output_name_suggestion": output_name_suggestion,
         }
 
+    def _ai_explain_with_model(self, run_id: str | None, config_name: str | None, focus: str | None) -> dict[str, Any]:
+        payload = self._build_ai_context(run_id=run_id, config_name=config_name, focus=focus)
+        prompt = json.dumps(payload, ensure_ascii=False, indent=2)
+        instructions = (
+            "You are helping operate a football tracking system. "
+            "Return strict JSON with keys: summary (string), evidence (array of short strings). "
+            "Ground every sentence in the provided evidence. "
+            "Do not invent artifacts, files, or metrics."
+        )
+        response = self.ai_client.create_json_response(
+            instructions=instructions,
+            prompt=prompt,
+            temperature=0.1,
+        )
+        return {
+            "summary": str(response.get("summary", "")),
+            "evidence": [str(item) for item in response.get("evidence", []) if str(item).strip()],
+        }
+
+    def _ai_recommend_with_model(self, run_id: str, objective: str | None) -> dict[str, Any]:
+        run = self.get_run(run_id)
+        config_name = run.get("config_name")
+        if not config_name:
+            raise FileNotFoundError(f"Run {run_id} is not linked to a config.")
+
+        payload = self._build_ai_context(run_id=run_id, config_name=config_name, focus=objective)
+        prompt = json.dumps(payload, ensure_ascii=False, indent=2)
+        instructions = (
+            "You are recommending the next config adjustment for a football tracking pipeline. "
+            "Return strict JSON with keys: title, diagnosis, recommendation, expected_tradeoff, patch, patch_preview, evidence, output_name_suggestion. "
+            "The patch must be a nested object suitable for YAML merge. "
+            "Only touch conservative operator-facing parameters in follow_cam, postprocess, scene_bias.dynamic_air_recovery, selection, or tracking. "
+            "Do not suggest destructive changes. "
+            "Patch preview must be a flat array of 'path: value' strings matching the patch object."
+        )
+        response = self.ai_client.create_json_response(
+            instructions=instructions,
+            prompt=prompt,
+            temperature=0.2,
+        )
+        patch = response.get("patch", {})
+        if not isinstance(patch, dict):
+            patch = {}
+        patch_preview = response.get("patch_preview", [])
+        if not isinstance(patch_preview, list) or not patch_preview:
+            patch_preview = _flatten_patch_lines(patch)
+        output_name_suggestion = str(
+            response.get("output_name_suggestion") or f"{Path(config_name).stem}_{self._slugify(objective or 'ai_update')}"
+        )
+        return {
+            "title": str(response.get("title", "Model Recommendation")),
+            "diagnosis": str(response.get("diagnosis", "")),
+            "recommendation": str(response.get("recommendation", "")),
+            "expected_tradeoff": str(response.get("expected_tradeoff", "")),
+            "patch": patch,
+            "patch_preview": [str(item) for item in patch_preview],
+            "evidence": [str(item) for item in response.get("evidence", []) if str(item).strip()],
+            "output_name_suggestion": output_name_suggestion,
+        }
+
     def ai_config_diff(self, base_config_name: str, patch: dict[str, Any], output_name: str | None = None) -> dict[str, Any]:
         resolved_output_name = output_name or f"{Path(base_config_name).stem}_ai_patch"
         return {
@@ -322,6 +401,50 @@ class ApiService:
             "patch": patch,
             "patch_preview": _flatten_patch_lines(patch),
         }
+
+    def _build_ai_context(self, run_id: str | None, config_name: str | None, focus: str | None) -> dict[str, Any]:
+        context: dict[str, Any] = {"focus": focus}
+
+        if config_name:
+            config = self.get_config(config_name)
+            context["config"] = {
+                "name": config["name"],
+                "summary": config["summary"],
+                "resolved": {
+                    "postprocess": config["resolved"].get("postprocess", {}),
+                    "follow_cam": config["resolved"].get("follow_cam", {}),
+                    "scene_bias": config["resolved"].get("scene_bias", {}),
+                    "selection": config["resolved"].get("selection", {}),
+                    "tracking": config["resolved"].get("tracking", {}),
+                },
+            }
+
+        if run_id:
+            run = self.get_run(run_id)
+            cleanup = run.get("stats", {}).get("cleanup", {}) or {}
+            follow_cam = run.get("stats", {}).get("follow_cam", {}) or {}
+            context["run"] = {
+                "run_id": run["run_id"],
+                "status": run["status"],
+                "config_name": run.get("config_name"),
+                "modules_enabled": run.get("modules_enabled", {}),
+                "raw_stats": run.get("stats", {}).get("raw", {}),
+                "cleaned_stats": run.get("stats", {}).get("cleaned", {}),
+                "cleanup_summary": {
+                    "scrubbed_frame_count": cleanup.get("scrubbed_frame_count"),
+                    "scrubbed_segment_count": cleanup.get("scrubbed_segment_count"),
+                    "actions_preview": (cleanup.get("actions") or [])[:5],
+                },
+                "follow_cam_summary": {
+                    "track_source": follow_cam.get("track_source"),
+                    "target_resolution": follow_cam.get("target_resolution"),
+                    "mean_crop_height": follow_cam.get("mean_crop_height"),
+                    "min_crop_height": follow_cam.get("min_crop_height"),
+                    "max_crop_height": follow_cam.get("max_crop_height"),
+                    "status_counts": follow_cam.get("status_counts"),
+                },
+            }
+        return context
 
     def create_run(self, request: dict[str, Any]) -> dict[str, Any]:
         config_path, relative_name = self._resolve_config_path(request["config_name"])

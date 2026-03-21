@@ -231,6 +231,13 @@ The API shell is filesystem-backed:
 - kept baselines are discovered from `outputs/`
 - new API-triggered runs default to `outputs/api_runs/<run_id>/`
 
+AI behavior:
+
+- if `PROVIDER_OPENAI_API_KEY` is configured in `.env`, the backend uses the OpenAI provider for:
+  - `POST /api/v1/ai/explain`
+  - `POST /api/v1/ai/recommend`
+- if no provider is configured, the backend falls back to local heuristic suggestions
+
 ## Frontend Shell
 
 The repo now includes a local React/Vite frontend shell in `frontend/`.
