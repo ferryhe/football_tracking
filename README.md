@@ -154,8 +154,9 @@ Current follow-cam controls are also defined in `config/real_v24_full_postclean.
 - output resolution
 - crop size range
 - dead-zone size
-- pan smoothing and max pan speed
+- glide / catch-up pan behavior
 - speed-based zoom out
+- zoom confirmation, deadband, and hold behavior
 - predicted and lost behavior
 - home framing and recenter behavior
 
@@ -165,6 +166,21 @@ Current follow-cam controls are also defined in `config/real_v24_full_postclean.
 - Keeper possession, heavy occlusion, and out-of-field spare balls can still create local noise.
 - Some bad segments are not short isolated islands, so they need stronger temporal logic or manual protection.
 - The first follow-cam version is intentionally conservative and may lag behind very fast ball flight.
+
+## Follow-Cam Design Notes
+
+The current follow-cam is intentionally closer to a slow operator camera than a frame-perfect crop.
+
+It uses:
+
+- `glide` and `catch_up` pan states
+- zoom deadband and confirmation windows
+- slower zoom-in than zoom-out
+- hold behavior so it does not immediately reverse zoom direction
+- weaker camera response on `Predicted`
+- recenter behavior after longer `Lost` stretches
+
+The goal is to reduce visual jitter and avoid amplifying single-frame tracking noise.
 
 ## Repo Conventions
 

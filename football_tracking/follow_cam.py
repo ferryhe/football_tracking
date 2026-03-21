@@ -38,6 +38,7 @@ class CameraPathEntry:
     confidence: float
     speed: float
     zoom_out_ratio: float
+    pan_mode: str
 
 
 class FollowCamGenerator:
@@ -158,10 +159,17 @@ class FollowCamGenerator:
         current_center = home_center
         current_crop_height = float(max(1, min(cfg.max_crop_height, source_height)))
         current_crop_width = current_crop_height * aspect
+        committed_crop_height = current_crop_height
+        zoom_candidate_height = current_crop_height
+        zoom_candidate_streak = 0
+        zoom_hold_frames_remaining = 0
+        last_zoom_commit_status = OutputStatus.LOST
+        last_zoom_direction = 0
         last_point: tuple[float, float] | None = None
         last_point_frame_index: int | None = None
         smoothed_velocity = (0.0, 0.0)
         lost_streak = 0
+        pan_mode = "glide"
         path_entries: list[CameraPathEntry] = []
 
         for frame_info in frames:
@@ -198,7 +206,27 @@ class FollowCamGenerator:
                 speed=speed,
                 source_height=source_height,
             )
-            current_crop_height = self._lerp(current_crop_height, desired_crop_height, cfg.zoom_smoothing)
+            (
+                committed_crop_height,
+                zoom_candidate_height,
+                zoom_candidate_streak,
+                zoom_hold_frames_remaining,
+                last_zoom_commit_status,
+                last_zoom_direction,
+            ) = self._update_zoom_commit_state(
+                committed_crop_height=committed_crop_height,
+                desired_crop_height=desired_crop_height,
+                zoom_candidate_height=zoom_candidate_height,
+                zoom_candidate_streak=zoom_candidate_streak,
+                zoom_hold_frames_remaining=zoom_hold_frames_remaining,
+                frame_status=frame_info.status,
+                last_zoom_commit_status=last_zoom_commit_status,
+                last_zoom_direction=last_zoom_direction,
+            )
+            current_crop_height = self._update_crop_height(
+                current_crop_height=current_crop_height,
+                desired_crop_height=committed_crop_height,
+            )
             current_crop_width, current_crop_height = self._crop_size_for_height(
                 current_crop_height,
                 aspect,
@@ -216,14 +244,16 @@ class FollowCamGenerator:
                     anchor_x - (cfg.ball_screen_x_ratio - 0.5) * current_crop_width,
                     anchor_y - (cfg.ball_screen_y_ratio - 0.5) * current_crop_height,
                 )
-                current_center = self._move_camera_towards(
+                current_center, pan_mode = self._move_camera_towards(
                     current_center=current_center,
                     desired_center=desired_center,
                     crop_width=current_crop_width,
                     crop_height=current_crop_height,
                     status=frame_info.status,
+                    current_pan_mode=pan_mode,
                 )
             else:
+                pan_mode = "hold"
                 if lost_streak > cfg.lost_recenter_frames:
                     current_center = self._move_towards_home(current_center, home_center, cfg.recenter_smoothing)
 
@@ -267,6 +297,7 @@ class FollowCamGenerator:
                     confidence=frame_info.confidence,
                     speed=speed,
                     zoom_out_ratio=zoom_out_ratio,
+                    pan_mode=pan_mode,
                 )
             )
 
@@ -297,6 +328,87 @@ class FollowCamGenerator:
         max_crop_height = max(min_crop_height, min(cfg.max_crop_height, source_height))
         desired_crop_height = min_crop_height + (max_crop_height - min_crop_height) * desired_ratio
         return desired_crop_height, desired_ratio
+
+    def _update_crop_height(
+        self,
+        current_crop_height: float,
+        desired_crop_height: float,
+    ) -> float:
+        cfg = self.config
+        if desired_crop_height >= current_crop_height:
+            alpha = cfg.zoom_out_smoothing
+            max_delta = cfg.max_zoom_out_per_frame
+        else:
+            alpha = cfg.zoom_in_smoothing
+            max_delta = cfg.max_zoom_in_per_frame
+
+        smoothed_target = self._lerp(current_crop_height, desired_crop_height, alpha)
+        delta = smoothed_target - current_crop_height
+        delta = max(-max_delta, min(max_delta, delta))
+        return current_crop_height + delta
+
+    def _update_zoom_commit_state(
+        self,
+        committed_crop_height: float,
+        desired_crop_height: float,
+        zoom_candidate_height: float,
+        zoom_candidate_streak: int,
+        zoom_hold_frames_remaining: int,
+        frame_status: OutputStatus,
+        last_zoom_commit_status: OutputStatus,
+        last_zoom_direction: int,
+    ) -> tuple[float, float, int, int, OutputStatus, int]:
+        cfg = self.config
+        if zoom_hold_frames_remaining > 0:
+            return (
+                committed_crop_height,
+                committed_crop_height,
+                0,
+                zoom_hold_frames_remaining - 1,
+                last_zoom_commit_status,
+                last_zoom_direction,
+            )
+
+        if abs(desired_crop_height - committed_crop_height) <= cfg.zoom_deadband_height:
+            return committed_crop_height, committed_crop_height, 0, 0, last_zoom_commit_status, last_zoom_direction
+
+        direction_changed = (desired_crop_height - committed_crop_height) * (zoom_candidate_height - committed_crop_height) < 0
+        if direction_changed or abs(desired_crop_height - zoom_candidate_height) > cfg.zoom_deadband_height:
+            zoom_candidate_height = desired_crop_height
+            zoom_candidate_streak = 1
+        else:
+            zoom_candidate_height = self._lerp(zoom_candidate_height, desired_crop_height, 0.35)
+            zoom_candidate_streak += 1
+
+        confirm_frames = cfg.zoom_out_confirm_frames
+        candidate_direction = 1
+        if zoom_candidate_height < committed_crop_height:
+            candidate_direction = -1
+            confirm_frames = cfg.zoom_in_confirm_frames
+        if (
+            last_zoom_direction != 0
+            and candidate_direction != last_zoom_direction
+            and frame_status == last_zoom_commit_status
+        ):
+            confirm_frames = max(confirm_frames, cfg.zoom_reverse_confirm_frames)
+
+        if zoom_candidate_streak >= confirm_frames:
+            return (
+                zoom_candidate_height,
+                zoom_candidate_height,
+                0,
+                cfg.zoom_hold_frames_after_change,
+                frame_status,
+                candidate_direction,
+            )
+        return (
+            committed_crop_height,
+            zoom_candidate_height,
+            zoom_candidate_streak,
+            0,
+            last_zoom_commit_status,
+            last_zoom_direction,
+        )
 
     def _update_velocity(
         self,
@@ -337,27 +449,51 @@ class FollowCamGenerator:
         crop_width: float,
         crop_height: float,
         status: OutputStatus,
-    ) -> tuple[float, float]:
+        current_pan_mode: str,
+    ) -> tuple[tuple[float, float], str]:
         cfg = self.config
         dead_x = crop_width * cfg.dead_zone_ratio_x
         dead_y = crop_height * cfg.dead_zone_ratio_y
         pan_decay = 1.0 if status == OutputStatus.DETECTED else cfg.predicted_pan_decay
+        offset_x = abs(desired_center[0] - current_center[0])
+        offset_y = abs(desired_center[1] - current_center[1])
+        trigger_x = crop_width * cfg.catch_up_trigger_ratio_x
+        trigger_y = crop_height * cfg.catch_up_trigger_ratio_y
+        release_x = crop_width * cfg.catch_up_release_ratio_x
+        release_y = crop_height * cfg.catch_up_release_ratio_y
+
+        catch_up_active = current_pan_mode == "catch_up"
+        if catch_up_active:
+            catch_up_active = offset_x >= release_x or offset_y >= release_y
+        else:
+            catch_up_active = offset_x >= trigger_x or offset_y >= trigger_y
+
+        if catch_up_active:
+            smoothing = cfg.catch_up_pan_smoothing
+            max_step_x = cfg.catch_up_max_pan_per_frame_x
+            max_step_y = cfg.catch_up_max_pan_per_frame_y
+            next_pan_mode = "catch_up"
+        else:
+            smoothing = cfg.glide_pan_smoothing
+            max_step_x = cfg.glide_max_pan_per_frame_x
+            max_step_y = cfg.glide_max_pan_per_frame_y
+            next_pan_mode = "glide"
 
         move_x = self._axis_move(
             current=current_center[0],
             desired=desired_center[0],
             dead_zone=dead_x,
-            smoothing=cfg.pan_smoothing * pan_decay,
-            max_step=cfg.max_pan_per_frame_x * pan_decay,
+            smoothing=smoothing * pan_decay,
+            max_step=max_step_x * pan_decay,
         )
         move_y = self._axis_move(
             current=current_center[1],
             desired=desired_center[1],
             dead_zone=dead_y,
-            smoothing=cfg.pan_smoothing * pan_decay,
-            max_step=cfg.max_pan_per_frame_y * pan_decay,
+            smoothing=smoothing * pan_decay,
+            max_step=max_step_y * pan_decay,
         )
-        return current_center[0] + move_x, current_center[1] + move_y
+        return (current_center[0] + move_x, current_center[1] + move_y), next_pan_mode
 
     def _axis_move(
         self,
@@ -504,6 +640,7 @@ class FollowCamGenerator:
                     "Confidence",
                     "Speed",
                     "ZoomOutRatio",
+                    "PanMode",
                 ]
             )
             for entry in path_entries:
@@ -524,6 +661,7 @@ class FollowCamGenerator:
                         f"{entry.confidence:.4f}",
                         f"{entry.speed:.2f}",
                         f"{entry.zoom_out_ratio:.4f}",
+                        entry.pan_mode,
                     ]
                 )
 

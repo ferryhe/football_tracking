@@ -167,7 +167,26 @@ class FollowCamConfig:
     dead_zone_ratio_x: float = 0.12
     dead_zone_ratio_y: float = 0.10
     pan_smoothing: float = 0.35
+    glide_pan_smoothing: float = 0.12
+    glide_max_pan_per_frame_x: float = 32.0
+    glide_max_pan_per_frame_y: float = 18.0
+    catch_up_pan_smoothing: float = 0.24
+    catch_up_max_pan_per_frame_x: float = 64.0
+    catch_up_max_pan_per_frame_y: float = 36.0
+    catch_up_trigger_ratio_x: float = 0.26
+    catch_up_trigger_ratio_y: float = 0.22
+    catch_up_release_ratio_x: float = 0.18
+    catch_up_release_ratio_y: float = 0.15
     zoom_smoothing: float = 0.20
+    zoom_in_smoothing: float = 0.05
+    zoom_out_smoothing: float = 0.08
+    max_zoom_in_per_frame: float = 10.0
+    max_zoom_out_per_frame: float = 18.0
+    zoom_deadband_height: float = 80.0
+    zoom_out_confirm_frames: int = 4
+    zoom_in_confirm_frames: int = 8
+    zoom_reverse_confirm_frames: int = 14
+    zoom_hold_frames_after_change: int = 10
     velocity_smoothing: float = 0.35
     max_pan_per_frame_x: float = 90.0
     max_pan_per_frame_y: float = 55.0
@@ -537,7 +556,36 @@ def _to_follow_cam(raw_follow_cam: Any) -> FollowCamConfig:
         dead_zone_ratio_x=float(raw_follow_cam.get("dead_zone_ratio_x", 0.12)),
         dead_zone_ratio_y=float(raw_follow_cam.get("dead_zone_ratio_y", 0.10)),
         pan_smoothing=float(raw_follow_cam.get("pan_smoothing", 0.35)),
+        glide_pan_smoothing=float(raw_follow_cam.get("glide_pan_smoothing", raw_follow_cam.get("pan_smoothing", 0.12))),
+        glide_max_pan_per_frame_x=float(
+            raw_follow_cam.get("glide_max_pan_per_frame_x", raw_follow_cam.get("max_pan_per_frame_x", 32.0))
+        ),
+        glide_max_pan_per_frame_y=float(
+            raw_follow_cam.get("glide_max_pan_per_frame_y", raw_follow_cam.get("max_pan_per_frame_y", 18.0))
+        ),
+        catch_up_pan_smoothing=float(
+            raw_follow_cam.get("catch_up_pan_smoothing", raw_follow_cam.get("pan_smoothing", 0.24))
+        ),
+        catch_up_max_pan_per_frame_x=float(
+            raw_follow_cam.get("catch_up_max_pan_per_frame_x", raw_follow_cam.get("max_pan_per_frame_x", 64.0))
+        ),
+        catch_up_max_pan_per_frame_y=float(
+            raw_follow_cam.get("catch_up_max_pan_per_frame_y", raw_follow_cam.get("max_pan_per_frame_y", 36.0))
+        ),
+        catch_up_trigger_ratio_x=float(raw_follow_cam.get("catch_up_trigger_ratio_x", 0.26)),
+        catch_up_trigger_ratio_y=float(raw_follow_cam.get("catch_up_trigger_ratio_y", 0.22)),
+        catch_up_release_ratio_x=float(raw_follow_cam.get("catch_up_release_ratio_x", 0.18)),
+        catch_up_release_ratio_y=float(raw_follow_cam.get("catch_up_release_ratio_y", 0.15)),
         zoom_smoothing=float(raw_follow_cam.get("zoom_smoothing", 0.20)),
+        zoom_in_smoothing=float(raw_follow_cam.get("zoom_in_smoothing", raw_follow_cam.get("zoom_smoothing", 0.05))),
+        zoom_out_smoothing=float(raw_follow_cam.get("zoom_out_smoothing", raw_follow_cam.get("zoom_smoothing", 0.08))),
+        max_zoom_in_per_frame=float(raw_follow_cam.get("max_zoom_in_per_frame", 10.0)),
+        max_zoom_out_per_frame=float(raw_follow_cam.get("max_zoom_out_per_frame", 18.0)),
+        zoom_deadband_height=float(raw_follow_cam.get("zoom_deadband_height", 80.0)),
+        zoom_out_confirm_frames=int(raw_follow_cam.get("zoom_out_confirm_frames", 4)),
+        zoom_in_confirm_frames=int(raw_follow_cam.get("zoom_in_confirm_frames", 8)),
+        zoom_reverse_confirm_frames=int(raw_follow_cam.get("zoom_reverse_confirm_frames", 14)),
+        zoom_hold_frames_after_change=int(raw_follow_cam.get("zoom_hold_frames_after_change", 10)),
         velocity_smoothing=float(raw_follow_cam.get("velocity_smoothing", 0.35)),
         max_pan_per_frame_x=float(raw_follow_cam.get("max_pan_per_frame_x", 90.0)),
         max_pan_per_frame_y=float(raw_follow_cam.get("max_pan_per_frame_y", 55.0)),
