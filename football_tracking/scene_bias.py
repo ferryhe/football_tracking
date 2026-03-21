@@ -42,6 +42,61 @@ class SceneBiasResolver:
         bottom_i = max(top_i + 1, min(frame_height, int(bottom)))
         return (left_i, top_i, right_i, bottom_i)
 
+    def get_edge_reentry_window(
+        self,
+        context: TrackerContext,
+        frame_shape: tuple[int, int] | None,
+    ) -> tuple[int, int, int, int] | None:
+        dynamic = self.config.dynamic_air_recovery
+        if frame_shape is None or not self.config.enabled or not dynamic.edge_reentry_enabled:
+            return None
+        if context.lost_frames < dynamic.edge_reentry_min_lost_frames:
+            return None
+        if context.lost_frames > dynamic.edge_reentry_max_lost_frames:
+            return None
+
+        anchor = context.last_detected_position or context.last_position or context.predicted_position
+        if anchor is None:
+            return None
+
+        frame_height, frame_width = frame_shape
+        anchor_x, anchor_y = anchor
+        margin_x = frame_width * dynamic.edge_reentry_margin_x_ratio
+        margin_y = frame_height * dynamic.edge_reentry_margin_y_ratio
+        expand_x = dynamic.edge_reentry_expand_x
+        expand_y = dynamic.edge_reentry_expand_y
+
+        near_left = anchor_x <= margin_x
+        near_right = anchor_x >= frame_width - 1.0 - margin_x
+        near_top = anchor_y <= margin_y
+        near_bottom = anchor_y >= frame_height - 1.0 - margin_y
+        if not any((near_left, near_right, near_top, near_bottom)):
+            return None
+
+        left = anchor_x - expand_x / 2.0
+        right = anchor_x + expand_x / 2.0
+        top = anchor_y - expand_y / 2.0
+        bottom = anchor_y + expand_y / 2.0
+
+        if near_left:
+            left = 0.0
+            right = max(right, anchor_x + expand_x)
+        if near_right:
+            left = min(left, anchor_x - expand_x)
+            right = frame_width
+        if near_top:
+            top = 0.0
+            bottom = max(bottom, anchor_y + expand_y)
+        if near_bottom:
+            top = min(top, anchor_y - expand_y)
+            bottom = frame_height
+
+        left_i = max(0, min(frame_width - 1, int(round(left))))
+        top_i = max(0, min(frame_height - 1, int(round(top))))
+        right_i = max(left_i + 1, min(frame_width, int(round(right))))
+        bottom_i = max(top_i + 1, min(frame_height, int(round(bottom))))
+        return (left_i, top_i, right_i, bottom_i)
+
     def is_point_in_ground_zone(
         self,
         position: tuple[float, float] | None,

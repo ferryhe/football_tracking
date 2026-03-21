@@ -1,5 +1,5 @@
 input_video: "./data/raw5760x144020fps.mp4"
-output_dir: "./outputs/real_v161_air_burst_2130_2450"
+output_dir: "./outputs/real_v24_full_postclean"
 
 logging:
   level: "INFO"
@@ -79,6 +79,27 @@ scene_bias:
     low_quality_reject_confidence: 0.22
     low_quality_reject_score: 0.30
     low_quality_reject_min_lost_frames: 4
+    tentative_reacquire_enabled: true
+    tentative_reacquire_min_lost_frames: 4
+    tentative_reacquire_confidence_threshold: 0.30
+    tentative_reacquire_score_threshold: 0.38
+    tentative_reacquire_confirmation_radius: 140.0
+    tentative_reacquire_max_age: 1
+    gap_aware_jump_gate_enabled: true
+    gap_aware_short_lost_frames: 3
+    gap_aware_short_jump_distance: 260.0
+    gap_aware_long_jump_distance: 520.0
+    gap_aware_high_confidence_bypass: 0.42
+    edge_reentry_enabled: true
+    edge_reentry_min_lost_frames: 2
+    edge_reentry_max_lost_frames: 80
+    edge_reentry_margin_x_ratio: 0.08
+    edge_reentry_margin_y_ratio: 0.08
+    edge_reentry_expand_x: 260.0
+    edge_reentry_expand_y: 240.0
+    edge_reentry_high_confidence_bypass: 0.45
+    isolated_far_jump_enabled: false
+    true_out_of_view_enabled: false
     ground_exit_enabled: true
     ground_exit_min_lost_frames: 8
 
@@ -135,7 +156,7 @@ output:
   debug_jsonl_name: "debug.jsonl"
   video_codec: "mp4v"
   frame_image_ext: ".jpg"
-  save_video: true
+  save_video: false
   save_frames: false
   save_csv: true
   save_debug_jsonl: true
@@ -145,10 +166,31 @@ output:
   frame_text_thickness: 2
   draw_status_text: true
 
+postprocess:
+  enabled: true
+  max_detected_island_length: 2
+  stable_segment_min_length: 4
+  min_jump_distance: 260.0
+  nuisance_zone_jump_distance: 160.0
+  low_confidence_threshold: 0.40
+  save_cleaned_video: true
+  save_cleaned_csv: true
+  save_cleaned_debug_jsonl: true
+  cleaned_video_name: "annotated.cleaned.mp4"
+  cleaned_csv_name: "ball_track.cleaned.csv"
+  cleaned_debug_jsonl_name: "debug.cleaned.jsonl"
+  cleanup_report_name: "cleanup_report.json"
+  nuisance_zones:
+    - name: "upper_head_nuisance"
+      roi: [2000, 620, 2280, 730]
+    - name: "left_bottom_spare_ball"
+      roi: [0, 1180, 200, 1440]
+  protected_ranges: []
+
 runtime:
   use_gpu_if_available: true
   enable_cudnn_benchmark: true
   opencv_threads: 2
   capture_backend: "CAP_FFMPEG"
-  start_frame: 2130
-  max_frames: 321
+  start_frame: 0
+  max_frames: null

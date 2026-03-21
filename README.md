@@ -1,161 +1,149 @@
-﻿# High-Resolution Football Ball Tracking
+# High-Resolution Football Ball Tracking
 
-## v1.0 Release Notes
+This repository tracks a single in-play football from `5120 x 1440 / 20 FPS` fisheye-style match video.
+The current backend is stabilized around two practical workflows:
 
-This tag marks the end of the first real-video integration phase.
+- raw tracking
+- raw tracking plus conservative post-cleanup
 
-Current baseline:
+## Current Recommended Configs
 
-- Real-video config is provided in `config/real_first_run.yaml`.
-- The pipeline supports `runtime.max_frames` for short integration runs.
-- CSV export can be enabled with `output.save_csv`.
-- A first practical real-video baseline has been validated on both 200-frame and full-video runs.
+- `config/real_first_run.yaml`
+  Use for short debugging runs and first-pass tuning on the first 200 frames.
+- `config/real_best_full.yaml`
+  Best current full-video raw tracking config.
+- `config/real_v24_full_postclean.yaml`
+  Best current full-video delivery config with post-cleanup enabled.
 
-What worked in v1.0:
+## Kept Output Baselines
 
-- The system no longer stays locked on the original static false ball for the whole clip.
-- The tracker can reacquire the ball after several occlusion and deflection events.
-- Full-length processing completes and produces `annotated.mp4`, `ball_track.csv`, and `debug.jsonl`.
+- `outputs/real_first_run_full_accept000`
+  Early historical baseline kept for comparison.
+- `outputs/real_best_full`
+  Best current raw full-video output.
+- `outputs/real_v24_full_postclean`
+  Best current cleaned full-video output.
 
-Known limits:
+## Pipeline
 
-- Long `Lost` spans still appear in corner-kick, sideline, and dead-ball scenes.
-- `no_filtered_candidates` remains the main failure mode in difficult regions.
-- Long prediction-only stretches can drift outside the frame during full-video runs.
+The active backend flow is:
 
-Recommended use for this tag:
+1. Detection: YOLO + SAHI candidate generation
+2. Filtering: confidence, size, aspect ratio, base spatial filtering
+3. Scene bias: ground polygon, negative zones, dynamic air recovery
+4. Selection: choose one candidate using distance, direction, velocity, and history
+5. Tracking: state machine + Kalman CA + adaptive gating + burst recovery
+6. Raw export: video, CSV, debug JSONL
+7. Postprocess cleanup: conservative cleanup of short isolated noise islands
 
-- Treat `v1.0` as a stable milestone and debugging baseline.
-- Use it for further scene-specific improvements rather than broad global retuning.
+## Main Modules
 
-这是一个面向本地 Windows 环境的工程化足球比赛用球唯一追踪项目，针对 `5210 x 1440 / 20 FPS` 广角视频设计。系统严格采用五层架构：
+- `football_tracking/config.py`
+- `football_tracking/pipeline.py`
+- `football_tracking/scene_bias.py`
+- `football_tracking/tracker.py`
+- `football_tracking/postprocess.py`
+- `football_tracking/types.py`
 
-1. Detection Layer：YOLO + SAHI，只输出候选球。
-2. Candidate Filtering Layer：只做置信度、尺寸、长宽比、ROI 等基础过滤。
-3. Selection Layer：基于轨迹连续性和物理约束，从多个候选中选出唯一比赛用球。
-4. Tracking Layer：状态机管理 `INIT / TRACKING / PREDICTING / LOST`，支持短时预测。
-5. Output Layer：输出视频、逐帧图片和 `ball_track.csv`。
-
-## 项目结构
-
-```text
-foot_ball_tracking/
-├─ config/
-│  └─ default.yaml
-├─ football_tracking/
-│  ├─ __init__.py
-│  ├─ config.py
-│  ├─ detector.py
-│  ├─ exporter.py
-│  ├─ filtering.py
-│  ├─ physics.py
-│  ├─ pipeline.py
-│  ├─ renderer.py
-│  ├─ selector.py
-│  ├─ tracker.py
-│  └─ types.py
-├─ main.py
-├─ README.md
-└─ requirements.txt
-```
-
-## 环境要求
+## Environment
 
 - Windows 10 / 11
-- Python 3.10 或 3.11
-- NVIDIA RTX 4060 / 5060 8G 级别显卡
-- 已正确安装 NVIDIA 驱动、CUDA Runtime 和 cuDNN
+- Python 3.10 or 3.11
+- NVIDIA GPU, recommended 8 GB VRAM or higher
+- CUDA runtime and cuDNN installed correctly
 
-## 安装步骤
-
-1. 创建虚拟环境：
+## Setup
 
 ```powershell
 python -m venv .venv
 .\.venv\Scripts\activate
 python -m pip install --upgrade pip
-```
-
-2. 先安装与本机 CUDA 版本匹配的 GPU 版 PyTorch。
-
-示例（CUDA 12.4）：
-
-```powershell
 pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124
-```
-
-3. 安装项目依赖：
-
-```powershell
 pip install -r requirements.txt
 ```
 
-## 数据准备
-
-按如下方式放置数据：
+## Data Layout
 
 ```text
 foot_ball_tracking/
-├─ data/
-│  └─ input.mp4
-└─ weights/
-   └─ football_ball_yolo.pt
+|-- data/
+|   `-- raw5760x144020fps.mp4
+`-- weights/
+    `-- football_ball_yolo.pt
 ```
 
-如果路径不同，直接修改 `config/default.yaml`。
+If your local names differ, update `input_video` and `detector.model_path` in the chosen config.
 
-## 运行命令
+## Run
+
+Short integration run:
 
 ```powershell
-python main.py --config config/default.yaml
+.\.venv\Scripts\python.exe main.py --config config/real_first_run.yaml
 ```
 
-## 输出说明
-
-默认输出目录为 `outputs/run_001/`，包含：
-
-- `annotated.mp4`：黄色圆圈标注后的结果视频
-- `frames/`：逐帧图片
-- `ball_track.csv`：轨迹 CSV，列为 `Frame, X, Y, Confidence, Status`
-- `debug.jsonl`：逐帧调试信息，便于分析候选数量、选中原因和状态切换
-
-`Status` 只会输出以下三种值：
-
-- `Detected`
-- `Predicted`
-- `Lost`
-
-## 配置建议
-
-- 显存紧张时优先减小 `slice_width`、`slice_height`，并降低重叠比例。
-- 轨迹跳跃明显时优先调小 `match_distance`、`max_speed`、`max_acceleration`。
-- 遮挡恢复能力不足时适度提高 `max_lost_frames`。
-- 误跟静态海报或非比赛球时，优先收紧候选尺寸范围和速度/加速度上限。
-
-## 鲁棒性设计
-
-- 单帧检测失败不会导致整体中断，会退化为 `Predicted` 或 `Lost`
-- 检测与追踪严格解耦，避免状态逻辑污染检测层
-- 所有关键参数集中在配置文件，便于不同视频快速调参
-- 调试日志保留每帧候选数量、评分结果、选中原因、状态和丢失计数
-
-## Repo Skill
-
-仓库内已经附带当前项目使用的 Codex skill，路径如下：
-
-```text
-skills/
-└─ high-resolution-football-ball-tracking-system-designer/
-   ├─ SKILL.md
-   └─ agents/
-      └─ openai.yaml
-```
-
-如果你在其他机器上继续开发，可以把该目录复制到本机的 `$CODEX_HOME/skills/` 下。例如在 Windows 上：
+Full raw tracking:
 
 ```powershell
-Copy-Item -Recurse -Force .\skills\high-resolution-football-ball-tracking-system-designer $env:USERPROFILE\.codex\skills\
+.\.venv\Scripts\python.exe main.py --config config/real_best_full.yaml
 ```
 
-复制后即可通过 `$high-resolution-football-ball-tracking-system-designer` 调用同一套技能约束继续开发。
+Full cleaned delivery:
 
+```powershell
+.\.venv\Scripts\python.exe main.py --config config/real_v24_full_postclean.yaml
+```
+
+## Outputs
+
+Raw tracking normally writes:
+
+- `annotated.mp4`
+- `ball_track.csv`
+- `debug.jsonl`
+
+When postprocess is enabled it also writes:
+
+- `annotated.cleaned.mp4`
+- `ball_track.cleaned.csv`
+- `debug.cleaned.jsonl`
+- `cleanup_report.json`
+
+`cleanup_report.json` is the main handoff artifact for future UI integration. It records:
+
+- which frames were modified by cleanup
+- why they were modified
+- which nuisance zone was hit
+- which short detected islands were scrubbed
+
+## Postprocess Scope
+
+The current post-cleanup is intentionally conservative. It targets only very short isolated
+`Detected` islands so that it can:
+
+- remove obvious spare-ball or head-like noise
+- avoid damaging the main recovery gains already achieved in raw tracking
+- stay compatible with later manual or UI-assisted tuning
+
+Current postprocess controls are defined in `config/real_v24_full_postclean.yaml`, including:
+
+- `nuisance_zones`
+- `protected_ranges`
+- island length threshold
+- jump distance threshold
+- low-confidence threshold
+
+## Known Limits
+
+- Fast airborne ball segments can still drop detector recall.
+- Keeper possession, heavy occlusion, and out-of-field spare balls can still create local noise.
+- Some bad segments are not short isolated islands, so they need stronger temporal logic or manual protection.
+
+## Repo Conventions
+
+- `outputs/`, `data/`, and `weights/` are ignored and are not committed.
+- The repo keeps only the most useful configs and docs, not every historical experiment config.
+- New work should start from:
+  - `config/real_first_run.yaml`
+  - `config/real_best_full.yaml`
+  - `config/real_v24_full_postclean.yaml`

@@ -1,5 +1,5 @@
-input_video: "./data/raw5760x144020fps.mp4"
-output_dir: "./outputs/real_v14_kalman_2130_2450"
+﻿input_video: "./data/raw5760x144020fps.mp4"
+output_dir: "./outputs/real_best_full"
 
 logging:
   level: "INFO"
@@ -70,6 +70,49 @@ scene_bias:
     reacquire_enabled: true
     reacquire_confidence_threshold: 0.10
     reacquire_image_size: 1536
+    burst_enabled: true
+    burst_frames: 8
+    burst_confidence_threshold: 0.05
+    burst_image_size: 1920
+    burst_window_scale: 1.35
+    low_quality_reject_enabled: true
+    low_quality_reject_confidence: 0.22
+    low_quality_reject_score: 0.30
+    low_quality_reject_min_lost_frames: 4
+    tentative_reacquire_enabled: true
+    tentative_reacquire_min_lost_frames: 4
+    tentative_reacquire_confidence_threshold: 0.30
+    tentative_reacquire_score_threshold: 0.38
+    tentative_reacquire_confirmation_radius: 140.0
+    tentative_reacquire_max_age: 1
+    gap_aware_jump_gate_enabled: true
+    gap_aware_short_lost_frames: 3
+    gap_aware_short_jump_distance: 260.0
+    gap_aware_long_jump_distance: 520.0
+    gap_aware_high_confidence_bypass: 0.42
+    edge_reentry_enabled: true
+    edge_reentry_min_lost_frames: 2
+    edge_reentry_max_lost_frames: 80
+    edge_reentry_margin_x_ratio: 0.08
+    edge_reentry_margin_y_ratio: 0.08
+    edge_reentry_expand_x: 260.0
+    edge_reentry_expand_y: 240.0
+    edge_reentry_high_confidence_bypass: 0.45
+    isolated_far_jump_enabled: false
+    isolated_far_jump_min_lost_frames: 1
+    isolated_far_jump_distance: 320.0
+    isolated_far_jump_high_confidence_bypass: 0.50
+    isolated_far_jump_confirmation_radius: 180.0
+    true_out_of_view_enabled: false
+    true_out_of_view_min_lost_frames: 4
+    true_out_of_view_min_empty_frames: 3
+    true_out_of_view_edge_margin_x_ratio: 0.08
+    true_out_of_view_edge_margin_y_ratio: 0.08
+    true_out_of_view_high_confidence_bypass: 0.55
+    true_out_of_view_jump_distance: 260.0
+    true_out_of_view_confirmation_radius: 180.0
+    ground_exit_enabled: true
+    ground_exit_min_lost_frames: 8
 
 selection:
   min_accept_score: 0.0
@@ -106,6 +149,16 @@ tracking:
   gate_radius_max: 260.0
   velocity_blend_after_reacquire: 0.35
   speed_cap_after_reacquire: 180.0
+  reacquire_stabilization_frames: 4
+  reacquire_stabilization_gate_scale: 0.70
+  reacquire_stabilization_velocity_decay: 0.88
+  out_of_view_enabled: true
+  out_of_view_top_margin_ratio: 0.12
+  out_of_view_side_margin_ratio: 0.06
+  out_of_view_bottom_margin_ratio: 0.06
+  out_of_view_velocity_threshold: 18.0
+  out_of_view_prediction_limit: 4
+  out_of_view_extra_decay: 0.60
 
 output:
   video_name: "annotated.mp4"
@@ -129,5 +182,5 @@ runtime:
   enable_cudnn_benchmark: true
   opencv_threads: 2
   capture_backend: "CAP_FFMPEG"
-  start_frame: 2130
-  max_frames: 321
+  start_frame: 0
+

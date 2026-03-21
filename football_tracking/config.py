@@ -94,8 +94,59 @@ class DynamicAirRecoveryConfig:
     low_quality_reject_confidence: float = 0.22
     low_quality_reject_score: float = 0.30
     low_quality_reject_min_lost_frames: int = 4
+    tentative_reacquire_enabled: bool = True
+    tentative_reacquire_min_lost_frames: int = 4
+    tentative_reacquire_confidence_threshold: float = 0.30
+    tentative_reacquire_score_threshold: float = 0.38
+    tentative_reacquire_confirmation_radius: float = 140.0
+    tentative_reacquire_max_age: int = 1
+    gap_aware_jump_gate_enabled: bool = True
+    gap_aware_short_lost_frames: int = 3
+    gap_aware_short_jump_distance: float = 260.0
+    gap_aware_long_jump_distance: float = 520.0
+    gap_aware_high_confidence_bypass: float = 0.42
+    edge_reentry_enabled: bool = True
+    edge_reentry_min_lost_frames: int = 2
+    edge_reentry_max_lost_frames: int = 80
+    edge_reentry_margin_x_ratio: float = 0.08
+    edge_reentry_margin_y_ratio: float = 0.08
+    edge_reentry_expand_x: float = 260.0
+    edge_reentry_expand_y: float = 240.0
+    edge_reentry_high_confidence_bypass: float = 0.45
+    isolated_far_jump_enabled: bool = False
+    isolated_far_jump_min_lost_frames: int = 1
+    isolated_far_jump_distance: float = 320.0
+    isolated_far_jump_high_confidence_bypass: float = 0.50
+    isolated_far_jump_confirmation_radius: float = 180.0
+    true_out_of_view_enabled: bool = False
+    true_out_of_view_min_lost_frames: int = 4
+    true_out_of_view_min_empty_frames: int = 3
+    true_out_of_view_edge_margin_x_ratio: float = 0.08
+    true_out_of_view_edge_margin_y_ratio: float = 0.08
+    true_out_of_view_high_confidence_bypass: float = 0.55
+    true_out_of_view_jump_distance: float = 260.0
+    true_out_of_view_confirmation_radius: float = 180.0
     ground_exit_enabled: bool = True
     ground_exit_min_lost_frames: int = 8
+
+
+@dataclass(slots=True)
+class PostprocessConfig:
+    enabled: bool = False
+    max_detected_island_length: int = 2
+    stable_segment_min_length: int = 4
+    min_jump_distance: float = 260.0
+    nuisance_zone_jump_distance: float = 180.0
+    low_confidence_threshold: float = 0.45
+    save_cleaned_video: bool = True
+    save_cleaned_csv: bool = True
+    save_cleaned_debug_jsonl: bool = True
+    cleaned_video_name: str = "annotated.cleaned.mp4"
+    cleaned_csv_name: str = "ball_track.cleaned.csv"
+    cleaned_debug_jsonl_name: str = "debug.cleaned.jsonl"
+    cleanup_report_name: str = "cleanup_report.json"
+    nuisance_zones: list[SceneZoneConfig] = field(default_factory=list)
+    protected_ranges: list[tuple[int, int]] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -205,6 +256,7 @@ class AppConfig:
     selection: SelectionConfig
     tracking: TrackingConfig
     output: OutputConfig
+    postprocess: PostprocessConfig
     runtime: RuntimeConfig
     mock: MockConfig
 
@@ -256,6 +308,14 @@ def _to_active_states(raw_active_states: Any) -> tuple[str, ...]:
     if not isinstance(raw_active_states, list):
         raise ValueError("active_states 必须为 TrackState 列表或 null")
     return tuple(str(value).upper() for value in raw_active_states)
+
+
+def _to_frame_ranges(raw_frame_ranges: Any) -> list[tuple[int, int]]:
+    if raw_frame_ranges in (None, "", []):
+        return []
+    if not isinstance(raw_frame_ranges, list):
+        raise ValueError("protected_ranges 必须为 [[start, end], ...] 列表或 null")
+    return [_to_frame_range(raw_frame_range) for raw_frame_range in raw_frame_ranges]
 
 
 def _to_relaxed_filtering(raw_relaxed_filtering: Any) -> RelaxedFilteringConfig:
@@ -333,8 +393,86 @@ def _to_dynamic_air_recovery(raw_dynamic_air_recovery: Any) -> DynamicAirRecover
         low_quality_reject_confidence=float(raw_dynamic_air_recovery.get("low_quality_reject_confidence", 0.22)),
         low_quality_reject_score=float(raw_dynamic_air_recovery.get("low_quality_reject_score", 0.30)),
         low_quality_reject_min_lost_frames=int(raw_dynamic_air_recovery.get("low_quality_reject_min_lost_frames", 4)),
+        tentative_reacquire_enabled=bool(raw_dynamic_air_recovery.get("tentative_reacquire_enabled", True)),
+        tentative_reacquire_min_lost_frames=int(raw_dynamic_air_recovery.get("tentative_reacquire_min_lost_frames", 4)),
+        tentative_reacquire_confidence_threshold=float(
+            raw_dynamic_air_recovery.get("tentative_reacquire_confidence_threshold", 0.30)
+        ),
+        tentative_reacquire_score_threshold=float(
+            raw_dynamic_air_recovery.get("tentative_reacquire_score_threshold", 0.38)
+        ),
+        tentative_reacquire_confirmation_radius=float(
+            raw_dynamic_air_recovery.get("tentative_reacquire_confirmation_radius", 140.0)
+        ),
+        tentative_reacquire_max_age=int(raw_dynamic_air_recovery.get("tentative_reacquire_max_age", 1)),
+        gap_aware_jump_gate_enabled=bool(raw_dynamic_air_recovery.get("gap_aware_jump_gate_enabled", True)),
+        gap_aware_short_lost_frames=int(raw_dynamic_air_recovery.get("gap_aware_short_lost_frames", 3)),
+        gap_aware_short_jump_distance=float(raw_dynamic_air_recovery.get("gap_aware_short_jump_distance", 260.0)),
+        gap_aware_long_jump_distance=float(raw_dynamic_air_recovery.get("gap_aware_long_jump_distance", 520.0)),
+        gap_aware_high_confidence_bypass=float(
+            raw_dynamic_air_recovery.get("gap_aware_high_confidence_bypass", 0.42)
+        ),
+        edge_reentry_enabled=bool(raw_dynamic_air_recovery.get("edge_reentry_enabled", True)),
+        edge_reentry_min_lost_frames=int(raw_dynamic_air_recovery.get("edge_reentry_min_lost_frames", 2)),
+        edge_reentry_max_lost_frames=int(raw_dynamic_air_recovery.get("edge_reentry_max_lost_frames", 80)),
+        edge_reentry_margin_x_ratio=float(raw_dynamic_air_recovery.get("edge_reentry_margin_x_ratio", 0.08)),
+        edge_reentry_margin_y_ratio=float(raw_dynamic_air_recovery.get("edge_reentry_margin_y_ratio", 0.08)),
+        edge_reentry_expand_x=float(raw_dynamic_air_recovery.get("edge_reentry_expand_x", 260.0)),
+        edge_reentry_expand_y=float(raw_dynamic_air_recovery.get("edge_reentry_expand_y", 240.0)),
+        edge_reentry_high_confidence_bypass=float(
+            raw_dynamic_air_recovery.get("edge_reentry_high_confidence_bypass", 0.45)
+        ),
+        isolated_far_jump_enabled=bool(raw_dynamic_air_recovery.get("isolated_far_jump_enabled", False)),
+        isolated_far_jump_min_lost_frames=int(raw_dynamic_air_recovery.get("isolated_far_jump_min_lost_frames", 1)),
+        isolated_far_jump_distance=float(raw_dynamic_air_recovery.get("isolated_far_jump_distance", 320.0)),
+        isolated_far_jump_high_confidence_bypass=float(
+            raw_dynamic_air_recovery.get("isolated_far_jump_high_confidence_bypass", 0.50)
+        ),
+        isolated_far_jump_confirmation_radius=float(
+            raw_dynamic_air_recovery.get("isolated_far_jump_confirmation_radius", 180.0)
+        ),
+        true_out_of_view_enabled=bool(raw_dynamic_air_recovery.get("true_out_of_view_enabled", False)),
+        true_out_of_view_min_lost_frames=int(raw_dynamic_air_recovery.get("true_out_of_view_min_lost_frames", 4)),
+        true_out_of_view_min_empty_frames=int(raw_dynamic_air_recovery.get("true_out_of_view_min_empty_frames", 3)),
+        true_out_of_view_edge_margin_x_ratio=float(
+            raw_dynamic_air_recovery.get("true_out_of_view_edge_margin_x_ratio", 0.08)
+        ),
+        true_out_of_view_edge_margin_y_ratio=float(
+            raw_dynamic_air_recovery.get("true_out_of_view_edge_margin_y_ratio", 0.08)
+        ),
+        true_out_of_view_high_confidence_bypass=float(
+            raw_dynamic_air_recovery.get("true_out_of_view_high_confidence_bypass", 0.55)
+        ),
+        true_out_of_view_jump_distance=float(raw_dynamic_air_recovery.get("true_out_of_view_jump_distance", 260.0)),
+        true_out_of_view_confirmation_radius=float(
+            raw_dynamic_air_recovery.get("true_out_of_view_confirmation_radius", 180.0)
+        ),
         ground_exit_enabled=bool(raw_dynamic_air_recovery.get("ground_exit_enabled", True)),
         ground_exit_min_lost_frames=int(raw_dynamic_air_recovery.get("ground_exit_min_lost_frames", 8)),
+    )
+
+
+def _to_postprocess(raw_postprocess: Any) -> PostprocessConfig:
+    if raw_postprocess in (None, "", []):
+        return PostprocessConfig()
+    if not isinstance(raw_postprocess, dict):
+        raise ValueError("postprocess 必须为 dict 或 null")
+    return PostprocessConfig(
+        enabled=bool(raw_postprocess.get("enabled", False)),
+        max_detected_island_length=int(raw_postprocess.get("max_detected_island_length", 2)),
+        stable_segment_min_length=int(raw_postprocess.get("stable_segment_min_length", 4)),
+        min_jump_distance=float(raw_postprocess.get("min_jump_distance", 260.0)),
+        nuisance_zone_jump_distance=float(raw_postprocess.get("nuisance_zone_jump_distance", 180.0)),
+        low_confidence_threshold=float(raw_postprocess.get("low_confidence_threshold", 0.45)),
+        save_cleaned_video=bool(raw_postprocess.get("save_cleaned_video", True)),
+        save_cleaned_csv=bool(raw_postprocess.get("save_cleaned_csv", True)),
+        save_cleaned_debug_jsonl=bool(raw_postprocess.get("save_cleaned_debug_jsonl", True)),
+        cleaned_video_name=str(raw_postprocess.get("cleaned_video_name", "annotated.cleaned.mp4")),
+        cleaned_csv_name=str(raw_postprocess.get("cleaned_csv_name", "ball_track.cleaned.csv")),
+        cleaned_debug_jsonl_name=str(raw_postprocess.get("cleaned_debug_jsonl_name", "debug.cleaned.jsonl")),
+        cleanup_report_name=str(raw_postprocess.get("cleanup_report_name", "cleanup_report.json")),
+        nuisance_zones=_to_scene_zones(raw_postprocess.get("nuisance_zones")),
+        protected_ranges=_to_frame_ranges(raw_postprocess.get("protected_ranges")),
     )
 
 
@@ -463,6 +601,8 @@ def load_config(config_path: Path) -> AppConfig:
         draw_status_text=bool(output_raw.get("draw_status_text", True)),
     )
 
+    postprocess = _to_postprocess(raw.get("postprocess"))
+
     runtime_raw = raw.get("runtime", {})
     raw_start_frame = runtime_raw.get("start_frame", 0)
     raw_max_frames = runtime_raw.get("max_frames")
@@ -513,6 +653,7 @@ def load_config(config_path: Path) -> AppConfig:
         selection=selection,
         tracking=tracking,
         output=output,
+        postprocess=postprocess,
         runtime=runtime,
         mock=mock,
     )

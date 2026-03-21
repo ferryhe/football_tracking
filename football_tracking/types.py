@@ -155,6 +155,15 @@ class TrackResult:
     reacquire_attempted: bool = False
     reacquire_candidate_count: int = 0
     reacquire_window: list[int] | None = None
+    tentative_reacquire_active: bool = False
+    tentative_reacquire_confirmed: bool = False
+    edge_reentry_active: bool = False
+    edge_reentry_window: list[int] | None = None
+    isolated_far_jump_active: bool = False
+    isolated_far_jump_confirmed: bool = False
+    true_out_of_view_active: bool = False
+    true_out_of_view_confirmed: bool = False
+    true_out_of_view_empty_frames: int = 0
     reacquire_stabilization_frames_remaining: int = 0
     out_of_view_active: bool = False
     out_of_view_prediction_frames: int = 0
@@ -185,6 +194,15 @@ class TrackResult:
             "reacquire_attempted": self.reacquire_attempted,
             "reacquire_candidate_count": self.reacquire_candidate_count,
             "reacquire_window": self.reacquire_window,
+            "tentative_reacquire_active": self.tentative_reacquire_active,
+            "tentative_reacquire_confirmed": self.tentative_reacquire_confirmed,
+            "edge_reentry_active": self.edge_reentry_active,
+            "edge_reentry_window": self.edge_reentry_window,
+            "isolated_far_jump_active": self.isolated_far_jump_active,
+            "isolated_far_jump_confirmed": self.isolated_far_jump_confirmed,
+            "true_out_of_view_active": self.true_out_of_view_active,
+            "true_out_of_view_confirmed": self.true_out_of_view_confirmed,
+            "true_out_of_view_empty_frames": self.true_out_of_view_empty_frames,
             "reacquire_stabilization_frames_remaining": self.reacquire_stabilization_frames_remaining,
             "out_of_view_active": self.out_of_view_active,
             "out_of_view_prediction_frames": self.out_of_view_prediction_frames,

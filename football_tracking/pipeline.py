@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 import logging
+import math
 
 import cv2
 import torch
@@ -10,11 +12,22 @@ from football_tracking.detector import MockBallDetector, YOLOSahiBallDetector
 from football_tracking.exporter import TrackingExporter
 from football_tracking.filtering import CandidateFilter
 from football_tracking.mock_mode import MockFrameSource
+from football_tracking.postprocess import TrackPostprocessor
 from football_tracking.renderer import FrameRenderer
 from football_tracking.scene_bias import SceneBiasResolver
 from football_tracking.selector import UniqueBallSelector
 from football_tracking.tracker import BallTracker
-from football_tracking.types import SelectionDecision, TrackState, TrackerContext
+from football_tracking.types import OutputStatus, SelectionDecision, TrackState, TrackerContext
+
+
+@dataclass(slots=True)
+class TentativeReacquireState:
+    frame_index: int
+    center: tuple[float, float]
+    confidence: float
+    score: float
+    scene_zone: str | None
+    kind: str = "tentative"
 
 
 class BallTrackingPipeline:
@@ -31,6 +44,10 @@ class BallTrackingPipeline:
         self.tracker = BallTracker(config.tracking)
         self.renderer = FrameRenderer(config.output)
         self.air_burst_frames_remaining = 0
+        self.tentative_reacquire: TentativeReacquireState | None = None
+        self.true_out_of_view_active = False
+        self.true_out_of_view_empty_frames = 0
+        self.true_out_of_view_tentative: TentativeReacquireState | None = None
 
     def _configure_runtime(self) -> None:
         """集中处理 OpenCV 与 CUDA 相关优化。"""
@@ -124,6 +141,9 @@ class BallTrackingPipeline:
         finally:
             capture.release()
             exporter.close()
+            if not self.config.mock.enabled and self.config.postprocess.enabled:
+                self.logger.info("Starting postprocess cleanup...")
+                TrackPostprocessor(self.config).run()
             self.logger.info("处理完成，输出目录: %s", self.config.output_dir)
 
     def _open_frame_source(self):
@@ -182,6 +202,14 @@ class BallTrackingPipeline:
             reacquire_attempted = False
             reacquire_candidates = []
             reacquire_window = None
+            tentative_reacquire_active = False
+            tentative_reacquire_confirmed = False
+            edge_reentry_active = False
+            edge_reentry_window = None
+            isolated_far_jump_active = False
+            isolated_far_jump_confirmed = False
+            true_out_of_view_active = self.true_out_of_view_active
+            true_out_of_view_confirmed = False
 
             (
                 raw_candidates,
@@ -207,6 +235,37 @@ class BallTrackingPipeline:
                 decision=decision,
                 context=context,
             )
+            (
+                decision,
+                tentative_reacquire_active,
+                tentative_reacquire_confirmed,
+                edge_reentry_active,
+                edge_reentry_window,
+            ) = self._maybe_apply_tentative_reacquire(
+                decision=decision,
+                context=context,
+                frame_index=frame_index,
+                frame_shape=frame.shape[:2],
+            )
+            (
+                decision,
+                isolated_far_jump_active,
+                isolated_far_jump_confirmed,
+            ) = self._maybe_apply_isolated_far_jump_scrub(
+                decision=decision,
+                context=context,
+                frame_index=frame_index,
+            )
+            (
+                decision,
+                true_out_of_view_active,
+                true_out_of_view_confirmed,
+            ) = self._maybe_apply_true_out_of_view_tentative(
+                decision=decision,
+                context=context,
+                frame_index=frame_index,
+                frame_shape=frame.shape[:2],
+            )
             force_lost = self._should_force_ground_exit_lost(
                 context=context,
                 frame_index=frame_index,
@@ -225,6 +284,22 @@ class BallTrackingPipeline:
             track_result.reacquire_attempted = reacquire_attempted
             track_result.reacquire_candidate_count = len(reacquire_candidates)
             track_result.reacquire_window = None if reacquire_window is None else list(reacquire_window)
+            track_result.tentative_reacquire_active = tentative_reacquire_active
+            track_result.tentative_reacquire_confirmed = tentative_reacquire_confirmed
+            track_result.edge_reentry_active = edge_reentry_active
+            track_result.edge_reentry_window = None if edge_reentry_window is None else list(edge_reentry_window)
+            track_result.isolated_far_jump_active = isolated_far_jump_active
+            track_result.isolated_far_jump_confirmed = isolated_far_jump_confirmed
+            self._update_true_out_of_view_state(
+                context=context,
+                track_result=track_result,
+                frame_index=frame_index,
+                frame_shape=frame.shape[:2],
+                filtered_candidate_count=len(filtered_candidates),
+            )
+            track_result.true_out_of_view_active = self.true_out_of_view_active
+            track_result.true_out_of_view_confirmed = true_out_of_view_confirmed
+            track_result.true_out_of_view_empty_frames = self.true_out_of_view_empty_frames
             self._advance_air_burst_state(decision)
             track_result.air_burst_active = burst_active
             track_result.air_burst_frames_remaining = self.air_burst_frames_remaining
@@ -249,6 +324,15 @@ class BallTrackingPipeline:
             track_result.reacquire_attempted = False
             track_result.reacquire_candidate_count = 0
             track_result.reacquire_window = None
+            track_result.tentative_reacquire_active = False
+            track_result.tentative_reacquire_confirmed = False
+            track_result.edge_reentry_active = False
+            track_result.edge_reentry_window = None
+            track_result.isolated_far_jump_active = False
+            track_result.isolated_far_jump_confirmed = False
+            track_result.true_out_of_view_active = self.true_out_of_view_active
+            track_result.true_out_of_view_confirmed = False
+            track_result.true_out_of_view_empty_frames = self.true_out_of_view_empty_frames
             self._advance_air_burst_state(None)
             track_result.air_burst_active = False
             track_result.air_burst_frames_remaining = self.air_burst_frames_remaining
@@ -461,6 +545,346 @@ class BallTrackingPipeline:
             selected_reason="low_quality_reacquire_rejected",
             candidate_scores=decision.candidate_scores,
         )
+
+    def _maybe_apply_tentative_reacquire(
+        self,
+        decision: SelectionDecision,
+        context,
+        frame_index: int,
+        frame_shape: tuple[int, int],
+    ) -> tuple[SelectionDecision, bool, bool, bool, tuple[int, int, int, int] | None]:
+        dynamic_config = self.config.scene_bias.dynamic_air_recovery
+        self._expire_tentative_reacquire(frame_index, dynamic_config.tentative_reacquire_max_age)
+        pending_state = self.tentative_reacquire
+        isolated_pending = pending_state is not None and pending_state.kind == "isolated_far_jump"
+        candidate = decision.selected_candidate
+        if candidate is None or not dynamic_config.tentative_reacquire_enabled:
+            return decision, self.tentative_reacquire is not None, False, False, None
+        if candidate.source != "yolo_direct_roi":
+            if isolated_pending:
+                return decision, True, False, False, None
+            self.tentative_reacquire = None
+            return decision, False, False, False, None
+        if context.lost_frames < dynamic_config.tentative_reacquire_min_lost_frames:
+            if isolated_pending:
+                return decision, True, False, False, None
+            self.tentative_reacquire = None
+            return decision, False, False, False, None
+        if not decision.candidate_scores:
+            if isolated_pending:
+                return decision, True, False, False, None
+            self.tentative_reacquire = None
+            return decision, False, False, False, None
+
+        best_score = decision.candidate_scores[0]
+        if best_score.scene_zone != "dynamic_air_recovery":
+            if isolated_pending:
+                return decision, True, False, False, None
+            self.tentative_reacquire = None
+            return decision, False, False, False, None
+        jump_mode, jump_distance = self._evaluate_gap_aware_jump_mode(candidate, context)
+        if jump_mode == "reject":
+            self.tentative_reacquire = None
+            rejected_decision = SelectionDecision(
+                selected_candidate=None,
+                selected_score=decision.selected_score,
+                selected_reason="gap_aware_jump_rejected",
+                candidate_scores=decision.candidate_scores,
+            )
+            return rejected_decision, False, False, False, None
+
+        edge_reentry_window = self.scene_bias.get_edge_reentry_window(context, frame_shape)
+        edge_reentry_tentative = False
+        if (
+            edge_reentry_window is not None
+            and candidate.confidence < dynamic_config.edge_reentry_high_confidence_bypass
+        ):
+            center_x, center_y = candidate.center
+            left, top, right, bottom = edge_reentry_window
+            if not (left <= center_x <= right and top <= center_y <= bottom):
+                edge_reentry_tentative = True
+
+        confidence_or_score_low = (
+            candidate.confidence < dynamic_config.tentative_reacquire_confidence_threshold
+            or decision.selected_score < dynamic_config.tentative_reacquire_score_threshold
+        )
+        far_jump_for_tentative = jump_distance >= dynamic_config.gap_aware_short_jump_distance
+        needs_tentative = (
+            edge_reentry_tentative
+            or jump_mode == "tentative"
+            or (confidence_or_score_low and far_jump_for_tentative)
+        )
+
+        if not needs_tentative:
+            self.tentative_reacquire = None
+            return decision, False, False, edge_reentry_window is not None, edge_reentry_window
+
+        if self.tentative_reacquire is not None:
+            if (
+                frame_index == self.tentative_reacquire.frame_index + 1
+                and self._distance(candidate.center, self.tentative_reacquire.center)
+                <= dynamic_config.tentative_reacquire_confirmation_radius
+            ):
+                confirmed_decision = SelectionDecision(
+                    selected_candidate=candidate,
+                    selected_score=decision.selected_score,
+                    selected_reason="tentative_reacquire_confirmed",
+                    candidate_scores=decision.candidate_scores,
+                )
+                self.tentative_reacquire = None
+                return confirmed_decision, False, True, edge_reentry_window is not None, edge_reentry_window
+
+        self.tentative_reacquire = TentativeReacquireState(
+            frame_index=frame_index,
+            center=candidate.center,
+            confidence=candidate.confidence,
+            score=decision.selected_score,
+            scene_zone=best_score.scene_zone,
+            kind="edge_reentry" if edge_reentry_tentative else "dynamic_air",
+        )
+        pending_decision = SelectionDecision(
+            selected_candidate=None,
+            selected_score=decision.selected_score,
+            selected_reason=(
+                "edge_reentry_tentative"
+                if edge_reentry_tentative
+                else ("tentative_reacquire_pending" if jump_mode != "tentative" else "gap_aware_jump_tentative")
+            ),
+            candidate_scores=decision.candidate_scores,
+        )
+        return pending_decision, True, False, edge_reentry_window is not None, edge_reentry_window
+
+    def _maybe_apply_isolated_far_jump_scrub(
+        self,
+        decision: SelectionDecision,
+        context,
+        frame_index: int,
+    ) -> tuple[SelectionDecision, bool, bool]:
+        dynamic_config = self.config.scene_bias.dynamic_air_recovery
+        candidate = decision.selected_candidate
+        if not dynamic_config.isolated_far_jump_enabled or candidate is None:
+            return decision, False, False
+
+        pending_state = self.tentative_reacquire
+        if pending_state is not None and pending_state.kind == "isolated_far_jump":
+            if (
+                frame_index == pending_state.frame_index + 1
+                and self._distance(candidate.center, pending_state.center)
+                <= dynamic_config.isolated_far_jump_confirmation_radius
+            ):
+                confirmed_decision = SelectionDecision(
+                    selected_candidate=candidate,
+                    selected_score=decision.selected_score,
+                    selected_reason="isolated_far_jump_confirmed",
+                    candidate_scores=decision.candidate_scores,
+                )
+                self.tentative_reacquire = None
+                return confirmed_decision, False, True
+
+        if context.lost_frames < dynamic_config.isolated_far_jump_min_lost_frames:
+            return decision, False, False
+        if candidate.confidence >= dynamic_config.isolated_far_jump_high_confidence_bypass:
+            return decision, False, False
+
+        anchor_position = context.predicted_position or context.last_position or context.last_detected_position
+        if anchor_position is None:
+            return decision, False, False
+
+        jump_distance = self._distance(candidate.center, anchor_position)
+        if jump_distance < dynamic_config.isolated_far_jump_distance:
+            return decision, False, False
+
+        self.tentative_reacquire = TentativeReacquireState(
+            frame_index=frame_index,
+            center=candidate.center,
+            confidence=candidate.confidence,
+            score=decision.selected_score,
+            scene_zone=decision.candidate_scores[0].scene_zone if decision.candidate_scores else None,
+            kind="isolated_far_jump",
+        )
+        pending_decision = SelectionDecision(
+            selected_candidate=None,
+            selected_score=decision.selected_score,
+            selected_reason="isolated_far_jump_tentative",
+            candidate_scores=decision.candidate_scores,
+        )
+        return pending_decision, True, False
+
+    def _maybe_apply_true_out_of_view_tentative(
+        self,
+        decision: SelectionDecision,
+        context,
+        frame_index: int,
+        frame_shape: tuple[int, int],
+    ) -> tuple[SelectionDecision, bool, bool]:
+        dynamic_config = self.config.scene_bias.dynamic_air_recovery
+        if not dynamic_config.true_out_of_view_enabled:
+            self.true_out_of_view_tentative = None
+            return decision, False, False
+
+        self._expire_true_out_of_view_tentative(frame_index)
+        candidate = decision.selected_candidate
+        if candidate is None:
+            return decision, self.true_out_of_view_active, False
+        if not self.true_out_of_view_active or context.lost_frames < dynamic_config.true_out_of_view_min_lost_frames:
+            self.true_out_of_view_tentative = None
+            return decision, self.true_out_of_view_active, False
+
+        pending_state = self.true_out_of_view_tentative
+        if pending_state is not None:
+            if (
+                frame_index == pending_state.frame_index + 1
+                and self._distance(candidate.center, pending_state.center)
+                <= dynamic_config.true_out_of_view_confirmation_radius
+            ):
+                confirmed_decision = SelectionDecision(
+                    selected_candidate=candidate,
+                    selected_score=decision.selected_score,
+                    selected_reason="true_out_of_view_confirmed",
+                    candidate_scores=decision.candidate_scores,
+                )
+                self.true_out_of_view_tentative = None
+                return confirmed_decision, True, True
+
+        in_ground_zone = self.scene_bias.is_point_in_ground_zone(candidate.center, context, frame_index)
+        anchor_position = context.last_detected_position or context.last_position or context.predicted_position
+        jump_distance = 0.0 if anchor_position is None else self._distance(candidate.center, anchor_position)
+        if (
+            candidate.confidence >= dynamic_config.true_out_of_view_high_confidence_bypass
+            and in_ground_zone
+            and jump_distance < dynamic_config.true_out_of_view_jump_distance
+        ):
+            self.true_out_of_view_tentative = None
+            return decision, True, False
+
+        self.true_out_of_view_tentative = TentativeReacquireState(
+            frame_index=frame_index,
+            center=candidate.center,
+            confidence=candidate.confidence,
+            score=decision.selected_score,
+            scene_zone=decision.candidate_scores[0].scene_zone if decision.candidate_scores else None,
+            kind="true_out_of_view",
+        )
+        pending_decision = SelectionDecision(
+            selected_candidate=None,
+            selected_score=decision.selected_score,
+            selected_reason="true_out_of_view_tentative",
+            candidate_scores=decision.candidate_scores,
+        )
+        return pending_decision, True, False
+
+    def _expire_true_out_of_view_tentative(self, frame_index: int) -> None:
+        if self.true_out_of_view_tentative is None:
+            return
+        if frame_index - self.true_out_of_view_tentative.frame_index > 1:
+            self.true_out_of_view_tentative = None
+
+    def _update_true_out_of_view_state(
+        self,
+        context,
+        track_result,
+        frame_index: int,
+        frame_shape: tuple[int, int],
+        filtered_candidate_count: int,
+    ) -> None:
+        dynamic_config = self.config.scene_bias.dynamic_air_recovery
+        if not dynamic_config.true_out_of_view_enabled:
+            self.true_out_of_view_active = False
+            self.true_out_of_view_empty_frames = 0
+            self.true_out_of_view_tentative = None
+            return
+
+        if track_result.output_status == OutputStatus.DETECTED:
+            self.true_out_of_view_active = False
+            self.true_out_of_view_empty_frames = 0
+            self.true_out_of_view_tentative = None
+            return
+
+        current_lost_frames = track_result.lost_frames
+        if current_lost_frames < dynamic_config.true_out_of_view_min_lost_frames:
+            self.true_out_of_view_active = False
+            self.true_out_of_view_empty_frames = 0
+            self.true_out_of_view_tentative = None
+            return
+
+        anchor_position = None
+        if track_result.point is not None:
+            anchor_position = (track_result.point.x, track_result.point.y)
+        if anchor_position is None:
+            anchor_position = context.predicted_position or context.last_position or context.last_detected_position
+        if anchor_position is None:
+            self.true_out_of_view_active = False
+            self.true_out_of_view_empty_frames = 0
+            return
+
+        leaving_monitored_area = (
+            not self.scene_bias.is_point_in_ground_zone(anchor_position, context, frame_index)
+            or self._is_near_frame_edge(anchor_position, frame_shape)
+        )
+        if leaving_monitored_area and filtered_candidate_count == 0:
+            self.true_out_of_view_empty_frames += 1
+        elif track_result.output_status != OutputStatus.DETECTED:
+            self.true_out_of_view_empty_frames = 0
+
+        if self.true_out_of_view_active:
+            return
+        if self.true_out_of_view_empty_frames >= dynamic_config.true_out_of_view_min_empty_frames:
+            self.true_out_of_view_active = True
+
+    def _is_near_frame_edge(
+        self,
+        position: tuple[float, float],
+        frame_shape: tuple[int, int],
+    ) -> bool:
+        frame_height, frame_width = frame_shape
+        margin_x = frame_width * self.config.scene_bias.dynamic_air_recovery.true_out_of_view_edge_margin_x_ratio
+        margin_y = frame_height * self.config.scene_bias.dynamic_air_recovery.true_out_of_view_edge_margin_y_ratio
+        x, y = position
+        return (
+            x <= margin_x
+            or x >= frame_width - 1.0 - margin_x
+            or y <= margin_y
+            or y >= frame_height - 1.0 - margin_y
+        )
+
+    def _expire_tentative_reacquire(self, frame_index: int, max_age: int) -> None:
+        if self.tentative_reacquire is None:
+            return
+        if max_age < 0:
+            max_age = 0
+        if frame_index - self.tentative_reacquire.frame_index > max_age:
+            self.tentative_reacquire = None
+
+    def _distance(self, point_a: tuple[float, float], point_b: tuple[float, float]) -> float:
+        return math.hypot(point_a[0] - point_b[0], point_a[1] - point_b[1])
+
+    def _evaluate_gap_aware_jump_mode(
+        self,
+        candidate,
+        context,
+    ) -> tuple[str, float]:
+        dynamic_config = self.config.scene_bias.dynamic_air_recovery
+        if not dynamic_config.gap_aware_jump_gate_enabled:
+            return "accept", 0.0
+
+        anchor_position = context.predicted_position or context.last_position or context.last_detected_position
+        if anchor_position is None:
+            return "accept", 0.0
+
+        jump_distance = self._distance(candidate.center, anchor_position)
+        if context.lost_frames <= 0:
+            return "accept", jump_distance
+        if candidate.confidence >= dynamic_config.gap_aware_high_confidence_bypass:
+            return "accept", jump_distance
+
+        if (
+            context.lost_frames <= dynamic_config.gap_aware_short_lost_frames
+            and jump_distance >= dynamic_config.gap_aware_short_jump_distance
+        ):
+            return "reject", jump_distance
+        if jump_distance >= dynamic_config.gap_aware_long_jump_distance:
+            return "tentative", jump_distance
+        return "accept", jump_distance
 
     def _should_force_ground_exit_lost(
         self,
