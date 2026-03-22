@@ -56,7 +56,7 @@ const PANEL_COPY: Record<
 > = {
   en: {
     explainButton: "Explain selected run",
-    explainHint: "Pick one finished run, then trigger AI only when you need an explanation.",
+    explainHint: "Pick the focused run above first, then trigger AI only when you need an explanation.",
     explanationTitle: "AI explanation",
     explanationEmpty: "No explanation yet. Pick a run in step 2, then click explain.",
     suggestionTitle: "Suggested next config",
@@ -71,7 +71,7 @@ const PANEL_COPY: Record<
   },
   zh: {
     explainButton: "\u89e3\u91ca\u5df2\u9009\u7ed3\u679c",
-    explainHint: "\u5148\u9009\u4e00\u4e2a\u5df2\u8dd1\u51fa\u6765\u7684 run\uff0c\u771f\u6b63\u9700\u8981 AI \u89e3\u91ca\u65f6\u518d\u624b\u52a8\u89e6\u53d1\u3002",
+    explainHint: "\u5148\u5728\u4e0a\u9762\u9009\u597d\u7126\u70b9 run\uff0c\u771f\u6b63\u9700\u8981 AI \u89e3\u91ca\u65f6\u518d\u624b\u52a8\u89e6\u53d1\u3002",
     explanationTitle: "AI \u89e3\u91ca",
     explanationEmpty: "\u8fd8\u6ca1\u6709 AI \u89e3\u91ca\u3002\u5148\u5728\u7b2c\u4e8c\u6b65\u9009\u4e00\u4e2a run\uff0c\u7136\u540e\u70b9\u51fb\u89e3\u91ca\u3002",
     suggestionTitle: "\u5efa\u8bae\u7684\u65b0\u914d\u7f6e",

@@ -186,7 +186,14 @@ export function App() {
   const selectedConfig = configs.find((item) => item.name === selectedConfigName) ?? null;
   const activeRun = orderedRuns.find((item) => item.status === "running" || item.status === "queued") ?? null;
   const latestCompletedRun = orderedRuns.find((item) => item.status === "completed") ?? null;
+  const latestHistoryRun = orderedRuns[0] ?? null;
   const focusedRun = selectedRun ?? activeRun ?? latestCompletedRun ?? orderedRuns[0] ?? null;
+  const aiScopedRuns = useMemo(
+    () => (selectedInputPath ? orderedRuns.filter((item) => item.input_video === selectedInputPath) : orderedRuns),
+    [orderedRuns, selectedInputPath],
+  );
+  const aiFocusedRun =
+    selectedRun && aiScopedRuns.some((item) => item.run_id === selectedRun.run_id) ? selectedRun : aiScopedRuns[0] ?? null;
 
   const stageTabs = useMemo<StageTab[]>(
     () => [
@@ -201,22 +208,22 @@ export function App() {
         key: "ai",
         icon: SparkIcon,
         title: copy.workspace.flowAiTitle,
-        detail: focusedRun ? focusedRun.run_id : copy.workspace.flowAiDetail,
-        state: stage === "ai" ? "current" : focusedRun ? "complete" : "upcoming",
+        detail: aiFocusedRun ? aiFocusedRun.run_id : copy.workspace.flowAiDetail,
+        state: stage === "ai" ? "current" : aiFocusedRun ? "complete" : "upcoming",
       },
       {
         key: "delivery",
         icon: FileIcon,
         title: copy.workspace.deliveryTitle,
-        detail: latestCompletedRun
-          ? `${latestCompletedRun.run_id} | ${formatDateTime(
-              latestCompletedRun.completed_at ?? latestCompletedRun.started_at ?? latestCompletedRun.created_at,
+        detail: latestHistoryRun
+          ? `${latestHistoryRun.run_id} | ${formatDateTime(
+              latestHistoryRun.completed_at ?? latestHistoryRun.started_at ?? latestHistoryRun.created_at,
             )}`
           : copy.workspace.deliverySubtitle,
-        state: stage === "delivery" ? "current" : latestCompletedRun ? "complete" : "upcoming",
+        state: stage === "delivery" ? "current" : latestHistoryRun ? "complete" : "upcoming",
       },
     ],
-    [copy, focusedRun, formatDateTime, latestCompletedRun, selectedConfig, selectedVideo, stage],
+    [aiFocusedRun, copy, focusedRun, formatDateTime, latestHistoryRun, selectedConfig, selectedVideo, stage],
   );
 
   return (
@@ -272,7 +279,7 @@ export function App() {
             inputCatalog={inputCatalog}
             configs={configs}
             runs={orderedRuns}
-            selectedRun={focusedRun}
+            selectedRun={stage === "ai" ? aiFocusedRun : focusedRun}
             selectedInputPath={selectedInputPath}
             selectedConfigName={selectedConfigName}
             loading={loading}
@@ -288,7 +295,7 @@ export function App() {
         {stage === "ai" ? (
           <aside className="assistant-column">
             <AIPanel
-              run={focusedRun}
+              run={aiFocusedRun}
               configs={configs}
               targetInputVideo={selectedInputPath || undefined}
               onConfigDerived={async () => {

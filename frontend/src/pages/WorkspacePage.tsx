@@ -126,9 +126,10 @@ export function WorkspacePage({
   const selectedVideo = inputCatalog.videos.find((item) => item.path === selectedInputPath) ?? null;
   const selectedConfig = configs.find((item) => item.name === selectedConfigName) ?? null;
   const selectedScope = inferConfigScope(selectedConfig?.name);
-  const stats = getTrackStats(selectedRun);
   const canLaunch = !loading && !launching && Boolean(selectedInputPath) && Boolean(selectedConfigName);
-  const deliveryRuns = runs.filter((run) => run.status === "completed");
+  const aiRuns = selectedInputPath ? runs.filter((run) => run.input_video === selectedInputPath) : runs;
+  const aiSelectedRun = selectedRun && aiRuns.some((run) => run.run_id === selectedRun.run_id) ? selectedRun : aiRuns[0] ?? null;
+  const stats = getTrackStats(aiSelectedRun ?? selectedRun);
 
   if (stage === "baseline") {
     return (
@@ -270,22 +271,28 @@ export function WorkspacePage({
             </div>
           </div>
 
-          {deliveryRuns.length ? (
+          {runs.length ? (
             <div className="delivery-list">
-              {deliveryRuns.map((run) => (
+              {runs.map((run) => {
+                const StatusIcon = runStatusIcon(run.status);
+                return (
                 <article key={run.run_id} className="delivery-row">
                   <div className="delivery-row-head">
                     <div className="title-row compact">
-                      <CheckIcon className="section-icon tiny" />
+                      <StatusIcon className="section-icon tiny" />
                       <strong>{run.run_id}</strong>
                     </div>
                     <p className="muted mono">{run.config_name ?? copy.common.notAvailable}</p>
+                    <div className="tag-row">
+                      <span className="tag">{formatRunStatus(run.status)}</span>
+                      <span className="tag">{formatPathTail(run.input_video) || copy.common.notAvailable}</span>
+                    </div>
                   </div>
 
                   <div className="delivery-row-meta">
                     <div className="detail-block compact-detail">
                       <p className="meta-label">{copy.workspace.deliveryRanAt}</p>
-                      <p>{formatDateTime(run.completed_at ?? run.started_at ?? run.created_at)}</p>
+                      <p>{formatDateTime(runMoment(run))}</p>
                     </div>
                     <div className="detail-block compact-detail">
                       <p className="meta-label">{copy.workspace.deliveryResultFolder}</p>
@@ -293,7 +300,8 @@ export function WorkspacePage({
                     </div>
                   </div>
                 </article>
-              ))}
+                );
+              })}
             </div>
           ) : (
             <div className="empty-state">
@@ -320,14 +328,33 @@ export function WorkspacePage({
           </div>
         </div>
 
-        {selectedRun ? (
+        {aiRuns.length ? (
           <div className="focus-stack">
+            <label className="form-label">
+              <span className="meta-label">{copy.workspace.focusRun}</span>
+              <select
+                value={aiSelectedRun?.run_id ?? ""}
+                onChange={(event) => {
+                  const nextRun = aiRuns.find((item) => item.run_id === event.target.value);
+                  if (nextRun) {
+                    onSelectRun(nextRun);
+                  }
+                }}
+              >
+                {aiRuns.map((run) => (
+                  <option key={run.run_id} value={run.run_id}>
+                    {`${formatDateTime(runMoment(run))} | ${run.run_id} | ${formatRunStatus(run.status)}`}
+                  </option>
+                ))}
+              </select>
+            </label>
+
             <article className="summary-card spotlight-card icon-card">
               <ActivityIcon className="section-icon" />
               <p className="meta-label">{copy.workspace.currentFocus}</p>
-              <strong>{selectedRun.run_id}</strong>
+              <strong>{aiSelectedRun?.run_id ?? copy.common.notAvailable}</strong>
               <p className="muted">
-                {formatRunStatus(selectedRun.status)} | {selectedRun.config_name ?? copy.common.notAvailable}
+                {formatRunStatus(aiSelectedRun?.status ?? "queued")} | {aiSelectedRun?.config_name ?? copy.common.notAvailable}
               </p>
             </article>
 
@@ -347,13 +374,13 @@ export function WorkspacePage({
               <article className="mini-stat icon-card">
                 <FileIcon className="section-icon" />
                 <p className="meta-label">{copy.workspace.artifacts}</p>
-                <strong>{selectedRun.artifacts.length}</strong>
+                <strong>{aiSelectedRun?.artifacts.length ?? 0}</strong>
                 <p className="muted">{copy.workspace.evidenceSubtitle}</p>
               </article>
               <article className="mini-stat icon-card">
                 <ClockIcon className="section-icon" />
                 <p className="meta-label">{copy.workspace.lastEvent}</p>
-                <strong>{formatDateTime(selectedRun.completed_at ?? selectedRun.started_at ?? selectedRun.created_at)}</strong>
+                <strong>{formatDateTime(aiSelectedRun ? runMoment(aiSelectedRun) : null)}</strong>
                 <p className="muted">{copy.common.refreshHint}</p>
               </article>
             </div>
@@ -361,81 +388,28 @@ export function WorkspacePage({
             <div className="detail-grid">
               <div className="detail-block">
                 <p className="meta-label">{copy.workspace.inputVideo}</p>
-                <p className="mono">{selectedRun.input_video ?? copy.common.notAvailable}</p>
+                <p className="mono">{aiSelectedRun?.input_video ?? copy.common.notAvailable}</p>
               </div>
               <div className="detail-block">
                 <p className="meta-label">{copy.workspace.outputDirectory}</p>
-                <p className="mono">{selectedRun.output_dir}</p>
+                <p className="mono">{aiSelectedRun?.output_dir ?? copy.common.notAvailable}</p>
               </div>
               <div className="detail-block">
                 <p className="meta-label">{copy.workspace.created}</p>
-                <p>{formatDateTime(selectedRun.created_at)}</p>
+                <p>{formatDateTime(aiSelectedRun?.created_at)}</p>
               </div>
               <div className="detail-block">
                 <p className="meta-label">{copy.workspace.completed}</p>
-                <p>{selectedRun.completed_at ? formatDateTime(selectedRun.completed_at) : copy.common.stillRunning}</p>
+                <p>{aiSelectedRun?.completed_at ? formatDateTime(aiSelectedRun.completed_at) : copy.common.stillRunning}</p>
               </div>
             </div>
 
-            {selectedRun.error ? <div className="error-banner inline">{selectedRun.error}</div> : null}
+            {aiSelectedRun?.error ? <div className="error-banner inline">{aiSelectedRun.error}</div> : null}
           </div>
         ) : (
           <div className="empty-state">
             <strong>{copy.workspace.noFocusTitle}</strong>
             <p className="muted">{copy.workspace.noFocusBody}</p>
-          </div>
-        )}
-      </section>
-
-      <section className="panel">
-        <div className="panel-header">
-          <div className="title-row">
-            <ClockIcon className="section-icon" />
-            <div>
-              <p className="eyebrow">{copy.workspace.queueEyebrow}</p>
-              <h3>{copy.workspace.queueTitle}</h3>
-              <p className="muted">{copy.workspace.queueSubtitle}</p>
-            </div>
-          </div>
-        </div>
-
-        {runs.length ? (
-          <div className="step-form-section">
-            <label className="form-label">
-              <span className="meta-label">{copy.workspace.focusRun}</span>
-              <select
-                value={selectedRun?.run_id ?? ""}
-                onChange={(event) => {
-                  const nextRun = runs.find((item) => item.run_id === event.target.value);
-                  if (nextRun) {
-                    onSelectRun(nextRun);
-                  }
-                }}
-              >
-                {runs.map((run) => (
-                  <option key={run.run_id} value={run.run_id}>
-                    {`${formatDateTime(runMoment(run))} | ${run.run_id} | ${formatRunStatus(run.status)}`}
-                  </option>
-                ))}
-              </select>
-            </label>
-
-            {selectedRun ? (
-              <div className="selection-summary-card">
-                <strong>{selectedRun.run_id}</strong>
-                <p className="muted mono">{selectedRun.config_name ?? formatPathTail(selectedRun.output_dir)}</p>
-                <div className="tag-row">
-                  <span className="tag">{formatDateTime(runMoment(selectedRun))}</span>
-                  <span className="tag">{formatRunStatus(selectedRun.status)}</span>
-                </div>
-                <p className="muted mono">{selectedRun.output_dir}</p>
-              </div>
-            ) : null}
-          </div>
-        ) : (
-          <div className="empty-state">
-            <strong>{copy.workspace.noRunsTitle}</strong>
-            <p className="muted">{copy.workspace.noRunsBody}</p>
           </div>
         )}
       </section>
