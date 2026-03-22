@@ -1,27 +1,36 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState, type ComponentType, type SVGProps } from "react";
 
 import { AIPanel } from "../components/AIPanel";
+import { ActivityIcon, LayersIcon, SparkIcon, VideoIcon } from "../components/Icons";
+import { LanguageToggle } from "../components/LanguageToggle";
 import { api } from "../lib/api";
+import { useI18n } from "../lib/i18n";
 import type { ConfigListItem, HealthResponse, InputCatalog, RunRecord } from "../lib/types";
 import { WorkspacePage } from "../pages/WorkspacePage";
 
-function formatTimestamp(value: string | null | undefined): string {
-  if (!value) {
-    return "Waiting";
+interface TopTile {
+  key: string;
+  icon: ComponentType<SVGProps<SVGSVGElement>>;
+  label: string;
+  value: string;
+  detail: string;
+  state: "complete" | "current" | "upcoming";
+}
+
+function formatPathTail(path: string | null | undefined): string {
+  if (!path) {
+    return "";
   }
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) {
-    return value;
-  }
-  return date.toLocaleString([], {
-    month: "short",
-    day: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-  });
+  const pieces = path.split(/[\\/]/).filter(Boolean);
+  return pieces.length ? pieces[pieces.length - 1] : path;
+}
+
+function formatVideoSize(sizeBytes: number): string {
+  return `${(sizeBytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
 export function App() {
+  const { copy, formatDateTime } = useI18n();
   const [health, setHealth] = useState<HealthResponse | null>(null);
   const [inputCatalog, setInputCatalog] = useState<InputCatalog>({ root_dir: "", videos: [] });
   const [configs, setConfigs] = useState<ConfigListItem[]>([]);
@@ -156,71 +165,92 @@ export function App() {
   const selectedVideo = inputCatalog.videos.find((item) => item.path === selectedInputPath) ?? null;
   const selectedConfig = configs.find((item) => item.name === selectedConfigName) ?? null;
   const activeRun = runs.find((item) => item.status === "running" || item.status === "queued") ?? null;
-  const workflowSteps = [
-    {
-      title: "Input locked",
-      detail: selectedVideo
-        ? `${selectedVideo.name} · ${formatTimestamp(selectedVideo.modified_at)}`
-        : "Choose one source clip from the discovered input list.",
-      state: selectedVideo ? "complete" : "current",
-    },
-    {
-      title: "Baseline ready",
-      detail: selectedConfig ? selectedConfig.name : "Pick the kept config you want as the baseline.",
-      state: selectedRun ? "complete" : selectedVideo && selectedConfig ? "current" : "upcoming",
-    },
-    {
-      title: "Evidence bundle",
-      detail: selectedRun
-        ? `${selectedRun.run_id} · ${selectedRun.artifacts.length} artifacts in focus`
-        : "Run one baseline and keep that evidence selected.",
-      state: selectedRun ? "complete" : "upcoming",
-    },
-    {
-      title: "AI iteration",
-      detail: selectedRun ? "Recommendation console is ready to derive the next config." : "AI unlocks after a run is selected.",
-      state: selectedRun ? "current" : "upcoming",
-    },
-  ] as const;
+
+  const topTiles = useMemo<TopTile[]>(
+    () => [
+      {
+        key: "input",
+        icon: VideoIcon,
+        label: copy.header.tileInput,
+        value: selectedVideo?.name ?? copy.header.tileInputEmpty,
+        detail: selectedVideo
+          ? `${formatDateTime(selectedVideo.modified_at)} | ${formatVideoSize(selectedVideo.size_bytes)}`
+          : copy.workspace.inputSubtitle,
+        state: selectedVideo ? "complete" : "current",
+      },
+      {
+        key: "baseline",
+        icon: LayersIcon,
+        label: copy.header.tileBaseline,
+        value: selectedConfig?.name ?? copy.header.tileBaselineEmpty,
+        detail: selectedConfig?.output_dir ? formatPathTail(selectedConfig.output_dir) : copy.workspace.baselineSubtitle,
+        state: selectedConfig ? "complete" : selectedVideo ? "current" : "upcoming",
+      },
+      {
+        key: "evidence",
+        icon: ActivityIcon,
+        label: copy.header.tileEvidence,
+        value: selectedRun?.run_id ?? copy.header.tileEvidenceEmpty,
+        detail: selectedRun
+          ? `${selectedRun.artifacts.length} ${copy.workspace.artifacts.toLowerCase()}`
+          : copy.workspace.focusSubtitle,
+        state: selectedRun ? "complete" : "upcoming",
+      },
+      {
+        key: "ai",
+        icon: SparkIcon,
+        label: copy.header.tileAi,
+        value: selectedRun ? copy.header.tileAiReady : copy.header.tileAiLocked,
+        detail: selectedRun ? copy.ai.subtitle : copy.workspace.noFocusBody,
+        state: selectedRun ? "current" : "upcoming",
+      },
+    ],
+    [copy, formatDateTime, selectedConfig, selectedRun, selectedVideo],
+  );
 
   return (
     <div className="workspace-app">
       <header className="topbar">
-        <div>
-          <p className="eyebrow">AI Native Workspace</p>
-          <h1>Football Tracking Operator</h1>
-          <p className="muted topbar-copy">
-            Put a video in the input folder, pick it once, and let AI recommend the next run from actual evidence.
-          </p>
+        <div className="topbar-copy-block">
+          <p className="eyebrow">{copy.header.eyebrow}</p>
+          <h1>{copy.header.title}</h1>
+          <p className="muted topbar-copy">{copy.header.subtitle}</p>
         </div>
         <div className="header-meta">
           <div className={`status-pill ${health?.status === "ok" ? "ok" : "warn"}`}>
-            {loading ? "Loading..." : error ? "Offline" : "Backend OK"}
+            <ActivityIcon className="section-icon tiny" />
+            <span>{loading ? copy.common.loading : error ? copy.common.offline : copy.common.backendOk}</span>
           </div>
           <div className="header-chip">
-            <span className="meta-label">Active task</span>
-            <strong className="mono">{activeRun?.run_id ?? health?.active_run_id ?? "Idle"}</strong>
+            <span className="meta-label">{copy.header.activeTask}</span>
+            <strong className="mono">{activeRun?.run_id ?? health?.active_run_id ?? copy.common.idle}</strong>
           </div>
           <div className="header-chip wide">
-            <span className="meta-label">Input root</span>
-            <strong className="mono">{inputCatalog.root_dir || "Input folder unavailable"}</strong>
+            <span className="meta-label">{copy.header.inputRoot}</span>
+            <strong className="mono">{inputCatalog.root_dir || copy.common.unavailable}</strong>
           </div>
+          <LanguageToggle />
         </div>
       </header>
 
       {error ? <div className="error-banner">{error}</div> : null}
 
-      <section className="workflow-strip" aria-label="Workflow stages">
-        {workflowSteps.map((step, index) => (
-          <article key={step.title} className={`workflow-step ${step.state}`}>
-            <div className="workflow-marker">{index + 1}</div>
-            <div className="workflow-copy">
-              <p className="meta-label">Stage {index + 1}</p>
-              <strong>{step.title}</strong>
-              <p className="muted">{step.detail}</p>
-            </div>
-          </article>
-        ))}
+      <section className="top-tile-strip" aria-label="Primary workspace status">
+        {topTiles.map((tile) => {
+          const Icon = tile.icon;
+          return (
+            <article key={tile.key} className={`top-tile ${tile.state}`}>
+              <div className="top-tile-icon-shell">
+                <Icon className="section-icon" />
+              </div>
+              <div className="top-tile-copy">
+                <p className="meta-label">{tile.label}</p>
+                <strong>{tile.value}</strong>
+                <p className="muted">{tile.detail}</p>
+              </div>
+            </article>
+          );
+        })}
       </section>
 
       <div className="workspace-layout">

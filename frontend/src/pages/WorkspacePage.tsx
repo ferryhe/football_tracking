@@ -1,7 +1,19 @@
 import { useMemo, useState } from "react";
 
 import { ArtifactList } from "../components/ArtifactList";
+import {
+  ActivityIcon,
+  CheckIcon,
+  ClockIcon,
+  FileIcon,
+  FolderIcon,
+  LayersIcon,
+  PlayIcon,
+  SparkIcon,
+  VideoIcon,
+} from "../components/Icons";
 import { api } from "../lib/api";
+import { useI18n } from "../lib/i18n";
 import type { ConfigListItem, HealthResponse, InputCatalog, RunRecord } from "../lib/types";
 
 interface WorkspacePageProps {
@@ -49,32 +61,12 @@ function formatVideoSize(sizeBytes: number): string {
   return `${(sizeBytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
-function formatTimestamp(value: string | null | undefined): string {
-  if (!value) {
-    return "n/a";
-  }
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) {
-    return value;
-  }
-  return date.toLocaleString([], {
-    month: "short",
-    day: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-  });
-}
-
 function formatPathTail(path: string | null | undefined): string {
   if (!path) {
-    return "n/a";
+    return "";
   }
   const pieces = path.split(/[\\/]/).filter(Boolean);
   return pieces.length ? pieces[pieces.length - 1] : path;
-}
-
-function formatStatusLabel(status: string): string {
-  return status.charAt(0).toUpperCase() + status.slice(1).replace(/_/g, " ");
 }
 
 export function WorkspacePage({
@@ -91,6 +83,7 @@ export function WorkspacePage({
   onSelectConfig,
   onStartBaselineRun,
 }: WorkspacePageProps) {
+  const { copy, formatDateTime, formatRunStatus } = useI18n();
   const [launching, setLaunching] = useState(false);
   const [launchMessage, setLaunchMessage] = useState<string | null>(null);
   const selectedVideo = useMemo(
@@ -110,7 +103,7 @@ export function WorkspacePage({
     setLaunchMessage(null);
     try {
       await onStartBaselineRun(`Workspace baseline run for ${selectedVideo?.name ?? "selected input"}`);
-      setLaunchMessage("Run started.");
+      setLaunchMessage(copy.common.refreshHint);
     } catch (caughtError) {
       setLaunchMessage(caughtError instanceof Error ? caughtError.message : String(caughtError));
     } finally {
@@ -122,49 +115,56 @@ export function WorkspacePage({
     <div className="page-stack">
       <section className="hero-panel compact workspace-hero">
         <div>
-          <p className="eyebrow">Operator Flow</p>
-          <h3>Keep the loop visible without turning it into a dashboard wall</h3>
-          <p className="muted">
-            One selected input, one baseline lane, one evidence bundle, one AI console. Everything else stays secondary.
-          </p>
+          <p className="eyebrow">{copy.workspace.heroEyebrow}</p>
+          <h3>{copy.workspace.heroTitle}</h3>
+          <p className="muted">{copy.workspace.heroSubtitle}</p>
         </div>
         <div className="stats-row">
-          <article className="stat-card">
-            <p className="meta-label">Input videos</p>
+          <article className="stat-card icon-card">
+            <VideoIcon className="section-icon" />
+            <p className="meta-label">{copy.workspace.statInputs}</p>
             <strong>{inputCatalog.videos.length}</strong>
-            <p className="muted">Found under the input folder</p>
+            <p className="muted">{copy.workspace.inputSubtitle}</p>
           </article>
-          <article className="stat-card">
-            <p className="meta-label">System pulse</p>
-            <strong>{health?.status ?? "loading"}</strong>
-            <p className="muted">{activeRun?.run_id ?? health?.active_run_id ?? "No active run"}</p>
+          <article className="stat-card icon-card">
+            <ActivityIcon className="section-icon" />
+            <p className="meta-label">{copy.workspace.statPulse}</p>
+            <strong>{health?.status ?? copy.common.loading}</strong>
+            <p className="muted">{activeRun?.run_id ?? health?.active_run_id ?? copy.common.noActiveRun}</p>
           </article>
-          <article className="stat-card">
-            <p className="meta-label">Ready baselines</p>
+          <article className="stat-card icon-card">
+            <LayersIcon className="section-icon" />
+            <p className="meta-label">{copy.workspace.statBaselines}</p>
             <strong>{configs.length}</strong>
-            <p className="muted">Configs currently available for launch</p>
+            <p className="muted">{copy.workspace.baselineSubtitle}</p>
           </article>
         </div>
       </section>
 
       <section className="panel workflow-panel">
         <div className="panel-header">
-          <div>
-            <p className="eyebrow">Stage 1 + 2</p>
-            <h3>Select the source and baseline</h3>
-            <p className="muted">The cleanest AI loop starts from a single, explicit baseline run.</p>
+          <div className="title-row">
+            <FolderIcon className="section-icon" />
+            <div>
+              <p className="eyebrow">{copy.workspace.selectEyebrow}</p>
+              <h3>{copy.workspace.selectTitle}</h3>
+              <p className="muted">{copy.workspace.selectSubtitle}</p>
+            </div>
           </div>
         </div>
 
         <div className="selector-grid">
           <section className="selector-column">
-            <div className="section-intro">
-              <h4>Input videos</h4>
-              <p className="muted">Discovered from the input folder. Pick one clip and keep it fixed for the iteration.</p>
+            <div className="section-intro title-row">
+              <VideoIcon className="section-icon" />
+              <div>
+                <h4>{copy.workspace.inputTitle}</h4>
+                <p className="muted">{copy.workspace.inputSubtitle}</p>
+              </div>
             </div>
             <div className="info-block">
-              <p className="meta-label">Input directory</p>
-              <p className="mono">{inputCatalog.root_dir || "Unavailable"}</p>
+              <p className="meta-label">{copy.workspace.inputDirectory}</p>
+              <p className="mono">{inputCatalog.root_dir || copy.common.unavailable}</p>
             </div>
 
             {inputCatalog.videos.length ? (
@@ -180,12 +180,12 @@ export function WorkspacePage({
                     >
                       <div className="choice-card-header">
                         <strong>{video.name}</strong>
-                        {isSelected ? <span className="choice-badge">Selected</span> : null}
+                        {isSelected ? <span className="choice-badge">{copy.common.selected}</span> : null}
                       </div>
                       <p className="muted mono">{formatPathTail(video.path)}</p>
                       <div className="choice-meta">
                         <span>{formatVideoSize(video.size_bytes)}</span>
-                        <span>{formatTimestamp(video.modified_at)}</span>
+                        <span>{formatDateTime(video.modified_at)}</span>
                       </div>
                     </button>
                   );
@@ -193,16 +193,19 @@ export function WorkspacePage({
               </div>
             ) : (
               <div className="empty-state">
-                <strong>No source videos found</strong>
-                <p className="muted">Drop a supported clip into the input directory, then refresh the workspace.</p>
+                <strong>{copy.workspace.noInputTitle}</strong>
+                <p className="muted">{copy.workspace.noInputBody}</p>
               </div>
             )}
           </section>
 
           <section className="selector-column">
-            <div className="section-intro">
-              <h4>Baseline configs</h4>
-              <p className="muted">Use an existing kept config as the base. AI derives from evidence after this step.</p>
+            <div className="section-intro title-row">
+              <LayersIcon className="section-icon" />
+              <div>
+                <h4>{copy.workspace.baselineTitle}</h4>
+                <p className="muted">{copy.workspace.baselineSubtitle}</p>
+              </div>
             </div>
 
             {configs.length ? (
@@ -218,13 +221,13 @@ export function WorkspacePage({
                     >
                       <div className="choice-card-header">
                         <strong>{config.name}</strong>
-                        {isSelected ? <span className="choice-badge">Baseline</span> : null}
+                        {isSelected ? <span className="choice-badge">{copy.common.baseline}</span> : null}
                       </div>
-                      <p className="muted mono">{config.output_dir ?? "Output directory not resolved"}</p>
+                      <p className="muted mono">{config.output_dir ?? copy.common.unavailable}</p>
                       <div className="tag-row">
-                        <span className={`tag ${config.postprocess_enabled ? "good" : ""}`}>cleanup</span>
-                        <span className={`tag ${config.follow_cam_enabled ? "good" : ""}`}>follow-cam</span>
-                        <span className="tag">{formatPathTail(config.detector_model_path)}</span>
+                        <span className={`tag ${config.postprocess_enabled ? "good" : ""}`}>{copy.workspace.cleanup}</span>
+                        <span className={`tag ${config.follow_cam_enabled ? "good" : ""}`}>{copy.workspace.followCam}</span>
+                        <span className="tag">{formatPathTail(config.detector_model_path) || copy.common.notAvailable}</span>
                       </div>
                     </button>
                   );
@@ -232,8 +235,8 @@ export function WorkspacePage({
               </div>
             ) : (
               <div className="empty-state">
-                <strong>No configs discovered</strong>
-                <p className="muted">Add or regenerate configs under `config/` before starting a new baseline.</p>
+                <strong>{copy.workspace.noBaselineTitle}</strong>
+                <p className="muted">{copy.workspace.noBaselineBody}</p>
               </div>
             )}
           </section>
@@ -241,30 +244,30 @@ export function WorkspacePage({
 
         <div className="launch-bar">
           <div className="launch-summary">
-            <article className="launch-card">
-              <p className="meta-label">Selected input</p>
-              <strong>{selectedVideo?.name ?? "Choose a source video"}</strong>
-              <p className="muted mono">{selectedVideo?.path ?? "Waiting for a selected input file."}</p>
+            <article className="launch-card icon-card">
+              <VideoIcon className="section-icon" />
+              <p className="meta-label">{copy.workspace.selectedInput}</p>
+              <strong>{selectedVideo?.name ?? copy.common.chooseOne}</strong>
+              <p className="muted mono">{selectedVideo?.path ?? copy.common.waiting}</p>
             </article>
-            <article className="launch-card">
-              <p className="meta-label">Selected baseline</p>
-              <strong>{selectedConfig?.name ?? "Choose a kept config"}</strong>
-              <p className="muted mono">{selectedConfig?.output_dir ?? "Waiting for a selected config."}</p>
+            <article className="launch-card icon-card">
+              <LayersIcon className="section-icon" />
+              <p className="meta-label">{copy.workspace.selectedBaseline}</p>
+              <strong>{selectedConfig?.name ?? copy.common.chooseOne}</strong>
+              <p className="muted mono">{selectedConfig?.output_dir ?? copy.common.waiting}</p>
             </article>
           </div>
 
           <div className="launch-actions">
-            <p className="muted">
-              This launches a baseline run with cleanup and follow-cam enabled, so the AI console can work from actual
-              artifacts instead of guesses.
-            </p>
+            <p className="muted">{copy.workspace.launchCopy}</p>
             <button
               type="button"
-              className="primary-button"
+              className="primary-button icon-button"
               onClick={handleStartRun}
               disabled={loading || launching || !selectedInputPath || !selectedConfigName}
             >
-              {launching ? "Starting..." : "Run Selected Video"}
+              <PlayIcon className="button-icon" />
+              <span>{launching ? copy.workspace.launchStarting : copy.workspace.launchButton}</span>
             </button>
             {launchMessage ? <p className="notice-line">{launchMessage}</p> : null}
           </div>
@@ -274,67 +277,75 @@ export function WorkspacePage({
       <div className="content-grid two-up">
         <section className="panel">
           <div className="panel-header">
-            <div>
-              <p className="eyebrow">Stage 3</p>
-              <h3>Focused run</h3>
-              <p className="muted">Keep one run selected. That evidence bundle becomes the source of truth for AI.</p>
+            <div className="title-row">
+              <SparkIcon className="section-icon" />
+              <div>
+                <p className="eyebrow">{copy.workspace.focusEyebrow}</p>
+                <h3>{copy.workspace.focusTitle}</h3>
+                <p className="muted">{copy.workspace.focusSubtitle}</p>
+              </div>
             </div>
           </div>
           {focusedRun ? (
             <div className="focus-stack">
-              <article className="summary-card spotlight-card">
-                <p className="meta-label">Current focus</p>
+              <article className="summary-card spotlight-card icon-card">
+                <ActivityIcon className="section-icon" />
+                <p className="meta-label">{copy.workspace.currentFocus}</p>
                 <strong>{focusedRun.run_id}</strong>
                 <p className="muted">
-                  {formatStatusLabel(focusedRun.status)} · {focusedRun.config_name ?? "Config pending"}
+                  {formatRunStatus(focusedRun.status)} | {focusedRun.config_name ?? copy.common.notAvailable}
                 </p>
               </article>
 
               <div className="mini-stat-grid">
-                <article className="mini-stat">
-                  <p className="meta-label">Detected</p>
+                <article className="mini-stat icon-card">
+                  <CheckIcon className="section-icon" />
+                  <p className="meta-label">{copy.workspace.detected}</p>
                   <strong>{readNumber(stats, "detected")}</strong>
-                  <p className="muted">Current focused track count</p>
+                  <p className="muted">{copy.workspace.focusSubtitle}</p>
                 </article>
-                <article className="mini-stat">
-                  <p className="meta-label">Lost</p>
+                <article className="mini-stat icon-card">
+                  <ActivityIcon className="section-icon" />
+                  <p className="meta-label">{copy.workspace.lost}</p>
                   <strong>{readNumber(stats, "lost")}</strong>
-                  <p className="muted">Frames marked as lost</p>
+                  <p className="muted">{copy.workspace.focusSubtitle}</p>
                 </article>
-                <article className="mini-stat">
-                  <p className="meta-label">Artifacts</p>
+                <article className="mini-stat icon-card">
+                  <FileIcon className="section-icon" />
+                  <p className="meta-label">{copy.workspace.artifacts}</p>
                   <strong>{focusedRun.artifacts.length}</strong>
-                  <p className="muted">Files available for review</p>
+                  <p className="muted">{copy.workspace.evidenceSubtitle}</p>
                 </article>
-                <article className="mini-stat">
-                  <p className="meta-label">Last event</p>
-                  <strong>{formatTimestamp(focusedRun.completed_at ?? focusedRun.started_at ?? focusedRun.created_at)}</strong>
-                  <p className="muted">Most recent known run timestamp</p>
+                <article className="mini-stat icon-card">
+                  <ClockIcon className="section-icon" />
+                  <p className="meta-label">{copy.workspace.lastEvent}</p>
+                  <strong>{formatDateTime(focusedRun.completed_at ?? focusedRun.started_at ?? focusedRun.created_at)}</strong>
+                  <p className="muted">{copy.common.refreshHint}</p>
                 </article>
               </div>
 
               <div className="detail-grid">
                 <div className="detail-block">
-                  <p className="meta-label">Input video</p>
-                  <p className="mono">{focusedRun.input_video ?? "n/a"}</p>
+                  <p className="meta-label">{copy.workspace.inputVideo}</p>
+                  <p className="mono">{focusedRun.input_video ?? copy.common.notAvailable}</p>
                 </div>
                 <div className="detail-block">
-                  <p className="meta-label">Output directory</p>
+                  <p className="meta-label">{copy.workspace.outputDirectory}</p>
                   <p className="mono">{focusedRun.output_dir}</p>
                 </div>
                 <div className="detail-block">
-                  <p className="meta-label">Created</p>
-                  <p>{formatTimestamp(focusedRun.created_at)}</p>
+                  <p className="meta-label">{copy.workspace.created}</p>
+                  <p>{formatDateTime(focusedRun.created_at)}</p>
                 </div>
                 <div className="detail-block">
-                  <p className="meta-label">Completed</p>
-                  <p>{focusedRun.completed_at ? formatTimestamp(focusedRun.completed_at) : "Still running or queued"}</p>
+                  <p className="meta-label">{copy.workspace.completed}</p>
+                  <p>{focusedRun.completed_at ? formatDateTime(focusedRun.completed_at) : copy.common.stillRunning}</p>
                 </div>
               </div>
 
               {focusedRun.notes ? (
                 <div className="info-block">
-                  <p className="meta-label">Run notes</p>
+                  <p className="meta-label">{copy.workspace.runNotes}</p>
                   <p className="muted">{focusedRun.notes}</p>
                 </div>
               ) : null}
@@ -343,31 +354,36 @@ export function WorkspacePage({
             </div>
           ) : (
             <div className="empty-state">
-              <strong>No run in focus yet</strong>
-              <p className="muted">Start a baseline run to populate the evidence lane and unlock the AI console.</p>
+              <strong>{copy.workspace.noFocusTitle}</strong>
+              <p className="muted">{copy.workspace.noFocusBody}</p>
             </div>
           )}
         </section>
 
         <section className="panel">
           <div className="panel-header">
-            <div>
-              <p className="eyebrow">Run Queue</p>
-              <h3>Recent tasks</h3>
-              <p className="muted">The queue stays short here. Deep logs and full reports remain secondary.</p>
+            <div className="title-row">
+              <ActivityIcon className="section-icon" />
+              <div>
+                <p className="eyebrow">{copy.workspace.queueEyebrow}</p>
+                <h3>{copy.workspace.queueTitle}</h3>
+                <p className="muted">{copy.workspace.queueSubtitle}</p>
+              </div>
             </div>
           </div>
           {activeRun ? (
-            <div className="summary-card">
-              <p className="meta-label">Running now</p>
+            <div className="summary-card icon-card">
+              <PlayIcon className="section-icon" />
+              <p className="meta-label">{copy.workspace.runningNow}</p>
               <strong>{activeRun.run_id}</strong>
-              <p className="muted">{formatStatusLabel(activeRun.status)}</p>
+              <p className="muted">{formatRunStatus(activeRun.status)}</p>
             </div>
           ) : (
-            <div className="summary-card">
-              <p className="meta-label">Running now</p>
-              <strong>Idle</strong>
-              <p className="muted">No active task at the moment</p>
+            <div className="summary-card icon-card">
+              <ClockIcon className="section-icon" />
+              <p className="meta-label">{copy.workspace.runningNow}</p>
+              <strong>{copy.common.idle}</strong>
+              <p className="muted">{copy.common.noActiveRun}</p>
             </div>
           )}
 
@@ -384,17 +400,17 @@ export function WorkspacePage({
                     <strong>{run.run_id}</strong>
                     <p className="muted mono">{run.config_name ?? formatPathTail(run.output_dir)}</p>
                     <div className="run-meta">
-                      <span>{formatTimestamp(run.created_at)}</span>
-                      <span>{run.artifacts.length} artifacts</span>
+                      <span>{formatDateTime(run.created_at)}</span>
+                      <span>{run.artifacts.length}</span>
                     </div>
                   </div>
-                  <span className={`status-dot ${run.status}`}>{formatStatusLabel(run.status)}</span>
+                  <span className={`status-dot ${run.status}`}>{formatRunStatus(run.status)}</span>
                 </button>
               ))
             ) : (
               <div className="empty-state">
-                <strong>No runs yet</strong>
-                <p className="muted">Launch the first baseline above to start building a reviewable history.</p>
+                <strong>{copy.workspace.noRunsTitle}</strong>
+                <p className="muted">{copy.workspace.noRunsBody}</p>
               </div>
             )}
           </div>
@@ -403,36 +419,43 @@ export function WorkspacePage({
 
       <section className="panel evidence-panel">
         <div className="panel-header">
-          <div>
-            <p className="eyebrow">Evidence Bundle</p>
-            <h3>Latest outputs in one place</h3>
-            <p className="muted">This is the material the AI reads before it recommends the next config.</p>
+          <div className="title-row">
+            <FileIcon className="section-icon" />
+            <div>
+              <p className="eyebrow">{copy.workspace.evidenceEyebrow}</p>
+              <h3>{copy.workspace.evidenceTitle}</h3>
+              <p className="muted">{copy.workspace.evidenceSubtitle}</p>
+            </div>
           </div>
         </div>
 
         {selectedRun ? (
           <>
             <div className="summary-grid evidence-summary-grid">
-              <div className="summary-card">
-                <p className="meta-label">Run</p>
+              <div className="summary-card icon-card">
+                <ActivityIcon className="section-icon" />
+                <p className="meta-label">{copy.workspace.run}</p>
                 <strong>{selectedRun.run_id}</strong>
-                <p className="muted mono">{selectedRun.config_name ?? "n/a"}</p>
+                <p className="muted mono">{selectedRun.config_name ?? copy.common.notAvailable}</p>
               </div>
-              <div className="summary-card">
-                <p className="meta-label">Modules enabled</p>
+              <div className="summary-card icon-card">
+                <LayersIcon className="section-icon" />
+                <p className="meta-label">{copy.workspace.modulesEnabled}</p>
                 <div className="tag-row">
-                  <span className={`tag ${selectedRun.modules_enabled.postprocess ? "good" : ""}`}>cleanup</span>
-                  <span className={`tag ${selectedRun.modules_enabled.follow_cam ? "good" : ""}`}>follow-cam</span>
+                  <span className={`tag ${selectedRun.modules_enabled.postprocess ? "good" : ""}`}>{copy.workspace.cleanup}</span>
+                  <span className={`tag ${selectedRun.modules_enabled.follow_cam ? "good" : ""}`}>{copy.workspace.followCam}</span>
                 </div>
-                <p className="muted">Processing modules used for this run</p>
+                <p className="muted">{copy.workspace.evidenceSubtitle}</p>
               </div>
-              <div className="summary-card">
-                <p className="meta-label">Artifacts ready</p>
+              <div className="summary-card icon-card">
+                <FileIcon className="section-icon" />
+                <p className="meta-label">{copy.workspace.artifactsReady}</p>
                 <strong>{selectedRun.artifacts.length}</strong>
-                <p className="muted">Videos, reports, CSVs, and camera path samples</p>
+                <p className="muted">{copy.workspace.evidenceSubtitle}</p>
               </div>
-              <div className="summary-card">
-                <p className="meta-label">Output folder</p>
+              <div className="summary-card icon-card">
+                <FolderIcon className="section-icon" />
+                <p className="meta-label">{copy.workspace.outputFolder}</p>
                 <strong>{formatPathTail(selectedRun.output_dir)}</strong>
                 <p className="muted mono">{selectedRun.output_dir}</p>
               </div>
@@ -440,11 +463,11 @@ export function WorkspacePage({
 
             <div className="video-grid">
               <div className="video-card">
-                <p className="meta-label">Follow-cam</p>
+                <p className="meta-label">{copy.workspace.followCamVideo}</p>
                 <video controls src={api.artifactUrl(selectedRun.run_id, "follow_cam.mp4")} />
               </div>
               <div className="video-card">
-                <p className="meta-label">Annotated cleaned</p>
+                <p className="meta-label">{copy.workspace.cleanedVideo}</p>
                 <video controls src={api.artifactUrl(selectedRun.run_id, "annotated.cleaned.mp4")} />
               </div>
             </div>
@@ -462,8 +485,8 @@ export function WorkspacePage({
           </>
         ) : (
           <div className="empty-state">
-            <strong>No evidence selected</strong>
-            <p className="muted">Start or select a run to surface videos, reports, and artifacts here.</p>
+            <strong>{copy.workspace.noEvidenceTitle}</strong>
+            <p className="muted">{copy.workspace.noEvidenceBody}</p>
           </div>
         )}
       </section>
