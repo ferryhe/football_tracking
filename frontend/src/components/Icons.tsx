@@ -118,3 +118,12 @@ export function WandIcon(props: IconProps) {
     </BaseIcon>
   );
 }
+
+export function ArrowUpRightIcon(props: IconProps) {
+  return (
+    <BaseIcon {...props}>
+      <path d="M7 17 17 7" />
+      <path d="M9 7h8v8" />
+    </BaseIcon>
+  );
+}

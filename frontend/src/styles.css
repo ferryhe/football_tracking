@@ -101,6 +101,7 @@ textarea {
 .workspace-layout,
 .content-grid,
 .page-stack,
+.artifact-stack,
 .assistant-shell,
 .assistant-actions,
 .run-list,
@@ -549,7 +550,8 @@ table {
 .choice-card:hover,
 .chip-button:hover,
 .run-row:hover,
-.artifact-card:hover {
+.artifact-card:hover,
+.artifact-feature-card:hover {
   transform: translateY(-1px);
 }
 
@@ -566,7 +568,11 @@ table {
 .choice-card-header,
 .tag-row,
 .choice-meta,
-.run-meta {
+.run-meta,
+.run-row-lead,
+.run-chip-row,
+.artifact-feature-head,
+.artifact-open-link {
   display: flex;
   gap: 8px;
   justify-content: space-between;
@@ -736,6 +742,12 @@ textarea {
   gap: 12px;
 }
 
+.artifact-stack,
+.output-section {
+  display: grid;
+  gap: 18px;
+}
+
 .compact-list {
   max-height: 360px;
   overflow: auto;
@@ -764,6 +776,42 @@ textarea {
 .run-row-copy {
   display: grid;
   gap: 4px;
+}
+
+.run-row-lead {
+  min-width: 0;
+  flex: 1;
+  justify-content: flex-start;
+  align-items: flex-start;
+}
+
+.run-row-icon-shell,
+.artifact-feature-icon {
+  width: 34px;
+  height: 34px;
+  border-radius: 12px;
+  display: grid;
+  place-items: center;
+  flex-shrink: 0;
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.run-row-icon-shell.completed {
+  background: rgba(92, 168, 112, 0.16);
+}
+
+.run-row-icon-shell.running,
+.run-row-icon-shell.queued {
+  background: rgba(240, 210, 122, 0.16);
+}
+
+.run-row-icon-shell.failed {
+  background: rgba(165, 54, 54, 0.24);
+}
+
+.run-chip-row,
+.artifact-open-link {
+  justify-content: flex-start;
 }
 
 .status-dot {
@@ -800,6 +848,30 @@ textarea {
 
 .artifact-list {
   grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+}
+
+.artifact-feature-grid {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+}
+
+.artifact-feature-card {
+  display: grid;
+  gap: 10px;
+  border: 1px solid var(--border-soft);
+  border-radius: 20px;
+  padding: 16px;
+  background: linear-gradient(180deg, rgba(240, 210, 122, 0.08), rgba(255, 255, 255, 0.03));
+  transition:
+    transform 0.18s ease,
+    border-color 0.18s ease,
+    background 0.18s ease;
+}
+
+.artifact-open-link {
+  color: var(--accent-warm);
+  font-weight: 700;
 }
 
 .artifact-copy {

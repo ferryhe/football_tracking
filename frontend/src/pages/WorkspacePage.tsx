@@ -64,6 +64,23 @@ function formatPathTail(path: string | null | undefined): string {
   return pieces.length ? pieces[pieces.length - 1] : path;
 }
 
+function runStatusIcon(status: string) {
+  if (status === "completed") {
+    return CheckIcon;
+  }
+  if (status === "running") {
+    return PlayIcon;
+  }
+  if (status === "queued") {
+    return ClockIcon;
+  }
+  return ActivityIcon;
+}
+
+function enabledModuleCount(run: RunRecord): number {
+  return Object.values(run.modules_enabled).filter(Boolean).length;
+}
+
 export function WorkspacePage({
   inputCatalog,
   configs,
@@ -301,24 +318,33 @@ export function WorkspacePage({
 
           <div className="run-list compact-list">
             {runs.length ? (
-              runs.map((run) => (
-                <button
-                  type="button"
-                  key={run.run_id}
-                  className={`run-row ${selectedRun?.run_id === run.run_id ? "selected" : ""}`}
-                  onClick={() => onSelectRun(run)}
-                >
-                  <div className="run-row-copy">
-                    <strong>{run.run_id}</strong>
-                    <p className="muted mono">{run.config_name ?? formatPathTail(run.output_dir)}</p>
-                    <div className="run-meta">
-                      <span>{formatDateTime(run.created_at)}</span>
-                      <span>{run.artifacts.length}</span>
+              runs.map((run) => {
+                const StatusIcon = runStatusIcon(run.status);
+                return (
+                  <button
+                    type="button"
+                    key={run.run_id}
+                    className={`run-row ${selectedRun?.run_id === run.run_id ? "selected" : ""}`}
+                    onClick={() => onSelectRun(run)}
+                  >
+                    <div className="run-row-lead">
+                      <div className={`run-row-icon-shell ${run.status}`}>
+                        <StatusIcon className="section-icon tiny" />
+                      </div>
+                      <div className="run-row-copy">
+                        <strong>{run.run_id}</strong>
+                        <p className="muted mono">{run.config_name ?? formatPathTail(run.output_dir)}</p>
+                        <div className="run-chip-row">
+                          <span className="tag">{formatDateTime(run.created_at)}</span>
+                          <span className="tag">{run.artifacts.length} {copy.workspace.artifacts.toLowerCase()}</span>
+                          <span className="tag">{enabledModuleCount(run)} {copy.workspace.modulesEnabled.toLowerCase()}</span>
+                        </div>
+                      </div>
                     </div>
-                  </div>
-                  <span className={`status-dot ${run.status}`}>{formatRunStatus(run.status)}</span>
-                </button>
-              ))
+                    <span className={`status-dot ${run.status}`}>{formatRunStatus(run.status)}</span>
+                  </button>
+                );
+              })
             ) : (
               <div className="empty-state">
                 <strong>{copy.workspace.noRunsTitle}</strong>
