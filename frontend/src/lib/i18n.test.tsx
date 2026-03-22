@@ -53,11 +53,13 @@ describe("i18n", () => {
     fireEvent.click(screen.getByRole("button", { name: "中文" }));
 
     expect(screen.getByText("足球跟踪控制台")).toBeInTheDocument();
+    expect(document.documentElement.lang).toBe("zh-CN");
     expect(window.localStorage.getItem("football-tracking-language")).toBe("zh");
 
     fireEvent.click(screen.getByRole("button", { name: "EN" }));
 
     expect(screen.getByText("Football Tracking Operator")).toBeInTheDocument();
+    expect(document.documentElement.lang).toBe("en");
     expect(window.localStorage.getItem("football-tracking-language")).toBe("en");
   });
 });

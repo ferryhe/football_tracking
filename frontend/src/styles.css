@@ -95,6 +95,9 @@ textarea {
 }
 
 .workflow-strip,
+.command-deck,
+.command-rail,
+.command-picks,
 .workspace-layout,
 .content-grid,
 .page-stack,
@@ -104,7 +107,9 @@ textarea {
 .artifact-list,
 .assistant-stack,
 .focus-stack,
-.detail-card {
+.detail-card,
+.command-footer,
+.command-footer-copy {
   display: grid;
   gap: 18px;
 }
@@ -128,6 +133,7 @@ textarea {
 }
 
 .panel,
+.command-card,
 .hero-panel,
 .stat-card,
 .summary-card,
@@ -135,6 +141,7 @@ textarea {
 .info-block,
 .workflow-step,
 .launch-card,
+.command-pick,
 .choice-card,
 .mini-stat,
 .detail-block,
@@ -148,6 +155,7 @@ textarea {
 }
 
 .panel,
+.command-card,
 .hero-panel,
 .stat-card,
 .summary-card,
@@ -178,6 +186,7 @@ textarea {
 
 .hero-panel,
 .assistant-card.primary,
+.command-card.primary,
 .signal-card,
 .spotlight-card {
   background: var(--bg-panel-strong);
@@ -212,6 +221,44 @@ table {
   gap: 12px;
   align-items: stretch;
   flex-wrap: wrap;
+}
+
+.command-deck {
+  grid-template-columns: minmax(0, 1.45fr) minmax(260px, 0.55fr);
+  margin-bottom: 22px;
+  align-items: start;
+}
+
+.command-rail {
+  align-content: start;
+}
+
+.command-picks {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.command-pick {
+  gap: 8px;
+  padding: 16px;
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.command-pick strong,
+.signal-card strong {
+  display: block;
+  font-size: 1.05rem;
+}
+
+.command-footer {
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: end;
+  gap: 14px;
+}
+
+.command-footer-copy {
+  gap: 8px;
 }
 
 .top-tile-strip {
@@ -479,6 +526,7 @@ table {
 }
 
 .choice-card,
+.command-pick,
 .run-row,
 .artifact-card,
 .chip-button {
@@ -509,6 +557,7 @@ table {
 .run-row.selected,
 .artifact-card:hover,
 .chip-button.selected,
+.command-pick:hover,
 .language-button.selected {
   border-color: var(--border-strong);
   background: linear-gradient(180deg, rgba(72, 127, 79, 0.18), rgba(33, 57, 39, 0.24));
@@ -935,6 +984,10 @@ td {
 }
 
 @media (max-width: 1440px) {
+  .command-deck {
+    grid-template-columns: 1fr;
+  }
+
   .top-tile-strip,
   .workflow-strip,
   .mini-stat-grid,
@@ -953,6 +1006,7 @@ td {
 
 @media (max-width: 1120px) {
   .launch-bar,
+  .command-footer,
   .selector-grid,
   .assistant-stage-grid,
   .assistant-mini-grid {
@@ -975,6 +1029,7 @@ td {
 
   .top-tile-strip,
   .workflow-strip,
+  .command-picks,
   .content-grid.two-up,
   .hero-panel.compact,
   .video-grid,

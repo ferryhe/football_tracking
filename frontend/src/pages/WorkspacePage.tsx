@@ -1,5 +1,3 @@
-import { useMemo, useState } from "react";
-
 import { ArtifactList } from "../components/ArtifactList";
 import {
   ActivityIcon,
@@ -14,21 +12,18 @@ import {
 } from "../components/Icons";
 import { api } from "../lib/api";
 import { useI18n } from "../lib/i18n";
-import type { ConfigListItem, HealthResponse, InputCatalog, RunRecord } from "../lib/types";
+import type { ConfigListItem, InputCatalog, RunRecord } from "../lib/types";
 
 interface WorkspacePageProps {
-  health: HealthResponse | null;
   inputCatalog: InputCatalog;
   configs: ConfigListItem[];
   runs: RunRecord[];
   selectedRun: RunRecord | null;
   selectedInputPath: string;
   selectedConfigName: string;
-  loading: boolean;
   onSelectRun: (run: RunRecord) => void;
   onSelectInput: (path: string) => void;
   onSelectConfig: (name: string) => void;
-  onStartBaselineRun: (notes: string) => Promise<void>;
 }
 
 function getTrackStats(run: RunRecord | null): Record<string, unknown> | null {
@@ -70,77 +65,23 @@ function formatPathTail(path: string | null | undefined): string {
 }
 
 export function WorkspacePage({
-  health,
   inputCatalog,
   configs,
   runs,
   selectedRun,
   selectedInputPath,
   selectedConfigName,
-  loading,
   onSelectRun,
   onSelectInput,
   onSelectConfig,
-  onStartBaselineRun,
 }: WorkspacePageProps) {
   const { copy, formatDateTime, formatRunStatus } = useI18n();
-  const [launching, setLaunching] = useState(false);
-  const [launchMessage, setLaunchMessage] = useState<string | null>(null);
-  const selectedVideo = useMemo(
-    () => inputCatalog.videos.find((item) => item.path === selectedInputPath) ?? null,
-    [inputCatalog.videos, selectedInputPath],
-  );
-  const selectedConfig = useMemo(
-    () => configs.find((item) => item.name === selectedConfigName) ?? null,
-    [configs, selectedConfigName],
-  );
   const stats = getTrackStats(selectedRun);
   const activeRun = runs.find((item) => item.status === "running" || item.status === "queued") ?? null;
   const focusedRun = selectedRun ?? activeRun;
 
-  async function handleStartRun() {
-    setLaunching(true);
-    setLaunchMessage(null);
-    try {
-      await onStartBaselineRun(`Workspace baseline run for ${selectedVideo?.name ?? "selected input"}`);
-      setLaunchMessage(copy.common.refreshHint);
-    } catch (caughtError) {
-      setLaunchMessage(caughtError instanceof Error ? caughtError.message : String(caughtError));
-    } finally {
-      setLaunching(false);
-    }
-  }
-
   return (
     <div className="page-stack">
-      <section className="hero-panel compact workspace-hero">
-        <div>
-          <p className="eyebrow">{copy.workspace.heroEyebrow}</p>
-          <h3>{copy.workspace.heroTitle}</h3>
-          <p className="muted">{copy.workspace.heroSubtitle}</p>
-        </div>
-        <div className="stats-row">
-          <article className="stat-card icon-card">
-            <VideoIcon className="section-icon" />
-            <p className="meta-label">{copy.workspace.statInputs}</p>
-            <strong>{inputCatalog.videos.length}</strong>
-            <p className="muted">{copy.workspace.inputSubtitle}</p>
-          </article>
-          <article className="stat-card icon-card">
-            <ActivityIcon className="section-icon" />
-            <p className="meta-label">{copy.workspace.statPulse}</p>
-            <strong>{health?.status ?? copy.common.loading}</strong>
-            <p className="muted">{activeRun?.run_id ?? health?.active_run_id ?? copy.common.noActiveRun}</p>
-          </article>
-          <article className="stat-card icon-card">
-            <LayersIcon className="section-icon" />
-            <p className="meta-label">{copy.workspace.statBaselines}</p>
-            <strong>{configs.length}</strong>
-            <p className="muted">{copy.workspace.baselineSubtitle}</p>
-          </article>
-        </div>
-      </section>
-
       <section className="panel workflow-panel">
         <div className="panel-header">
           <div className="title-row">
@@ -242,36 +183,7 @@ export function WorkspacePage({
           </section>
         </div>
 
-        <div className="launch-bar">
-          <div className="launch-summary">
-            <article className="launch-card icon-card">
-              <VideoIcon className="section-icon" />
-              <p className="meta-label">{copy.workspace.selectedInput}</p>
-              <strong>{selectedVideo?.name ?? copy.common.chooseOne}</strong>
-              <p className="muted mono">{selectedVideo?.path ?? copy.common.waiting}</p>
-            </article>
-            <article className="launch-card icon-card">
-              <LayersIcon className="section-icon" />
-              <p className="meta-label">{copy.workspace.selectedBaseline}</p>
-              <strong>{selectedConfig?.name ?? copy.common.chooseOne}</strong>
-              <p className="muted mono">{selectedConfig?.output_dir ?? copy.common.waiting}</p>
-            </article>
-          </div>
-
-          <div className="launch-actions">
-            <p className="muted">{copy.workspace.launchCopy}</p>
-            <button
-              type="button"
-              className="primary-button icon-button"
-              onClick={handleStartRun}
-              disabled={loading || launching || !selectedInputPath || !selectedConfigName}
-            >
-              <PlayIcon className="button-icon" />
-              <span>{launching ? copy.workspace.launchStarting : copy.workspace.launchButton}</span>
-            </button>
-            {launchMessage ? <p className="notice-line">{launchMessage}</p> : null}
-          </div>
-        </div>
+        <p className="notice-line subtle">{copy.workspace.launchHint}</p>
       </section>
 
       <div className="content-grid two-up">

@@ -28,7 +28,7 @@ const OBJECTIVE_PRESETS: Record<LanguageCode, Record<"steady" | "recover" | "cle
   },
   zh: {
     steady: "让镜头移动更稳定，减少快速甩镜，并在高速转换里尽量保持球始终可见。",
-    recover: "减少长时间丢球的区段，优先保证球尽量留在画面中，即便裁切要更保守一些。",
+    recover: "减少长时间丢球的区段，优先保证球尽量留在画面中，即便裁切需要更保守一些。",
     clean: "优先得到更干净的轨迹和更顺滑的跟随镜头，即便这意味着裁切策略要稍微保守一些。",
   },
 };

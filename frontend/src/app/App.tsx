@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState, type ComponentType, type SVGProps } from "react";
 
 import { AIPanel } from "../components/AIPanel";
-import { ActivityIcon, LayersIcon, SparkIcon, VideoIcon } from "../components/Icons";
+import { ActivityIcon, FileIcon, LayersIcon, PlayIcon, SparkIcon, VideoIcon } from "../components/Icons";
 import { LanguageToggle } from "../components/LanguageToggle";
 import { api } from "../lib/api";
 import { useI18n } from "../lib/i18n";
@@ -30,7 +30,7 @@ function formatVideoSize(sizeBytes: number): string {
 }
 
 export function App() {
-  const { copy, formatDateTime } = useI18n();
+  const { copy, formatDateTime, formatRunStatus } = useI18n();
   const [health, setHealth] = useState<HealthResponse | null>(null);
   const [inputCatalog, setInputCatalog] = useState<InputCatalog>({ root_dir: "", videos: [] });
   const [configs, setConfigs] = useState<ConfigListItem[]>([]);
@@ -39,6 +39,8 @@ export function App() {
   const [selectedInputPath, setSelectedInputPath] = useState<string>("");
   const [selectedConfigName, setSelectedConfigName] = useState<string>("real_v24_full_postclean.yaml");
   const [loading, setLoading] = useState(true);
+  const [launching, setLaunching] = useState(false);
+  const [launchMessage, setLaunchMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   async function refreshConfigs(): Promise<ConfigListItem[]> {
@@ -129,6 +131,10 @@ export function App() {
     };
   }, []);
 
+  useEffect(() => {
+    setLaunchMessage(null);
+  }, [selectedConfigName, selectedInputPath]);
+
   function handleSelectRun(run: RunRecord) {
     setSelectedRun(run);
     if (run.input_video) {
@@ -151,20 +157,31 @@ export function App() {
     }
   }
 
-  async function handleStartBaselineRun(notes: string) {
-    const createdRun = await api.createRun({
-      config_name: selectedConfigName,
-      input_video: selectedInputPath || undefined,
-      enable_postprocess: true,
-      enable_follow_cam: true,
-      notes,
-    });
-    await handleRunCreated(createdRun);
+  async function handleStartBaselineRun() {
+    setLaunching(true);
+    setLaunchMessage(null);
+    try {
+      const createdRun = await api.createRun({
+        config_name: selectedConfigName,
+        input_video: selectedInputPath || undefined,
+        enable_postprocess: true,
+        enable_follow_cam: true,
+        notes: `Workspace baseline run for ${selectedVideo?.name ?? "selected input"}`,
+      });
+      await handleRunCreated(createdRun);
+      setLaunchMessage(copy.common.refreshHint);
+    } catch (caughtError) {
+      setLaunchMessage(caughtError instanceof Error ? caughtError.message : String(caughtError));
+    } finally {
+      setLaunching(false);
+    }
   }
 
   const selectedVideo = inputCatalog.videos.find((item) => item.path === selectedInputPath) ?? null;
   const selectedConfig = configs.find((item) => item.name === selectedConfigName) ?? null;
   const activeRun = runs.find((item) => item.status === "running" || item.status === "queued") ?? null;
+  const focusedRun = selectedRun ?? activeRun;
+  const canLaunch = !loading && !launching && Boolean(selectedInputPath) && Boolean(selectedConfigName);
 
   const topTiles = useMemo<TopTile[]>(
     () => [
@@ -190,22 +207,22 @@ export function App() {
         key: "evidence",
         icon: ActivityIcon,
         label: copy.header.tileEvidence,
-        value: selectedRun?.run_id ?? copy.header.tileEvidenceEmpty,
-        detail: selectedRun
-          ? `${selectedRun.artifacts.length} ${copy.workspace.artifacts.toLowerCase()}`
+        value: focusedRun?.run_id ?? copy.header.tileEvidenceEmpty,
+        detail: focusedRun
+          ? `${focusedRun.artifacts.length} ${copy.workspace.artifacts.toLowerCase()}`
           : copy.workspace.focusSubtitle,
-        state: selectedRun ? "complete" : "upcoming",
+        state: focusedRun ? "complete" : "upcoming",
       },
       {
         key: "ai",
         icon: SparkIcon,
         label: copy.header.tileAi,
-        value: selectedRun ? copy.header.tileAiReady : copy.header.tileAiLocked,
-        detail: selectedRun ? copy.ai.subtitle : copy.workspace.noFocusBody,
-        state: selectedRun ? "current" : "upcoming",
+        value: focusedRun ? copy.header.tileAiReady : copy.header.tileAiLocked,
+        detail: focusedRun ? copy.ai.subtitle : copy.workspace.noFocusBody,
+        state: focusedRun ? "current" : "upcoming",
       },
     ],
-    [copy, formatDateTime, selectedConfig, selectedRun, selectedVideo],
+    [copy, focusedRun, formatDateTime, selectedConfig, selectedVideo],
   );
 
   return (
@@ -253,21 +270,111 @@ export function App() {
         })}
       </section>
 
+      <section className="command-deck">
+        <article className="command-card primary">
+          <div className="panel-header">
+            <div className="title-row">
+              <PlayIcon className="section-icon" />
+              <div>
+                <p className="eyebrow">{copy.workspace.missionEyebrow}</p>
+                <h3>{copy.workspace.missionTitle}</h3>
+                <p className="muted">{copy.workspace.missionSubtitle}</p>
+              </div>
+            </div>
+          </div>
+
+          <div className="command-picks">
+            <article className="command-pick">
+              <div className="title-row compact">
+                <VideoIcon className="section-icon tiny" />
+                <p className="meta-label">{copy.workspace.selectedInput}</p>
+              </div>
+              <strong>{selectedVideo?.name ?? copy.header.tileInputEmpty}</strong>
+              <p className="muted mono">
+                {selectedVideo
+                  ? `${formatPathTail(selectedVideo.path)} | ${formatVideoSize(selectedVideo.size_bytes)}`
+                  : copy.common.waiting}
+              </p>
+            </article>
+
+            <article className="command-pick">
+              <div className="title-row compact">
+                <LayersIcon className="section-icon tiny" />
+                <p className="meta-label">{copy.workspace.selectedBaseline}</p>
+              </div>
+              <strong>{selectedConfig?.name ?? copy.header.tileBaselineEmpty}</strong>
+              <p className="muted mono">{selectedConfig?.output_dir ?? copy.common.waiting}</p>
+            </article>
+
+            <article className="command-pick">
+              <div className="title-row compact">
+                <ActivityIcon className="section-icon tiny" />
+                <p className="meta-label">{copy.workspace.focusRun}</p>
+              </div>
+              <strong>{focusedRun?.run_id ?? copy.workspace.noFocusTitle}</strong>
+              <p className="muted">
+                {focusedRun
+                  ? `${formatRunStatus(focusedRun.status)} | ${focusedRun.artifacts.length} ${copy.workspace.artifacts.toLowerCase()}`
+                  : copy.workspace.noFocusBody}
+              </p>
+            </article>
+
+            <article className="command-pick">
+              <div className="title-row compact">
+                <SparkIcon className="section-icon tiny" />
+                <p className="meta-label">{copy.workspace.aiLane}</p>
+              </div>
+              <strong>{focusedRun ? copy.workspace.aiReady : copy.workspace.aiWaiting}</strong>
+              <p className="muted">{focusedRun ? copy.ai.subtitle : copy.ai.stageEvidenceNone}</p>
+            </article>
+          </div>
+
+          <div className="command-footer">
+            <div className="command-footer-copy">
+              <p className="muted">{copy.workspace.launchCopy}</p>
+            </div>
+            <button type="button" className="primary-button icon-button" onClick={handleStartBaselineRun} disabled={!canLaunch}>
+              <PlayIcon className="button-icon" />
+              <span>{launching ? copy.workspace.launchStarting : copy.workspace.launchButton}</span>
+            </button>
+          </div>
+
+          {launchMessage ? <p className="notice-line">{launchMessage}</p> : null}
+        </article>
+
+        <div className="command-rail">
+          <article className="signal-card">
+            <div className="title-row compact">
+              <ActivityIcon className="section-icon tiny" />
+              <p className="meta-label">{copy.workspace.runningNow}</p>
+            </div>
+            <strong>{activeRun?.run_id ?? copy.common.idle}</strong>
+            <p className="muted">{activeRun ? formatRunStatus(activeRun.status) : copy.common.noActiveRun}</p>
+          </article>
+
+          <article className="signal-card">
+            <div className="title-row compact">
+              <FileIcon className="section-icon tiny" />
+              <p className="meta-label">{copy.workspace.artifactsReady}</p>
+            </div>
+            <strong>{focusedRun?.artifacts.length ?? 0}</strong>
+            <p className="muted mono">{focusedRun?.output_dir ?? copy.common.waiting}</p>
+          </article>
+        </div>
+      </section>
+
       <div className="workspace-layout">
         <section className="workspace-main">
           <WorkspacePage
-            health={health}
             inputCatalog={inputCatalog}
             configs={configs}
             runs={runs}
             selectedRun={selectedRun}
             selectedInputPath={selectedInputPath}
             selectedConfigName={selectedConfigName}
-            loading={loading}
             onSelectRun={handleSelectRun}
             onSelectInput={setSelectedInputPath}
             onSelectConfig={setSelectedConfigName}
-            onStartBaselineRun={handleStartBaselineRun}
           />
         </section>
 
