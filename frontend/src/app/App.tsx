@@ -1,15 +1,15 @@
 import { useEffect, useMemo, useState, type ComponentType, type SVGProps } from "react";
 
 import { AIPanel } from "../components/AIPanel";
-import { ActivityIcon, FileIcon, PlayIcon, SparkIcon, VideoIcon } from "../components/Icons";
+import { ActivityIcon, FileIcon, PlayIcon, SparkIcon } from "../components/Icons";
 import { LanguageToggle } from "../components/LanguageToggle";
 import { api } from "../lib/api";
 import { useI18n } from "../lib/i18n";
 import type { ConfigListItem, HealthResponse, InputCatalog, RunRecord } from "../lib/types";
-import { WorkspacePage } from "../pages/WorkspacePage";
+import { WorkspacePage, type WorkspaceStage } from "../pages/WorkspacePage";
 
-interface WorkflowStep {
-  key: string;
+interface StageTab {
+  key: WorkspaceStage;
   icon: ComponentType<SVGProps<SVGSVGElement>>;
   title: string;
   detail: string;
@@ -17,7 +17,7 @@ interface WorkflowStep {
 }
 
 export function App() {
-  const { copy } = useI18n();
+  const { copy, formatDateTime } = useI18n();
   const [health, setHealth] = useState<HealthResponse | null>(null);
   const [inputCatalog, setInputCatalog] = useState<InputCatalog>({ root_dir: "", videos: [] });
   const [configs, setConfigs] = useState<ConfigListItem[]>([]);
@@ -25,6 +25,7 @@ export function App() {
   const [selectedRun, setSelectedRun] = useState<RunRecord | null>(null);
   const [selectedInputPath, setSelectedInputPath] = useState<string>("");
   const [selectedConfigName, setSelectedConfigName] = useState<string>("real_v24_full_postclean.yaml");
+  const [stage, setStage] = useState<WorkspaceStage>("baseline");
   const [loading, setLoading] = useState(true);
   const [launching, setLaunching] = useState(false);
   const [launchMessage, setLaunchMessage] = useState<string | null>(null);
@@ -132,7 +133,7 @@ export function App() {
     }
   }
 
-  async function handleRunCreated(createdRun: RunRecord) {
+  async function syncCreatedRun(createdRun: RunRecord) {
     const runData = await refreshRuns();
     const matched = runData.find((item) => item.run_id === createdRun.run_id) ?? createdRun;
     setSelectedRun(matched);
@@ -142,6 +143,7 @@ export function App() {
     if (matched.config_name) {
       setSelectedConfigName(matched.config_name);
     }
+    return matched;
   }
 
   async function handleStartBaselineRun() {
@@ -155,8 +157,9 @@ export function App() {
         enable_follow_cam: true,
         notes: `Workspace baseline run for ${selectedVideo?.name ?? "selected input"}`,
       });
-      await handleRunCreated(createdRun);
+      await syncCreatedRun(createdRun);
       setLaunchMessage(copy.common.refreshHint);
+      setStage("ai");
     } catch (caughtError) {
       setLaunchMessage(caughtError instanceof Error ? caughtError.message : String(caughtError));
     } finally {
@@ -164,43 +167,56 @@ export function App() {
     }
   }
 
+  async function handleAssistantRunCreated(createdRun: RunRecord) {
+    await syncCreatedRun(createdRun);
+    setStage("delivery");
+  }
+
+  const orderedRuns = useMemo(
+    () =>
+      [...runs].sort((left, right) => {
+        const leftTime = new Date(left.completed_at ?? left.started_at ?? left.created_at).getTime();
+        const rightTime = new Date(right.completed_at ?? right.started_at ?? right.created_at).getTime();
+        return rightTime - leftTime;
+      }),
+    [runs],
+  );
+
   const selectedVideo = inputCatalog.videos.find((item) => item.path === selectedInputPath) ?? null;
   const selectedConfig = configs.find((item) => item.name === selectedConfigName) ?? null;
-  const activeRun = runs.find((item) => item.status === "running" || item.status === "queued") ?? null;
-  const focusedRun = selectedRun ?? activeRun;
+  const activeRun = orderedRuns.find((item) => item.status === "running" || item.status === "queued") ?? null;
+  const latestCompletedRun = orderedRuns.find((item) => item.status === "completed") ?? null;
+  const focusedRun = selectedRun ?? activeRun ?? latestCompletedRun ?? orderedRuns[0] ?? null;
 
-  const workflowSteps = useMemo<WorkflowStep[]>(
+  const stageTabs = useMemo<StageTab[]>(
     () => [
       {
-        key: "choose",
-        icon: VideoIcon,
-        title: copy.workspace.flowChooseTitle,
-        detail: selectedVideo && selectedConfig ? `${selectedVideo.name} + ${selectedConfig.name}` : copy.workspace.flowChooseDetail,
-        state: selectedVideo && selectedConfig ? "complete" : "current",
-      },
-      {
-        key: "run",
+        key: "baseline",
         icon: PlayIcon,
         title: copy.workspace.flowRunTitle,
-        detail: focusedRun ? focusedRun.run_id : copy.workspace.flowRunDetail,
-        state: focusedRun ? "complete" : selectedVideo && selectedConfig ? "current" : "upcoming",
+        detail: selectedVideo && selectedConfig ? `${selectedVideo.name} | ${selectedConfig.name}` : copy.workspace.flowChooseDetail,
+        state: focusedRun ? "complete" : "current",
       },
       {
         key: "ai",
         icon: SparkIcon,
         title: copy.workspace.flowAiTitle,
-        detail: focusedRun ? copy.ai.subtitle : copy.workspace.flowAiDetail,
-        state: focusedRun ? "current" : "upcoming",
+        detail: focusedRun ? focusedRun.run_id : copy.workspace.flowAiDetail,
+        state: stage === "ai" ? "current" : focusedRun ? "complete" : "upcoming",
       },
       {
-        key: "review",
+        key: "delivery",
         icon: FileIcon,
-        title: copy.workspace.flowReviewTitle,
-        detail: focusedRun ? copy.workspace.evidenceSubtitle : copy.workspace.flowReviewDetail,
-        state: focusedRun ? "current" : "upcoming",
+        title: copy.workspace.deliveryTitle,
+        detail: latestCompletedRun
+          ? `${latestCompletedRun.run_id} | ${formatDateTime(
+              latestCompletedRun.completed_at ?? latestCompletedRun.started_at ?? latestCompletedRun.created_at,
+            )}`
+          : copy.workspace.deliverySubtitle,
+        state: stage === "delivery" ? "current" : latestCompletedRun ? "complete" : "upcoming",
       },
     ],
-    [copy, focusedRun, selectedConfig, selectedVideo],
+    [copy, focusedRun, formatDateTime, latestCompletedRun, selectedConfig, selectedVideo, stage],
   );
 
   return (
@@ -226,31 +242,37 @@ export function App() {
 
       {error ? <div className="error-banner">{error}</div> : null}
 
-      <section className="workflow-strip" aria-label="Primary workflow">
-        {workflowSteps.map((step, index) => {
-          const Icon = step.icon;
+      <section className="step-tabs" aria-label="Workflow steps">
+        {stageTabs.map((tab, index) => {
+          const Icon = tab.icon;
           return (
-            <article key={step.key} className={`workflow-step ${step.state}`}>
-              <span className="workflow-marker">{index + 1}</span>
-              <div className="workflow-copy">
+            <button
+              type="button"
+              key={tab.key}
+              className={`step-tab ${stage === tab.key ? "active" : ""} ${tab.state}`}
+              onClick={() => setStage(tab.key)}
+            >
+              <span className="step-tab-index">{index + 1}</span>
+              <div className="step-tab-copy">
                 <div className="title-row compact">
                   <Icon className="section-icon tiny" />
-                  <p className="meta-label">{step.title}</p>
+                  <p className="meta-label">{tab.title}</p>
                 </div>
-                <p className="muted">{step.detail}</p>
+                <p className="muted">{tab.detail}</p>
               </div>
-            </article>
+            </button>
           );
         })}
       </section>
 
-      <div className="workspace-layout">
+      <div className={`workspace-layout stage-${stage}`}>
         <section className="workspace-main">
           <WorkspacePage
+            stage={stage}
             inputCatalog={inputCatalog}
             configs={configs}
-            runs={runs}
-            selectedRun={selectedRun}
+            runs={orderedRuns}
+            selectedRun={focusedRun}
             selectedInputPath={selectedInputPath}
             selectedConfigName={selectedConfigName}
             loading={loading}
@@ -263,18 +285,20 @@ export function App() {
           />
         </section>
 
-        <aside className="assistant-column">
-          <AIPanel
-            run={selectedRun}
-            configs={configs}
-            targetInputVideo={selectedInputPath || undefined}
-            onConfigDerived={async () => {
-              await refreshConfigs();
-              await refreshInputs();
-            }}
-            onRunCreated={handleRunCreated}
-          />
-        </aside>
+        {stage === "ai" ? (
+          <aside className="assistant-column">
+            <AIPanel
+              run={focusedRun}
+              configs={configs}
+              targetInputVideo={selectedInputPath || undefined}
+              onConfigDerived={async () => {
+                await refreshConfigs();
+                await refreshInputs();
+              }}
+              onRunCreated={handleAssistantRunCreated}
+            />
+          </aside>
+        ) : null}
       </div>
     </div>
   );

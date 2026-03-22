@@ -4,7 +4,7 @@ import { useI18n } from "../lib/i18n";
 export function LanguageToggle() {
   const { language, setLanguage, copy } = useI18n();
   const nextLanguage = language === "en" ? "zh" : "en";
-  const buttonLabel = nextLanguage === "en" ? copy.common.english : "中";
+  const buttonLabel = nextLanguage === "en" ? copy.common.english : "\u4e2d";
 
   return (
     <button

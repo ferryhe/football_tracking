@@ -1,20 +1,20 @@
-import { ArtifactList } from "../components/ArtifactList";
 import {
   ActivityIcon,
   CheckIcon,
   ClockIcon,
   FileIcon,
-  FolderIcon,
   LayersIcon,
   PlayIcon,
   SparkIcon,
   VideoIcon,
 } from "../components/Icons";
-import { api } from "../lib/api";
 import { useI18n } from "../lib/i18n";
 import type { ConfigListItem, InputCatalog, RunRecord } from "../lib/types";
 
+export type WorkspaceStage = "baseline" | "ai" | "delivery";
+
 interface WorkspacePageProps {
+  stage: WorkspaceStage;
   inputCatalog: InputCatalog;
   configs: ConfigListItem[];
   runs: RunRecord[];
@@ -81,11 +81,29 @@ function runStatusIcon(status: string) {
   return ActivityIcon;
 }
 
-function enabledModuleCount(run: RunRecord): number {
-  return Object.values(run.modules_enabled).filter(Boolean).length;
+function inferConfigScope(configName: string | null | undefined): "full" | "partial" | "standard" {
+  const value = configName?.toLowerCase() ?? "";
+  if (/(sample|short|debug|preview|first|partial|quick)/.test(value)) {
+    return "partial";
+  }
+  if (/(full|final|complete)/.test(value)) {
+    return "full";
+  }
+  return "standard";
+}
+
+function scopeLabel(copy: ReturnType<typeof useI18n>["copy"], scope: "full" | "partial" | "standard"): string {
+  if (scope === "full") {
+    return copy.workspace.scopeFull;
+  }
+  if (scope === "partial") {
+    return copy.workspace.scopePartial;
+  }
+  return copy.workspace.scopeStandard;
 }
 
 export function WorkspacePage({
+  stage,
   inputCatalog,
   configs,
   runs,
@@ -101,365 +119,314 @@ export function WorkspacePage({
   onStartBaselineRun,
 }: WorkspacePageProps) {
   const { copy, formatDateTime, formatRunStatus } = useI18n();
-  const activeRun = runs.find((item) => item.status === "running" || item.status === "queued") ?? null;
-  const focusedRun = selectedRun ?? activeRun;
-  const stats = getTrackStats(focusedRun);
   const selectedVideo = inputCatalog.videos.find((item) => item.path === selectedInputPath) ?? null;
   const selectedConfig = configs.find((item) => item.name === selectedConfigName) ?? null;
+  const selectedScope = inferConfigScope(selectedConfig?.name);
+  const stats = getTrackStats(selectedRun);
   const canLaunch = !loading && !launching && Boolean(selectedInputPath) && Boolean(selectedConfigName);
+  const deliveryRuns = runs.filter((run) => run.status === "completed");
 
-  return (
-    <div className="page-stack">
-      <section className="panel workflow-panel">
-        <div className="panel-header">
-          <div className="title-row">
-            <PlayIcon className="section-icon" />
-            <div>
-              <p className="eyebrow">{copy.workspace.selectEyebrow}</p>
-              <h3>{copy.workspace.selectTitle}</h3>
-              <p className="muted">{copy.workspace.selectSubtitle}</p>
-            </div>
-          </div>
-        </div>
-
-        <div className="selector-grid">
-          <section className="selector-column">
-            <div className="section-intro title-row">
-              <VideoIcon className="section-icon" />
-              <div>
-                <h4>{copy.workspace.inputTitle}</h4>
-                <p className="muted">{copy.workspace.inputSubtitle}</p>
-              </div>
-            </div>
-            <div className="info-block">
-              <p className="meta-label">{copy.workspace.inputDirectory}</p>
-              <p className="mono">{inputCatalog.root_dir || copy.common.unavailable}</p>
-            </div>
-
-            {inputCatalog.videos.length ? (
-              <div className="choice-grid">
-                {inputCatalog.videos.map((video) => {
-                  const isSelected = video.path === selectedInputPath;
-                  return (
-                    <button
-                      type="button"
-                      key={video.path}
-                      className={`choice-card ${isSelected ? "selected" : ""}`}
-                      onClick={() => onSelectInput(video.path)}
-                    >
-                      <div className="choice-card-header">
-                        <strong>{video.name}</strong>
-                        {isSelected ? <span className="choice-badge">{copy.common.selected}</span> : null}
-                      </div>
-                      <p className="muted mono">{formatPathTail(video.path)}</p>
-                      <div className="choice-meta">
-                        <span>{formatVideoSize(video.size_bytes)}</span>
-                        <span>{formatDateTime(video.modified_at)}</span>
-                      </div>
-                    </button>
-                  );
-                })}
-              </div>
-            ) : (
-              <div className="empty-state">
-                <strong>{copy.workspace.noInputTitle}</strong>
-                <p className="muted">{copy.workspace.noInputBody}</p>
-              </div>
-            )}
-          </section>
-
-          <section className="selector-column">
-            <div className="section-intro title-row">
-              <LayersIcon className="section-icon" />
-              <div>
-                <h4>{copy.workspace.baselineTitle}</h4>
-                <p className="muted">{copy.workspace.baselineSubtitle}</p>
-              </div>
-            </div>
-
-            {configs.length ? (
-              <div className="choice-grid">
-                {configs.map((config) => {
-                  const isSelected = config.name === selectedConfigName;
-                  return (
-                    <button
-                      type="button"
-                      key={config.name}
-                      className={`choice-card ${isSelected ? "selected" : ""}`}
-                      onClick={() => onSelectConfig(config.name)}
-                    >
-                      <div className="choice-card-header">
-                        <strong>{config.name}</strong>
-                        {isSelected ? <span className="choice-badge">{copy.common.baseline}</span> : null}
-                      </div>
-                      <p className="muted mono">{config.output_dir ?? copy.common.unavailable}</p>
-                      <div className="tag-row">
-                        <span className={`tag ${config.postprocess_enabled ? "good" : ""}`}>{copy.workspace.cleanup}</span>
-                        <span className={`tag ${config.follow_cam_enabled ? "good" : ""}`}>{copy.workspace.followCam}</span>
-                        <span className="tag">{formatPathTail(config.detector_model_path) || copy.common.notAvailable}</span>
-                      </div>
-                    </button>
-                  );
-                })}
-              </div>
-            ) : (
-              <div className="empty-state">
-                <strong>{copy.workspace.noBaselineTitle}</strong>
-                <p className="muted">{copy.workspace.noBaselineBody}</p>
-              </div>
-            )}
-          </section>
-        </div>
-
-        <div className="launch-bar">
-          <div className="launch-summary">
-            <article className="launch-card icon-card">
-              <VideoIcon className="section-icon" />
-              <p className="meta-label">{copy.workspace.selectedInput}</p>
-              <strong>{selectedVideo?.name ?? copy.common.chooseOne}</strong>
-              <p className="muted mono">{selectedVideo?.path ?? copy.common.waiting}</p>
-            </article>
-            <article className="launch-card icon-card">
-              <LayersIcon className="section-icon" />
-              <p className="meta-label">{copy.workspace.selectedBaseline}</p>
-              <strong>{selectedConfig?.name ?? copy.common.chooseOne}</strong>
-              <p className="muted mono">{selectedConfig?.output_dir ?? copy.common.waiting}</p>
-            </article>
-          </div>
-
-          <div className="launch-actions">
-            <p className="muted">{copy.workspace.launchCopy}</p>
-            <button type="button" className="primary-button icon-button" onClick={onStartBaselineRun} disabled={!canLaunch}>
-              <PlayIcon className="button-icon" />
-              <span>{launching ? copy.workspace.launchStarting : copy.workspace.launchButton}</span>
-            </button>
-            {launchMessage ? <p className="notice-line">{launchMessage}</p> : <p className="notice-line subtle">{copy.workspace.launchHint}</p>}
-          </div>
-        </div>
-      </section>
-
-      <div className="content-grid two-up">
-        <section className="panel">
+  if (stage === "baseline") {
+    return (
+      <div className="page-stack">
+        <section className="panel workflow-panel">
           <div className="panel-header">
             <div className="title-row">
-              <SparkIcon className="section-icon" />
-              <div>
-                <p className="eyebrow">{copy.workspace.focusEyebrow}</p>
-                <h3>{copy.workspace.focusTitle}</h3>
-                <p className="muted">{copy.workspace.focusSubtitle}</p>
-              </div>
-            </div>
-          </div>
-          {focusedRun ? (
-            <div className="focus-stack">
-              <article className="summary-card spotlight-card icon-card">
-                <ActivityIcon className="section-icon" />
-                <p className="meta-label">{copy.workspace.currentFocus}</p>
-                <strong>{focusedRun.run_id}</strong>
-                <p className="muted">
-                  {formatRunStatus(focusedRun.status)} | {focusedRun.config_name ?? copy.common.notAvailable}
-                </p>
-              </article>
-
-              <div className="mini-stat-grid">
-                <article className="mini-stat icon-card">
-                  <CheckIcon className="section-icon" />
-                  <p className="meta-label">{copy.workspace.detected}</p>
-                  <strong>{readNumber(stats, "detected")}</strong>
-                  <p className="muted">{copy.workspace.focusSubtitle}</p>
-                </article>
-                <article className="mini-stat icon-card">
-                  <ActivityIcon className="section-icon" />
-                  <p className="meta-label">{copy.workspace.lost}</p>
-                  <strong>{readNumber(stats, "lost")}</strong>
-                  <p className="muted">{copy.workspace.focusSubtitle}</p>
-                </article>
-                <article className="mini-stat icon-card">
-                  <FileIcon className="section-icon" />
-                  <p className="meta-label">{copy.workspace.artifacts}</p>
-                  <strong>{focusedRun.artifacts.length}</strong>
-                  <p className="muted">{copy.workspace.evidenceSubtitle}</p>
-                </article>
-                <article className="mini-stat icon-card">
-                  <ClockIcon className="section-icon" />
-                  <p className="meta-label">{copy.workspace.lastEvent}</p>
-                  <strong>{formatDateTime(focusedRun.completed_at ?? focusedRun.started_at ?? focusedRun.created_at)}</strong>
-                  <p className="muted">{copy.common.refreshHint}</p>
-                </article>
-              </div>
-
-              <div className="detail-grid">
-                <div className="detail-block">
-                  <p className="meta-label">{copy.workspace.inputVideo}</p>
-                  <p className="mono">{focusedRun.input_video ?? copy.common.notAvailable}</p>
-                </div>
-                <div className="detail-block">
-                  <p className="meta-label">{copy.workspace.outputDirectory}</p>
-                  <p className="mono">{focusedRun.output_dir}</p>
-                </div>
-                <div className="detail-block">
-                  <p className="meta-label">{copy.workspace.created}</p>
-                  <p>{formatDateTime(focusedRun.created_at)}</p>
-                </div>
-                <div className="detail-block">
-                  <p className="meta-label">{copy.workspace.completed}</p>
-                  <p>{focusedRun.completed_at ? formatDateTime(focusedRun.completed_at) : copy.common.stillRunning}</p>
-                </div>
-              </div>
-
-              {focusedRun.notes ? (
-                <div className="info-block">
-                  <p className="meta-label">{copy.workspace.runNotes}</p>
-                  <p className="muted">{focusedRun.notes}</p>
-                </div>
-              ) : null}
-
-              {focusedRun.error ? <div className="error-banner inline">{focusedRun.error}</div> : null}
-            </div>
-          ) : (
-            <div className="empty-state">
-              <strong>{copy.workspace.noFocusTitle}</strong>
-              <p className="muted">{copy.workspace.noFocusBody}</p>
-            </div>
-          )}
-        </section>
-
-        <section className="panel">
-          <div className="panel-header">
-            <div className="title-row">
-              <ActivityIcon className="section-icon" />
-              <div>
-                <p className="eyebrow">{copy.workspace.queueEyebrow}</p>
-                <h3>{copy.workspace.queueTitle}</h3>
-                <p className="muted">{copy.workspace.queueSubtitle}</p>
-              </div>
-            </div>
-          </div>
-          {activeRun ? (
-            <div className="summary-card icon-card">
               <PlayIcon className="section-icon" />
-              <p className="meta-label">{copy.workspace.runningNow}</p>
-              <strong>{activeRun.run_id}</strong>
-              <p className="muted">{formatRunStatus(activeRun.status)}</p>
-            </div>
-          ) : (
-            <div className="summary-card icon-card">
-              <ClockIcon className="section-icon" />
-              <p className="meta-label">{copy.workspace.runningNow}</p>
-              <strong>{copy.common.idle}</strong>
-              <p className="muted">{copy.common.noActiveRun}</p>
-            </div>
-          )}
-
-          <div className="run-list compact-list">
-            {runs.length ? (
-              runs.map((run) => {
-                const StatusIcon = runStatusIcon(run.status);
-                return (
-                  <button
-                    type="button"
-                    key={run.run_id}
-                    className={`run-row ${selectedRun?.run_id === run.run_id ? "selected" : ""}`}
-                    onClick={() => onSelectRun(run)}
-                  >
-                    <div className="run-row-lead">
-                      <div className={`run-row-icon-shell ${run.status}`}>
-                        <StatusIcon className="section-icon tiny" />
-                      </div>
-                      <div className="run-row-copy">
-                        <strong>{run.run_id}</strong>
-                        <p className="muted mono">{run.config_name ?? formatPathTail(run.output_dir)}</p>
-                        <div className="run-chip-row">
-                          <span className="tag">{formatDateTime(run.created_at)}</span>
-                          <span className="tag">{run.artifacts.length} {copy.workspace.artifacts.toLowerCase()}</span>
-                          <span className="tag">{enabledModuleCount(run)} {copy.workspace.modulesEnabled.toLowerCase()}</span>
-                        </div>
-                      </div>
-                    </div>
-                    <span className={`status-dot ${run.status}`}>{formatRunStatus(run.status)}</span>
-                  </button>
-                );
-              })
-            ) : (
-              <div className="empty-state">
-                <strong>{copy.workspace.noRunsTitle}</strong>
-                <p className="muted">{copy.workspace.noRunsBody}</p>
+              <div>
+                <p className="eyebrow">{copy.workspace.selectEyebrow}</p>
+                <h3>{copy.workspace.selectTitle}</h3>
+                <p className="muted">{copy.workspace.selectSubtitle}</p>
               </div>
-            )}
+            </div>
+          </div>
+
+          <div className="step-form-grid">
+            <section className="step-form-section">
+              <div className="section-intro title-row">
+                <VideoIcon className="section-icon" />
+                <div>
+                  <h4>{copy.workspace.inputTitle}</h4>
+                  <p className="muted">{copy.workspace.inputSubtitle}</p>
+                </div>
+              </div>
+
+              <label className="form-label">
+                <span className="meta-label">{copy.workspace.selectedInput}</span>
+                <select value={selectedInputPath} onChange={(event) => onSelectInput(event.target.value)} disabled={!inputCatalog.videos.length}>
+                  {inputCatalog.videos.length ? null : <option value="">{copy.workspace.noInputTitle}</option>}
+                  {inputCatalog.videos.map((video) => (
+                    <option key={video.path} value={video.path}>
+                      {video.name}
+                    </option>
+                  ))}
+                </select>
+              </label>
+
+              <div className="info-block compact-block">
+                <p className="meta-label">{copy.workspace.inputDirectory}</p>
+                <p className="mono">{inputCatalog.root_dir || copy.common.unavailable}</p>
+              </div>
+
+              {selectedVideo ? (
+                <div className="selection-summary-card">
+                  <strong>{selectedVideo.name}</strong>
+                  <p className="muted mono">{selectedVideo.path}</p>
+                  <div className="tag-row">
+                    <span className="tag">{formatVideoSize(selectedVideo.size_bytes)}</span>
+                    <span className="tag">{formatDateTime(selectedVideo.modified_at)}</span>
+                  </div>
+                </div>
+              ) : (
+                <div className="empty-state">
+                  <strong>{copy.workspace.noInputTitle}</strong>
+                  <p className="muted">{copy.workspace.noInputBody}</p>
+                </div>
+              )}
+            </section>
+
+            <section className="step-form-section">
+              <div className="section-intro title-row">
+                <LayersIcon className="section-icon" />
+                <div>
+                  <h4>{copy.workspace.baselineTitle}</h4>
+                  <p className="muted">{copy.workspace.baselineSubtitle}</p>
+                </div>
+              </div>
+
+              <label className="form-label">
+                <span className="meta-label">{copy.workspace.selectedBaseline}</span>
+                <select value={selectedConfigName} onChange={(event) => onSelectConfig(event.target.value)} disabled={!configs.length}>
+                  {configs.length ? null : <option value="">{copy.workspace.noBaselineTitle}</option>}
+                  {configs.map((config) => (
+                    <option key={config.name} value={config.name}>
+                      {config.name}
+                    </option>
+                  ))}
+                </select>
+              </label>
+
+              {selectedConfig ? (
+                <article className="selection-summary-card config-summary-card">
+                  <p className="meta-label">{copy.workspace.baselineSummaryTitle}</p>
+                  <strong>{selectedConfig.name}</strong>
+                  <div className="tag-row">
+                    <span className="tag">
+                      {copy.workspace.scopeLabel}: {scopeLabel(copy, selectedScope)}
+                    </span>
+                    <span className={`tag ${selectedConfig.postprocess_enabled ? "good" : ""}`}>{copy.workspace.cleanup}</span>
+                    <span className={`tag ${selectedConfig.follow_cam_enabled ? "good" : ""}`}>{copy.workspace.followCam}</span>
+                  </div>
+                  <p className="muted mono">
+                    {selectedConfig.detector_model_path ? formatPathTail(selectedConfig.detector_model_path) : copy.common.notAvailable}
+                  </p>
+                  <p className="muted mono">{selectedConfig.output_dir ?? copy.common.unavailable}</p>
+                </article>
+              ) : (
+                <div className="empty-state">
+                  <strong>{copy.workspace.noBaselineTitle}</strong>
+                  <p className="muted">{copy.workspace.noBaselineBody}</p>
+                </div>
+              )}
+            </section>
+          </div>
+
+          <div className="step-footer">
+            <div className="info-block compact-block">
+              <p className="meta-label">{copy.workspace.scopeLabel}</p>
+              <p className="muted">{copy.workspace.baselineLoopHint}</p>
+            </div>
+
+            <div className="launch-actions">
+              <p className="muted">{copy.workspace.launchCopy}</p>
+              <button type="button" className="primary-button icon-button" onClick={onStartBaselineRun} disabled={!canLaunch}>
+                <PlayIcon className="button-icon" />
+                <span>{launching ? copy.workspace.launchStarting : copy.workspace.launchButton}</span>
+              </button>
+              {launchMessage ? <p className="notice-line">{launchMessage}</p> : null}
+            </div>
           </div>
         </section>
       </div>
+    );
+  }
 
-      <section className="panel evidence-panel">
+  if (stage === "delivery") {
+    return (
+      <div className="page-stack">
+        <section className="panel">
+          <div className="panel-header">
+            <div className="title-row">
+              <FileIcon className="section-icon" />
+              <div>
+                <p className="eyebrow">{copy.workspace.deliveryEyebrow}</p>
+                <h3>{copy.workspace.deliveryTitle}</h3>
+                <p className="muted">{copy.workspace.deliverySubtitle}</p>
+              </div>
+            </div>
+          </div>
+
+          {deliveryRuns.length ? (
+            <div className="delivery-list">
+              {deliveryRuns.map((run) => (
+                <article key={run.run_id} className="delivery-row">
+                  <div className="delivery-row-head">
+                    <div className="title-row compact">
+                      <CheckIcon className="section-icon tiny" />
+                      <strong>{run.run_id}</strong>
+                    </div>
+                    <p className="muted mono">{run.config_name ?? copy.common.notAvailable}</p>
+                  </div>
+
+                  <div className="delivery-row-meta">
+                    <div className="detail-block compact-detail">
+                      <p className="meta-label">{copy.workspace.deliveryRanAt}</p>
+                      <p>{formatDateTime(run.completed_at ?? run.started_at ?? run.created_at)}</p>
+                    </div>
+                    <div className="detail-block compact-detail">
+                      <p className="meta-label">{copy.workspace.deliveryResultFolder}</p>
+                      <p className="mono">{run.output_dir}</p>
+                    </div>
+                  </div>
+                </article>
+              ))}
+            </div>
+          ) : (
+            <div className="empty-state">
+              <strong>{copy.workspace.deliveryEmptyTitle}</strong>
+              <p className="muted">{copy.workspace.deliveryEmptyBody}</p>
+            </div>
+          )}
+        </section>
+      </div>
+    );
+  }
+
+  return (
+    <div className="page-stack">
+      <section className="panel">
         <div className="panel-header">
           <div className="title-row">
-            <FileIcon className="section-icon" />
+            <SparkIcon className="section-icon" />
             <div>
-              <p className="eyebrow">{copy.workspace.evidenceEyebrow}</p>
-              <h3>{copy.workspace.evidenceTitle}</h3>
-              <p className="muted">{copy.workspace.evidenceSubtitle}</p>
+              <p className="eyebrow">{copy.workspace.focusEyebrow}</p>
+              <h3>{copy.workspace.focusTitle}</h3>
+              <p className="muted">{copy.workspace.focusSubtitle}</p>
             </div>
           </div>
         </div>
 
-        {focusedRun ? (
-          <>
-            <div className="summary-grid evidence-summary-grid">
-              <div className="summary-card icon-card">
+        {selectedRun ? (
+          <div className="focus-stack">
+            <article className="summary-card spotlight-card icon-card">
+              <ActivityIcon className="section-icon" />
+              <p className="meta-label">{copy.workspace.currentFocus}</p>
+              <strong>{selectedRun.run_id}</strong>
+              <p className="muted">
+                {formatRunStatus(selectedRun.status)} | {selectedRun.config_name ?? copy.common.notAvailable}
+              </p>
+            </article>
+
+            <div className="mini-stat-grid">
+              <article className="mini-stat icon-card">
+                <CheckIcon className="section-icon" />
+                <p className="meta-label">{copy.workspace.detected}</p>
+                <strong>{readNumber(stats, "detected")}</strong>
+                <p className="muted">{copy.workspace.focusSubtitle}</p>
+              </article>
+              <article className="mini-stat icon-card">
                 <ActivityIcon className="section-icon" />
-                <p className="meta-label">{copy.workspace.run}</p>
-                <strong>{focusedRun.run_id}</strong>
-                <p className="muted mono">{focusedRun.config_name ?? copy.common.notAvailable}</p>
-              </div>
-              <div className="summary-card icon-card">
-                <LayersIcon className="section-icon" />
-                <p className="meta-label">{copy.workspace.modulesEnabled}</p>
-                <div className="tag-row">
-                  <span className={`tag ${focusedRun.modules_enabled.postprocess ? "good" : ""}`}>{copy.workspace.cleanup}</span>
-                  <span className={`tag ${focusedRun.modules_enabled.follow_cam ? "good" : ""}`}>{copy.workspace.followCam}</span>
-                </div>
-                <p className="muted">{copy.workspace.evidenceSubtitle}</p>
-              </div>
-              <div className="summary-card icon-card">
+                <p className="meta-label">{copy.workspace.lost}</p>
+                <strong>{readNumber(stats, "lost")}</strong>
+                <p className="muted">{copy.workspace.focusSubtitle}</p>
+              </article>
+              <article className="mini-stat icon-card">
                 <FileIcon className="section-icon" />
-                <p className="meta-label">{copy.workspace.artifactsReady}</p>
-                <strong>{focusedRun.artifacts.length}</strong>
+                <p className="meta-label">{copy.workspace.artifacts}</p>
+                <strong>{selectedRun.artifacts.length}</strong>
                 <p className="muted">{copy.workspace.evidenceSubtitle}</p>
+              </article>
+              <article className="mini-stat icon-card">
+                <ClockIcon className="section-icon" />
+                <p className="meta-label">{copy.workspace.lastEvent}</p>
+                <strong>{formatDateTime(selectedRun.completed_at ?? selectedRun.started_at ?? selectedRun.created_at)}</strong>
+                <p className="muted">{copy.common.refreshHint}</p>
+              </article>
+            </div>
+
+            <div className="detail-grid">
+              <div className="detail-block">
+                <p className="meta-label">{copy.workspace.inputVideo}</p>
+                <p className="mono">{selectedRun.input_video ?? copy.common.notAvailable}</p>
               </div>
-              <div className="summary-card icon-card">
-                <FolderIcon className="section-icon" />
-                <p className="meta-label">{copy.workspace.outputFolder}</p>
-                <strong>{formatPathTail(focusedRun.output_dir)}</strong>
-                <p className="muted mono">{focusedRun.output_dir}</p>
+              <div className="detail-block">
+                <p className="meta-label">{copy.workspace.outputDirectory}</p>
+                <p className="mono">{selectedRun.output_dir}</p>
+              </div>
+              <div className="detail-block">
+                <p className="meta-label">{copy.workspace.created}</p>
+                <p>{formatDateTime(selectedRun.created_at)}</p>
+              </div>
+              <div className="detail-block">
+                <p className="meta-label">{copy.workspace.completed}</p>
+                <p>{selectedRun.completed_at ? formatDateTime(selectedRun.completed_at) : copy.common.stillRunning}</p>
               </div>
             </div>
 
-            <div className="video-grid">
-              <div className="video-card">
-                <p className="meta-label">{copy.workspace.followCamVideo}</p>
-                <video controls src={api.artifactUrl(focusedRun.run_id, "follow_cam.mp4")} />
-              </div>
-              <div className="video-card">
-                <p className="meta-label">{copy.workspace.cleanedVideo}</p>
-                <video controls src={api.artifactUrl(focusedRun.run_id, "annotated.cleaned.mp4")} />
-              </div>
-            </div>
-
-            <ArtifactList
-              run={focusedRun}
-              preferredNames={[
-                "follow_cam.mp4",
-                "annotated.cleaned.mp4",
-                "ball_track.cleaned.csv",
-                "cleanup_report.json",
-                "follow_cam_report.json",
-              ]}
-            />
-          </>
+            {selectedRun.error ? <div className="error-banner inline">{selectedRun.error}</div> : null}
+          </div>
         ) : (
           <div className="empty-state">
-            <strong>{copy.workspace.noEvidenceTitle}</strong>
-            <p className="muted">{copy.workspace.noEvidenceBody}</p>
+            <strong>{copy.workspace.noFocusTitle}</strong>
+            <p className="muted">{copy.workspace.noFocusBody}</p>
+          </div>
+        )}
+      </section>
+
+      <section className="panel">
+        <div className="panel-header">
+          <div className="title-row">
+            <ActivityIcon className="section-icon" />
+            <div>
+              <p className="eyebrow">{copy.workspace.queueEyebrow}</p>
+              <h3>{copy.workspace.queueTitle}</h3>
+              <p className="muted">{copy.workspace.queueSubtitle}</p>
+            </div>
+          </div>
+        </div>
+
+        {runs.length ? (
+          <div className="run-list compact-list">
+            {runs.map((run) => {
+              const StatusIcon = runStatusIcon(run.status);
+              return (
+                <button
+                  type="button"
+                  key={run.run_id}
+                  className={`run-row ${selectedRun?.run_id === run.run_id ? "selected" : ""}`}
+                  onClick={() => onSelectRun(run)}
+                >
+                  <div className="run-row-lead">
+                    <div className={`run-row-icon-shell ${run.status}`}>
+                      <StatusIcon className="section-icon tiny" />
+                    </div>
+                    <div className="run-row-copy">
+                      <strong>{run.run_id}</strong>
+                      <p className="muted mono">{run.config_name ?? formatPathTail(run.output_dir)}</p>
+                      <div className="run-chip-row">
+                        <span className="tag">{formatDateTime(run.created_at)}</span>
+                        <span className="tag">{formatRunStatus(run.status)}</span>
+                      </div>
+                    </div>
+                  </div>
+                </button>
+              );
+            })}
+          </div>
+        ) : (
+          <div className="empty-state">
+            <strong>{copy.workspace.noRunsTitle}</strong>
+            <p className="muted">{copy.workspace.noRunsBody}</p>
           </div>
         )}
       </section>

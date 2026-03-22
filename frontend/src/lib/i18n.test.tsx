@@ -49,11 +49,11 @@ describe("i18n", () => {
     );
 
     expect(screen.getByText("Football Tracking Operator")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "中" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "\u4e2d" })).toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("button", { name: "中" }));
+    fireEvent.click(screen.getByRole("button", { name: "\u4e2d" }));
 
-    expect(screen.getByText("足球跟踪控制台")).toBeInTheDocument();
+    expect(screen.getByText("\u8db3\u7403\u8ddf\u8e2a\u63a7\u5236\u53f0")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "EN" })).toBeInTheDocument();
     expect(document.documentElement.lang).toBe("zh-CN");
     expect(window.localStorage.getItem("football-tracking-language")).toBe("zh");
@@ -61,7 +61,7 @@ describe("i18n", () => {
     fireEvent.click(screen.getByRole("button", { name: "EN" }));
 
     expect(screen.getByText("Football Tracking Operator")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "中" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "\u4e2d" })).toBeInTheDocument();
     expect(document.documentElement.lang).toBe("en");
     expect(window.localStorage.getItem("football-tracking-language")).toBe("en");
   });
