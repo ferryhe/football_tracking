@@ -81,6 +81,10 @@ function runStatusIcon(status: string) {
   return ActivityIcon;
 }
 
+function runMoment(run: RunRecord): string {
+  return run.completed_at ?? run.started_at ?? run.created_at;
+}
+
 function inferConfigScope(configName: string | null | undefined): "full" | "partial" | "standard" {
   const value = configName?.toLowerCase() ?? "";
   if (/(sample|short|debug|preview|first|partial|quick)/.test(value)) {
@@ -396,32 +400,37 @@ export function WorkspacePage({
         </div>
 
         {runs.length ? (
-          <div className="run-list compact-list">
-            {runs.map((run) => {
-              const StatusIcon = runStatusIcon(run.status);
-              return (
-                <button
-                  type="button"
-                  key={run.run_id}
-                  className={`run-row ${selectedRun?.run_id === run.run_id ? "selected" : ""}`}
-                  onClick={() => onSelectRun(run)}
-                >
-                  <div className="run-row-lead">
-                    <div className={`run-row-icon-shell ${run.status}`}>
-                      <StatusIcon className="section-icon tiny" />
-                    </div>
-                    <div className="run-row-copy">
-                      <strong>{run.run_id}</strong>
-                      <p className="muted mono">{run.config_name ?? formatPathTail(run.output_dir)}</p>
-                      <div className="run-chip-row">
-                        <span className="tag">{formatDateTime(run.created_at)}</span>
-                        <span className="tag">{formatRunStatus(run.status)}</span>
-                      </div>
-                    </div>
-                  </div>
-                </button>
-              );
-            })}
+          <div className="step-form-section">
+            <label className="form-label">
+              <span className="meta-label">{copy.workspace.focusRun}</span>
+              <select
+                value={selectedRun?.run_id ?? ""}
+                onChange={(event) => {
+                  const nextRun = runs.find((item) => item.run_id === event.target.value);
+                  if (nextRun) {
+                    onSelectRun(nextRun);
+                  }
+                }}
+              >
+                {runs.map((run) => (
+                  <option key={run.run_id} value={run.run_id}>
+                    {`${formatDateTime(runMoment(run))} | ${run.run_id} | ${formatRunStatus(run.status)}`}
+                  </option>
+                ))}
+              </select>
+            </label>
+
+            {selectedRun ? (
+              <div className="selection-summary-card">
+                <strong>{selectedRun.run_id}</strong>
+                <p className="muted mono">{selectedRun.config_name ?? formatPathTail(selectedRun.output_dir)}</p>
+                <div className="tag-row">
+                  <span className="tag">{formatDateTime(runMoment(selectedRun))}</span>
+                  <span className="tag">{formatRunStatus(selectedRun.status)}</span>
+                </div>
+                <p className="muted mono">{selectedRun.output_dir}</p>
+              </div>
+            ) : null}
           </div>
         ) : (
           <div className="empty-state">
