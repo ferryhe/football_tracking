@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState, type ComponentType, type SVGProps } from "react";
 
 import { AIPanel } from "../components/AIPanel";
-import { ActivityIcon, FileIcon, PlayIcon, SparkIcon } from "../components/Icons";
+import { ActivityIcon, ClockIcon, FileIcon, PlayIcon, SparkIcon } from "../components/Icons";
 import { LanguageToggle } from "../components/LanguageToggle";
 import { api } from "../lib/api";
 import { useI18n } from "../lib/i18n";
@@ -215,8 +215,15 @@ export function App() {
           : copy.workspace.deliverySubtitle,
         state: stage === "delivery" ? "current" : latestCompletedRun ? "complete" : "upcoming",
       },
+      {
+        key: "history",
+        icon: ClockIcon,
+        title: copy.workspace.queueTitle,
+        detail: focusedRun ? focusedRun.run_id : copy.workspace.queueSubtitle,
+        state: stage === "history" ? "current" : orderedRuns.length ? "complete" : "upcoming",
+      },
     ],
-    [copy, focusedRun, formatDateTime, latestCompletedRun, selectedConfig, selectedVideo, stage],
+    [copy, focusedRun, formatDateTime, latestCompletedRun, orderedRuns.length, selectedConfig, selectedVideo, stage],
   );
 
   return (
