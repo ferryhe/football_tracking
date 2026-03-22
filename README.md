@@ -303,3 +303,11 @@ Current frontend scope:
   - generate a grounded recommendation
   - preview a config patch
   - derive a new generated config with explicit confirmation
+
+## Verification
+
+Backend/API smoke tests:
+
+```powershell
+.\.venv\Scripts\python.exe -m unittest discover -s tests -p "test_*.py"
+```
