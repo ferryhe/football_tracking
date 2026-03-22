@@ -77,6 +77,7 @@ export function AIPanel({ run, configs, targetInputVideo, onConfigDerived, onRun
           run_id: run.run_id,
           config_name: run.config_name,
           focus: objective,
+          language,
         });
         if (!cancelled) {
           setExplanation(explain);
@@ -100,7 +101,7 @@ export function AIPanel({ run, configs, targetInputVideo, onConfigDerived, onRun
     return () => {
       cancelled = true;
     };
-  }, [copy.ai.activityExplain, objective, run]);
+  }, [copy.ai.activityExplain, language, objective, run]);
 
   async function handleRecommend() {
     if (!run) {
@@ -113,6 +114,7 @@ export function AIPanel({ run, configs, targetInputVideo, onConfigDerived, onRun
       const nextSuggestion = await api.aiRecommend({
         run_id: run.run_id,
         objective,
+        language,
       });
       setSuggestion(nextSuggestion);
       if (run.config_name) {

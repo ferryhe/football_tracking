@@ -186,6 +186,35 @@ class ApiServiceSmokeTests(unittest.TestCase):
         self.assertTrue(any(line.startswith("follow_cam.") for line in recommendation["patch_preview"]))
         self.assertTrue(recommendation["output_name_suggestion"].startswith("default_"))
 
+    def test_ai_explain_language_zh_returns_chinese_summary(self) -> None:
+        self.create_output_bundle("kept_baseline")
+        run = self.service.list_runs()[0]
+
+        explanation = self.service.ai_explain(
+            run_id=run["run_id"],
+            config_name=run["config_name"],
+            focus="\u7a33\u5b9a\u955c\u5934",
+            language="zh",
+        )
+
+        self.assertIn("\u8fd0\u884c", explanation["summary"])
+        self.assertIn("\u5f53\u524d\u76ee\u6807", explanation["summary"])
+        self.assertTrue(any("\u8fd0\u884c\u72b6\u6001" in item for item in explanation["evidence"]))
+
+    def test_ai_recommend_language_zh_returns_chinese_copy(self) -> None:
+        self.create_output_bundle("kept_baseline")
+        run = self.service.list_runs()[0]
+
+        recommendation = self.service.ai_recommend(
+            run_id=run["run_id"],
+            objective="\u8ba9\u955c\u5934\u66f4\u7a33\u4e00\u4e9b",
+            language="zh",
+        )
+
+        self.assertEqual("\u8ddf\u968f\u955c\u5934\u7a33\u5b9a\u5316", recommendation["title"])
+        self.assertIn("\u5e73\u79fb", recommendation["recommendation"])
+        self.assertTrue(any("\u8ddf\u968f\u955c\u5934" in item for item in recommendation["evidence"]))
+
     def test_create_app_registers_expected_routes(self) -> None:
         app = create_app(self.repo_root)
         route_paths = {route.path for route in app.routes}

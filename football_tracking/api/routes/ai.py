@@ -24,6 +24,7 @@ def explain(request: AIExplainRequest, service: ApiService = Depends(get_service
                 run_id=request.run_id,
                 config_name=request.config_name,
                 focus=request.focus,
+                language=request.language,
             )
         )
     except (KeyError, FileNotFoundError) as exc:
@@ -33,7 +34,13 @@ def explain(request: AIExplainRequest, service: ApiService = Depends(get_service
 @router.post("/ai/recommend", response_model=AISuggestion)
 def recommend(request: AIRecommendRequest, service: ApiService = Depends(get_service)) -> AISuggestion:
     try:
-        return AISuggestion(**service.ai_recommend(run_id=request.run_id, objective=request.objective))
+        return AISuggestion(
+            **service.ai_recommend(
+                run_id=request.run_id,
+                objective=request.objective,
+                language=request.language,
+            )
+        )
     except (KeyError, FileNotFoundError) as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 

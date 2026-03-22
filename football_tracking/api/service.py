@@ -4,6 +4,7 @@ import csv
 import json
 import mimetypes
 import threading
+import unicodedata
 from copy import deepcopy
 from dataclasses import asdict, is_dataclass
 from datetime import datetime, timezone
@@ -53,6 +54,32 @@ def _flatten_patch_lines(patch: dict[str, Any], prefix: str = "") -> list[str]:
         else:
             lines.append(f"{current_key}: {value}")
     return lines
+
+
+def _normalize_ai_language(language: str | None) -> str:
+    return "zh" if language == "zh" else "en"
+
+
+def _localized_text(language: str, *, en: str, zh: str) -> str:
+    return zh if language == "zh" else en
+
+
+def _localized_run_status(language: str, status: str) -> str:
+    labels = {
+        "en": {
+            "queued": "queued",
+            "running": "running",
+            "completed": "completed",
+            "failed": "failed",
+        },
+        "zh": {
+            "queued": "\u6392\u961f\u4e2d",
+            "running": "\u8fd0\u884c\u4e2d",
+            "completed": "\u5df2\u5b8c\u6210",
+            "failed": "\u5931\u8d25",
+        },
+    }
+    return labels[language].get(status, status)
 
 
 class ApiService:
@@ -185,23 +212,51 @@ class ApiService:
             "rows": rows[offset : offset + limit],
         }
 
-    def ai_explain(self, run_id: str | None, config_name: str | None, focus: str | None) -> dict[str, Any]:
+    def ai_explain(
+        self,
+        run_id: str | None,
+        config_name: str | None,
+        focus: str | None,
+        language: str | None = None,
+    ) -> dict[str, Any]:
+        resolved_language = _normalize_ai_language(language)
         if self.ai_client.is_enabled():
             try:
-                return self._ai_explain_with_model(run_id=run_id, config_name=config_name, focus=focus)
+                return self._ai_explain_with_model(
+                    run_id=run_id,
+                    config_name=config_name,
+                    focus=focus,
+                    language=resolved_language,
+                )
             except Exception:
                 pass
-        return self._ai_explain_heuristic(run_id=run_id, config_name=config_name, focus=focus)
+        return self._ai_explain_heuristic(
+            run_id=run_id,
+            config_name=config_name,
+            focus=focus,
+            language=resolved_language,
+        )
 
-    def ai_recommend(self, run_id: str, objective: str | None) -> dict[str, Any]:
+    def ai_recommend(self, run_id: str, objective: str | None, language: str | None = None) -> dict[str, Any]:
+        resolved_language = _normalize_ai_language(language)
         if self.ai_client.is_enabled():
             try:
-                return self._ai_recommend_with_model(run_id=run_id, objective=objective)
+                return self._ai_recommend_with_model(
+                    run_id=run_id,
+                    objective=objective,
+                    language=resolved_language,
+                )
             except Exception:
                 pass
-        return self._ai_recommend_heuristic(run_id=run_id, objective=objective)
+        return self._ai_recommend_heuristic(run_id=run_id, objective=objective, language=resolved_language)
 
-    def _ai_explain_heuristic(self, run_id: str | None, config_name: str | None, focus: str | None) -> dict[str, Any]:
+    def _ai_explain_heuristic(
+        self,
+        run_id: str | None,
+        config_name: str | None,
+        focus: str | None,
+        language: str,
+    ) -> dict[str, Any]:
         evidence: list[str] = []
         summary_parts: list[str] = []
 
@@ -210,17 +265,43 @@ class ApiService:
             raw_stats = run.get("stats", {}).get("raw", {})
             cleaned_stats = run.get("stats", {}).get("cleaned", {})
             summary_parts.append(
-                f"Run {run_id} is {run['status']} with cleaned detected ratio "
-                f"{float(cleaned_stats.get('detected_ratio', raw_stats.get('detected_ratio', 0.0))) * 100:.1f}%."
+                _localized_text(
+                    language,
+                    en=(
+                        f"Run {run_id} is {_localized_run_status(language, run['status'])} with cleaned detected ratio "
+                        f"{float(cleaned_stats.get('detected_ratio', raw_stats.get('detected_ratio', 0.0))) * 100:.1f}%."
+                    ),
+                    zh=(
+                        f"\u8fd0\u884c {run_id} \u5f53\u524d\u4e3a{_localized_run_status(language, run['status'])}"
+                        f"\uff0c\u6e05\u6d17\u540e\u68c0\u6d4b\u7387\u4e3a "
+                        f"{float(cleaned_stats.get('detected_ratio', raw_stats.get('detected_ratio', 0.0))) * 100:.1f}%\u3002"
+                    ),
+                )
             )
             evidence.extend(
                 [
-                    f"run.status={run['status']}",
-                    f"run.config={run.get('config_name')}",
-                    f"raw.detected={raw_stats.get('detected')}",
-                    f"raw.lost={raw_stats.get('lost')}",
-                    f"cleaned.detected={cleaned_stats.get('detected')}",
-                    f"cleaned.lost={cleaned_stats.get('lost')}",
+                    _localized_text(language, en=f"Run status={run['status']}", zh=f"\u8fd0\u884c\u72b6\u6001={run['status']}"),
+                    _localized_text(
+                        language,
+                        en=f"Run config={run.get('config_name')}",
+                        zh=f"\u8fd0\u884c\u914d\u7f6e={run.get('config_name')}",
+                    ),
+                    _localized_text(
+                        language,
+                        en=f"Raw detected={raw_stats.get('detected')}",
+                        zh=f"\u539f\u59cb\u68c0\u6d4b={raw_stats.get('detected')}",
+                    ),
+                    _localized_text(language, en=f"Raw lost={raw_stats.get('lost')}", zh=f"\u539f\u59cb\u4e22\u5931={raw_stats.get('lost')}"),
+                    _localized_text(
+                        language,
+                        en=f"Cleaned detected={cleaned_stats.get('detected')}",
+                        zh=f"\u6e05\u6d17\u540e\u68c0\u6d4b={cleaned_stats.get('detected')}",
+                    ),
+                    _localized_text(
+                        language,
+                        en=f"Cleaned lost={cleaned_stats.get('lost')}",
+                        zh=f"\u6e05\u6d17\u540e\u4e22\u5931={cleaned_stats.get('lost')}",
+                    ),
                 ]
             )
 
@@ -228,28 +309,58 @@ class ApiService:
             config = self.get_config(config_name)
             resolved = config["resolved"]
             summary_parts.append(
-                f"Config {config_name} has postprocess={resolved.get('postprocess', {}).get('enabled')} "
-                f"and follow_cam={resolved.get('follow_cam', {}).get('enabled')}."
+                _localized_text(
+                    language,
+                    en=(
+                        f"Config {config_name} has postprocess={resolved.get('postprocess', {}).get('enabled')} "
+                        f"and follow_cam={resolved.get('follow_cam', {}).get('enabled')}."
+                    ),
+                    zh=(
+                        f"\u914d\u7f6e {config_name} \u4e2d postprocess="
+                        f"{resolved.get('postprocess', {}).get('enabled')} \uff0cfollow_cam="
+                        f"{resolved.get('follow_cam', {}).get('enabled')}\u3002"
+                    ),
+                )
             )
             evidence.extend(
                 [
-                    f"config.output_dir={config['summary']['output_dir']}",
-                    f"config.input_video={config['summary']['input_video']}",
+                    _localized_text(
+                        language,
+                        en=f"Config output={config['summary']['output_dir']}",
+                        zh=f"\u914d\u7f6e\u8f93\u51fa\u76ee\u5f55={config['summary']['output_dir']}",
+                    ),
+                    _localized_text(
+                        language,
+                        en=f"Config input={config['summary']['input_video']}",
+                        zh=f"\u914d\u7f6e\u8f93\u5165\u89c6\u9891={config['summary']['input_video']}",
+                    ),
                 ]
             )
 
         if focus:
-            summary_parts.append(f"Requested focus: {focus}.")
+            summary_parts.append(
+                _localized_text(
+                    language,
+                    en=f"Requested focus: {focus}.",
+                    zh=f"\u5f53\u524d\u76ee\u6807\uff1a{focus}\u3002",
+                )
+            )
 
         if not summary_parts:
-            summary_parts.append("No run or config was provided, so AI explanation has no grounded evidence yet.")
+            summary_parts.append(
+                _localized_text(
+                    language,
+                    en="No run or config was provided, so AI explanation has no grounded evidence yet.",
+                    zh="\u8fd8\u6ca1\u6709\u63d0\u4f9b run \u6216\u914d\u7f6e\uff0c\u6240\u4ee5\u73b0\u5728\u8fd8\u6ca1\u6709\u53ef\u843d\u5730\u7684\u8bc1\u636e\u6458\u8981\u3002",
+                )
+            )
 
         return {
             "summary": " ".join(summary_parts),
             "evidence": evidence,
         }
 
-    def _ai_recommend_heuristic(self, run_id: str, objective: str | None) -> dict[str, Any]:
+    def _ai_recommend_heuristic(self, run_id: str, objective: str | None, language: str) -> dict[str, Any]:
         run = self.get_run(run_id)
         config_name = run.get("config_name")
         if not config_name:
@@ -266,21 +377,49 @@ class ApiService:
         mean_crop_height = float(follow_cam_stats.get("mean_crop_height", 0.0) or 0.0)
 
         patch: dict[str, Any] = {}
-        title = "Grounded Recommendation"
-        diagnosis = (
-            f"Detected ratio is {detected_ratio * 100:.1f}% and lost ratio is {lost_ratio * 100:.1f}% "
-            f"for run {run_id}."
+        output_slug = "grounded_recommendation"
+        title = _localized_text(
+            language,
+            en="Grounded Recommendation",
+            zh="\u57fa\u4e8e\u8bc1\u636e\u7684\u5efa\u8bae",
         )
-        recommendation = "Stay on the current baseline and make only targeted adjustments."
-        expected_tradeoff = "Conservative changes keep current gains and avoid reintroducing noisy regressions."
+        diagnosis = _localized_text(
+            language,
+            en=(
+                f"Detected ratio is {detected_ratio * 100:.1f}% and lost ratio is {lost_ratio * 100:.1f}% "
+                f"for run {run_id}."
+            ),
+            zh=(
+                f"\u8fd0\u884c {run_id} \u7684\u68c0\u6d4b\u7387\u4e3a {detected_ratio * 100:.1f}%"
+                f"\uff0c\u4e22\u5931\u7387\u4e3a {lost_ratio * 100:.1f}%\u3002"
+            ),
+        )
+        recommendation = _localized_text(
+            language,
+            en="Stay on the current baseline and make only targeted adjustments.",
+            zh="\u5148\u7559\u5728\u5f53\u524d\u57fa\u7ebf\u4e0a\uff0c\u53ea\u505a\u6709\u9488\u5bf9\u6027\u7684\u5c0f\u8c03\u6574\u3002",
+        )
+        expected_tradeoff = _localized_text(
+            language,
+            en="Conservative changes keep current gains and avoid reintroducing noisy regressions.",
+            zh="\u4fdd\u5b88\u6539\u52a8\u80fd\u5c3d\u91cf\u4fdd\u4f4f\u73b0\u5728\u7684\u6536\u76ca\uff0c\u907f\u514d\u518d\u6b21\u5f15\u5165\u660e\u663e\u566a\u58f0\u56de\u9000\u3002",
+        )
         evidence = [
-            f"run_id={run_id}",
-            f"config={config_name}",
-            f"cleaned.detected_ratio={detected_ratio:.4f}",
-            f"cleaned.lost_ratio={lost_ratio:.4f}",
+            _localized_text(language, en=f"Run ID={run_id}", zh=f"\u8fd0\u884c ID={run_id}"),
+            _localized_text(language, en=f"Config={config_name}", zh=f"\u914d\u7f6e={config_name}"),
+            _localized_text(
+                language,
+                en=f"Cleaned detected ratio={detected_ratio:.4f}",
+                zh=f"\u6e05\u6d17\u540e\u68c0\u6d4b\u7387={detected_ratio:.4f}",
+            ),
+            _localized_text(
+                language,
+                en=f"Cleaned lost ratio={lost_ratio:.4f}",
+                zh=f"\u6e05\u6d17\u540e\u4e22\u5931\u7387={lost_ratio:.4f}",
+            ),
         ]
 
-        if any(token in objective_text for token in ["camera", "follow", "zoom", "pan"]):
+        if any(token in objective_text for token in ["camera", "follow", "zoom", "pan", "\u955c\u5934", "\u8ddf\u968f", "\u8ddf\u62cd", "\u5e73\u79fb", "\u7f29\u653e", "\u76f8\u673a"]):
             current_follow = config["resolved"].get("follow_cam", {})
             patch = {
                 "follow_cam": {
@@ -291,16 +430,38 @@ class ApiService:
                     "zoom_hold_frames_after_change": int(current_follow.get("zoom_hold_frames_after_change", 16)) + 4,
                 }
             }
-            title = "Follow-Cam Stabilization"
-            diagnosis = (
-                f"Mean crop height is {mean_crop_height:.1f}px. The fastest win is to make pan and zoom slower to react."
+            output_slug = "follow_cam_stabilization"
+            title = _localized_text(language, en="Follow-Cam Stabilization", zh="\u8ddf\u968f\u955c\u5934\u7a33\u5b9a\u5316")
+            diagnosis = _localized_text(
+                language,
+                en=f"Mean crop height is {mean_crop_height:.1f}px. The fastest win is to make pan and zoom slower to react.",
+                zh=(
+                    f"\u5e73\u5747\u88c1\u5207\u9ad8\u5ea6\u4e3a {mean_crop_height:.1f}px\u3002"
+                    "\u6700\u76f4\u63a5\u7684\u6539\u8fdb\u662f\u5148\u653e\u6162\u5e73\u79fb\u548c\u7f29\u653e\u7684\u53cd\u5e94\u901f\u5ea6\u3002"
+                ),
             )
-            recommendation = "Slow pan response first and require longer zoom confirmation before changing crop depth."
-            expected_tradeoff = "The camera will feel steadier, but fast breaks may take slightly longer to catch up."
+            recommendation = _localized_text(
+                language,
+                en="Slow pan response first and require longer zoom confirmation before changing crop depth.",
+                zh="\u5148\u653e\u6162\u5e73\u79fb\u54cd\u5e94\uff0c\u5e76\u63d0\u9ad8\u7f29\u653e\u786e\u8ba4\u65f6\u95f4\uff0c\u518d\u6539\u53d8\u753b\u9762\u6df1\u5ea6\u3002",
+            )
+            expected_tradeoff = _localized_text(
+                language,
+                en="The camera will feel steadier, but fast breaks may take slightly longer to catch up.",
+                zh="\u955c\u5934\u4f1a\u66f4\u7a33\uff0c\u4f46\u5feb\u901f\u653b\u9632\u8f6c\u6362\u65f6\u53ef\u80fd\u4f1a\u7a0d\u6162\u4e00\u70b9\u8ddf\u4e0a\u3002",
+            )
             evidence.extend(
                 [
-                    f"follow_cam.mean_crop_height={mean_crop_height:.2f}",
-                    f"follow_cam.enabled={run.get('modules_enabled', {}).get('follow_cam')}",
+                    _localized_text(
+                        language,
+                        en=f"Follow-cam mean crop height={mean_crop_height:.2f}",
+                        zh=f"\u8ddf\u968f\u955c\u5934\u5e73\u5747\u88c1\u5207\u9ad8\u5ea6={mean_crop_height:.2f}",
+                    ),
+                    _localized_text(
+                        language,
+                        en=f"Follow-cam enabled={run.get('modules_enabled', {}).get('follow_cam')}",
+                        zh=f"\u8ddf\u968f\u955c\u5934\u5df2\u542f\u7528={run.get('modules_enabled', {}).get('follow_cam')}",
+                    ),
                 ]
             )
         elif lost_ratio > 0.18:
@@ -323,10 +484,23 @@ class ApiService:
                     }
                 }
             }
-            title = "Reacquire Tightening"
-            diagnosis = "Lost ratio is still material, but global detector loosening is riskier than targeted reacquire tightening."
-            recommendation = "Tighten tentative reacquire acceptance before changing detector sensitivity."
-            expected_tradeoff = "This should suppress noisy far-jump recoveries, but may delay a few true long-gap reacquires."
+            output_slug = "reacquire_tightening"
+            title = _localized_text(language, en="Reacquire Tightening", zh="\u91cd\u65b0\u6355\u83b7\u6536\u7d27")
+            diagnosis = _localized_text(
+                language,
+                en="Lost ratio is still material, but global detector loosening is riskier than targeted reacquire tightening.",
+                zh="\u4e22\u5931\u7387\u4ecd\u7136\u504f\u9ad8\uff0c\u4f46\u76f4\u63a5\u5168\u5c40\u653e\u5bbd detector \u98ce\u9669\u66f4\u5927\uff0c\u5148\u6536\u7d27\u91cd\u65b0\u6355\u83b7\u4f1a\u66f4\u7a33\u3002",
+            )
+            recommendation = _localized_text(
+                language,
+                en="Tighten tentative reacquire acceptance before changing detector sensitivity.",
+                zh="\u5148\u6536\u7d27 tentative reacquire \u7684\u63a5\u53d7\u9608\u503c\uff0c\u518d\u8003\u8651\u52a8 detector \u7075\u654f\u5ea6\u3002",
+            )
+            expected_tradeoff = _localized_text(
+                language,
+                en="This should suppress noisy far-jump recoveries, but may delay a few true long-gap reacquires.",
+                zh="\u8fd9\u4f1a\u538b\u6389\u4e00\u4e9b\u566a\u58f0\u6027\u7684\u8fdc\u8df3\u6062\u590d\uff0c\u4f46\u4e5f\u53ef\u80fd\u8ba9\u5c11\u6570\u771f\u5b9e\u7684\u957f\u95f4\u9694\u91cd\u6355\u7a0d\u5fae\u6162\u4e00\u70b9\u3002",
+            )
         else:
             current_post = config["resolved"].get("postprocess", {})
             patch = {
@@ -338,13 +512,25 @@ class ApiService:
                     ),
                 }
             }
-            title = "Post-Cleanup Tightening"
-            diagnosis = "Tracking is already strong enough that cleanup is a safer place to shave visible noise."
-            recommendation = "Prefer small cleanup threshold changes before touching detector or tracker behavior."
-            expected_tradeoff = "A stricter cleanup pass may hide a few borderline true detections along with short noise islands."
+            output_slug = "post_cleanup_tightening"
+            title = _localized_text(language, en="Post-Cleanup Tightening", zh="\u6e05\u6d17\u9636\u6bb5\u6536\u7d27")
+            diagnosis = _localized_text(
+                language,
+                en="Tracking is already strong enough that cleanup is a safer place to shave visible noise.",
+                zh="\u8ddf\u8e2a\u4e3b\u4f53\u5df2\u7ecf\u8db3\u591f\u7a33\uff0c\u5148\u5728 cleanup \u73af\u8282\u53bb\u6389\u53ef\u89c1\u566a\u58f0\u4f1a\u66f4\u5b89\u5168\u3002",
+            )
+            recommendation = _localized_text(
+                language,
+                en="Prefer small cleanup threshold changes before touching detector or tracker behavior.",
+                zh="\u5148\u8c03\u5c0f cleanup \u9608\u503c\uff0c\u5c3d\u91cf\u4e0d\u8981\u5148\u52a8 detector \u6216 tracker \u884c\u4e3a\u3002",
+            )
+            expected_tradeoff = _localized_text(
+                language,
+                en="A stricter cleanup pass may hide a few borderline true detections along with short noise islands.",
+                zh="\u66f4\u4e25\u7684 cleanup \u53ef\u80fd\u4f1a\u5728\u538b\u6389\u77ed\u566a\u58f0\u6bb5\u7684\u540c\u65f6\uff0c\u4e5f\u85cf\u6389\u5c11\u91cf\u8fb9\u7f18\u771f\u5b9e\u68c0\u6d4b\u3002",
+            )
 
-        slug = self._slugify(objective or title)
-        output_name_suggestion = f"{Path(config_name).stem}_{slug}"
+        output_name_suggestion = f"{Path(config_name).stem}_{output_slug}"
 
         return {
             "title": title,
@@ -357,14 +543,26 @@ class ApiService:
             "output_name_suggestion": output_name_suggestion,
         }
 
-    def _ai_explain_with_model(self, run_id: str | None, config_name: str | None, focus: str | None) -> dict[str, Any]:
-        payload = self._build_ai_context(run_id=run_id, config_name=config_name, focus=focus)
+    def _ai_explain_with_model(
+        self,
+        run_id: str | None,
+        config_name: str | None,
+        focus: str | None,
+        language: str,
+    ) -> dict[str, Any]:
+        payload = self._build_ai_context(run_id=run_id, config_name=config_name, focus=focus, language=language)
         prompt = json.dumps(payload, ensure_ascii=False, indent=2)
+        language_instruction = _localized_text(
+            language,
+            en="Write all human-readable output in English.",
+            zh="Write all human-readable output in Simplified Chinese.",
+        )
         instructions = (
             "You are helping operate a football tracking system. "
             "Return strict JSON with keys: summary (string), evidence (array of short strings). "
             "Ground every sentence in the provided evidence. "
-            "Do not invent artifacts, files, or metrics."
+            "Do not invent artifacts, files, or metrics. "
+            f"{language_instruction}"
         )
         response = self.ai_client.create_json_response(
             instructions=instructions,
@@ -376,21 +574,28 @@ class ApiService:
             "evidence": [str(item) for item in response.get("evidence", []) if str(item).strip()],
         }
 
-    def _ai_recommend_with_model(self, run_id: str, objective: str | None) -> dict[str, Any]:
+    def _ai_recommend_with_model(self, run_id: str, objective: str | None, language: str) -> dict[str, Any]:
         run = self.get_run(run_id)
         config_name = run.get("config_name")
         if not config_name:
             raise FileNotFoundError(f"Run {run_id} is not linked to a config.")
 
-        payload = self._build_ai_context(run_id=run_id, config_name=config_name, focus=objective)
+        payload = self._build_ai_context(run_id=run_id, config_name=config_name, focus=objective, language=language)
         prompt = json.dumps(payload, ensure_ascii=False, indent=2)
+        language_instruction = _localized_text(
+            language,
+            en="Write all human-readable fields in English. Keep patch keys and patch_preview paths in code-style English.",
+            zh="Write all human-readable fields in Simplified Chinese. Keep patch keys and patch_preview paths in code-style English.",
+        )
         instructions = (
             "You are recommending the next config adjustment for a football tracking pipeline. "
             "Return strict JSON with keys: title, diagnosis, recommendation, expected_tradeoff, patch, patch_preview, evidence, output_name_suggestion. "
             "The patch must be a nested object suitable for YAML merge. "
             "Only touch conservative operator-facing parameters in follow_cam, postprocess, scene_bias.dynamic_air_recovery, selection, or tracking. "
             "Do not suggest destructive changes. "
-            "Patch preview must be a flat array of 'path: value' strings matching the patch object."
+            "Patch preview must be a flat array of 'path: value' strings matching the patch object. "
+            "output_name_suggestion must be a short lowercase ASCII slug. "
+            f"{language_instruction}"
         )
         response = self.ai_client.create_json_response(
             instructions=instructions,
@@ -426,8 +631,14 @@ class ApiService:
             "patch_preview": _flatten_patch_lines(patch),
         }
 
-    def _build_ai_context(self, run_id: str | None, config_name: str | None, focus: str | None) -> dict[str, Any]:
-        context: dict[str, Any] = {"focus": focus}
+    def _build_ai_context(
+        self,
+        run_id: str | None,
+        config_name: str | None,
+        focus: str | None,
+        language: str,
+    ) -> dict[str, Any]:
+        context: dict[str, Any] = {"focus": focus, "response_language": language}
 
         if config_name:
             config = self.get_config(config_name)
@@ -849,6 +1060,7 @@ class ApiService:
             return json.load(handle)
 
     def _slugify(self, text: str) -> str:
-        cleaned = "".join(char.lower() if char.isalnum() else "_" for char in text.strip())
+        normalized = unicodedata.normalize("NFKD", text.strip()).encode("ascii", "ignore").decode("ascii")
+        cleaned = "".join(char.lower() if char.isalnum() else "_" for char in normalized)
         collapsed = "_".join(filter(None, cleaned.split("_")))
         return collapsed[:48] or "ai_update"

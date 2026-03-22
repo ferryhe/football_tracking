@@ -6,6 +6,7 @@ from pydantic import BaseModel, Field
 
 
 RunStatus = Literal["queued", "running", "completed", "failed"]
+AIResponseLanguage = Literal["en", "zh"]
 
 
 class HealthResponse(BaseModel):
@@ -102,11 +103,13 @@ class AIExplainRequest(BaseModel):
     run_id: str | None = None
     config_name: str | None = None
     focus: str | None = None
+    language: AIResponseLanguage = "en"
 
 
 class AIRecommendRequest(BaseModel):
     run_id: str
     objective: str | None = None
+    language: AIResponseLanguage = "en"
 
 
 class AIConfigDiffRequest(BaseModel):
