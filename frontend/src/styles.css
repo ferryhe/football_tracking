@@ -1122,9 +1122,27 @@ textarea {
   font-weight: 700;
 }
 
+.detail-card[open] {
+  gap: 12px;
+}
+
+.detail-card > *:not(summary) {
+  min-width: 0;
+}
+
+.detail-lead {
+  margin: 0;
+  line-height: 1.7;
+}
+
 .flat-list {
   margin: 8px 0 0;
   padding-left: 18px;
+}
+
+.evidence-list li {
+  line-height: 1.65;
+  overflow-wrap: break-word;
 }
 
 .compact-evidence {
@@ -1141,6 +1159,17 @@ textarea {
   border-radius: 14px;
   padding: 12px;
   font-size: 0.85rem;
+  max-width: 100%;
+}
+
+.patch-block {
+  white-space: pre;
+  overflow-x: auto;
+  overflow-y: auto;
+  overflow-wrap: normal;
+  word-break: normal;
+  line-height: 1.6;
+  tab-size: 2;
 }
 
 .code-block.compact {

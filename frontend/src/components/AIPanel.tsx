@@ -355,13 +355,13 @@ export function AIPanel({ run, configs, targetInputVideo, onConfigDerived, onRun
       {suggestion ? (
         <details className="assistant-card detail-card">
           <summary>{copy.ai.evidencePatch}</summary>
-          <p className="muted">{suggestion.diagnosis}</p>
-          <ul className="flat-list">
+          <p className="muted detail-lead">{suggestion.diagnosis}</p>
+          <ul className="flat-list evidence-list">
             {suggestion.evidence.map((item) => (
               <li key={item}>{item}</li>
             ))}
           </ul>
-          <pre className="code-block compact">{(suggestion.patchPreview ?? []).join("\n")}</pre>
+          <pre className="code-block compact patch-block">{(suggestion.patchPreview ?? []).join("\n")}</pre>
         </details>
       ) : null}
 
@@ -370,7 +370,7 @@ export function AIPanel({ run, configs, targetInputVideo, onConfigDerived, onRun
           <summary>{copy.ai.configDiff}</summary>
           <p className="muted mono">{diffPreview.base_config_name}</p>
           <p className="muted mono">generated/{diffPreview.output_name}.yaml</p>
-          <pre className="code-block compact">{diffPreview.patch_preview.join("\n")}</pre>
+          <pre className="code-block compact patch-block">{diffPreview.patch_preview.join("\n")}</pre>
         </details>
       ) : null}
     </div>
