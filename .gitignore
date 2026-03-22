@@ -10,3 +10,4 @@ config/generated/
 frontend/node_modules/
 frontend/dist/
 *.tsbuildinfo
+.run/

@@ -10,5 +10,5 @@ if not exist "%PYTHON_EXE%" (
   exit /b 1
 )
 
-"%PYTHON_EXE%" "%ROOT_DIR%scripts\start_ui.py" %*
+"%PYTHON_EXE%" "%ROOT_DIR%scripts\start_ui.py" --stop
 exit /b %errorlevel%

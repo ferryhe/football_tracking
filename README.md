@@ -103,9 +103,23 @@ One-click local UI startup:
 .\start_ui.cmd
 ```
 
-`start_ui.cmd` now waits for the backend health endpoint before launching the Vite frontend.
-The frontend also polls the backend every few seconds, so it can recover if the API starts slightly later
-or is restarted during local development.
+`start_ui.cmd` now uses a managed launcher:
+
+- it stops the last backend/frontend pair that it started
+- it auto-selects the next free localhost ports if `8000` or `5173` are unavailable
+- it waits for the backend health endpoint before launching the Vite frontend
+
+If you want the steadiest backend startup on Windows, disable hot reload:
+
+```powershell
+.\start_ui.cmd --no-reload
+```
+
+To stop the managed UI processes without starting a new pair:
+
+```powershell
+.\stop_ui.cmd
+```
 
 ## Outputs
 
