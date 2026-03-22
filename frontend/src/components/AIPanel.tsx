@@ -10,7 +10,7 @@ import type {
   ConfigListItem,
   RunRecord,
 } from "../lib/types";
-import { FileIcon, LayersIcon, PlayIcon, SparkIcon, WandIcon } from "./Icons";
+import { FileIcon, PlayIcon, SparkIcon, WandIcon } from "./Icons";
 
 interface AIPanelProps {
   run: RunRecord | null;
@@ -43,8 +43,9 @@ const PANEL_COPY: Record<
     explainHint: string;
     explanationTitle: string;
     explanationEmpty: string;
-    suggestTitle: string;
-    suggestHint: string;
+    suggestionTitle: string;
+    suggestionEmpty: string;
+    objectiveDetails: string;
     updateButton: string;
     updateHint: string;
     runHint: string;
@@ -55,28 +56,30 @@ const PANEL_COPY: Record<
 > = {
   en: {
     explainButton: "Explain selected run",
-    explainHint: "Choose one finished run, then explain it manually so tokens are only spent when you actually need AI.",
+    explainHint: "Pick one finished run, then trigger AI only when you need an explanation.",
     explanationTitle: "AI explanation",
     explanationEmpty: "No explanation yet. Pick a run in step 2, then click explain.",
-    suggestTitle: "Suggested next config",
-    suggestHint: "After the explanation finishes, AI creates the first config suggestion automatically.",
+    suggestionTitle: "Suggested next config",
+    suggestionEmpty: "The first suggestion will appear after the explanation finishes.",
+    objectiveDetails: "Adjust objective",
     updateButton: "Update suggestion",
-    updateHint: "If you want a different direction, edit the objective and regenerate the suggestion.",
-    runHint: "After the suggestion looks right, start the next task with the generated config.",
+    updateHint: "Edit the objective only when you want a different direction.",
+    runHint: "When the suggested config looks right, start the next task.",
     readyMessage: "Explanation finished and the first suggestion is ready.",
     updatedMessage: "Suggestion updated.",
     noPatchReady: "No AI patch is ready yet.",
   },
   zh: {
     explainButton: "\u89e3\u91ca\u5df2\u9009\u7ed3\u679c",
-    explainHint: "\u5148\u9009\u4e00\u4e2a\u5df2\u8dd1\u51fa\u6765\u7684 run\uff0c\u518d\u624b\u52a8\u70b9\u51fb\u89e3\u91ca\uff0c\u8fd9\u6837\u53ea\u5728\u771f\u6b63\u9700\u8981 AI \u65f6\u624d\u6d88\u8017 token\u3002",
+    explainHint: "\u5148\u9009\u4e00\u4e2a\u5df2\u8dd1\u51fa\u6765\u7684 run\uff0c\u771f\u6b63\u9700\u8981 AI \u89e3\u91ca\u65f6\u518d\u624b\u52a8\u89e6\u53d1\u3002",
     explanationTitle: "AI \u89e3\u91ca",
     explanationEmpty: "\u8fd8\u6ca1\u6709 AI \u89e3\u91ca\u3002\u5148\u5728\u7b2c\u4e8c\u6b65\u9009\u4e00\u4e2a run\uff0c\u7136\u540e\u70b9\u51fb\u89e3\u91ca\u3002",
-    suggestTitle: "\u5efa\u8bae\u7684\u65b0\u914d\u7f6e",
-    suggestHint: "\u89e3\u91ca\u5b8c\u6210\u540e\uff0cAI \u4f1a\u81ea\u52a8\u5148\u751f\u6210\u4e00\u7248\u65b0\u914d\u7f6e\u5efa\u8bae\u3002",
+    suggestionTitle: "\u5efa\u8bae\u7684\u65b0\u914d\u7f6e",
+    suggestionEmpty: "\u89e3\u91ca\u5b8c\u6210\u540e\uff0c\u7b2c\u4e00\u7248\u5efa\u8bae\u4f1a\u51fa\u73b0\u5728\u8fd9\u91cc\u3002",
+    objectiveDetails: "\u8c03\u6574\u76ee\u6807",
     updateButton: "\u66f4\u65b0\u5efa\u8bae",
-    updateHint: "\u5982\u679c\u4f60\u60f3\u6362\u4e2a\u65b9\u5411\uff0c\u5148\u6539\u4e0b\u9762\u7684\u76ee\u6807\uff0c\u518d\u91cd\u65b0\u751f\u6210\u5efa\u8bae\u3002",
-    runHint: "\u914d\u7f6e\u786e\u8ba4\u597d\u4e4b\u540e\uff0c\u5c31\u53ef\u4ee5\u76f4\u63a5\u542f\u52a8\u4e0b\u4e00\u4e2a\u4efb\u52a1\u3002",
+    updateHint: "\u53ea\u6709\u60f3\u6362\u65b9\u5411\u65f6\uff0c\u624d\u9700\u8981\u6539\u4e0b\u9762\u7684\u76ee\u6807\u3002",
+    runHint: "\u786e\u8ba4\u65b0\u914d\u7f6e\u6ca1\u95ee\u9898\u540e\uff0c\u5c31\u53ef\u4ee5\u76f4\u63a5\u542f\u52a8\u4e0b\u4e00\u4e2a\u4efb\u52a1\u3002",
     readyMessage: "\u89e3\u91ca\u5b8c\u6210\uff0c\u7b2c\u4e00\u7248\u5efa\u8bae\u5df2\u751f\u6210\u3002",
     updatedMessage: "\u5efa\u8bae\u5df2\u66f4\u65b0\u3002",
     noPatchReady: "\u8fd8\u6ca1\u6709\u53ef\u4ee5\u542f\u52a8\u7684 AI \u914d\u7f6e\u8865\u4e01\u3002",
@@ -114,6 +117,7 @@ export function AIPanel({ run, configs, targetInputVideo, onConfigDerived, onRun
     setExplanation(null);
     setSuggestion(null);
     setDiffPreview(null);
+    setLastDerivedConfig(null);
     setStatusMessage(null);
     setActivityLabel(null);
   }, [run?.run_id]);
@@ -226,8 +230,7 @@ export function AIPanel({ run, configs, targetInputVideo, onConfigDerived, onRun
     }
   }
 
-  const evidencePoints = explanation?.evidence ?? [];
-  const patchLines = suggestion?.patchPreview ?? [];
+  const nextConfigName = diffPreview?.output_name ?? suggestion?.outputNameSuggestion ?? "-";
 
   return (
     <div className="assistant-shell">
@@ -241,7 +244,7 @@ export function AIPanel({ run, configs, targetInputVideo, onConfigDerived, onRun
           </div>
         </div>
 
-        <div className="assistant-context">
+        <div className="assistant-context compact-context">
           <div className="meta-row">
             <span className="meta-label">{copy.ai.evidenceRun}</span>
             <span className="mono">{run?.run_id ?? copy.common.noneSelected}</span>
@@ -256,37 +259,56 @@ export function AIPanel({ run, configs, targetInputVideo, onConfigDerived, onRun
           </div>
         </div>
 
+        <div className="assistant-actions compact-actions">
+          <button type="button" className="secondary-button icon-button" onClick={handleExplain} disabled={!run || loading}>
+            <SparkIcon className="button-icon" />
+            <span>{panelCopy.explainButton}</span>
+          </button>
+          <button
+            type="button"
+            className="primary-button icon-button"
+            onClick={handleApplyAndRun}
+            disabled={!run || !suggestion || !diffPreview || loading}
+          >
+            <PlayIcon className="button-icon" />
+            <span>{copy.ai.buttonRun}</span>
+          </button>
+        </div>
+
         <p className="notice-line subtle">{panelCopy.explainHint}</p>
-
-        <button type="button" className="secondary-button icon-button" onClick={handleExplain} disabled={!run || loading}>
-          <SparkIcon className="button-icon" />
-          <span>{panelCopy.explainButton}</span>
-        </button>
-
         {activityLabel ? <p className="notice-line subtle">{activityLabel}</p> : null}
         {statusMessage ? <p className="notice-line">{statusMessage}</p> : null}
 
         <div className="signal-card">
           <p className="meta-label">{panelCopy.explanationTitle}</p>
           <p className="assistant-summary-copy">{explanation?.summary ?? panelCopy.explanationEmpty}</p>
-          {evidencePoints.length ? (
-            <ul className="flat-list compact-evidence">
-              {evidencePoints.map((item) => (
-                <li key={item}>{item}</li>
-              ))}
-            </ul>
+        </div>
+
+        <div className="signal-card">
+          <div className="meta-row">
+            <span className="meta-label">{panelCopy.suggestionTitle}</span>
+            <strong className="mono">{nextConfigName}</strong>
+          </div>
+          {suggestion ? (
+            <>
+              <p className="assistant-reco">{suggestion.recommendation}</p>
+              <p className="muted">{suggestion.expected_tradeoff}</p>
+              <p className="muted">{panelCopy.runHint}</p>
+            </>
+          ) : (
+            <p className="assistant-summary-copy">{panelCopy.suggestionEmpty}</p>
+          )}
+          {lastDerivedConfig ? (
+            <p className="muted mono">
+              {copy.ai.latestDerived}: {lastDerivedConfig.name}
+            </p>
           ) : null}
         </div>
       </section>
 
-      <section className="assistant-card">
-        <div className="panel-header title-row">
-          <FileIcon className="section-icon" />
-          <div>
-            <h3>{panelCopy.suggestTitle}</h3>
-            <p className="muted">{panelCopy.suggestHint}</p>
-          </div>
-        </div>
+      <details className="assistant-card detail-card">
+        <summary>{panelCopy.objectiveDetails}</summary>
+        <p className="muted">{panelCopy.updateHint}</p>
 
         <label className="assistant-form-label">
           <span className="meta-label">{copy.ai.objective}</span>
@@ -317,9 +339,7 @@ export function AIPanel({ run, configs, targetInputVideo, onConfigDerived, onRun
           </button>
         </div>
 
-        <p className="muted">{panelCopy.updateHint}</p>
-
-        <div className="assistant-actions">
+        <div className="assistant-actions compact-actions">
           <button
             type="button"
             className="secondary-button icon-button"
@@ -329,54 +349,8 @@ export function AIPanel({ run, configs, targetInputVideo, onConfigDerived, onRun
             <SparkIcon className="button-icon" />
             <span>{panelCopy.updateButton}</span>
           </button>
-          <button
-            type="button"
-            className="primary-button icon-button"
-            onClick={handleApplyAndRun}
-            disabled={!run || !suggestion || !diffPreview || loading}
-          >
-            <PlayIcon className="button-icon" />
-            <span>{copy.ai.buttonRun}</span>
-          </button>
         </div>
-
-        <p className="muted">{panelCopy.runHint}</p>
-
-        {suggestion ? (
-          <div className="signal-card">
-            <p className="meta-label">{copy.ai.recommendation}</p>
-            <p className="assistant-reco">{suggestion.recommendation}</p>
-            <p className="muted">{suggestion.expected_tradeoff}</p>
-          </div>
-        ) : null}
-
-        <div className="mini-stat-grid assistant-mini-grid">
-          <article className="mini-stat icon-card">
-            <LayersIcon className="section-icon" />
-            <p className="meta-label">{copy.ai.evidencePoints}</p>
-            <strong>{evidencePoints.length}</strong>
-            <p className="muted">{copy.ai.readoutSubtitle}</p>
-          </article>
-          <article className="mini-stat icon-card">
-            <FileIcon className="section-icon" />
-            <p className="meta-label">{copy.ai.patchLines}</p>
-            <strong>{patchLines.length}</strong>
-            <p className="muted">{copy.ai.readoutSubtitle}</p>
-          </article>
-          <article className="mini-stat icon-card">
-            <WandIcon className="section-icon" />
-            <p className="meta-label">{copy.ai.nextConfig}</p>
-            <strong className="mono">{diffPreview?.output_name ?? suggestion?.outputNameSuggestion ?? "-"}</strong>
-            <p className="muted">{copy.ai.readoutSubtitle}</p>
-          </article>
-        </div>
-
-        {lastDerivedConfig ? (
-          <p className="muted mono">
-            {copy.ai.latestDerived}: {lastDerivedConfig.name}
-          </p>
-        ) : null}
-      </section>
+      </details>
 
       {suggestion ? (
         <details className="assistant-card detail-card">

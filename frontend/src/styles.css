@@ -605,6 +605,10 @@ table {
   gap: 8px;
 }
 
+.compact-context {
+  gap: 6px;
+}
+
 .compact-block {
   padding: 14px 16px;
 }
@@ -1096,6 +1100,11 @@ textarea {
   line-height: 1.7;
 }
 
+.compact-actions {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
 .signal-card {
   display: grid;
   gap: 8px;
@@ -1241,6 +1250,7 @@ td {
   .step-form-grid,
   .assistant-stage-grid,
   .assistant-mini-grid,
+  .compact-actions,
   .delivery-row-meta {
     grid-template-columns: 1fr;
   }
