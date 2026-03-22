@@ -26,6 +26,18 @@ class ConfigListItem(BaseModel):
     exists: dict[str, bool]
 
 
+class InputVideoItem(BaseModel):
+    name: str
+    path: str
+    size_bytes: int
+    modified_at: str
+
+
+class InputCatalogResponse(BaseModel):
+    root_dir: str
+    videos: list[InputVideoItem] = Field(default_factory=list)
+
+
 class ConfigDetail(BaseModel):
     name: str
     path: str

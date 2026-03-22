@@ -18,6 +18,18 @@ export interface ConfigListItem {
   exists: Record<string, boolean>;
 }
 
+export interface InputVideoItem {
+  name: string;
+  path: string;
+  size_bytes: number;
+  modified_at: string;
+}
+
+export interface InputCatalog {
+  root_dir: string;
+  videos: InputVideoItem[];
+}
+
 export interface ConfigDetail {
   name: string;
   path: string;

@@ -60,6 +60,7 @@ class ApiService:
         self.repo_root = repo_root
         self.config_dir = repo_root / "config"
         self.outputs_dir = repo_root / "outputs"
+        self.data_dir = repo_root / "data"
         self.registry_path = repo_root / "data" / "run_registry.json"
         self.generated_config_dir = self.config_dir / "generated"
         self._lock = threading.Lock()
@@ -85,6 +86,29 @@ class ApiService:
                 relative_name = config_path.relative_to(self.config_dir).as_posix()
                 items.append(self._build_config_summary(config_path, relative_name))
         return items
+
+    def list_input_videos(self) -> dict[str, Any]:
+        supported_suffixes = {".mp4", ".mov", ".mkv", ".avi", ".m4v"}
+        videos: list[dict[str, Any]] = []
+        if self.data_dir.exists():
+            for video_path in sorted(self.data_dir.rglob("*"), key=lambda item: item.name.lower()):
+                if not video_path.is_file():
+                    continue
+                if video_path.suffix.lower() not in supported_suffixes:
+                    continue
+                stat = video_path.stat()
+                videos.append(
+                    {
+                        "name": video_path.relative_to(self.data_dir).as_posix(),
+                        "path": str(video_path.resolve()),
+                        "size_bytes": stat.st_size,
+                        "modified_at": datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat(),
+                    }
+                )
+        return {
+            "root_dir": str(self.data_dir.resolve()),
+            "videos": videos,
+        }
 
     def get_config(self, name: str) -> dict[str, Any]:
         config_path, relative_name = self._resolve_config_path(name)

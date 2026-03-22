@@ -52,10 +52,11 @@ export function RunsPage({ configs, runs, loading, onRunCreated }: RunsPageProps
   }
 
   return (
-    <div className="page-grid two-column">
+    <div className="page-stack">
       <section className="panel">
         <div className="panel-header">
           <h3>Launch Run</h3>
+          <p className="muted">Pick one config, limit the frame range if needed, and keep the notes short.</p>
         </div>
         <form className="form-stack" onSubmit={handleSubmit}>
           <label>
@@ -93,7 +94,7 @@ export function RunsPage({ configs, runs, loading, onRunCreated }: RunsPageProps
 
           <label>
             <span>Notes</span>
-            <textarea value={notes} onChange={(event) => setNotes(event.target.value)} rows={4} />
+            <textarea value={notes} onChange={(event) => setNotes(event.target.value)} rows={3} />
           </label>
 
           <button className="primary-button" type="submit" disabled={loading || submitting}>
@@ -106,8 +107,9 @@ export function RunsPage({ configs, runs, loading, onRunCreated }: RunsPageProps
       <section className="panel">
         <div className="panel-header">
           <h3>Run Queue</h3>
+          <p className="muted">Recent activity only. Use Review when you need the full evidence bundle.</p>
         </div>
-        <div className="run-list">
+        <div className="run-list compact-list">
           {runs.map((run) => (
             <div key={run.run_id} className="run-row static">
               <div>

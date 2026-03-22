@@ -6,12 +6,13 @@ import type {
   ConfigDetail,
   ConfigListItem,
   HealthResponse,
+  InputCatalog,
   RunRecord,
 } from "./types";
 
 const API_BASE_URL =
   (import.meta.env.VITE_API_BASE_URL as string | undefined)?.replace(/\/$/, "") ??
-  "http://127.0.0.1:8000/api/v1";
+  "/api/v1";
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`${API_BASE_URL}${path}`, {
@@ -33,6 +34,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 export const api = {
   baseUrl: API_BASE_URL,
   getHealth: () => request<HealthResponse>("/health"),
+  listInputs: () => request<InputCatalog>("/inputs"),
   listConfigs: () => request<ConfigListItem[]>("/configs"),
   getConfig: (name: string) => request<ConfigDetail>(`/configs/${encodeURIComponent(name)}`),
   deriveConfig: (body: Record<string, unknown>) =>

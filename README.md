@@ -97,6 +97,16 @@ Full cleaned delivery:
 .\.venv\Scripts\python.exe main.py --config config/real_v24_full_postclean.yaml
 ```
 
+One-click local UI startup:
+
+```powershell
+.\start_ui.cmd
+```
+
+`start_ui.cmd` now waits for the backend health endpoint before launching the Vite frontend.
+The frontend also polls the backend every few seconds, so it can recover if the API starts slightly later
+or is restarted during local development.
+
 ## Outputs
 
 Raw tracking normally writes:
@@ -206,9 +216,14 @@ Run locally:
 .\.venv\Scripts\python.exe -m uvicorn football_tracking.api.app:app --reload
 ```
 
+The Vite frontend proxies `/api/*` to `http://127.0.0.1:8000`, so the default local setup does not need
+`VITE_API_BASE_URL`. If you want the frontend to point at a different backend, set `VITE_API_BASE_URL`
+explicitly.
+
 Current phase-1 endpoints:
 
 - `GET /api/v1/health`
+- `GET /api/v1/inputs`
 - `GET /api/v1/configs`
 - `GET /api/v1/configs/{name}`
 - `POST /api/v1/configs/derive`
@@ -220,6 +235,28 @@ Current phase-1 endpoints:
 - `GET /api/v1/runs/{run_id}/cleanup-report`
 - `GET /api/v1/runs/{run_id}/follow-cam-report`
 - `GET /api/v1/runs/{run_id}/camera-path`
+
+## Current Local UI Shape
+
+The local UI is intentionally being simplified into a single AI-native workspace instead of a traditional
+multi-page control surface.
+
+The primary workflow is now:
+
+1. Put a source video under `data/`
+2. Select that video from the discovered input list
+3. Launch one baseline run
+4. Review the latest output in-place
+5. Ask AI to recommend and run the next config from the selected run evidence
+
+The default workspace keeps only four things in focus:
+
+- input directory and selectable videos
+- current / recent tasks
+- latest outputs
+- AI console
+
+Detailed reports, patch previews, and config diffs stay secondary and are shown only when needed.
 - `POST /api/v1/ai/explain`
 - `POST /api/v1/ai/recommend`
 - `POST /api/v1/ai/config-diff`
@@ -256,9 +293,11 @@ npm run dev
 
 Current frontend scope:
 
-- Dashboard for kept configs and recent runs
-- Runs page to launch local jobs through the API
-- Review page for raw/cleaned/follow-cam artifacts and reports
+- Single workspace view for:
+  - choosing one discovered input video
+  - choosing one kept baseline config
+  - launching one baseline run
+  - reviewing the focused run evidence in place
 - AI-native side panel that can:
   - explain a selected run
   - generate a grounded recommendation
