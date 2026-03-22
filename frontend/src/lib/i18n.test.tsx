@@ -38,7 +38,7 @@ describe("i18n", () => {
     expect(detectPreferredLanguage()).toBe("en");
   });
 
-  it("switches between English and Chinese and persists the choice", () => {
+  it("toggles between English and Chinese and persists the choice", () => {
     setNavigatorLanguage("en-US");
 
     render(
@@ -49,16 +49,19 @@ describe("i18n", () => {
     );
 
     expect(screen.getByText("Football Tracking Operator")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "中" })).toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("button", { name: "中文" }));
+    fireEvent.click(screen.getByRole("button", { name: "中" }));
 
     expect(screen.getByText("足球跟踪控制台")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "EN" })).toBeInTheDocument();
     expect(document.documentElement.lang).toBe("zh-CN");
     expect(window.localStorage.getItem("football-tracking-language")).toBe("zh");
 
     fireEvent.click(screen.getByRole("button", { name: "EN" }));
 
     expect(screen.getByText("Football Tracking Operator")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "中" })).toBeInTheDocument();
     expect(document.documentElement.lang).toBe("en");
     expect(window.localStorage.getItem("football-tracking-language")).toBe("en");
   });

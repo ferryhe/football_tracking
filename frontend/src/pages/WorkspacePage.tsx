@@ -21,9 +21,13 @@ interface WorkspacePageProps {
   selectedRun: RunRecord | null;
   selectedInputPath: string;
   selectedConfigName: string;
+  loading: boolean;
+  launching: boolean;
+  launchMessage: string | null;
   onSelectRun: (run: RunRecord) => void;
   onSelectInput: (path: string) => void;
   onSelectConfig: (name: string) => void;
+  onStartBaselineRun: () => Promise<void>;
 }
 
 function getTrackStats(run: RunRecord | null): Record<string, unknown> | null {
@@ -88,21 +92,28 @@ export function WorkspacePage({
   selectedRun,
   selectedInputPath,
   selectedConfigName,
+  loading,
+  launching,
+  launchMessage,
   onSelectRun,
   onSelectInput,
   onSelectConfig,
+  onStartBaselineRun,
 }: WorkspacePageProps) {
   const { copy, formatDateTime, formatRunStatus } = useI18n();
-  const stats = getTrackStats(selectedRun);
   const activeRun = runs.find((item) => item.status === "running" || item.status === "queued") ?? null;
   const focusedRun = selectedRun ?? activeRun;
+  const stats = getTrackStats(focusedRun);
+  const selectedVideo = inputCatalog.videos.find((item) => item.path === selectedInputPath) ?? null;
+  const selectedConfig = configs.find((item) => item.name === selectedConfigName) ?? null;
+  const canLaunch = !loading && !launching && Boolean(selectedInputPath) && Boolean(selectedConfigName);
 
   return (
     <div className="page-stack">
       <section className="panel workflow-panel">
         <div className="panel-header">
           <div className="title-row">
-            <FolderIcon className="section-icon" />
+            <PlayIcon className="section-icon" />
             <div>
               <p className="eyebrow">{copy.workspace.selectEyebrow}</p>
               <h3>{copy.workspace.selectTitle}</h3>
@@ -200,7 +211,31 @@ export function WorkspacePage({
           </section>
         </div>
 
-        <p className="notice-line subtle">{copy.workspace.launchHint}</p>
+        <div className="launch-bar">
+          <div className="launch-summary">
+            <article className="launch-card icon-card">
+              <VideoIcon className="section-icon" />
+              <p className="meta-label">{copy.workspace.selectedInput}</p>
+              <strong>{selectedVideo?.name ?? copy.common.chooseOne}</strong>
+              <p className="muted mono">{selectedVideo?.path ?? copy.common.waiting}</p>
+            </article>
+            <article className="launch-card icon-card">
+              <LayersIcon className="section-icon" />
+              <p className="meta-label">{copy.workspace.selectedBaseline}</p>
+              <strong>{selectedConfig?.name ?? copy.common.chooseOne}</strong>
+              <p className="muted mono">{selectedConfig?.output_dir ?? copy.common.waiting}</p>
+            </article>
+          </div>
+
+          <div className="launch-actions">
+            <p className="muted">{copy.workspace.launchCopy}</p>
+            <button type="button" className="primary-button icon-button" onClick={onStartBaselineRun} disabled={!canLaunch}>
+              <PlayIcon className="button-icon" />
+              <span>{launching ? copy.workspace.launchStarting : copy.workspace.launchButton}</span>
+            </button>
+            {launchMessage ? <p className="notice-line">{launchMessage}</p> : <p className="notice-line subtle">{copy.workspace.launchHint}</p>}
+          </div>
+        </div>
       </section>
 
       <div className="content-grid two-up">
@@ -367,51 +402,51 @@ export function WorkspacePage({
           </div>
         </div>
 
-        {selectedRun ? (
+        {focusedRun ? (
           <>
             <div className="summary-grid evidence-summary-grid">
               <div className="summary-card icon-card">
                 <ActivityIcon className="section-icon" />
                 <p className="meta-label">{copy.workspace.run}</p>
-                <strong>{selectedRun.run_id}</strong>
-                <p className="muted mono">{selectedRun.config_name ?? copy.common.notAvailable}</p>
+                <strong>{focusedRun.run_id}</strong>
+                <p className="muted mono">{focusedRun.config_name ?? copy.common.notAvailable}</p>
               </div>
               <div className="summary-card icon-card">
                 <LayersIcon className="section-icon" />
                 <p className="meta-label">{copy.workspace.modulesEnabled}</p>
                 <div className="tag-row">
-                  <span className={`tag ${selectedRun.modules_enabled.postprocess ? "good" : ""}`}>{copy.workspace.cleanup}</span>
-                  <span className={`tag ${selectedRun.modules_enabled.follow_cam ? "good" : ""}`}>{copy.workspace.followCam}</span>
+                  <span className={`tag ${focusedRun.modules_enabled.postprocess ? "good" : ""}`}>{copy.workspace.cleanup}</span>
+                  <span className={`tag ${focusedRun.modules_enabled.follow_cam ? "good" : ""}`}>{copy.workspace.followCam}</span>
                 </div>
                 <p className="muted">{copy.workspace.evidenceSubtitle}</p>
               </div>
               <div className="summary-card icon-card">
                 <FileIcon className="section-icon" />
                 <p className="meta-label">{copy.workspace.artifactsReady}</p>
-                <strong>{selectedRun.artifacts.length}</strong>
+                <strong>{focusedRun.artifacts.length}</strong>
                 <p className="muted">{copy.workspace.evidenceSubtitle}</p>
               </div>
               <div className="summary-card icon-card">
                 <FolderIcon className="section-icon" />
                 <p className="meta-label">{copy.workspace.outputFolder}</p>
-                <strong>{formatPathTail(selectedRun.output_dir)}</strong>
-                <p className="muted mono">{selectedRun.output_dir}</p>
+                <strong>{formatPathTail(focusedRun.output_dir)}</strong>
+                <p className="muted mono">{focusedRun.output_dir}</p>
               </div>
             </div>
 
             <div className="video-grid">
               <div className="video-card">
                 <p className="meta-label">{copy.workspace.followCamVideo}</p>
-                <video controls src={api.artifactUrl(selectedRun.run_id, "follow_cam.mp4")} />
+                <video controls src={api.artifactUrl(focusedRun.run_id, "follow_cam.mp4")} />
               </div>
               <div className="video-card">
                 <p className="meta-label">{copy.workspace.cleanedVideo}</p>
-                <video controls src={api.artifactUrl(selectedRun.run_id, "annotated.cleaned.mp4")} />
+                <video controls src={api.artifactUrl(focusedRun.run_id, "annotated.cleaned.mp4")} />
               </div>
             </div>
 
             <ArtifactList
-              run={selectedRun}
+              run={focusedRun}
               preferredNames={[
                 "follow_cam.mp4",
                 "annotated.cleaned.mp4",
