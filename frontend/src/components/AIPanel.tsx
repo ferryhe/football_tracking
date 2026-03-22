@@ -1,19 +1,28 @@
 import { useEffect, useState } from "react";
 
 import { api } from "../lib/api";
-import type { AIConfigDiffResponse, AIExplainResponse, AssistantSuggestion, ConfigListItem, RunRecord } from "../lib/types";
+import type {
+  AIConfigDiffResponse,
+  AIExplainResponse,
+  AssistantSuggestion,
+  ConfigDetail,
+  ConfigListItem,
+  RunRecord,
+} from "../lib/types";
 
 interface AIPanelProps {
   run: RunRecord | null;
   configs: ConfigListItem[];
-  onConfigDerived: () => Promise<void> | void;
+  onConfigDerived: () => Promise<ConfigListItem[]> | Promise<void> | void;
+  onRunCreated: (run: RunRecord) => Promise<void> | void;
 }
 
-export function AIPanel({ run, configs, onConfigDerived }: AIPanelProps) {
+export function AIPanel({ run, configs, onConfigDerived, onRunCreated }: AIPanelProps) {
   const [objective, setObjective] = useState("stabilize follow-cam without making it sluggish");
   const [explanation, setExplanation] = useState<AIExplainResponse | null>(null);
   const [suggestion, setSuggestion] = useState<AssistantSuggestion | null>(null);
   const [diffPreview, setDiffPreview] = useState<AIConfigDiffResponse | null>(null);
+  const [lastDerivedConfig, setLastDerivedConfig] = useState<ConfigDetail | null>(null);
   const [deriveStatus, setDeriveStatus] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
 
@@ -24,6 +33,7 @@ export function AIPanel({ run, configs, onConfigDerived }: AIPanelProps) {
         setExplanation(null);
         setSuggestion(null);
         setDiffPreview(null);
+        setLastDerivedConfig(null);
         return;
       }
       setLoading(true);
@@ -82,20 +92,55 @@ export function AIPanel({ run, configs, onConfigDerived }: AIPanelProps) {
     }
   }
 
-  async function handleDerive() {
+  async function deriveCurrentConfig(): Promise<ConfigDetail | null> {
     if (!run?.config_name || !suggestion?.patch || !diffPreview) {
+      return null;
+    }
+    const derived = await api.deriveConfig({
+      base_config_name: run.config_name,
+      output_name: diffPreview.output_name,
+      patch: suggestion.patch,
+    });
+    setLastDerivedConfig(derived);
+    await onConfigDerived();
+    return derived;
+  }
+
+  async function handleDerive() {
+    setLoading(true);
+    setDeriveStatus(null);
+    try {
+      const derived = await deriveCurrentConfig();
+      if (derived) {
+        setDeriveStatus(`Derived config saved: ${derived.name}`);
+      }
+    } catch (caughtError) {
+      setDeriveStatus(caughtError instanceof Error ? caughtError.message : String(caughtError));
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function handleDeriveAndRun() {
+    if (!run) {
       return;
     }
     setLoading(true);
     setDeriveStatus(null);
     try {
-      await api.deriveConfig({
-        base_config_name: run.config_name,
-        output_name: diffPreview.output_name,
-        patch: suggestion.patch,
+      const derived = await deriveCurrentConfig();
+      if (!derived) {
+        throw new Error("No derived config is available.");
+      }
+      const createdRun = await api.createRun({
+        config_name: derived.name,
+        input_video: run.input_video ?? undefined,
+        enable_postprocess: run.modules_enabled.postprocess ?? true,
+        enable_follow_cam: run.modules_enabled.follow_cam ?? true,
+        notes: `AI objective: ${objective}`,
       });
-      await onConfigDerived();
-      setDeriveStatus(`Derived config saved: generated/${diffPreview.output_name}.yaml`);
+      setDeriveStatus(`Derived ${derived.name} and started run ${createdRun.run_id}.`);
+      await onRunCreated(createdRun);
     } catch (caughtError) {
       setDeriveStatus(caughtError instanceof Error ? caughtError.message : String(caughtError));
     } finally {
@@ -109,7 +154,7 @@ export function AIPanel({ run, configs, onConfigDerived }: AIPanelProps) {
         <p className="eyebrow">AI Native</p>
         <h3>Operator Assistant</h3>
         <p className="muted">
-          The assistant is now grounded in live run evidence and creates explicit config patches instead of static hints.
+          The assistant is grounded in live run evidence and can now derive a config and immediately launch a new run.
         </p>
       </div>
 
@@ -129,7 +174,7 @@ export function AIPanel({ run, configs, onConfigDerived }: AIPanelProps) {
         </label>
         <div className="assistant-actions">
           <button type="button" className="primary-button" onClick={handleRecommend} disabled={!run || loading}>
-            {loading ? "Thinking…" : "Recommend Patch"}
+            {loading ? "Thinking..." : "Recommend Patch"}
           </button>
           <button
             type="button"
@@ -139,8 +184,17 @@ export function AIPanel({ run, configs, onConfigDerived }: AIPanelProps) {
           >
             Derive Config
           </button>
+          <button
+            type="button"
+            className="accent-button"
+            onClick={handleDeriveAndRun}
+            disabled={!run || !suggestion || !diffPreview || loading}
+          >
+            Derive and Run
+          </button>
         </div>
         {deriveStatus ? <p className="muted">{deriveStatus}</p> : null}
+        {lastDerivedConfig ? <p className="muted mono">latest: {lastDerivedConfig.name}</p> : null}
       </div>
 
       <div className="assistant-stack">

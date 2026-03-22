@@ -19,6 +19,18 @@ export function App() {
   const navigate = useNavigate();
   const location = useLocation();
 
+  async function refreshConfigs(): Promise<ConfigListItem[]> {
+    const nextConfigs = await api.listConfigs();
+    setConfigs(nextConfigs);
+    return nextConfigs;
+  }
+
+  async function refreshRuns(): Promise<RunRecord[]> {
+    const nextRuns = await api.listRuns();
+    setRuns(nextRuns);
+    return nextRuns;
+  }
+
   useEffect(() => {
     let cancelled = false;
     async function load() {
@@ -38,10 +50,7 @@ export function App() {
         setRuns(runData);
 
         const requestedRunId = searchParams.get("run");
-        const nextRun =
-          runData.find((item) => item.run_id === requestedRunId) ??
-          runData[0] ??
-          null;
+        const nextRun = runData.find((item) => item.run_id === requestedRunId) ?? runData[0] ?? null;
         setSelectedRun(nextRun);
       } catch (caughtError) {
         if (!cancelled) {
@@ -67,8 +76,7 @@ export function App() {
   }
 
   async function handleRunCreated(createdRun: RunRecord) {
-    const runData = await api.listRuns();
-    setRuns(runData);
+    const runData = await refreshRuns();
     const matched = runData.find((item) => item.run_id === createdRun.run_id) ?? createdRun;
     setSelectedRun(matched);
     navigate(`/review?run=${encodeURIComponent(matched.run_id)}`);
@@ -114,7 +122,7 @@ export function App() {
             <h2>Frontend Shell</h2>
           </div>
           <div className={`status-pill ${health?.status === "ok" ? "ok" : "warn"}`}>
-            {loading ? "Loading…" : error ? "Offline" : "Backend OK"}
+            {loading ? "Loading..." : error ? "Offline" : "Backend OK"}
           </div>
         </header>
 
@@ -136,28 +144,24 @@ export function App() {
           <Route
             path="/runs"
             element={
-              <RunsPage
-                configs={configs}
-                runs={runs}
-                loading={loading}
-                onRunCreated={handleRunCreated}
-              />
+              <RunsPage configs={configs} runs={runs} loading={loading} onRunCreated={handleRunCreated} />
             }
           />
           <Route
             path="/review"
             element={
-              <ReviewPage
-                runs={runs}
-                selectedRun={selectedRun}
-                onSelectRun={handleSelectRun}
-              />
+              <ReviewPage runs={runs} selectedRun={selectedRun} onSelectRun={handleSelectRun} />
             }
           />
         </Routes>
       </main>
 
-      <AIPanel run={selectedRun} configs={configs} onConfigDerived={() => api.listConfigs().then(setConfigs)} />
+      <AIPanel
+        run={selectedRun}
+        configs={configs}
+        onConfigDerived={refreshConfigs}
+        onRunCreated={handleRunCreated}
+      />
     </div>
   );
 }

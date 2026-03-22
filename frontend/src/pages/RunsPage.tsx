@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 import { api } from "../lib/api";
 import type { ConfigListItem, RunRecord } from "../lib/types";
@@ -11,7 +11,7 @@ interface RunsPageProps {
 }
 
 export function RunsPage({ configs, runs, loading, onRunCreated }: RunsPageProps) {
-  const [configName, setConfigName] = useState<string>(configs[0]?.name ?? "real_v24_full_postclean.yaml");
+  const [configName, setConfigName] = useState<string>("real_v24_full_postclean.yaml");
   const [startFrame, setStartFrame] = useState("0");
   const [maxFrames, setMaxFrames] = useState("");
   const [enablePostprocess, setEnablePostprocess] = useState(true);
@@ -19,6 +19,15 @@ export function RunsPage({ configs, runs, loading, onRunCreated }: RunsPageProps
   const [notes, setNotes] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!configs.length) {
+      return;
+    }
+    if (!configs.some((config) => config.name === configName)) {
+      setConfigName(configs[0].name);
+    }
+  }, [configs, configName]);
 
   async function handleSubmit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -88,7 +97,7 @@ export function RunsPage({ configs, runs, loading, onRunCreated }: RunsPageProps
           </label>
 
           <button className="primary-button" type="submit" disabled={loading || submitting}>
-            {submitting ? "Starting…" : "Start Run"}
+            {submitting ? "Starting..." : "Start Run"}
           </button>
           {message ? <p className="muted">{message}</p> : null}
         </form>

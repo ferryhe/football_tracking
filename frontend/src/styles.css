@@ -309,7 +309,7 @@ table {
 
 .assistant-actions {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 10px;
   margin-top: 12px;
 }
@@ -383,7 +383,22 @@ textarea {
   cursor: pointer;
 }
 
+.accent-button {
+  padding: 14px 18px;
+  border: none;
+  border-radius: 16px;
+  color: #081108;
+  font-weight: 700;
+  background: linear-gradient(135deg, #f0d27a, #dba34c);
+  cursor: pointer;
+}
+
 .secondary-button:disabled {
+  opacity: 0.65;
+  cursor: not-allowed;
+}
+
+.accent-button:disabled {
   opacity: 0.65;
   cursor: not-allowed;
 }
