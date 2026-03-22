@@ -11,7 +11,7 @@ import {
 import { useI18n } from "../lib/i18n";
 import type { ConfigListItem, InputCatalog, RunRecord } from "../lib/types";
 
-export type WorkspaceStage = "baseline" | "ai" | "delivery" | "history";
+export type WorkspaceStage = "baseline" | "ai" | "delivery";
 
 interface WorkspacePageProps {
   stage: WorkspaceStage;
@@ -302,68 +302,6 @@ export function WorkspacePage({
     );
   }
 
-  if (stage === "history") {
-    return (
-      <div className="page-stack">
-        <section className="panel">
-          <div className="panel-header">
-            <div className="title-row">
-              <ClockIcon className="section-icon" />
-              <div>
-                <p className="eyebrow">{copy.workspace.queueEyebrow}</p>
-                <h3>{copy.workspace.queueTitle}</h3>
-                <p className="muted">{copy.workspace.queueSubtitle}</p>
-              </div>
-            </div>
-          </div>
-
-          {selectedRun ? (
-            <div className="info-block compact-block">
-              <p className="meta-label">{copy.workspace.currentFocus}</p>
-              <strong>{selectedRun.run_id}</strong>
-              <p className="muted mono">{selectedRun.config_name ?? copy.common.notAvailable}</p>
-            </div>
-          ) : null}
-
-          {runs.length ? (
-            <div className="run-list compact-list">
-              {runs.map((run) => {
-                const StatusIcon = runStatusIcon(run.status);
-                return (
-                  <button
-                    type="button"
-                    key={run.run_id}
-                    className={`run-row ${selectedRun?.run_id === run.run_id ? "selected" : ""}`}
-                    onClick={() => onSelectRun(run)}
-                  >
-                    <div className="run-row-lead">
-                      <div className={`run-row-icon-shell ${run.status}`}>
-                        <StatusIcon className="section-icon tiny" />
-                      </div>
-                      <div className="run-row-copy">
-                        <strong>{run.run_id}</strong>
-                        <p className="muted mono">{run.config_name ?? formatPathTail(run.output_dir)}</p>
-                        <div className="run-chip-row">
-                          <span className="tag">{formatDateTime(run.created_at)}</span>
-                          <span className="tag">{formatRunStatus(run.status)}</span>
-                        </div>
-                      </div>
-                    </div>
-                  </button>
-                );
-              })}
-            </div>
-          ) : (
-            <div className="empty-state">
-              <strong>{copy.workspace.noRunsTitle}</strong>
-              <p className="muted">{copy.workspace.noRunsBody}</p>
-            </div>
-          )}
-        </section>
-      </div>
-    );
-  }
-
   return (
     <div className="page-stack">
       <section className="panel">
@@ -441,6 +379,54 @@ export function WorkspacePage({
           <div className="empty-state">
             <strong>{copy.workspace.noFocusTitle}</strong>
             <p className="muted">{copy.workspace.noFocusBody}</p>
+          </div>
+        )}
+      </section>
+
+      <section className="panel">
+        <div className="panel-header">
+          <div className="title-row">
+            <ClockIcon className="section-icon" />
+            <div>
+              <p className="eyebrow">{copy.workspace.queueEyebrow}</p>
+              <h3>{copy.workspace.queueTitle}</h3>
+              <p className="muted">{copy.workspace.queueSubtitle}</p>
+            </div>
+          </div>
+        </div>
+
+        {runs.length ? (
+          <div className="run-list compact-list">
+            {runs.map((run) => {
+              const StatusIcon = runStatusIcon(run.status);
+              return (
+                <button
+                  type="button"
+                  key={run.run_id}
+                  className={`run-row ${selectedRun?.run_id === run.run_id ? "selected" : ""}`}
+                  onClick={() => onSelectRun(run)}
+                >
+                  <div className="run-row-lead">
+                    <div className={`run-row-icon-shell ${run.status}`}>
+                      <StatusIcon className="section-icon tiny" />
+                    </div>
+                    <div className="run-row-copy">
+                      <strong>{run.run_id}</strong>
+                      <p className="muted mono">{run.config_name ?? formatPathTail(run.output_dir)}</p>
+                      <div className="run-chip-row">
+                        <span className="tag">{formatDateTime(run.created_at)}</span>
+                        <span className="tag">{formatRunStatus(run.status)}</span>
+                      </div>
+                    </div>
+                  </div>
+                </button>
+              );
+            })}
+          </div>
+        ) : (
+          <div className="empty-state">
+            <strong>{copy.workspace.noRunsTitle}</strong>
+            <p className="muted">{copy.workspace.noRunsBody}</p>
           </div>
         )}
       </section>
