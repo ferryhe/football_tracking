@@ -1414,6 +1414,12 @@ textarea {
   align-content: start;
 }
 
+.asset-group-summary-line {
+  margin: 0;
+  font-size: 0.86rem;
+  line-height: 1.4;
+}
+
 .asset-group-meta,
 .asset-entry-time {
   flex: 0 0 auto;

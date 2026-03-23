@@ -229,18 +229,26 @@ describe("WorkspacePage deliverable and history stages", () => {
     const assetGroupsSection = screen.getByText("Manage assets by source clip").closest("section");
     expect(assetGroupsSection).not.toBeNull();
     const assetGroupsWithin = within(assetGroupsSection!);
+    const groupCard = assetGroupsSection?.querySelector("details.asset-group-card") as HTMLDetailsElement | null;
+    expect(groupCard).not.toBeNull();
 
     expect(screen.getByText("Manage assets by source clip")).toBeInTheDocument();
     expect(screen.getAllByText("game_01.mp4").length).toBeGreaterThan(0);
-    expect(screen.getByText("Source")).toBeInTheDocument();
-    expect(screen.getAllByText("Configs").length).toBeGreaterThan(0);
-    expect(screen.getAllByText("Outputs").length).toBeGreaterThan(0);
+    expect(screen.getByText(/Latest baseline/)).toBeInTheDocument();
+    expect(screen.getByText(/Latest deliverable/)).toBeInTheDocument();
+    expect(groupCard?.open).toBe(false);
     expect(screen.getAllByText(/Mar/).length).toBeGreaterThan(0);
 
     expect(historyWithin.getAllByText("baseline_run_20260323_120000").length).toBeGreaterThan(0);
     expect(historyWithin.getAllByText("Completed").length).toBeGreaterThan(0);
     expect(historyWithin.getAllByText("Baseline").length).toBeGreaterThan(0);
     expect(historyWithin.queryByText("Ran at")).not.toBeInTheDocument();
+
+    fireEvent.click(groupCard?.querySelector("summary") as HTMLElement);
+    expect(groupCard?.open).toBe(true);
+    expect(screen.getByText("Source")).toBeInTheDocument();
+    expect(screen.getAllByText("Configs").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("Outputs").length).toBeGreaterThan(0);
     expect(
       assetGroupsWithin.getByText("C:/Projects/foot_ball_tracking/outputs/runs/game_01/baseline_run_20260323_120000"),
     ).not.toBeVisible();
@@ -262,8 +270,12 @@ describe("WorkspacePage deliverable and history stages", () => {
     const assetGroupsSection = screen.getByText("Manage assets by source clip").closest("section");
     expect(assetGroupsSection).not.toBeNull();
     const assetGroupsWithin = within(assetGroupsSection!);
-
-    fireEvent.click(assetGroupsWithin.getAllByText("game_01.mp4")[1]);
+    const groupCard = assetGroupsSection?.querySelector("details.asset-group-card") as HTMLDetailsElement | null;
+    expect(groupCard).not.toBeNull();
+    fireEvent.click(groupCard?.querySelector("summary") as HTMLElement);
+    const sourceEntry = groupCard?.querySelector("details.asset-entry") as HTMLDetailsElement | null;
+    expect(sourceEntry).not.toBeNull();
+    fireEvent.click(sourceEntry?.querySelector("summary") as HTMLElement);
     fireEvent.click(assetGroupsWithin.getAllByRole("button", { name: "Delete" })[0]);
     expect(screen.getByRole("dialog", { name: "Confirm deletion" })).toBeInTheDocument();
 

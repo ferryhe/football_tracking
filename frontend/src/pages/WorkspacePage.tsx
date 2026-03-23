@@ -391,6 +391,20 @@ export function WorkspacePage({
   const aiCompletedMoment =
     aiSelectedRun?.completed_at ??
     (aiSelectedRun?.status === "completed" ? aiSelectedRun.started_at ?? aiSelectedRun.created_at : null);
+  const assetGroupSummaryCopy =
+    language === "zh"
+      ? {
+          baseline: "\u6700\u8fd1\u57fa\u7ebf",
+          deliverable: "\u6700\u8fd1\u6210\u54c1",
+          failed: "\u6700\u8fd1\u5931\u8d25",
+          empty: "\u8fd8\u6ca1\u6709\u5173\u8054 run",
+        }
+      : {
+          baseline: "Latest baseline",
+          deliverable: "Latest deliverable",
+          failed: "Latest failed",
+          empty: "No linked runs yet.",
+        };
 
   function scopeTooltipText(scope: "full" | "partial" | "standard"): string {
     if (scope === "full") {
@@ -400,6 +414,18 @@ export function WorkspacePage({
       return `${uiCopy.scopeTooltip} ${uiCopy.scopePartialTooltip}`;
     }
     return `${uiCopy.scopeTooltip} ${uiCopy.scopeStandardTooltip}`;
+  }
+
+  function assetGroupSummaryText(group: AssetGroup): string {
+    const latestBaseline = group.runs.find((run) => historyCategoryForRun(run) === "baseline");
+    const latestDeliverable = group.runs.find((run) => historyCategoryForRun(run) === "deliverable");
+    const latestFailed = group.runs.find((run) => historyCategoryForRun(run) === "failed");
+    const pieces = [
+      latestBaseline ? `${assetGroupSummaryCopy.baseline} ${formatDateTime(runMoment(latestBaseline))}` : null,
+      latestDeliverable ? `${assetGroupSummaryCopy.deliverable} ${formatDateTime(runMoment(latestDeliverable))}` : null,
+      latestFailed ? `${assetGroupSummaryCopy.failed} ${formatDateTime(runMoment(latestFailed))}` : null,
+    ].filter(Boolean);
+    return pieces.join(" · ") || assetGroupSummaryCopy.empty;
   }
 
   useEffect(() => {
@@ -911,14 +937,11 @@ export function WorkspacePage({
           {assetGroups.length ? (
             <div className="asset-group-list">
               {assetGroups.map((group) => (
-                <details
-                  key={group.group_id}
-                  className="asset-group-card"
-                  open={group.is_unbound || group.input_video?.path === selectedInputPath}
-                >
+                <details key={group.group_id} className="asset-group-card">
                   <summary className="asset-group-summary">
                     <div className="asset-group-copy">
                       <strong className="resource-title">{group.is_unbound ? uiCopy.unboundGroupTitle : group.title}</strong>
+                      <p className="asset-group-summary-line muted">{assetGroupSummaryText(group)}</p>
                       <div className="tag-row">
                         <span className="tag">{`${uiCopy.groupRuns}: ${group.run_count}`}</span>
                         <span className="tag">{`${uiCopy.groupConfigs}: ${group.config_count}`}</span>
