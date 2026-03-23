@@ -39,9 +39,25 @@ class InputCatalogResponse(BaseModel):
     videos: list[InputVideoItem] = Field(default_factory=list)
 
 
+class FieldPreviewRequest(BaseModel):
+    input_video: str
+
+
+class FieldPreviewResponse(BaseModel):
+    input_video: str
+    preview_data_url: str
+    frame_width: int
+    frame_height: int
+    frame_index: int
+    frame_time_seconds: float
+    sample_index: int
+    sample_count: int
+
+
 class FieldSuggestionRequest(BaseModel):
     input_video: str
     config_name: str | None = None
+    frame_index: int | None = None
 
 
 class FieldSuggestionResponse(BaseModel):
@@ -50,6 +66,7 @@ class FieldSuggestionResponse(BaseModel):
     preview_bounds: tuple[int, int, int, int]
     frame_width: int
     frame_height: int
+    frame_index: int
     frame_time_seconds: float
     sample_index: int
     sample_count: int

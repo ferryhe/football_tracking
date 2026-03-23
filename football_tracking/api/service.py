@@ -139,9 +139,19 @@ class ApiService:
             "videos": videos,
         }
 
-    def suggest_field_setup(self, input_video: str, config_name: str | None = None) -> dict[str, Any]:
+    def capture_field_preview(self, input_video: str) -> dict[str, Any]:
         video_path = self._resolve_input_video_path(input_video)
-        samples = self._sample_video_frames(video_path)
+        preview_sample = self._pick_field_preview_sample(video_path)
+        return self._build_field_preview_response(video_path, preview_sample)
+
+    def suggest_field_setup(
+        self,
+        input_video: str,
+        config_name: str | None = None,
+        frame_index: int | None = None,
+    ) -> dict[str, Any]:
+        video_path = self._resolve_input_video_path(input_video)
+        samples = [self._read_video_frame(video_path, frame_index)] if frame_index is not None else self._sample_video_frames(video_path)
         if not samples:
             raise RuntimeError(f"Unable to read preview frames from input video: {video_path}")
 
@@ -212,9 +222,10 @@ class ApiService:
         return {
             "input_video": str(video_path),
             "preview_data_url": self._encode_frame_data_url(self._prepare_preview_frame(best_sample["frame"])),
-            "preview_bounds": best_sample["preview_bounds"],
+            "preview_bounds": (0, 0, best_sample["frame_width"], best_sample["frame_height"]),
             "frame_width": best_sample["frame_width"],
             "frame_height": best_sample["frame_height"],
+            "frame_index": best_sample["frame_index"],
             "frame_time_seconds": round(best_sample["frame_time_seconds"], 2),
             "sample_index": best_sample["sample_index"],
             "sample_count": best_sample["sample_count"],
@@ -230,6 +241,18 @@ class ApiService:
                 expanded_polygon=best_sample["expanded_polygon"],
                 expanded_roi=best_sample["expanded_roi"],
             ),
+        }
+
+    def _build_field_preview_response(self, video_path: Path, sample: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "input_video": str(video_path),
+            "preview_data_url": self._encode_frame_data_url(self._prepare_preview_frame(sample["frame"])),
+            "frame_width": sample["frame_width"],
+            "frame_height": sample["frame_height"],
+            "frame_index": sample["frame_index"],
+            "frame_time_seconds": round(sample["frame_time_seconds"], 2),
+            "sample_index": sample["sample_index"],
+            "sample_count": sample["sample_count"],
         }
 
     def get_config(self, name: str) -> dict[str, Any]:
@@ -1071,11 +1094,11 @@ class ApiService:
         frame_count = int(capture.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
         fractions = [0.18, 0.5, 0.82] if frame_count > 3 else [0.5]
         samples: list[dict[str, Any]] = []
+        warmup_frames = 48
 
         for index, fraction in enumerate(fractions, start=1):
             frame_index = max(0, int(round((max(frame_count, 1) - 1) * fraction)))
-            capture.set(cv2.CAP_PROP_POS_FRAMES, frame_index)
-            ok, frame = capture.read()
+            ok, frame = self._read_frame_with_warmup(capture, frame_index, warmup_frames)
             if not ok or frame is None:
                 continue
             frame_height, frame_width = frame.shape[:2]
@@ -1110,6 +1133,45 @@ class ApiService:
 
         capture.release()
         return samples
+
+    def _pick_field_preview_sample(self, video_path: Path) -> dict[str, Any]:
+        samples = self._sample_video_frames(video_path)
+        if not samples:
+            raise RuntimeError(f"Unable to read preview frames from input video: {video_path}")
+        return samples[len(samples) // 2]
+
+    def _read_video_frame(self, video_path: Path, frame_index: int) -> dict[str, Any]:
+        capture = cv2.VideoCapture(str(video_path))
+        if not capture.isOpened():
+            raise RuntimeError(f"Unable to open input video: {video_path}")
+        fps = float(capture.get(cv2.CAP_PROP_FPS) or 0.0)
+        frame_count = int(capture.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+        clamped_index = max(0, min(frame_index, max(frame_count - 1, 0)))
+        ok, frame = self._read_frame_with_warmup(capture, clamped_index, warmup_frames=48)
+        capture.release()
+        if not ok or frame is None:
+            raise RuntimeError(f"Unable to read preview frame {clamped_index} from input video: {video_path}")
+        frame_height, frame_width = frame.shape[:2]
+        return {
+            "frame": frame,
+            "frame_index": clamped_index,
+            "frame_time_seconds": clamped_index / fps if fps > 0 else 0.0,
+            "frame_width": int(frame_width),
+            "frame_height": int(frame_height),
+            "sample_index": 1,
+            "sample_count": 1,
+        }
+
+    def _read_frame_with_warmup(self, capture: Any, frame_index: int, warmup_frames: int) -> tuple[bool, Any]:
+        seek_start = max(0, frame_index - warmup_frames)
+        capture.set(cv2.CAP_PROP_POS_FRAMES, seek_start)
+        ok = False
+        frame = None
+        for _ in range(frame_index - seek_start + 1):
+            ok, frame = capture.read()
+            if not ok or frame is None:
+                break
+        return ok, frame
 
     def _detect_field_polygon(
         self,

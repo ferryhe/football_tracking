@@ -5,6 +5,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import cv2
 import numpy as np
@@ -227,6 +228,16 @@ class ApiServiceSmokeTests(unittest.TestCase):
         self.assertEqual(list(expanded_roi), suggestion["config_patch"]["filtering"]["roi"])
         self.assertEqual(4, len(suggestion["config_patch"]["scene_bias"]["ground_zones"][0]["points"]))
 
+    def test_capture_field_preview_returns_fixed_preview_frame(self) -> None:
+        video_path = self.write_video("data/preview_only.avi")
+
+        preview = self.service.capture_field_preview(str(video_path))
+
+        self.assertTrue(preview["preview_data_url"].startswith("data:image/jpeg;base64,"))
+        self.assertEqual(640, preview["frame_width"])
+        self.assertEqual(360, preview["frame_height"])
+        self.assertGreaterEqual(preview["frame_index"], 0)
+
     def test_suggest_field_setup_prefers_existing_config_polygon(self) -> None:
         video_path = self.write_video("data/config_preview.avi")
         self.write_yaml(
@@ -261,16 +272,53 @@ class ApiServiceSmokeTests(unittest.TestCase):
         self.assertLessEqual(preview_image.shape[1], 1600)
         self.assertAlmostEqual(640 / 360, preview_image.shape[1] / preview_image.shape[0], places=2)
 
-    def test_suggest_field_setup_crops_preview_for_wide_video(self) -> None:
+    def test_suggest_field_setup_keeps_full_frame_preview_for_wide_video(self) -> None:
         video_path = self.write_wide_video("data/fisheye_preview.avi")
 
         suggestion = self.service.suggest_field_setup(str(video_path))
 
-        preview_x1, _, preview_x2, _ = suggestion["preview_bounds"]
-        self.assertGreater(preview_x1, 0)
-        self.assertLess(preview_x2, suggestion["frame_width"])
+        self.assertEqual((0, 0, 1280, 360), suggestion["preview_bounds"])
         self.assertEqual(4, len(suggestion["field_polygon"]))
         self.assertLess(suggestion["field_polygon"][0][1], suggestion["field_polygon"][3][1])
+
+    def test_sample_video_frames_uses_warmup_before_target_seek(self) -> None:
+        class FakeCapture:
+            def __init__(self) -> None:
+                self.current = 0
+                self.set_calls: list[int] = []
+
+            def isOpened(self) -> bool:
+                return True
+
+            def get(self, prop: int) -> float:
+                if prop == cv2.CAP_PROP_FPS:
+                    return 20.0
+                if prop == cv2.CAP_PROP_FRAME_COUNT:
+                    return 100.0
+                return 0.0
+
+            def set(self, prop: int, value: float) -> bool:
+                if prop == cv2.CAP_PROP_POS_FRAMES:
+                    self.current = int(value)
+                    self.set_calls.append(int(value))
+                return True
+
+            def read(self) -> tuple[bool, np.ndarray]:
+                frame = np.full((8, 12, 3), self.current % 255, dtype=np.uint8)
+                self.current += 1
+                return True, frame
+
+            def release(self) -> None:
+                return None
+
+        fake_capture = FakeCapture()
+
+        with mock.patch("football_tracking.api.service.cv2.VideoCapture", return_value=fake_capture):
+            samples = self.service._sample_video_frames(Path("dummy.mp4"))
+
+        self.assertEqual(3, len(samples))
+        self.assertEqual([0, 2, 33], fake_capture.set_calls)
+        self.assertEqual([18, 50, 81], [sample["frame_index"] for sample in samples])
 
     def test_materialize_run_config_writes_generated_patch_file(self) -> None:
         config_path, relative_name = self.service._resolve_config_path("default.yaml")
@@ -354,6 +402,7 @@ class ApiServiceSmokeTests(unittest.TestCase):
         expected_paths = {
             "/api/v1/health",
             "/api/v1/inputs",
+            "/api/v1/inputs/field-preview",
             "/api/v1/inputs/field-suggestion",
             "/api/v1/configs",
             "/api/v1/configs/{name:path}",

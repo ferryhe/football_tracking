@@ -734,13 +734,13 @@ table {
 }
 
 .field-polygon.field {
-  fill: rgba(118, 185, 109, 0.14);
+  fill: transparent;
   stroke: rgba(118, 185, 109, 0.96);
   stroke-width: 2.5px;
 }
 
 .field-polygon.expanded {
-  fill: rgba(240, 210, 122, 0.08);
+  fill: transparent;
   stroke: rgba(240, 210, 122, 0.92);
   stroke-width: 2px;
   stroke-dasharray: 10 8;

@@ -5,7 +5,7 @@ import { ActivityIcon, FileIcon, PlayIcon, SparkIcon } from "../components/Icons
 import { LanguageToggle } from "../components/LanguageToggle";
 import { api } from "../lib/api";
 import { useI18n } from "../lib/i18n";
-import type { ConfigListItem, FieldSuggestion, HealthResponse, InputCatalog, RunRecord } from "../lib/types";
+import type { ConfigListItem, FieldPreview, FieldSuggestion, HealthResponse, InputCatalog, RunRecord } from "../lib/types";
 import { WorkspacePage, type WorkspaceStage } from "../pages/WorkspacePage";
 
 interface StageTab {
@@ -56,6 +56,7 @@ export function App() {
   const [loading, setLoading] = useState(true);
   const [launching, setLaunching] = useState(false);
   const [launchMessage, setLaunchMessage] = useState<string | null>(null);
+  const [fieldPreviews, setFieldPreviews] = useState<Record<string, FieldPreview>>({});
   const [fieldSuggestions, setFieldSuggestions] = useState<Record<string, FieldSuggestion>>({});
   const [fieldLoading, setFieldLoading] = useState(false);
   const [fieldMessage, setFieldMessage] = useState<string | null>(null);
@@ -153,50 +154,22 @@ export function App() {
   }, [selectedConfigName, selectedInputPath]);
 
   useEffect(() => {
-    let cancelled = false;
-
-    async function syncFieldSetupFromConfig() {
-      if (!selectedInputPath || !selectedConfigName) {
-        return;
-      }
-      try {
-        const detail = await api.getConfig(selectedConfigName);
-        if (!configHasFieldSetup(detail.raw)) {
-          if (!cancelled) {
-            setFieldSuggestions((current) => {
-              const existing = current[selectedInputPath];
-              if (!existing?.source.startsWith("config:")) {
-                return current;
-              }
-              const next = { ...current };
-              delete next[selectedInputPath];
-              return next;
-            });
-          }
-          return;
-        }
-        const suggestion = await api.suggestFieldSetup({
-          input_video: selectedInputPath,
-          config_name: selectedConfigName,
-        });
-        if (cancelled) {
-          return;
-        }
-        setFieldSuggestions((current) => ({
-          ...current,
-          [selectedInputPath]: { ...suggestion, accepted: true },
-        }));
-        setFieldMessage(copy.workspace.fieldLoadedFromConfig);
-      } catch {
-        // Keep the current suggestion untouched when the config does not provide field setup.
-      }
+    if (!selectedInputPath || !selectedConfigName) {
+      return;
     }
-
-    void syncFieldSetupFromConfig();
-    return () => {
-      cancelled = true;
-    };
-  }, [copy.workspace.fieldLoadedFromConfig, selectedConfigName, selectedInputPath]);
+    setFieldSuggestions((current) => {
+      const existing = current[selectedInputPath];
+      if (!existing?.source.startsWith("config:")) {
+        return current;
+      }
+      if (existing.source === `config:${selectedConfigName}`) {
+        return current;
+      }
+      const next = { ...current };
+      delete next[selectedInputPath];
+      return next;
+    });
+  }, [selectedConfigName, selectedInputPath]);
 
   const orderedRuns = useMemo(
     () =>
@@ -210,6 +183,7 @@ export function App() {
 
   const selectedVideo = inputCatalog.videos.find((item) => item.path === selectedInputPath) ?? null;
   const selectedConfig = configs.find((item) => item.name === selectedConfigName) ?? null;
+  const activeFieldPreview = selectedInputPath ? fieldPreviews[selectedInputPath] ?? null : null;
   const activeFieldSuggestion = selectedInputPath ? fieldSuggestions[selectedInputPath] ?? null : null;
   const activeRun = orderedRuns.find((item) => item.status === "running" || item.status === "queued") ?? null;
   const latestCompletedRun = orderedRuns.find((item) => item.status === "completed") ?? null;
@@ -250,8 +224,64 @@ export function App() {
     return matched;
   }
 
-  async function handleGenerateFieldSuggestion() {
+  async function handleCaptureFieldPreview() {
     if (!selectedInputPath) {
+      return;
+    }
+    setFieldLoading(true);
+    setFieldMessage(null);
+    try {
+      const preview = await api.captureFieldPreview({
+        input_video: selectedInputPath,
+      });
+      setFieldPreviews((current) => ({
+        ...current,
+        [selectedInputPath]: preview,
+      }));
+      setFieldSuggestions((current) => {
+        const next = { ...current };
+        delete next[selectedInputPath];
+        return next;
+      });
+      setFieldMessage(copy.workspace.fieldPreviewReadyMessage);
+    } catch (caughtError) {
+      setFieldMessage(caughtError instanceof Error ? caughtError.message : String(caughtError));
+    } finally {
+      setFieldLoading(false);
+    }
+  }
+
+  async function handleLoadFieldFromConfig() {
+    if (!selectedInputPath || !selectedConfigName || !activeFieldPreview) {
+      return;
+    }
+    setFieldLoading(true);
+    setFieldMessage(null);
+    try {
+      const detail = await api.getConfig(selectedConfigName);
+      if (!configHasFieldSetup(detail.raw)) {
+        setFieldMessage(copy.workspace.fieldConfigMissing);
+        return;
+      }
+      const suggestion = await api.suggestFieldSetup({
+        input_video: selectedInputPath,
+        config_name: selectedConfigName,
+        frame_index: activeFieldPreview.frame_index,
+      });
+      setFieldSuggestions((current) => ({
+        ...current,
+        [selectedInputPath]: { ...suggestion, accepted: true },
+      }));
+      setFieldMessage(copy.workspace.fieldLoadedFromConfig);
+    } catch (caughtError) {
+      setFieldMessage(caughtError instanceof Error ? caughtError.message : String(caughtError));
+    } finally {
+      setFieldLoading(false);
+    }
+  }
+
+  async function handleGenerateFieldSuggestion() {
+    if (!selectedInputPath || !activeFieldPreview) {
       return;
     }
     setFieldLoading(true);
@@ -259,7 +289,7 @@ export function App() {
     try {
       const suggestion = await api.suggestFieldSetup({
         input_video: selectedInputPath,
-        config_name: selectedConfigName || undefined,
+        frame_index: activeFieldPreview.frame_index,
       });
       setFieldSuggestions((current) => ({
         ...current,
@@ -421,12 +451,16 @@ export function App() {
             loading={loading}
             launching={launching}
             launchMessage={launchMessage}
+            fieldPreview={activeFieldPreview}
             fieldSuggestion={activeFieldSuggestion}
             fieldLoading={fieldLoading}
             fieldMessage={fieldMessage}
+            canLoadFieldFromConfig={Boolean(selectedConfig)}
             onSelectRun={handleSelectRun}
             onSelectInput={handleSelectInput}
             onSelectConfig={setSelectedConfigName}
+            onCaptureFieldPreview={handleCaptureFieldPreview}
+            onLoadFieldFromConfig={handleLoadFieldFromConfig}
             onGenerateFieldSuggestion={handleGenerateFieldSuggestion}
             onClearFieldSuggestion={handleClearFieldSuggestion}
             onUpdateFieldSuggestion={handleUpdateFieldSuggestion}

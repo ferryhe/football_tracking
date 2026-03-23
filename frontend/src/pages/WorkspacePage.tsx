@@ -10,7 +10,7 @@ import {
 } from "../components/Icons";
 import { FieldSetupCard } from "../components/FieldSetupCard";
 import { useI18n } from "../lib/i18n";
-import type { ConfigListItem, FieldSuggestion, InputCatalog, RunRecord } from "../lib/types";
+import type { ConfigListItem, FieldPreview, FieldSuggestion, InputCatalog, RunRecord } from "../lib/types";
 
 export type WorkspaceStage = "baseline" | "ai" | "delivery";
 
@@ -25,12 +25,16 @@ interface WorkspacePageProps {
   loading: boolean;
   launching: boolean;
   launchMessage: string | null;
+  fieldPreview: FieldPreview | null;
   fieldSuggestion: FieldSuggestion | null;
   fieldLoading: boolean;
   fieldMessage: string | null;
+  canLoadFieldFromConfig: boolean;
   onSelectRun: (run: RunRecord) => void;
   onSelectInput: (path: string) => void;
   onSelectConfig: (name: string) => void;
+  onCaptureFieldPreview: () => Promise<void>;
+  onLoadFieldFromConfig: () => Promise<void>;
   onGenerateFieldSuggestion: () => Promise<void>;
   onClearFieldSuggestion: () => void;
   onUpdateFieldSuggestion: (suggestion: FieldSuggestion) => void;
@@ -125,12 +129,16 @@ export function WorkspacePage({
   loading,
   launching,
   launchMessage,
+  fieldPreview,
   fieldSuggestion,
   fieldLoading,
   fieldMessage,
+  canLoadFieldFromConfig,
   onSelectRun,
   onSelectInput,
   onSelectConfig,
+  onCaptureFieldPreview,
+  onLoadFieldFromConfig,
   onGenerateFieldSuggestion,
   onClearFieldSuggestion,
   onUpdateFieldSuggestion,
@@ -204,9 +212,13 @@ export function WorkspacePage({
 
               {selectedVideo ? (
                 <FieldSetupCard
+                  preview={fieldPreview}
                   suggestion={fieldSuggestion}
                   loading={fieldLoading}
                   message={fieldMessage}
+                  canLoadFromConfig={canLoadFieldFromConfig}
+                  onCapturePreview={onCaptureFieldPreview}
+                  onLoadFromConfig={onLoadFieldFromConfig}
                   onGenerate={onGenerateFieldSuggestion}
                   onClear={onClearFieldSuggestion}
                   onUpdate={onUpdateFieldSuggestion}
