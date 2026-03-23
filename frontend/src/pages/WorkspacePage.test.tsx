@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, within } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { I18nProvider } from "../lib/i18n";
@@ -109,46 +109,56 @@ function renderWorkspaceStage(stage: WorkspaceStage) {
     },
   ];
 
-  return render(
-    <I18nProvider>
-      <WorkspacePage
-        stage={stage}
-        inputCatalog={inputCatalog}
-        configs={configs}
-        runs={runs}
-        selectedRun={runs[0]}
-        selectedInputPath={inputCatalog.videos[0].path}
-        selectedConfigName={configs[0].name}
-        loading={false}
-        launching={false}
-        launchMessage={null}
-        fieldPreview={null}
-        fieldSuggestion={null}
-        fieldLoading={false}
-        fieldMessage={null}
-        canLoadFieldFromConfig
-        canStartBaseline
-        onSelectRun={vi.fn()}
-        onSelectInput={vi.fn()}
-        onSelectConfig={vi.fn()}
-        onCaptureFieldPreview={vi.fn(async () => undefined)}
-        onLoadFieldFromConfig={vi.fn(async () => undefined)}
-        onGenerateFieldSuggestion={vi.fn(async () => undefined)}
-        onClearFieldSuggestion={vi.fn()}
-        onUpdateFieldSuggestion={vi.fn()}
-        onAcceptFieldSuggestion={vi.fn()}
-        onStartBaselineRun={vi.fn(async () => undefined)}
-        onCreateFollowCamRender={vi.fn(async () => runs[1])}
-        onDeleteInputVideo={vi.fn(async () => undefined)}
-        onDeleteConfig={vi.fn(async () => undefined)}
-        onDeleteRunOutput={vi.fn(async () => undefined)}
-      />
-    </I18nProvider>,
-  );
+  const onDeleteInputVideo = vi.fn(async () => undefined);
+  const onDeleteConfig = vi.fn(async () => undefined);
+  const onDeleteRunOutput = vi.fn(async () => undefined);
+
+  return {
+    onDeleteInputVideo,
+    onDeleteConfig,
+    onDeleteRunOutput,
+    ...render(
+      <I18nProvider>
+        <WorkspacePage
+          stage={stage}
+          inputCatalog={inputCatalog}
+          configs={configs}
+          runs={runs}
+          selectedRun={runs[0]}
+          selectedInputPath={inputCatalog.videos[0].path}
+          selectedConfigName={configs[0].name}
+          loading={false}
+          launching={false}
+          launchMessage={null}
+          fieldPreview={null}
+          fieldSuggestion={null}
+          fieldLoading={false}
+          fieldMessage={null}
+          canLoadFieldFromConfig
+          canStartBaseline
+          onSelectRun={vi.fn()}
+          onSelectInput={vi.fn()}
+          onSelectConfig={vi.fn()}
+          onCaptureFieldPreview={vi.fn(async () => undefined)}
+          onLoadFieldFromConfig={vi.fn(async () => undefined)}
+          onGenerateFieldSuggestion={vi.fn(async () => undefined)}
+          onClearFieldSuggestion={vi.fn()}
+          onUpdateFieldSuggestion={vi.fn()}
+          onAcceptFieldSuggestion={vi.fn()}
+          onStartBaselineRun={vi.fn(async () => undefined)}
+          onCreateFollowCamRender={vi.fn(async () => runs[1])}
+          onDeleteInputVideo={onDeleteInputVideo}
+          onDeleteConfig={onDeleteConfig}
+          onDeleteRunOutput={onDeleteRunOutput}
+        />
+      </I18nProvider>,
+    ),
+  };
 }
 
 describe("WorkspacePage deliverable and history stages", () => {
   beforeEach(() => {
+    cleanup();
     window.localStorage.clear();
     setLanguage("en");
   });
@@ -194,5 +204,24 @@ describe("WorkspacePage deliverable and history stages", () => {
     fireEvent.click(screen.getAllByRole("button", { name: "Failed" })[0]);
     expect(historyWithin.getByText("failed_run_20260323_122000")).toBeInTheDocument();
     expect(historyWithin.queryByText("deliverable_run_20260323_121000")).not.toBeInTheDocument();
+  });
+
+  it("requires typing DELETE before a file delete action can proceed", async () => {
+    const view = renderWorkspaceStage("history");
+
+    const resourceHeading = screen.getByText("Video and config cleanup");
+    fireEvent.click(resourceHeading.closest("summary")!);
+
+    fireEvent.click(screen.getAllByRole("button", { name: "Delete" })[0]);
+    expect(screen.getByRole("dialog", { name: "Confirm deletion" })).toBeInTheDocument();
+
+    const confirmButton = screen.getByRole("button", { name: "Confirm delete" });
+    expect(confirmButton).toBeDisabled();
+
+    fireEvent.change(screen.getByLabelText("Type DELETE to continue"), { target: { value: "DELETE" } });
+    expect(confirmButton).not.toBeDisabled();
+
+    fireEvent.click(confirmButton);
+    await waitFor(() => expect(view.onDeleteInputVideo).toHaveBeenCalledWith("game_01.mp4"));
   });
 });

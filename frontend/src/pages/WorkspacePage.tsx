@@ -13,12 +13,18 @@ import {
   TrashIcon,
   VideoIcon,
 } from "../components/Icons";
+import { ConfirmDeleteDialog } from "../components/ConfirmDeleteDialog";
 import { FieldSetupCard } from "../components/FieldSetupCard";
 import { useI18n } from "../lib/i18n";
 import type { ConfigListItem, FieldPreview, FieldSuggestion, InputCatalog, RunRecord } from "../lib/types";
 
 export type WorkspaceStage = "baseline" | "ai" | "deliverable" | "history";
 type HistoryCategory = "baseline" | "deliverable" | "failed";
+type PendingDelete = {
+  targetName: string;
+  prompt: string;
+  execute: () => Promise<void>;
+};
 
 interface WorkspacePageProps {
   stage: WorkspaceStage;
@@ -292,10 +298,18 @@ export function WorkspacePage({
   const [historyFilter, setHistoryFilter] = useState<HistoryCategory>("baseline");
   const [renderBusy, setRenderBusy] = useState(false);
   const [historyMessage, setHistoryMessage] = useState<string | null>(null);
+  const [pendingDelete, setPendingDelete] = useState<PendingDelete | null>(null);
+  const [deleteConfirmValue, setDeleteConfirmValue] = useState("");
   const renderOutputHint = language === "zh" ? "新的成品文件夹会创建在" : "A new deliverable folder will be created under";
   const manageOutputsLabel = language === "zh" ? "输出文件夹" : "Output folders";
   const manageNoOutputs = language === "zh" ? "没有可管理的输出。" : "No outputs to manage.";
   const manageDeleteOutputConfirm = language === "zh" ? "确定删除这个输出文件夹吗？" : "Delete this output folder?";
+  const deleteDialogTitle = language === "zh" ? "确认删除" : "Confirm deletion";
+  const deleteDialogTarget = language === "zh" ? "目标" : "Target";
+  const deleteDialogInputLabel = language === "zh" ? "输入 DELETE 以继续" : "Type DELETE to continue";
+  const deleteDialogCancel = language === "zh" ? "取消" : "Cancel";
+  const deleteDialogConfirm = language === "zh" ? "确认删除" : "Confirm delete";
+  const deleteDialogPhrase = "DELETE";
   const [renderOptions, setRenderOptions] = useState({
     prefer_cleaned_track: true,
     draw_ball_marker: false,
@@ -329,6 +343,20 @@ export function WorkspacePage({
   const deliverableOutputRoot = formatParentPath(activeRenderRun?.output_dir);
 
   useEffect(() => {
+    if (!pendingDelete) {
+      setDeleteConfirmValue("");
+      return;
+    }
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") {
+        setPendingDelete(null);
+      }
+    }
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [pendingDelete]);
+
+  useEffect(() => {
     if (renderableRuns.some((run) => run.run_id === renderRunId)) {
       return;
     }
@@ -359,15 +387,26 @@ export function WorkspacePage({
     }
   }
 
+  function requestDelete(targetName: string, prompt: string, execute: () => Promise<void>) {
+    setPendingDelete({ targetName, prompt, execute });
+  }
+
   async function handleDeleteVideo(name: string) {
-    if (typeof window !== "undefined" && !window.confirm(historyCopy.manageDeleteVideoConfirm)) {
+    requestDelete(name, historyCopy.manageDeleteVideoConfirm, async () => {
+      await onDeleteInputVideo(name);
+    });
+  }
+
+  async function handleConfirmDelete() {
+    if (!pendingDelete || deleteConfirmValue.trim().toUpperCase() !== deleteDialogPhrase) {
       return;
     }
     setRenderBusy(true);
     setHistoryMessage(null);
     try {
-      await onDeleteInputVideo(name);
-      setHistoryMessage(`${historyCopy.manageDeleted}: ${name}`);
+      await pendingDelete.execute();
+      setHistoryMessage(`${historyCopy.manageDeleted}: ${pendingDelete.targetName}`);
+      setPendingDelete(null);
     } catch (caughtError) {
       setHistoryMessage(caughtError instanceof Error ? caughtError.message : String(caughtError));
     } finally {
@@ -376,35 +415,15 @@ export function WorkspacePage({
   }
 
   async function handleDeleteConfigClick(name: string) {
-    if (typeof window !== "undefined" && !window.confirm(historyCopy.manageDeleteConfigConfirm)) {
-      return;
-    }
-    setRenderBusy(true);
-    setHistoryMessage(null);
-    try {
+    requestDelete(name, historyCopy.manageDeleteConfigConfirm, async () => {
       await onDeleteConfig(name);
-      setHistoryMessage(`${historyCopy.manageDeleted}: ${name}`);
-    } catch (caughtError) {
-      setHistoryMessage(caughtError instanceof Error ? caughtError.message : String(caughtError));
-    } finally {
-      setRenderBusy(false);
-    }
+    });
   }
 
   async function handleDeleteRunOutputClick(runId: string) {
-    if (typeof window !== "undefined" && !window.confirm(manageDeleteOutputConfirm)) {
-      return;
-    }
-    setRenderBusy(true);
-    setHistoryMessage(null);
-    try {
+    requestDelete(runId, manageDeleteOutputConfirm, async () => {
       await onDeleteRunOutput(runId);
-      setHistoryMessage(`${historyCopy.manageDeleted}: ${runId}`);
-    } catch (caughtError) {
-      setHistoryMessage(caughtError instanceof Error ? caughtError.message : String(caughtError));
-    } finally {
-      setRenderBusy(false);
-    }
+    });
   }
 
   if (stage === "baseline") {
@@ -900,6 +919,23 @@ export function WorkspacePage({
             </section>
           </div>
         </details>
+
+        <ConfirmDeleteDialog
+          open={Boolean(pendingDelete)}
+          title={deleteDialogTitle}
+          message={pendingDelete?.prompt ?? ""}
+          targetLabel={deleteDialogTarget}
+          targetValue={pendingDelete?.targetName ?? ""}
+          phrase={deleteDialogPhrase}
+          inputValue={deleteConfirmValue}
+          inputLabel={deleteDialogInputLabel}
+          cancelLabel={deleteDialogCancel}
+          confirmLabel={deleteDialogConfirm}
+          busy={renderBusy}
+          onInputChange={setDeleteConfirmValue}
+          onCancel={() => setPendingDelete(null)}
+          onConfirm={() => void handleConfirmDelete()}
+        />
       </div>
     );
   }
