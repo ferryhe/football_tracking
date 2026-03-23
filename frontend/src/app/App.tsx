@@ -62,6 +62,12 @@ export function App() {
   const [fieldMessage, setFieldMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
+  async function refreshHealth(): Promise<HealthResponse> {
+    const nextHealth = await api.getHealth();
+    setHealth(nextHealth);
+    return nextHealth;
+  }
+
   async function refreshConfigs(): Promise<ConfigListItem[]> {
     const nextConfigs = await api.listConfigs();
     setConfigs(nextConfigs);
@@ -374,6 +380,37 @@ export function App() {
     setStage("delivery");
   }
 
+  async function handleCreateFollowCamRender(
+    runId: string,
+    options: {
+      prefer_cleaned_track: boolean;
+      draw_ball_marker: boolean;
+      draw_frame_text: boolean;
+    },
+  ) {
+    const createdRun = await api.createFollowCamRender(runId, options);
+    await syncCreatedRun(createdRun);
+    setStage("delivery");
+    return createdRun;
+  }
+
+  async function handleDeleteInputVideo(name: string) {
+    await api.deleteInput(name);
+    const [nextInputs] = await Promise.all([refreshInputs(), refreshHealth()]);
+    const nextSelectedInput =
+      selectedInputPath && nextInputs.videos.some((item) => item.path === selectedInputPath)
+        ? selectedInputPath
+        : (nextInputs.videos[0]?.path ?? "");
+    setSelectedInputPath(nextSelectedInput);
+    setSelectedConfigName((current) => pickPreferredConfigName(configs, orderedRuns, nextSelectedInput, current));
+  }
+
+  async function handleDeleteConfig(name: string) {
+    await api.deleteConfig(name);
+    const [nextConfigs] = await Promise.all([refreshConfigs(), refreshHealth()]);
+    setSelectedConfigName((current) => pickPreferredConfigName(nextConfigs, orderedRuns, selectedInputPath, current === name ? "" : current));
+  }
+
   const stageTabs = useMemo<StageTab[]>(
     () => [
       {
@@ -472,6 +509,9 @@ export function App() {
             onUpdateFieldSuggestion={handleUpdateFieldSuggestion}
             onAcceptFieldSuggestion={handleAcceptFieldSuggestion}
             onStartBaselineRun={handleStartBaselineRun}
+            onCreateFollowCamRender={handleCreateFollowCamRender}
+            onDeleteInputVideo={handleDeleteInputVideo}
+            onDeleteConfig={handleDeleteConfig}
           />
         </section>
 

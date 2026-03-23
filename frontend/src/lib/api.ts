@@ -37,6 +37,10 @@ export const api = {
   baseUrl: API_BASE_URL,
   getHealth: () => request<HealthResponse>("/health"),
   listInputs: () => request<InputCatalog>("/inputs"),
+  deleteInput: (name: string) =>
+    request<{ name: string; path: string; deleted: boolean }>(`/inputs?name=${encodeURIComponent(name)}`, {
+      method: "DELETE",
+    }),
   captureFieldPreview: (body: Record<string, unknown>) =>
     request<FieldPreview>("/inputs/field-preview", {
       method: "POST",
@@ -48,6 +52,10 @@ export const api = {
       body: JSON.stringify(body),
     }),
   listConfigs: () => request<ConfigListItem[]>("/configs"),
+  deleteConfig: (name: string) =>
+    request<{ name: string; path: string; deleted: boolean }>(`/configs?name=${encodeURIComponent(name)}`, {
+      method: "DELETE",
+    }),
   getConfig: (name: string) => request<ConfigDetail>(`/configs/${encodeURIComponent(name)}`),
   deriveConfig: (body: Record<string, unknown>) =>
     request<ConfigDetail>("/configs/derive", {
@@ -63,6 +71,11 @@ export const api = {
     request<CameraPathResponse>(`/runs/${encodeURIComponent(runId)}/camera-path?limit=${limit}`),
   createRun: (body: Record<string, unknown>) =>
     request<RunRecord>("/runs", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  createFollowCamRender: (runId: string, body: Record<string, unknown>) =>
+    request<RunRecord>(`/runs/${encodeURIComponent(runId)}/follow-cam-render`, {
       method: "POST",
       body: JSON.stringify(body),
     }),

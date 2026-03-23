@@ -368,6 +368,95 @@ class ApiServiceSmokeTests(unittest.TestCase):
         self.assertEqual("cleaned", run["stats"]["follow_cam"]["track_source"])
         self.assertIn("follow_cam.mp4", {artifact["name"] for artifact in run["artifacts"]})
 
+    def test_create_follow_cam_render_creates_standalone_deliverable_task(self) -> None:
+        self.create_output_bundle("kept_baseline")
+        source_run = self.service.list_runs()[0]
+
+        class ImmediateThread:
+            def __init__(self, *, target, args, name, daemon) -> None:
+                self._target = target
+                self._args = args
+                self._alive = False
+
+            def start(self) -> None:
+                self._alive = True
+                try:
+                    self._target(*self._args)
+                finally:
+                    self._alive = False
+
+            def is_alive(self) -> bool:
+                return self._alive
+
+        class FakeFollowCamGenerator:
+            def __init__(self, app_config) -> None:
+                self.app_config = app_config
+
+            def run(self) -> None:
+                output_dir = self.app_config.output_dir
+                (output_dir / self.app_config.follow_cam.output_video_name).write_text("deliverable", encoding="utf-8")
+                (output_dir / self.app_config.follow_cam.camera_path_name).write_text(
+                    "Frame,CenterX,CenterY\n0,100,200\n",
+                    encoding="utf-8",
+                )
+                report = {
+                    "track_source": "cleaned",
+                    "target_resolution": [
+                        self.app_config.follow_cam.target_width,
+                        self.app_config.follow_cam.target_height,
+                    ],
+                    "mean_crop_height": 980.0,
+                    "status_counts": {"Detected": 2, "Lost": 1},
+                }
+                (output_dir / self.app_config.follow_cam.report_name).write_text(
+                    json.dumps(report, ensure_ascii=False),
+                    encoding="utf-8",
+                )
+
+        with mock.patch("football_tracking.api.service.threading.Thread", ImmediateThread), mock.patch(
+            "football_tracking.api.service.FollowCamGenerator", FakeFollowCamGenerator
+        ):
+            created_run = self.service.create_follow_cam_render(source_run["run_id"], {})
+
+        completed_run = self.service.get_run(created_run["run_id"])
+
+        self.assertEqual("follow_cam_render", completed_run["source"])
+        self.assertEqual(source_run["run_id"], completed_run["parent_run_id"])
+        self.assertEqual("completed", completed_run["status"])
+        self.assertFalse(completed_run["modules_enabled"]["postprocess"])
+        self.assertTrue(completed_run["modules_enabled"]["follow_cam"])
+        self.assertEqual([1920, 1080], completed_run["stats"]["follow_cam"]["target_resolution"])
+        self.assertIn("deliverable_16x9.mp4", {artifact["name"] for artifact in completed_run["artifacts"]})
+        self.assertTrue((Path(completed_run["output_dir"]) / "ball_track.cleaned.csv").exists())
+
+    def test_delete_input_video_blocks_active_run_reference(self) -> None:
+        active_input = (self.repo_root / "data" / "input.mp4").resolve()
+        active_config = (self.repo_root / "config" / "default.yaml").resolve()
+        self.service._write_registry(
+            {
+                "runs": [
+                    {
+                        "run_id": "active_demo",
+                        "status": "running",
+                        "input_video": str(active_input),
+                        "config_path": str(active_config),
+                    }
+                ]
+            }
+        )
+
+        with self.assertRaises(RuntimeError):
+            self.service.delete_input_video("input.mp4")
+
+    def test_delete_config_and_input_video_remove_files(self) -> None:
+        deleted_video = self.service.delete_input_video("clip.mov")
+        deleted_config = self.service.delete_config("alt.yaml")
+
+        self.assertTrue(deleted_video["deleted"])
+        self.assertTrue(deleted_config["deleted"])
+        self.assertFalse((self.repo_root / "data" / "clip.mov").exists())
+        self.assertFalse((self.repo_root / "config" / "alt.yaml").exists())
+
     def test_ai_recommend_camera_objective_returns_follow_cam_patch(self) -> None:
         self.create_output_bundle("kept_baseline")
         run = self.service.list_runs()[0]
@@ -424,6 +513,7 @@ class ApiServiceSmokeTests(unittest.TestCase):
             "/api/v1/configs/{name:path}",
             "/api/v1/runs",
             "/api/v1/runs/{run_id}",
+            "/api/v1/runs/{run_id}/follow-cam-render",
             "/api/v1/runs/{run_id}/artifacts",
             "/api/v1/runs/{run_id}/artifacts/{artifact_name:path}",
             "/api/v1/runs/{run_id}/cleanup-report",

@@ -84,6 +84,7 @@ export interface RunRecord {
   config_name?: string | null;
   config_path?: string | null;
   input_video?: string | null;
+  parent_run_id?: string | null;
   output_dir: string;
   modules_enabled: Record<string, boolean>;
   artifacts: ArtifactSummary[];

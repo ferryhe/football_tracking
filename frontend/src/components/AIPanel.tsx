@@ -216,6 +216,7 @@ export function AIPanel({ run, configs, targetInputVideo, onConfigDerived, onRun
       const createdRun = await api.createRun({
         config_name: derived.name,
         input_video: targetInputVideo ?? run.input_video ?? undefined,
+        parent_run_id: run.run_id,
         enable_postprocess: true,
         enable_follow_cam: true,
         notes: `AI objective: ${objective}`,

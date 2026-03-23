@@ -4,6 +4,7 @@ import base64
 import csv
 import json
 import mimetypes
+import shutil
 import threading
 import unicodedata
 from copy import deepcopy
@@ -19,6 +20,7 @@ import yaml
 
 from football_tracking.api.ai_provider import OpenAIResponsesClient, load_provider_settings
 from football_tracking.config import AppConfig, load_config
+from football_tracking.follow_cam import FollowCamGenerator
 from football_tracking.pipeline import BallTrackingPipeline
 
 
@@ -138,6 +140,17 @@ class ApiService:
         return {
             "root_dir": str(self.data_dir.resolve()),
             "videos": videos,
+        }
+
+    def delete_input_video(self, name: str) -> dict[str, Any]:
+        video_path = self._resolve_input_video_name(name)
+        with self._lock:
+            self._assert_path_not_used_by_active_run_locked(input_video=video_path)
+        video_path.unlink()
+        return {
+            "name": name,
+            "path": str(video_path),
+            "deleted": True,
         }
 
     def capture_field_preview(self, input_video: str, sample_index: int | None = None) -> dict[str, Any]:
@@ -266,6 +279,17 @@ class ApiService:
             "raw": raw,
             "resolved": _jsonable(resolved),
             "summary": self._build_config_summary(config_path, relative_name),
+        }
+
+    def delete_config(self, name: str) -> dict[str, Any]:
+        config_path, relative_name = self._resolve_config_path(name)
+        with self._lock:
+            self._assert_path_not_used_by_active_run_locked(config_path=config_path)
+        config_path.unlink()
+        return {
+            "name": relative_name,
+            "path": str(config_path),
+            "deleted": True,
         }
 
     def derive_config(self, base_config_name: str, output_name: str, patch: dict[str, Any]) -> dict[str, Any]:
@@ -844,6 +868,7 @@ class ApiService:
             "config_name": relative_name,
             "config_path": str(config_path),
             "input_video": str(config.input_video),
+            "parent_run_id": request.get("parent_run_id"),
             "output_dir": str(config.output_dir),
             "modules_enabled": {
                 "postprocess": bool(config.postprocess.enabled),
@@ -868,7 +893,85 @@ class ApiService:
                 daemon=True,
             )
             self._active_threads[run_id] = thread
-            thread.start()
+        thread.start()
+        return run_record
+
+    def create_follow_cam_render(self, source_run_id: str, request: dict[str, Any]) -> dict[str, Any]:
+        source_run = self.get_run(source_run_id)
+        if source_run.get("status") != "completed":
+            raise RuntimeError(f"Run must be completed before rendering a deliverable: {source_run_id}")
+
+        config_path, relative_name = self._resolve_run_config_reference(source_run)
+        config = load_config(config_path)
+        input_video = source_run.get("input_video") or str(config.input_video)
+        if not input_video:
+            raise FileNotFoundError(f"Run {source_run_id} is not linked to an input video.")
+
+        config.input_video = self._resolve_input_video_path(input_video)
+        requested_output_name = request.get("output_dir_name")
+        run_id = Path(requested_output_name).name if requested_output_name else ""
+        if not run_id:
+            run_id = f"deliver_{source_run_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid4().hex[:6]}"
+
+        config.output_dir = (self.outputs_dir / "api_runs" / run_id).resolve()
+        if config.output_dir.exists() and any(config.output_dir.iterdir()):
+            raise FileExistsError(str(config.output_dir))
+        config.output_dir.mkdir(parents=True, exist_ok=True)
+
+        config.postprocess.enabled = False
+        config.follow_cam.enabled = True
+        config.follow_cam.prefer_cleaned_track = bool(request.get("prefer_cleaned_track", True))
+        config.follow_cam.draw_ball_marker = bool(request.get("draw_ball_marker", False))
+        config.follow_cam.draw_frame_text = bool(request.get("draw_frame_text", False))
+        config.follow_cam.target_width = max(320, int(request.get("target_width") or 1920))
+        config.follow_cam.target_height = max(180, int(request.get("target_height") or 1080))
+        requested_video_name = str(request.get("output_video_name") or "deliverable_16x9.mp4")
+        config.follow_cam.output_video_name = Path(requested_video_name).name or "deliverable_16x9.mp4"
+
+        source_output_dir = Path(source_run["output_dir"]).resolve()
+        self._prepare_follow_cam_render_inputs(source_output_dir=source_output_dir, render_output_dir=config.output_dir, config=config)
+
+        render_notes = request.get("notes") or (
+            f"Standalone 16:9 render from {source_run_id} | "
+            f"marker={int(config.follow_cam.draw_ball_marker)} | "
+            f"annotation={int(config.follow_cam.draw_frame_text)}"
+        )
+        run_record = {
+            "run_id": run_id,
+            "source": "follow_cam_render",
+            "status": "queued",
+            "created_at": _utc_now_iso(),
+            "started_at": None,
+            "completed_at": None,
+            "config_name": relative_name,
+            "config_path": str(config_path),
+            "input_video": str(config.input_video),
+            "parent_run_id": source_run_id,
+            "output_dir": str(config.output_dir),
+            "modules_enabled": {
+                "postprocess": False,
+                "follow_cam": True,
+            },
+            "artifacts": self._collect_artifacts(config.output_dir),
+            "stats": self._collect_stats(config.output_dir),
+            "notes": render_notes,
+            "error": None,
+        }
+
+        with self._lock:
+            self._assert_no_active_run_locked()
+            registry = self._read_registry()
+            registry["runs"] = [run for run in registry["runs"] if run["run_id"] != run_id]
+            registry["runs"].append(run_record)
+            self._write_registry(registry)
+            thread = threading.Thread(
+                target=self._execute_follow_cam_render,
+                args=(run_id, config, source_run_id),
+                name=f"football-tracking-render-{run_id}",
+                daemon=True,
+            )
+            self._active_threads[run_id] = thread
+        thread.start()
         return run_record
 
     def _execute_run(self, run_id: str, config: AppConfig) -> None:
@@ -884,11 +987,48 @@ class ApiService:
                 config_name=existing.get("config_name"),
                 config_path=existing.get("config_path"),
                 input_video=str(config.input_video),
+                parent_run_id=existing.get("parent_run_id"),
                 output_dir=config.output_dir,
                 modules_enabled={
                     "postprocess": bool(config.postprocess.enabled),
                     "follow_cam": bool(config.follow_cam.enabled),
                 },
+                notes=existing.get("notes"),
+                started_at=existing.get("started_at"),
+                completed_at=_utc_now_iso(),
+            )
+            self._replace_run(run_id, updated)
+        except Exception as exc:
+            self._update_run(
+                run_id,
+                {
+                    "status": "failed",
+                    "completed_at": _utc_now_iso(),
+                    "error": str(exc),
+                    "artifacts": self._collect_artifacts(config.output_dir),
+                    "stats": self._collect_stats(config.output_dir),
+                },
+            )
+        finally:
+            with self._lock:
+                self._active_threads.pop(run_id, None)
+
+    def _execute_follow_cam_render(self, run_id: str, config: AppConfig, parent_run_id: str) -> None:
+        self._update_run(run_id, {"status": "running", "started_at": _utc_now_iso(), "error": None})
+        try:
+            FollowCamGenerator(config).run()
+            existing = self.get_run(run_id)
+            updated = self._build_run_snapshot(
+                run_id=run_id,
+                source="follow_cam_render",
+                status="completed",
+                created_at=existing["created_at"],
+                config_name=existing.get("config_name"),
+                config_path=existing.get("config_path"),
+                input_video=str(config.input_video),
+                parent_run_id=parent_run_id,
+                output_dir=config.output_dir,
+                modules_enabled={"postprocess": False, "follow_cam": True},
                 notes=existing.get("notes"),
                 started_at=existing.get("started_at"),
                 completed_at=_utc_now_iso(),
@@ -979,6 +1119,7 @@ class ApiService:
                     config_name=None if config_meta is None else config_meta["name"],
                     config_path=None if config_meta is None else str(config_meta["path"]),
                     input_video=None if config_meta is None else config_meta["input_video"],
+                    parent_run_id=None,
                     output_dir=output_dir,
                     modules_enabled=self._collect_module_flags(output_dir, config_meta),
                     notes=None,
@@ -995,6 +1136,7 @@ class ApiService:
         config_name: str | None,
         config_path: str | None,
         input_video: str | None,
+        parent_run_id: str | None,
         output_dir: Path,
         modules_enabled: dict[str, bool],
         notes: str | None,
@@ -1011,6 +1153,7 @@ class ApiService:
             "config_name": config_name,
             "config_path": config_path,
             "input_video": input_video,
+            "parent_run_id": parent_run_id,
             "output_dir": str(output_dir.resolve()),
             "modules_enabled": modules_enabled,
             "artifacts": self._collect_artifacts(output_dir),
@@ -1077,6 +1220,30 @@ class ApiService:
                 return candidate, candidate.relative_to(self.config_dir).as_posix()
         raise FileNotFoundError(name)
 
+    def _resolve_run_config_reference(self, run: dict[str, Any]) -> tuple[Path, str]:
+        config_path_raw = run.get("config_path")
+        if config_path_raw:
+            config_path = Path(config_path_raw).resolve()
+            if config_path.exists() and config_path.is_file():
+                try:
+                    relative_name = config_path.relative_to(self.config_dir.resolve()).as_posix()
+                except ValueError:
+                    relative_name = run.get("config_name") or config_path.name
+                return config_path, relative_name
+        config_name = run.get("config_name")
+        if config_name:
+            return self._resolve_config_path(config_name)
+        raise FileNotFoundError(f"Run {run.get('run_id')} is not linked to a readable config.")
+
+    def _resolve_input_video_name(self, name: str) -> Path:
+        candidate = (self.data_dir / name).resolve()
+        data_root = self.data_dir.resolve()
+        if candidate != data_root and data_root not in candidate.parents:
+            raise FileNotFoundError(f"Input video must live under {data_root}: {name}")
+        if not candidate.exists() or not candidate.is_file():
+            raise FileNotFoundError(f"Input video not found: {name}")
+        return candidate
+
     def _resolve_input_video_path(self, input_video: str) -> Path:
         candidate = Path(input_video).resolve()
         data_root = self.data_dir.resolve()
@@ -1085,6 +1252,37 @@ class ApiService:
         if not candidate.exists() or not candidate.is_file():
             raise FileNotFoundError(f"Input video not found: {input_video}")
         return candidate
+
+    def _prepare_follow_cam_render_inputs(self, source_output_dir: Path, render_output_dir: Path, config: AppConfig) -> None:
+        raw_csv = source_output_dir / config.output.csv_name
+        cleaned_csv = source_output_dir / config.postprocess.cleaned_csv_name
+        copied_any = False
+        for candidate in (raw_csv, cleaned_csv):
+            if not candidate.exists() or not candidate.is_file():
+                continue
+            shutil.copy2(candidate, render_output_dir / candidate.name)
+            copied_any = True
+        if not copied_any:
+            raise FileNotFoundError(f"Run output does not contain a usable track CSV: {source_output_dir}")
+
+    def _assert_path_not_used_by_active_run_locked(
+        self,
+        *,
+        input_video: Path | None = None,
+        config_path: Path | None = None,
+    ) -> None:
+        registry = self._read_registry()
+        for run in registry["runs"]:
+            if run.get("status") not in {"queued", "running"}:
+                continue
+            if input_video and run.get("input_video"):
+                run_input = Path(run["input_video"]).resolve()
+                if run_input == input_video.resolve():
+                    raise RuntimeError(f"File is used by active run: {run['run_id']}")
+            if config_path and run.get("config_path"):
+                run_config = Path(run["config_path"]).resolve()
+                if run_config == config_path.resolve():
+                    raise RuntimeError(f"Config is used by active run: {run['run_id']}")
 
     def _sample_video_frames(self, video_path: Path) -> list[dict[str, Any]]:
         capture = cv2.VideoCapture(str(video_path))

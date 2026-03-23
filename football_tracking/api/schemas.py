@@ -39,6 +39,12 @@ class InputCatalogResponse(BaseModel):
     videos: list[InputVideoItem] = Field(default_factory=list)
 
 
+class DeleteResourceResponse(BaseModel):
+    name: str
+    path: str
+    deleted: bool = True
+
+
 class FieldPreviewRequest(BaseModel):
     input_video: str
     sample_index: int | None = None
@@ -114,6 +120,7 @@ class RunRecord(BaseModel):
     config_name: str | None = None
     config_path: str | None = None
     input_video: str | None = None
+    parent_run_id: str | None = None
     output_dir: str
     modules_enabled: dict[str, bool] = Field(default_factory=dict)
     artifacts: list[ArtifactSummary] = Field(default_factory=list)
@@ -125,12 +132,24 @@ class RunRecord(BaseModel):
 class CreateRunRequest(BaseModel):
     config_name: str
     input_video: str | None = None
+    parent_run_id: str | None = None
     output_dir_name: str | None = None
     config_patch: dict[str, Any] = Field(default_factory=dict)
     enable_postprocess: bool | None = None
     enable_follow_cam: bool | None = None
     start_frame: int | None = None
     max_frames: int | None = None
+    notes: str | None = None
+
+
+class FollowCamRenderRequest(BaseModel):
+    output_dir_name: str | None = None
+    output_video_name: str | None = None
+    prefer_cleaned_track: bool = True
+    draw_ball_marker: bool = False
+    draw_frame_text: bool = False
+    target_width: int = 1920
+    target_height: int = 1080
     notes: str | None = None
 
 

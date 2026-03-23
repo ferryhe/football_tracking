@@ -4,6 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException
 
 from football_tracking.api.dependencies import get_service
 from football_tracking.api.schemas import (
+    DeleteResourceResponse,
     FieldPreviewRequest,
     FieldPreviewResponse,
     FieldSuggestionRequest,
@@ -44,3 +45,13 @@ def suggest_field_setup(request: FieldSuggestionRequest, service: ApiService = D
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except RuntimeError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.delete("/inputs", response_model=DeleteResourceResponse)
+def delete_input_video(name: str, service: ApiService = Depends(get_service)) -> DeleteResourceResponse:
+    try:
+        return DeleteResourceResponse(**service.delete_input_video(name))
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc

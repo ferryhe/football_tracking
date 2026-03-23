@@ -1109,6 +1109,11 @@ textarea {
   color: inherit;
 }
 
+.secondary-button.danger-button {
+  border-color: rgba(208, 112, 112, 0.28);
+  background: rgba(138, 48, 48, 0.16);
+}
+
 .accent-button {
   border: none;
   color: #081108;
@@ -1180,6 +1185,84 @@ textarea {
   gap: 12px;
 }
 
+.history-grid,
+.resource-grid,
+.history-render-grid,
+.option-toggle-grid {
+  display: grid;
+  gap: 16px;
+}
+
+.history-grid {
+  grid-template-columns: minmax(320px, 0.9fr) minmax(320px, 1.1fr);
+  align-items: start;
+}
+
+.history-render-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.option-toggle-grid {
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+}
+
+.option-toggle {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 52px;
+  padding: 12px 14px;
+  border-radius: 16px;
+  border: 1px solid var(--border-soft);
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.option-toggle input {
+  width: 18px;
+  height: 18px;
+  margin: 0;
+  flex-shrink: 0;
+}
+
+.resource-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.resource-list-card,
+.resource-list,
+.resource-copy {
+  display: grid;
+  gap: 12px;
+}
+
+.resource-list-card,
+.compact-summary-card {
+  padding: 16px;
+  border-radius: 18px;
+  border: 1px solid var(--border-soft);
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.history-action-card h4,
+.resource-panel h4 {
+  margin: 0;
+}
+
+.resource-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 14px;
+  align-items: center;
+  padding: 14px 16px;
+  border-radius: 18px;
+  border: 1px solid var(--border-soft);
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.resource-copy {
+  min-width: 0;
+}
+
 .artifact-stack,
 .output-section {
   display: grid;
@@ -1214,6 +1297,10 @@ textarea {
   border-radius: 20px;
   border: 1px solid var(--border-soft);
   background: rgba(255, 255, 255, 0.035);
+}
+
+.delivery-row.selected {
+  border-color: rgba(184, 223, 116, 0.32);
 }
 
 .delivery-row-head {
@@ -1584,7 +1671,10 @@ td {
   .assistant-stage-grid,
   .assistant-mini-grid,
   .compact-actions,
-  .delivery-row-meta {
+  .delivery-row-meta,
+  .history-grid,
+  .resource-grid,
+  .history-render-grid {
     grid-template-columns: 1fr;
   }
 }
@@ -1613,7 +1703,8 @@ td {
   .stats-row,
   .launch-summary,
   .mini-stat-grid,
-  .detail-grid {
+  .detail-grid,
+  .option-toggle-grid {
     grid-template-columns: 1fr;
   }
 

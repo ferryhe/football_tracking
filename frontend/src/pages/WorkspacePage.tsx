@@ -1,11 +1,15 @@
+import { useEffect, useMemo, useState } from "react";
+
 import {
   ActivityIcon,
   CheckIcon,
   ClockIcon,
   FileIcon,
+  FolderIcon,
   LayersIcon,
   PlayIcon,
   SparkIcon,
+  TrashIcon,
   VideoIcon,
 } from "../components/Icons";
 import { FieldSetupCard } from "../components/FieldSetupCard";
@@ -41,6 +45,16 @@ interface WorkspacePageProps {
   onUpdateFieldSuggestion: (suggestion: FieldSuggestion) => void;
   onAcceptFieldSuggestion: (suggestion: FieldSuggestion) => void;
   onStartBaselineRun: () => Promise<void>;
+  onCreateFollowCamRender: (
+    runId: string,
+    options: {
+      prefer_cleaned_track: boolean;
+      draw_ball_marker: boolean;
+      draw_frame_text: boolean;
+    },
+  ) => Promise<RunRecord>;
+  onDeleteInputVideo: (name: string) => Promise<void>;
+  onDeleteConfig: (name: string) => Promise<void>;
 }
 
 function getTrackStats(run: RunRecord | null): Record<string, unknown> | null {
@@ -79,6 +93,15 @@ function formatPathTail(path: string | null | undefined): string {
   }
   const pieces = path.split(/[\\/]/).filter(Boolean);
   return pieces.length ? pieces[pieces.length - 1] : path;
+}
+
+function supportsFollowCamRender(run: RunRecord): boolean {
+  return (
+    run.status === "completed" &&
+    Boolean(run.input_video) &&
+    Boolean(run.config_name || run.config_path) &&
+    run.artifacts.some((artifact) => artifact.name === "ball_track.csv" || artifact.name === "ball_track.cleaned.csv")
+  );
 }
 
 function runStatusIcon(status: string) {
@@ -146,8 +169,88 @@ export function WorkspacePage({
   onUpdateFieldSuggestion,
   onAcceptFieldSuggestion,
   onStartBaselineRun,
+  onCreateFollowCamRender,
+  onDeleteInputVideo,
+  onDeleteConfig,
 }: WorkspacePageProps) {
-  const { copy, formatDateTime, formatRunStatus } = useI18n();
+  const { copy, formatDateTime, formatRunStatus, language } = useI18n();
+  const historyCopy = useMemo(
+    () =>
+      language === "zh"
+        ? {
+            renderEyebrow: "独立成品任务",
+            renderTitle: "从历史 run 生成 16:9 成品",
+            renderSubtitle: "这里不会重跑 detector 或基线，只复用已完成 run 的轨迹重新导出成品。",
+            renderSelect: "来源 run",
+            renderReady: "可用于成品裁剪的 run",
+            renderOutput: "输出",
+            renderSource: "来源",
+            renderUseCleaned: "优先使用清洗后的轨迹",
+            renderShowMarker: "显示球点标记",
+            renderShowText: "显示文字标注",
+            renderDefaults: "成品默认关闭标记和文字标注，只保留干净的 16:9 画面。",
+            renderButton: "开始 16:9 成品裁剪",
+            renderEmpty: "先完成至少一个包含轨迹 CSV 的 run，才能独立导出 16:9 成品。",
+            renderCreated: "已创建独立成品任务",
+            renderConfirm: "要开始新的 16:9 成品任务吗？",
+            historySource: "来源 run",
+            historyModeBaseline: "基线",
+            historyModeRender: "成品",
+            historyModeScan: "扫描",
+            manageEyebrow: "资源管理",
+            manageTitle: "视频和配置文件管理",
+            manageSubtitle: "这里可以清理不再需要的输入视频和 YAML 配置。正在运行中的任务会被保护，不能删除。",
+            manageVideos: "输入视频",
+            manageConfigs: "配置文件",
+            manageDelete: "删除",
+            manageNoVideos: "没有可管理的视频。",
+            manageNoConfigs: "没有可管理的配置。",
+            manageDeleted: "已删除",
+            manageDeleteVideoConfirm: "确定删除这个输入视频吗？",
+            manageDeleteConfigConfirm: "确定删除这个配置文件吗？",
+          }
+        : {
+            renderEyebrow: "Standalone deliverable task",
+            renderTitle: "Create a 16:9 deliverable from history",
+            renderSubtitle: "This does not rerun detector or baseline. It reuses the selected completed run and renders a clean deliverable.",
+            renderSelect: "Source run",
+            renderReady: "Runs ready for deliverable render",
+            renderOutput: "Output",
+            renderSource: "Source",
+            renderUseCleaned: "Prefer cleaned track CSV",
+            renderShowMarker: "Show ball marker",
+            renderShowText: "Show frame text / annotation",
+            renderDefaults: "Final deliverables default to a clean 16:9 frame with marker and annotation turned off.",
+            renderButton: "Start 16:9 deliverable render",
+            renderEmpty: "Complete at least one run with track CSVs before starting a standalone 16:9 render.",
+            renderCreated: "Standalone deliverable task created",
+            renderConfirm: "Start a new standalone 16:9 render task?",
+            historySource: "Source run",
+            historyModeBaseline: "Baseline",
+            historyModeRender: "Deliverable",
+            historyModeScan: "Scanned",
+            manageEyebrow: "File management",
+            manageTitle: "Video and config cleanup",
+            manageSubtitle: "Remove videos and YAML configs you no longer need. Active runs stay protected.",
+            manageVideos: "Input videos",
+            manageConfigs: "Config files",
+            manageDelete: "Delete",
+            manageNoVideos: "No videos to manage.",
+            manageNoConfigs: "No configs to manage.",
+            manageDeleted: "Deleted",
+            manageDeleteVideoConfirm: "Delete this input video?",
+            manageDeleteConfigConfirm: "Delete this config file?",
+          },
+    [language],
+  );
+  const [renderRunId, setRenderRunId] = useState("");
+  const [renderBusy, setRenderBusy] = useState(false);
+  const [historyMessage, setHistoryMessage] = useState<string | null>(null);
+  const [renderOptions, setRenderOptions] = useState({
+    prefer_cleaned_track: true,
+    draw_ball_marker: false,
+    draw_frame_text: false,
+  });
   const selectedVideo = inputCatalog.videos.find((item) => item.path === selectedInputPath) ?? null;
   const selectedConfig = configs.find((item) => item.name === selectedConfigName) ?? null;
   const selectedScope = inferConfigScope(selectedConfig?.name);
@@ -155,6 +258,79 @@ export function WorkspacePage({
   const aiRuns = selectedInputPath ? runs.filter((run) => run.input_video === selectedInputPath) : runs;
   const aiSelectedRun = selectedRun && aiRuns.some((run) => run.run_id === selectedRun.run_id) ? selectedRun : aiRuns[0] ?? null;
   const stats = getTrackStats(aiSelectedRun ?? selectedRun);
+  const renderableRuns = useMemo(
+    () =>
+      runs.filter(
+        (run) => supportsFollowCamRender(run) && inputCatalog.videos.some((item) => item.path === run.input_video),
+      ),
+    [inputCatalog.videos, runs],
+  );
+  const activeRenderRun =
+    renderableRuns.find((run) => run.run_id === renderRunId) ??
+    (selectedRun && renderableRuns.some((run) => run.run_id === selectedRun.run_id) ? selectedRun : renderableRuns[0] ?? null);
+
+  useEffect(() => {
+    if (renderableRuns.some((run) => run.run_id === renderRunId)) {
+      return;
+    }
+    if (selectedRun && renderableRuns.some((run) => run.run_id === selectedRun.run_id)) {
+      setRenderRunId(selectedRun.run_id);
+      return;
+    }
+    setRenderRunId(renderableRuns[0]?.run_id ?? "");
+  }, [renderRunId, renderableRuns, selectedRun]);
+
+  async function handleCreateDeliverableRender() {
+    if (!activeRenderRun) {
+      return;
+    }
+    if (typeof window !== "undefined" && !window.confirm(historyCopy.renderConfirm)) {
+      return;
+    }
+    setRenderBusy(true);
+    setHistoryMessage(null);
+    try {
+      const createdRun = await onCreateFollowCamRender(activeRenderRun.run_id, renderOptions);
+      setRenderRunId(createdRun.run_id);
+      setHistoryMessage(`${historyCopy.renderCreated}: ${createdRun.run_id}`);
+    } catch (caughtError) {
+      setHistoryMessage(caughtError instanceof Error ? caughtError.message : String(caughtError));
+    } finally {
+      setRenderBusy(false);
+    }
+  }
+
+  async function handleDeleteVideo(name: string) {
+    if (typeof window !== "undefined" && !window.confirm(historyCopy.manageDeleteVideoConfirm)) {
+      return;
+    }
+    setRenderBusy(true);
+    setHistoryMessage(null);
+    try {
+      await onDeleteInputVideo(name);
+      setHistoryMessage(`${historyCopy.manageDeleted}: ${name}`);
+    } catch (caughtError) {
+      setHistoryMessage(caughtError instanceof Error ? caughtError.message : String(caughtError));
+    } finally {
+      setRenderBusy(false);
+    }
+  }
+
+  async function handleDeleteConfigClick(name: string) {
+    if (typeof window !== "undefined" && !window.confirm(historyCopy.manageDeleteConfigConfirm)) {
+      return;
+    }
+    setRenderBusy(true);
+    setHistoryMessage(null);
+    try {
+      await onDeleteConfig(name);
+      setHistoryMessage(`${historyCopy.manageDeleted}: ${name}`);
+    } catch (caughtError) {
+      setHistoryMessage(caughtError instanceof Error ? caughtError.message : String(caughtError));
+    } finally {
+      setRenderBusy(false);
+    }
+  }
 
   if (stage === "baseline") {
     return (
@@ -328,35 +504,242 @@ export function WorkspacePage({
             </div>
           </div>
 
+          <div className="history-grid">
+            <article className="assistant-card primary history-action-card">
+              <div className="title-row">
+                <VideoIcon className="section-icon" />
+                <div>
+                  <p className="eyebrow">{historyCopy.renderEyebrow}</p>
+                  <h4>{historyCopy.renderTitle}</h4>
+                  <p className="muted">{historyCopy.renderSubtitle}</p>
+                </div>
+              </div>
+
+              {renderableRuns.length ? (
+                <>
+                  <label className="form-label">
+                    <span className="meta-label">{historyCopy.renderSelect}</span>
+                    <select
+                      value={activeRenderRun?.run_id ?? ""}
+                      onChange={(event) => {
+                        setRenderRunId(event.target.value);
+                        const nextRun = renderableRuns.find((run) => run.run_id === event.target.value);
+                        if (nextRun) {
+                          onSelectRun(nextRun);
+                        }
+                      }}
+                    >
+                      {renderableRuns.map((run) => (
+                        <option key={run.run_id} value={run.run_id}>
+                          {`${formatDateTime(runMoment(run))} | ${run.run_id} | ${formatPathTail(run.input_video)}`}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+
+                  <div className="history-render-grid">
+                    <article className="summary-card compact-summary-card">
+                      <p className="meta-label">{historyCopy.renderSource}</p>
+                      <strong>{activeRenderRun?.run_id ?? copy.common.notAvailable}</strong>
+                      <p className="muted mono">{activeRenderRun?.config_name ?? activeRenderRun?.config_path ?? copy.common.notAvailable}</p>
+                    </article>
+                    <article className="summary-card compact-summary-card">
+                      <p className="meta-label">{historyCopy.renderOutput}</p>
+                      <strong>1920 x 1080</strong>
+                      <p className="muted mono">deliverable_16x9.mp4</p>
+                    </article>
+                  </div>
+
+                  <div className="option-toggle-grid">
+                    <label className="option-toggle">
+                      <input
+                        type="checkbox"
+                        checked={renderOptions.prefer_cleaned_track}
+                        onChange={(event) =>
+                          setRenderOptions((current) => ({
+                            ...current,
+                            prefer_cleaned_track: event.target.checked,
+                          }))
+                        }
+                      />
+                      <span>{historyCopy.renderUseCleaned}</span>
+                    </label>
+                    <label className="option-toggle">
+                      <input
+                        type="checkbox"
+                        checked={renderOptions.draw_ball_marker}
+                        onChange={(event) =>
+                          setRenderOptions((current) => ({
+                            ...current,
+                            draw_ball_marker: event.target.checked,
+                          }))
+                        }
+                      />
+                      <span>{historyCopy.renderShowMarker}</span>
+                    </label>
+                    <label className="option-toggle">
+                      <input
+                        type="checkbox"
+                        checked={renderOptions.draw_frame_text}
+                        onChange={(event) =>
+                          setRenderOptions((current) => ({
+                            ...current,
+                            draw_frame_text: event.target.checked,
+                          }))
+                        }
+                      />
+                      <span>{historyCopy.renderShowText}</span>
+                    </label>
+                  </div>
+
+                  <p className="notice-line subtle">{historyCopy.renderDefaults}</p>
+                  <button type="button" className="primary-button icon-button" onClick={handleCreateDeliverableRender} disabled={renderBusy}>
+                    <PlayIcon className="button-icon" />
+                    <span>{historyCopy.renderButton}</span>
+                  </button>
+                </>
+              ) : (
+                <div className="empty-state">
+                  <strong>{copy.workspace.deliveryEmptyTitle}</strong>
+                  <p className="muted">{historyCopy.renderEmpty}</p>
+                </div>
+              )}
+
+              {historyMessage ? <p className="notice-line">{historyMessage}</p> : null}
+            </article>
+
+            <article className="panel resource-panel">
+              <div className="title-row">
+                <FolderIcon className="section-icon" />
+                <div>
+                  <p className="eyebrow">{historyCopy.manageEyebrow}</p>
+                  <h4>{historyCopy.manageTitle}</h4>
+                  <p className="muted">{historyCopy.manageSubtitle}</p>
+                </div>
+              </div>
+
+              <div className="resource-grid">
+                <section className="resource-list-card">
+                  <div className="meta-row">
+                    <span className="meta-label">{historyCopy.manageVideos}</span>
+                    <strong>{inputCatalog.videos.length}</strong>
+                  </div>
+                  {inputCatalog.videos.length ? (
+                    <div className="resource-list">
+                      {inputCatalog.videos.map((video) => (
+                        <article key={video.path} className="resource-row">
+                          <div className="resource-copy">
+                            <strong>{video.name}</strong>
+                            <p className="muted mono">{formatVideoSize(video.size_bytes)} | {formatDateTime(video.modified_at)}</p>
+                          </div>
+                          <button
+                            type="button"
+                            className="secondary-button icon-button danger-button"
+                            onClick={() => void handleDeleteVideo(video.name)}
+                            disabled={renderBusy}
+                          >
+                            <TrashIcon className="button-icon" />
+                            <span>{historyCopy.manageDelete}</span>
+                          </button>
+                        </article>
+                      ))}
+                    </div>
+                  ) : (
+                    <p className="muted">{historyCopy.manageNoVideos}</p>
+                  )}
+                </section>
+
+                <section className="resource-list-card">
+                  <div className="meta-row">
+                    <span className="meta-label">{historyCopy.manageConfigs}</span>
+                    <strong>{configs.length}</strong>
+                  </div>
+                  {configs.length ? (
+                    <div className="resource-list">
+                      {configs.map((config) => (
+                        <article key={config.name} className="resource-row">
+                          <div className="resource-copy">
+                            <strong>{config.name}</strong>
+                            <div className="tag-row">
+                              <span className={`tag ${config.postprocess_enabled ? "good" : ""}`}>{copy.workspace.cleanup}</span>
+                              <span className={`tag ${config.follow_cam_enabled ? "good" : ""}`}>{copy.workspace.followCam}</span>
+                            </div>
+                          </div>
+                          <button
+                            type="button"
+                            className="secondary-button icon-button danger-button"
+                            onClick={() => void handleDeleteConfigClick(config.name)}
+                            disabled={renderBusy}
+                          >
+                            <TrashIcon className="button-icon" />
+                            <span>{historyCopy.manageDelete}</span>
+                          </button>
+                        </article>
+                      ))}
+                    </div>
+                  ) : (
+                    <p className="muted">{historyCopy.manageNoConfigs}</p>
+                  )}
+                </section>
+              </div>
+            </article>
+          </div>
+        </section>
+
+        <section className="panel">
+          <div className="panel-header">
+            <div className="title-row">
+              <ClockIcon className="section-icon" />
+              <div>
+                <p className="eyebrow">{copy.workspace.queueEyebrow}</p>
+                <h3>{copy.workspace.deliveryTitle}</h3>
+                <p className="muted">{copy.workspace.deliverySubtitle}</p>
+              </div>
+            </div>
+          </div>
+
           {runs.length ? (
             <div className="delivery-list">
               {runs.map((run) => {
                 const StatusIcon = runStatusIcon(run.status);
+                const modeLabel =
+                  run.source === "follow_cam_render"
+                    ? historyCopy.historyModeRender
+                    : run.source === "filesystem_scan"
+                      ? historyCopy.historyModeScan
+                      : historyCopy.historyModeBaseline;
                 return (
-                <article key={run.run_id} className="delivery-row">
-                  <div className="delivery-row-head">
-                    <div className="title-row compact">
-                      <StatusIcon className="section-icon tiny" />
-                      <strong>{run.run_id}</strong>
+                  <article key={run.run_id} className={`delivery-row ${activeRenderRun?.run_id === run.run_id ? "selected" : ""}`}>
+                    <div className="delivery-row-head">
+                      <div className="title-row compact">
+                        <StatusIcon className="section-icon tiny" />
+                        <strong>{run.run_id}</strong>
+                      </div>
+                      <p className="muted mono">{run.config_name ?? run.config_path ?? copy.common.notAvailable}</p>
+                      <div className="tag-row">
+                        <span className="tag">{formatRunStatus(run.status)}</span>
+                        <span className="tag">{modeLabel}</span>
+                        <span className="tag">{formatPathTail(run.input_video) || copy.common.notAvailable}</span>
+                      </div>
                     </div>
-                    <p className="muted mono">{run.config_name ?? copy.common.notAvailable}</p>
-                    <div className="tag-row">
-                      <span className="tag">{formatRunStatus(run.status)}</span>
-                      <span className="tag">{formatPathTail(run.input_video) || copy.common.notAvailable}</span>
-                    </div>
-                  </div>
 
-                  <div className="delivery-row-meta">
-                    <div className="detail-block compact-detail">
-                      <p className="meta-label">{copy.workspace.deliveryRanAt}</p>
-                      <p>{formatDateTime(runMoment(run))}</p>
+                    <div className="delivery-row-meta">
+                      <div className="detail-block compact-detail">
+                        <p className="meta-label">{copy.workspace.deliveryRanAt}</p>
+                        <p>{formatDateTime(runMoment(run))}</p>
+                      </div>
+                      <div className="detail-block compact-detail">
+                        <p className="meta-label">{copy.workspace.deliveryResultFolder}</p>
+                        <p className="mono">{run.output_dir}</p>
+                      </div>
+                      {run.parent_run_id ? (
+                        <div className="detail-block compact-detail">
+                          <p className="meta-label">{historyCopy.historySource}</p>
+                          <p className="mono">{run.parent_run_id}</p>
+                        </div>
+                      ) : null}
                     </div>
-                    <div className="detail-block compact-detail">
-                      <p className="meta-label">{copy.workspace.deliveryResultFolder}</p>
-                      <p className="mono">{run.output_dir}</p>
-                    </div>
-                  </div>
-                </article>
+                  </article>
                 );
               })}
             </div>
