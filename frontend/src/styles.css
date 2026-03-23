@@ -1188,7 +1188,9 @@ textarea {
 .history-grid,
 .resource-grid,
 .history-render-grid,
-.option-toggle-grid {
+.option-toggle-grid,
+.render-summary-strip,
+.render-footer {
   display: grid;
   gap: 16px;
 }
@@ -1202,8 +1204,16 @@ textarea {
   grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
+.render-summary-strip {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
 .option-toggle-grid {
   grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+}
+
+.compact-toggle-grid {
+  gap: 12px;
 }
 
 .option-toggle {
@@ -1246,6 +1256,37 @@ textarea {
 .history-action-card h4,
 .resource-panel h4 {
   margin: 0;
+}
+
+.compact-summary-card {
+  gap: 6px;
+}
+
+.compact-lead {
+  margin: 4px 0 0;
+}
+
+.render-footer {
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+}
+
+.compact-notice {
+  padding: 10px 12px;
+}
+
+.resource-panel-collapsed summary {
+  list-style: none;
+  cursor: pointer;
+}
+
+.resource-panel-collapsed summary::-webkit-details-marker {
+  display: none;
+}
+
+.resource-summary {
+  margin: -2px;
+  padding: 2px;
 }
 
 .resource-row {
@@ -1674,7 +1715,9 @@ td {
   .delivery-row-meta,
   .history-grid,
   .resource-grid,
-  .history-render-grid {
+  .history-render-grid,
+  .render-summary-strip,
+  .render-footer {
     grid-template-columns: 1fr;
   }
 }

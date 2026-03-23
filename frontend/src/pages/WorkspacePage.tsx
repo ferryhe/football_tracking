@@ -185,6 +185,7 @@ export function WorkspacePage({
             renderReady: "可用于成品裁剪的 run",
             renderOutput: "输出",
             renderSource: "来源",
+            renderClip: "原视频",
             renderUseCleaned: "优先使用清洗后的轨迹",
             renderShowMarker: "显示球点标记",
             renderShowText: "显示文字标注",
@@ -200,6 +201,7 @@ export function WorkspacePage({
             manageEyebrow: "资源管理",
             manageTitle: "视频和配置文件管理",
             manageSubtitle: "这里可以清理不再需要的输入视频和 YAML 配置。正在运行中的任务会被保护，不能删除。",
+            manageSummary: "清理不用的视频和 YAML",
             manageVideos: "输入视频",
             manageConfigs: "配置文件",
             manageDelete: "删除",
@@ -217,6 +219,7 @@ export function WorkspacePage({
             renderReady: "Runs ready for deliverable render",
             renderOutput: "Output",
             renderSource: "Source",
+            renderClip: "Clip",
             renderUseCleaned: "Prefer cleaned track CSV",
             renderShowMarker: "Show ball marker",
             renderShowText: "Show frame text / annotation",
@@ -232,6 +235,7 @@ export function WorkspacePage({
             manageEyebrow: "File management",
             manageTitle: "Video and config cleanup",
             manageSubtitle: "Remove videos and YAML configs you no longer need. Active runs stay protected.",
+            manageSummary: "Clean up unused videos and YAML configs",
             manageVideos: "Input videos",
             manageConfigs: "Config files",
             manageDelete: "Delete",
@@ -511,7 +515,7 @@ export function WorkspacePage({
                 <div>
                   <p className="eyebrow">{historyCopy.renderEyebrow}</p>
                   <h4>{historyCopy.renderTitle}</h4>
-                  <p className="muted">{historyCopy.renderSubtitle}</p>
+                  <p className="muted compact-lead">{historyCopy.renderSubtitle}</p>
                 </div>
               </div>
 
@@ -537,20 +541,22 @@ export function WorkspacePage({
                     </select>
                   </label>
 
-                  <div className="history-render-grid">
+                  <div className="render-summary-strip">
                     <article className="summary-card compact-summary-card">
                       <p className="meta-label">{historyCopy.renderSource}</p>
                       <strong>{activeRenderRun?.run_id ?? copy.common.notAvailable}</strong>
-                      <p className="muted mono">{activeRenderRun?.config_name ?? activeRenderRun?.config_path ?? copy.common.notAvailable}</p>
+                    </article>
+                    <article className="summary-card compact-summary-card">
+                      <p className="meta-label">{historyCopy.renderClip}</p>
+                      <strong>{formatPathTail(activeRenderRun?.input_video) || copy.common.notAvailable}</strong>
                     </article>
                     <article className="summary-card compact-summary-card">
                       <p className="meta-label">{historyCopy.renderOutput}</p>
-                      <strong>1920 x 1080</strong>
-                      <p className="muted mono">deliverable_16x9.mp4</p>
+                      <strong>16:9 clean</strong>
                     </article>
                   </div>
 
-                  <div className="option-toggle-grid">
+                  <div className="option-toggle-grid compact-toggle-grid">
                     <label className="option-toggle">
                       <input
                         type="checkbox"
@@ -592,11 +598,18 @@ export function WorkspacePage({
                     </label>
                   </div>
 
-                  <p className="notice-line subtle">{historyCopy.renderDefaults}</p>
-                  <button type="button" className="primary-button icon-button" onClick={handleCreateDeliverableRender} disabled={renderBusy}>
-                    <PlayIcon className="button-icon" />
-                    <span>{historyCopy.renderButton}</span>
-                  </button>
+                  <div className="render-footer">
+                    <p className="notice-line subtle compact-notice">{historyCopy.renderDefaults}</p>
+                    <button
+                      type="button"
+                      className="primary-button icon-button"
+                      onClick={handleCreateDeliverableRender}
+                      disabled={renderBusy}
+                    >
+                      <PlayIcon className="button-icon" />
+                      <span>{historyCopy.renderButton}</span>
+                    </button>
+                  </div>
                 </>
               ) : (
                 <div className="empty-state">
@@ -608,15 +621,19 @@ export function WorkspacePage({
               {historyMessage ? <p className="notice-line">{historyMessage}</p> : null}
             </article>
 
-            <article className="panel resource-panel">
-              <div className="title-row">
-                <FolderIcon className="section-icon" />
-                <div>
-                  <p className="eyebrow">{historyCopy.manageEyebrow}</p>
-                  <h4>{historyCopy.manageTitle}</h4>
-                  <p className="muted">{historyCopy.manageSubtitle}</p>
+            <details className="panel resource-panel resource-panel-collapsed">
+              <summary className="resource-summary">
+                <div className="title-row">
+                  <FolderIcon className="section-icon" />
+                  <div>
+                    <p className="eyebrow">{historyCopy.manageEyebrow}</p>
+                    <h4>{historyCopy.manageTitle}</h4>
+                    <p className="muted compact-lead">{historyCopy.manageSummary}</p>
+                  </div>
                 </div>
-              </div>
+              </summary>
+
+              <p className="muted">{historyCopy.manageSubtitle}</p>
 
               <div className="resource-grid">
                 <section className="resource-list-card">
@@ -682,7 +699,7 @@ export function WorkspacePage({
                   )}
                 </section>
               </div>
-            </article>
+            </details>
           </div>
         </section>
 
