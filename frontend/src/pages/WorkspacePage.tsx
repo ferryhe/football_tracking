@@ -30,6 +30,7 @@ interface WorkspacePageProps {
   fieldLoading: boolean;
   fieldMessage: string | null;
   canLoadFieldFromConfig: boolean;
+  canStartBaseline: boolean;
   onSelectRun: (run: RunRecord) => void;
   onSelectInput: (path: string) => void;
   onSelectConfig: (name: string) => void;
@@ -134,6 +135,7 @@ export function WorkspacePage({
   fieldLoading,
   fieldMessage,
   canLoadFieldFromConfig,
+  canStartBaseline,
   onSelectRun,
   onSelectInput,
   onSelectConfig,
@@ -149,7 +151,6 @@ export function WorkspacePage({
   const selectedVideo = inputCatalog.videos.find((item) => item.path === selectedInputPath) ?? null;
   const selectedConfig = configs.find((item) => item.name === selectedConfigName) ?? null;
   const selectedScope = inferConfigScope(selectedConfig?.name);
-  const canLaunch = !loading && !launching && Boolean(selectedInputPath) && Boolean(selectedConfig);
   const hasRunHistoryForInput = runs.some((run) => run.input_video === selectedInputPath);
   const aiRuns = selectedInputPath ? runs.filter((run) => run.input_video === selectedInputPath) : runs;
   const aiSelectedRun = selectedRun && aiRuns.some((run) => run.run_id === selectedRun.run_id) ? selectedRun : aiRuns[0] ?? null;
@@ -217,12 +218,16 @@ export function WorkspacePage({
                   loading={fieldLoading}
                   message={fieldMessage}
                   canLoadFromConfig={canLoadFieldFromConfig}
+                  canStartBaseline={canStartBaseline}
+                  launching={launching}
+                  launchMessage={launchMessage}
                   onCapturePreview={onCaptureFieldPreview}
                   onLoadFromConfig={onLoadFieldFromConfig}
                   onGenerate={onGenerateFieldSuggestion}
                   onClear={onClearFieldSuggestion}
                   onUpdate={onUpdateFieldSuggestion}
                   onAccept={onAcceptFieldSuggestion}
+                  onStartBaseline={onStartBaselineRun}
                 />
               ) : null}
             </section>
@@ -267,17 +272,6 @@ export function WorkspacePage({
                 </div>
               )}
             </section>
-          </div>
-
-          <div className="step-footer">
-            <div className="launch-actions">
-              <p className="muted">{copy.workspace.baselineLoopHint}</p>
-              <button type="button" className="primary-button icon-button" onClick={onStartBaselineRun} disabled={!canLaunch}>
-                <PlayIcon className="button-icon" />
-                <span>{launching ? copy.workspace.launchStarting : copy.workspace.launchButton}</span>
-              </button>
-              {launchMessage ? <p className="notice-line">{launchMessage}</p> : null}
-            </div>
           </div>
 
           <details className="assistant-card detail-card selection-tail-card">

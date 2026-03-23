@@ -456,6 +456,7 @@ export function App() {
             fieldLoading={fieldLoading}
             fieldMessage={fieldMessage}
             canLoadFieldFromConfig={Boolean(selectedConfig)}
+            canStartBaseline={!loading && !launching && Boolean(selectedInputPath) && Boolean(selectedConfig)}
             onSelectRun={handleSelectRun}
             onSelectInput={handleSelectInput}
             onSelectConfig={setSelectedConfigName}

@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 
-import { CheckIcon, SparkIcon } from "./Icons";
+import { CheckIcon, FileIcon, PlayIcon, SparkIcon, WandIcon } from "./Icons";
 import { useI18n } from "../lib/i18n";
 import type { FieldPoint, FieldPreview, FieldSuggestion } from "../lib/types";
 
@@ -10,12 +10,16 @@ interface FieldSetupCardProps {
   loading: boolean;
   message: string | null;
   canLoadFromConfig: boolean;
+  canStartBaseline: boolean;
+  launching: boolean;
+  launchMessage: string | null;
   onCapturePreview: () => Promise<void>;
   onLoadFromConfig: () => Promise<void>;
   onGenerate: () => Promise<void>;
   onClear: () => void;
   onUpdate: (suggestion: FieldSuggestion) => void;
   onAccept: (suggestion: FieldSuggestion) => void;
+  onStartBaseline: () => Promise<void>;
 }
 
 function formatClock(totalSeconds: number): string {
@@ -141,12 +145,16 @@ export function FieldSetupCard({
   loading,
   message,
   canLoadFromConfig,
+  canStartBaseline,
+  launching,
+  launchMessage,
   onCapturePreview,
   onLoadFromConfig,
   onGenerate,
   onClear,
   onUpdate,
   onAccept,
+  onStartBaseline,
 }: FieldSetupCardProps) {
   const { copy } = useI18n();
   const [draft, setDraft] = useState<FieldSuggestion | null>(suggestion);
@@ -165,6 +173,9 @@ export function FieldSetupCard({
   const activePreview = preview ?? activeSuggestion;
   const previewWidth = activePreview?.frame_width ?? 1;
   const previewHeight = activePreview?.frame_height ?? 1;
+  const sourceFromConfig = Boolean(activeSuggestion?.source.startsWith("config:"));
+  const sourceFromAi = Boolean(activeSuggestion && !sourceFromConfig);
+  const suggestionAccepted = Boolean(activeSuggestion?.accepted);
 
   function pointSummary(count: number) {
     return `${count}`;
@@ -215,41 +226,89 @@ export function FieldSetupCard({
         </div>
       </div>
 
-      <div className="field-setup-actions primary-actions">
-        <button type="button" className="secondary-button icon-button" onClick={onCapturePreview} disabled={loading}>
-          <SparkIcon className="button-icon" />
-          <span>{copy.workspace.fieldCapture}</span>
+      <div className="field-action-grid">
+        <button
+          type="button"
+          className={`field-action-button ${activePreview ? "complete" : "active"}`}
+          onClick={onCapturePreview}
+          disabled={loading}
+        >
+          <span className="field-action-index">1</span>
+          <span className="field-action-icon">
+            <SparkIcon className="button-icon" />
+          </span>
+          <span className="field-action-copy">
+            <strong>{copy.workspace.fieldCapture}</strong>
+          </span>
         </button>
-        <button type="button" className="secondary-button" onClick={onLoadFromConfig} disabled={!activePreview || !canLoadFromConfig || loading}>
-          {copy.workspace.fieldLoadConfig}
+
+        <button
+          type="button"
+          className={`field-action-button ${sourceFromConfig ? "complete" : activePreview ? "active" : ""}`}
+          onClick={onLoadFromConfig}
+          disabled={!activePreview || !canLoadFromConfig || loading}
+        >
+          <span className="field-action-index">2</span>
+          <span className="field-action-icon">
+            <FileIcon className="button-icon" />
+          </span>
+          <span className="field-action-copy">
+            <strong>{copy.workspace.fieldLoadConfig}</strong>
+          </span>
         </button>
-        <button type="button" className="secondary-button" onClick={onGenerate} disabled={!activePreview || loading}>
-          {copy.workspace.fieldGenerate}
+
+        <button
+          type="button"
+          className={`field-action-button ${sourceFromAi ? "complete" : activePreview ? "active" : ""}`}
+          onClick={onGenerate}
+          disabled={!activePreview || loading}
+        >
+          <span className="field-action-index">3</span>
+          <span className="field-action-icon">
+            <WandIcon className="button-icon" />
+          </span>
+          <span className="field-action-copy">
+            <strong>{copy.workspace.fieldGenerate}</strong>
+          </span>
+        </button>
+
+        <button
+          type="button"
+          className={`field-action-button ${suggestionAccepted ? "complete" : activeSuggestion ? "active" : ""}`}
+          onClick={() => {
+            if (activeSuggestion) {
+              onAccept({ ...activeSuggestion, accepted: true });
+            }
+          }}
+          disabled={!activeSuggestion || loading}
+        >
+          <span className="field-action-index">4</span>
+          <span className="field-action-icon">
+            <CheckIcon className="button-icon" />
+          </span>
+          <span className="field-action-copy">
+            <strong>{copy.workspace.fieldAccept}</strong>
+          </span>
+        </button>
+
+        <button
+          type="button"
+          className="field-action-button primary"
+          onClick={onStartBaseline}
+          disabled={!canStartBaseline}
+        >
+          <span className="field-action-index">5</span>
+          <span className="field-action-icon">
+            <PlayIcon className="button-icon" />
+          </span>
+          <span className="field-action-copy">
+            <strong>{launching ? copy.workspace.launchStarting : copy.workspace.launchButton}</strong>
+          </span>
         </button>
       </div>
 
-      {activeSuggestion ? (
-        <div className="field-setup-actions secondary-actions">
-          <button
-            type="button"
-            className="primary-button icon-button"
-            onClick={() => {
-              if (activeSuggestion) {
-                onAccept({ ...activeSuggestion, accepted: true });
-              }
-            }}
-            disabled={loading}
-          >
-            <CheckIcon className="button-icon" />
-            <span>{copy.workspace.fieldAccept}</span>
-          </button>
-          <button type="button" className="secondary-button" onClick={onClear} disabled={loading}>
-            {copy.workspace.fieldClear}
-          </button>
-        </div>
-      ) : null}
-
       {message ? <p className="notice-line">{message}</p> : null}
+      {launchMessage ? <p className="notice-line">{launchMessage}</p> : null}
       {manualError ? <p className="notice-line">{manualError}</p> : null}
 
       {activePreview ? (
@@ -294,115 +353,124 @@ export function FieldSetupCard({
 
           {activeSuggestion ? (
             <>
-              <div className="field-manual-grid">
-                <label className="form-label">
-                  <span className="meta-label">{copy.workspace.fieldPolygonInput}</span>
-                  <input
-                    className="mono"
-                    value={fieldInput}
-                    onChange={(event) => setFieldInput(event.target.value)}
-                    onBlur={applyFieldInput}
-                    onKeyDown={(event) => {
-                      if (event.key === "Enter") {
-                        event.preventDefault();
-                        applyFieldInput();
-                      }
-                    }}
-                  />
-                </label>
-                <label className="form-label">
-                  <span className="meta-label">{copy.workspace.fieldExpandedInput}</span>
-                  <input
-                    className="mono"
-                    value={expandedInput}
-                    onChange={(event) => setExpandedInput(event.target.value)}
-                    onBlur={applyExpandedInput}
-                    onKeyDown={(event) => {
-                      if (event.key === "Enter") {
-                        event.preventDefault();
-                        applyExpandedInput();
-                      }
-                    }}
-                  />
-                </label>
-              </div>
-              <p className="muted field-manual-hint">{copy.workspace.fieldInputHint}</p>
-
-              <div className="field-adjust-row">
-                <span className="meta-label">{copy.workspace.fieldAdjustTitle}</span>
-                <div className="field-adjust-actions">
-                  <button
-                    type="button"
-                    className="chip-button"
-                    onClick={() =>
-                      applyAdjustment(
-                        updateSuggestionShape(
-                          activeSuggestion,
-                          scalePolygon(activeSuggestion.field_polygon, activeSuggestion.frame_width, activeSuggestion.frame_height, 0.96, 0.98),
-                        ),
-                      )
-                    }
-                  >
-                    {copy.workspace.fieldAdjustTighter}
-                  </button>
-                  <button
-                    type="button"
-                    className="chip-button"
-                    onClick={() =>
-                      applyAdjustment(
-                        updateSuggestionShape(
-                          activeSuggestion,
-                          scalePolygon(activeSuggestion.field_polygon, activeSuggestion.frame_width, activeSuggestion.frame_height, 1.04, 1.02),
-                        ),
-                      )
-                    }
-                  >
-                    {copy.workspace.fieldAdjustWider}
-                  </button>
-                  <button
-                    type="button"
-                    className="chip-button"
-                    onClick={() =>
-                      applyAdjustment(
-                        updateSuggestionShape(
-                          activeSuggestion,
-                          nudgeTop(
-                            activeSuggestion.field_polygon,
-                            activeSuggestion.frame_width,
-                            activeSuggestion.frame_height,
-                            -Math.max(6, activeSuggestion.frame_height * 0.02),
-                          ),
-                        ),
-                      )
-                    }
-                  >
-                    {copy.workspace.fieldAdjustRaise}
-                  </button>
-                  <button
-                    type="button"
-                    className="chip-button"
-                    onClick={() =>
-                      applyAdjustment(
-                        updateSuggestionShape(
-                          activeSuggestion,
-                          nudgeTop(
-                            activeSuggestion.field_polygon,
-                            activeSuggestion.frame_width,
-                            activeSuggestion.frame_height,
-                            Math.max(6, activeSuggestion.frame_height * 0.02),
-                          ),
-                        ),
-                      )
-                    }
-                  >
-                    {copy.workspace.fieldAdjustLower}
-                  </button>
-                </div>
-              </div>
-
               <p className={`notice-line subtle ${activeSuggestion.accepted ? "accepted" : ""}`}>
                 {activeSuggestion.accepted ? copy.workspace.fieldAccepted : copy.workspace.fieldApplyHint}
               </p>
+
+              <details className="detail-card field-manual-card">
+                <summary>{copy.workspace.fieldAdjustTitle}</summary>
+
+                <div className="field-manual-grid">
+                  <label className="form-label">
+                    <span className="meta-label">{copy.workspace.fieldPolygonInput}</span>
+                    <input
+                      className="mono"
+                      value={fieldInput}
+                      onChange={(event) => setFieldInput(event.target.value)}
+                      onBlur={applyFieldInput}
+                      onKeyDown={(event) => {
+                        if (event.key === "Enter") {
+                          event.preventDefault();
+                          applyFieldInput();
+                        }
+                      }}
+                    />
+                  </label>
+                  <label className="form-label">
+                    <span className="meta-label">{copy.workspace.fieldExpandedInput}</span>
+                    <input
+                      className="mono"
+                      value={expandedInput}
+                      onChange={(event) => setExpandedInput(event.target.value)}
+                      onBlur={applyExpandedInput}
+                      onKeyDown={(event) => {
+                        if (event.key === "Enter") {
+                          event.preventDefault();
+                          applyExpandedInput();
+                        }
+                      }}
+                    />
+                  </label>
+                </div>
+                <p className="muted field-manual-hint">{copy.workspace.fieldInputHint}</p>
+
+                <div className="field-adjust-row">
+                  <div className="field-adjust-actions">
+                    <button
+                      type="button"
+                      className="chip-button"
+                      onClick={() =>
+                        applyAdjustment(
+                          updateSuggestionShape(
+                            activeSuggestion,
+                            scalePolygon(activeSuggestion.field_polygon, activeSuggestion.frame_width, activeSuggestion.frame_height, 0.96, 0.98),
+                          ),
+                        )
+                      }
+                    >
+                      {copy.workspace.fieldAdjustTighter}
+                    </button>
+                    <button
+                      type="button"
+                      className="chip-button"
+                      onClick={() =>
+                        applyAdjustment(
+                          updateSuggestionShape(
+                            activeSuggestion,
+                            scalePolygon(activeSuggestion.field_polygon, activeSuggestion.frame_width, activeSuggestion.frame_height, 1.04, 1.02),
+                          ),
+                        )
+                      }
+                    >
+                      {copy.workspace.fieldAdjustWider}
+                    </button>
+                    <button
+                      type="button"
+                      className="chip-button"
+                      onClick={() =>
+                        applyAdjustment(
+                          updateSuggestionShape(
+                            activeSuggestion,
+                            nudgeTop(
+                              activeSuggestion.field_polygon,
+                              activeSuggestion.frame_width,
+                              activeSuggestion.frame_height,
+                              -Math.max(6, activeSuggestion.frame_height * 0.02),
+                            ),
+                          ),
+                        )
+                      }
+                    >
+                      {copy.workspace.fieldAdjustRaise}
+                    </button>
+                    <button
+                      type="button"
+                      className="chip-button"
+                      onClick={() =>
+                        applyAdjustment(
+                          updateSuggestionShape(
+                            activeSuggestion,
+                            nudgeTop(
+                              activeSuggestion.field_polygon,
+                              activeSuggestion.frame_width,
+                              activeSuggestion.frame_height,
+                              Math.max(6, activeSuggestion.frame_height * 0.02),
+                            ),
+                          ),
+                        )
+                      }
+                    >
+                      {copy.workspace.fieldAdjustLower}
+                    </button>
+                  </div>
+                </div>
+
+                <div className="field-detail-actions">
+                  <button type="button" className="secondary-button" onClick={onClear} disabled={loading}>
+                    {copy.workspace.fieldClear}
+                  </button>
+                </div>
+              </details>
             </>
           ) : (
             <p className="notice-line subtle">{copy.workspace.fieldChooseSourceHint}</p>

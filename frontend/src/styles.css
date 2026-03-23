@@ -704,6 +704,99 @@ table {
   background: rgba(255, 255, 255, 0.03);
 }
 
+.field-action-grid {
+  display: grid;
+  gap: 10px;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+}
+
+.field-action-button {
+  display: grid;
+  gap: 10px;
+  justify-items: start;
+  align-content: start;
+  width: 100%;
+  min-height: 106px;
+  padding: 14px;
+  border-radius: 18px;
+  border: 1px solid var(--border-soft);
+  background: rgba(255, 255, 255, 0.035);
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition:
+    transform 0.18s ease,
+    border-color 0.18s ease,
+    background 0.18s ease,
+    box-shadow 0.18s ease;
+}
+
+.field-action-button:hover:not(:disabled) {
+  transform: translateY(-1px);
+}
+
+.field-action-button:disabled {
+  opacity: 0.56;
+  cursor: not-allowed;
+}
+
+.field-action-button.active {
+  border-color: rgba(240, 210, 122, 0.34);
+  background: linear-gradient(180deg, rgba(240, 210, 122, 0.09), rgba(255, 255, 255, 0.03));
+}
+
+.field-action-button.complete {
+  border-color: rgba(122, 189, 104, 0.3);
+  background: linear-gradient(180deg, rgba(72, 127, 79, 0.18), rgba(33, 57, 39, 0.2));
+}
+
+.field-action-button.primary {
+  border-color: rgba(184, 223, 116, 0.34);
+  background: linear-gradient(180deg, rgba(185, 220, 114, 0.22), rgba(118, 185, 109, 0.18));
+  box-shadow: 0 16px 30px rgba(118, 185, 109, 0.12);
+}
+
+.field-action-index {
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  border-radius: 11px;
+  background: rgba(255, 255, 255, 0.08);
+  font-size: 0.84rem;
+  font-weight: 800;
+}
+
+.field-action-button.complete .field-action-index {
+  background: linear-gradient(135deg, var(--accent), var(--accent-deep));
+  color: #102013;
+}
+
+.field-action-button.primary .field-action-index,
+.field-action-button.active .field-action-index {
+  background: linear-gradient(135deg, var(--accent-warm), #d7a04c);
+  color: #102013;
+}
+
+.field-action-icon {
+  display: grid;
+  place-items: center;
+  width: 40px;
+  height: 40px;
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.field-action-copy {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.field-action-copy strong {
+  font-size: 0.98rem;
+}
+
 .field-preview-shell {
   position: relative;
   overflow: hidden;
@@ -778,6 +871,14 @@ table {
   margin: 0;
 }
 
+.field-manual-card {
+  margin-top: 2px;
+}
+
+.field-manual-card summary {
+  cursor: pointer;
+}
+
 .field-adjust-row {
   display: grid;
   gap: 10px;
@@ -791,6 +892,11 @@ table {
 
 .compact-empty {
   padding: 16px 18px;
+}
+
+.field-detail-actions {
+  display: flex;
+  justify-content: flex-end;
 }
 
 .choice-card,
@@ -1481,10 +1587,20 @@ td {
   .step-tabs {
     grid-template-columns: repeat(3, minmax(0, 1fr));
   }
+
+  .field-action-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
 }
 
 @media (max-width: 760px) {
   .step-tabs {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 640px) {
+  .field-action-grid {
     grid-template-columns: 1fr;
   }
 }
