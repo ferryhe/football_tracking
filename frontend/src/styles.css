@@ -1333,8 +1333,8 @@ textarea {
 
 .delivery-row {
   display: grid;
-  gap: 14px;
-  padding: 18px;
+  gap: 12px;
+  padding: 14px 16px;
   border-radius: 20px;
   border: 1px solid var(--border-soft);
   background: rgba(255, 255, 255, 0.035);
@@ -1344,15 +1344,28 @@ textarea {
   border-color: rgba(184, 223, 116, 0.32);
 }
 
-.delivery-row-head {
-  display: grid;
-  gap: 4px;
-}
-
-.delivery-row-meta {
+.delivery-row-compact {
   display: grid;
   gap: 12px;
-  grid-template-columns: minmax(180px, 0.35fr) minmax(0, 1fr);
+  grid-template-columns: auto auto minmax(140px, 220px) minmax(0, 1fr);
+  align-items: center;
+}
+
+.delivery-row-id {
+  min-width: 0;
+}
+
+.delivery-row-time {
+  margin: 0;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+.delivery-row-output {
+  margin: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .run-row {
@@ -1712,7 +1725,7 @@ td {
   .assistant-stage-grid,
   .assistant-mini-grid,
   .compact-actions,
-  .delivery-row-meta,
+  .delivery-row-compact,
   .history-grid,
   .resource-grid,
   .history-render-grid,

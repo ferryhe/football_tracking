@@ -727,34 +727,18 @@ export function WorkspacePage({
                       : historyCopy.historyModeBaseline;
                 return (
                   <article key={run.run_id} className={`delivery-row ${activeRenderRun?.run_id === run.run_id ? "selected" : ""}`}>
-                    <div className="delivery-row-head">
-                      <div className="title-row compact">
+                    <div className="delivery-row-compact">
+                      <div className="title-row compact delivery-row-id">
                         <StatusIcon className="section-icon tiny" />
                         <strong>{run.run_id}</strong>
                       </div>
-                      <p className="muted mono">{run.config_name ?? run.config_path ?? copy.common.notAvailable}</p>
                       <div className="tag-row">
                         <span className="tag">{formatRunStatus(run.status)}</span>
                         <span className="tag">{modeLabel}</span>
-                        <span className="tag">{formatPathTail(run.input_video) || copy.common.notAvailable}</span>
+                        {run.parent_run_id ? <span className="tag">{`${historyCopy.historySource}: ${run.parent_run_id}`}</span> : null}
                       </div>
-                    </div>
-
-                    <div className="delivery-row-meta">
-                      <div className="detail-block compact-detail">
-                        <p className="meta-label">{copy.workspace.deliveryRanAt}</p>
-                        <p>{formatDateTime(runMoment(run))}</p>
-                      </div>
-                      <div className="detail-block compact-detail">
-                        <p className="meta-label">{copy.workspace.deliveryResultFolder}</p>
-                        <p className="mono">{run.output_dir}</p>
-                      </div>
-                      {run.parent_run_id ? (
-                        <div className="detail-block compact-detail">
-                          <p className="meta-label">{historyCopy.historySource}</p>
-                          <p className="mono">{run.parent_run_id}</p>
-                        </div>
-                      ) : null}
+                      <p className="delivery-row-time">{formatDateTime(runMoment(run))}</p>
+                      <p className="delivery-row-output mono">{run.output_dir}</p>
                     </div>
                   </article>
                 );
