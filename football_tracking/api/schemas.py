@@ -41,6 +41,7 @@ class InputCatalogResponse(BaseModel):
 
 class FieldPreviewRequest(BaseModel):
     input_video: str
+    sample_index: int | None = None
 
 
 class FieldPreviewResponse(BaseModel):

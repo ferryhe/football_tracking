@@ -67,6 +67,27 @@ function deriveExpandedPolygon(points: FieldPoint[], frameWidth: number, frameHe
   return scalePolygon(points, frameWidth, frameHeight, 1.08, 1.1);
 }
 
+function adjustExpandedGap(current: FieldSuggestion, factor: number): FieldSuggestion {
+  const baseExpandedPolygon =
+    current.expanded_polygon.length === current.field_polygon.length
+      ? current.expanded_polygon
+      : deriveExpandedPolygon(current.field_polygon, current.frame_width, current.frame_height);
+
+  const nextExpandedPolygon = baseExpandedPolygon.map((point, index) => {
+    const fieldPoint = current.field_polygon[Math.min(index, current.field_polygon.length - 1)];
+    return clampPoint(
+      [
+        fieldPoint[0] + (point[0] - fieldPoint[0]) * factor,
+        fieldPoint[1] + (point[1] - fieldPoint[1]) * factor,
+      ],
+      current.frame_width,
+      current.frame_height,
+    );
+  });
+
+  return updateSuggestionShape(current, current.field_polygon, nextExpandedPolygon);
+}
+
 function buildConfigPatch(fieldPolygon: FieldPoint[], expandedPolygon: FieldPoint[]) {
   const expandedRoi = polygonBounds(expandedPolygon);
   return {
@@ -328,38 +349,137 @@ export function FieldSetupCard({
             ) : null}
           </div>
 
-          <div className="field-meta-grid">
-            <div className="detail-block compact-detail">
-              <p className="meta-label">{copy.workspace.fieldFrame}</p>
-              <strong>
-                {formatClock(activePreview.frame_time_seconds)} | {activePreview.sample_index}/{activePreview.sample_count}
-              </strong>
-              <p className="muted">{activePreview.frame_width} x {activePreview.frame_height}</p>
-              <p className="muted">{activeSuggestion ? copy.workspace.fieldOverlayReady : copy.workspace.fieldPreviewReady}</p>
-            </div>
-
-            <div className="detail-block compact-detail">
-              <p className="meta-label">{copy.workspace.fieldFieldBox}</p>
-              <strong>{activeSuggestion ? pointSummary(activeSuggestion.field_polygon.length) : copy.workspace.fieldNoOverlay}</strong>
-              <p className="muted">{copy.workspace.fieldPolygonInput}</p>
-            </div>
-
-            <div className="detail-block compact-detail">
-              <p className="meta-label">{copy.workspace.fieldExpandedBox}</p>
-              <strong>{activeSuggestion ? pointSummary(activeSuggestion.expanded_polygon.length) : copy.workspace.fieldAwaitingSource}</strong>
-              <p className="muted mono">{activeSuggestion?.source ?? copy.workspace.fieldAwaitingSource}</p>
-            </div>
-          </div>
+          {activePreview.sample_count > 1 ? <p className="notice-line subtle">{copy.workspace.fieldPreviewCycleHint}</p> : null}
 
           {activeSuggestion ? (
             <>
+              <div className="field-legend-row">
+                <span className="field-legend-pill field" title={copy.workspace.fieldFieldTooltip}>
+                  <span className="field-legend-line field" aria-hidden="true" />
+                  <span>{copy.workspace.fieldFieldBox}</span>
+                </span>
+                <span className="field-legend-pill expanded" title={copy.workspace.fieldExpandedTooltip}>
+                  <span className="field-legend-line expanded" aria-hidden="true" />
+                  <span>{copy.workspace.fieldExpandedBox}</span>
+                </span>
+              </div>
+
+              <div className="field-adjust-row">
+                <span className="meta-label">{copy.workspace.fieldAdjustTitle}</span>
+                <div className="field-adjust-actions">
+                  <button
+                    type="button"
+                    className="chip-button"
+                    onClick={() =>
+                      applyAdjustment(
+                        updateSuggestionShape(
+                          activeSuggestion,
+                          scalePolygon(activeSuggestion.field_polygon, activeSuggestion.frame_width, activeSuggestion.frame_height, 0.96, 0.98),
+                        ),
+                      )
+                    }
+                  >
+                    {copy.workspace.fieldAdjustTighter}
+                  </button>
+                  <button
+                    type="button"
+                    className="chip-button"
+                    onClick={() =>
+                      applyAdjustment(
+                        updateSuggestionShape(
+                          activeSuggestion,
+                          scalePolygon(activeSuggestion.field_polygon, activeSuggestion.frame_width, activeSuggestion.frame_height, 1.04, 1.02),
+                        ),
+                      )
+                    }
+                  >
+                    {copy.workspace.fieldAdjustWider}
+                  </button>
+                  <button
+                    type="button"
+                    className="chip-button"
+                    onClick={() =>
+                      applyAdjustment(
+                        updateSuggestionShape(
+                          activeSuggestion,
+                          nudgeTop(
+                            activeSuggestion.field_polygon,
+                            activeSuggestion.frame_width,
+                            activeSuggestion.frame_height,
+                            -Math.max(6, activeSuggestion.frame_height * 0.02),
+                          ),
+                        ),
+                      )
+                    }
+                  >
+                    {copy.workspace.fieldAdjustRaise}
+                  </button>
+                  <button
+                    type="button"
+                    className="chip-button"
+                    onClick={() =>
+                      applyAdjustment(
+                        updateSuggestionShape(
+                          activeSuggestion,
+                          nudgeTop(
+                            activeSuggestion.field_polygon,
+                            activeSuggestion.frame_width,
+                            activeSuggestion.frame_height,
+                            Math.max(6, activeSuggestion.frame_height * 0.02),
+                          ),
+                        ),
+                      )
+                    }
+                  >
+                    {copy.workspace.fieldAdjustLower}
+                  </button>
+                  <button type="button" className="chip-button" onClick={() => applyAdjustment(adjustExpandedGap(activeSuggestion, 0.9))}>
+                    {copy.workspace.fieldAdjustGapIn}
+                  </button>
+                  <button type="button" className="chip-button" onClick={() => applyAdjustment(adjustExpandedGap(activeSuggestion, 1.12))}>
+                    {copy.workspace.fieldAdjustGapOut}
+                  </button>
+                </div>
+              </div>
+
               <p className={`notice-line subtle ${activeSuggestion.accepted ? "accepted" : ""}`}>
                 {activeSuggestion.accepted ? copy.workspace.fieldAccepted : copy.workspace.fieldApplyHint}
               </p>
+            </>
+          ) : (
+            <p className="notice-line subtle">{copy.workspace.fieldChooseSourceHint}</p>
+          )}
 
-              <details className="detail-card field-manual-card">
-                <summary>{copy.workspace.fieldAdjustTitle}</summary>
+          <details className="detail-card field-manual-card">
+            <summary>{copy.workspace.fieldDetailsTitle}</summary>
 
+            <div className="field-meta-grid">
+              <div className="detail-block compact-detail">
+                <p className="meta-label">{copy.workspace.fieldFrame}</p>
+                <strong>
+                  {formatClock(activePreview.frame_time_seconds)} | {activePreview.sample_index}/{activePreview.sample_count}
+                </strong>
+                <p className="muted">
+                  {activePreview.frame_width} x {activePreview.frame_height}
+                </p>
+                <p className="muted">{activeSuggestion ? copy.workspace.fieldOverlayReady : copy.workspace.fieldPreviewReady}</p>
+              </div>
+
+              <div className="detail-block compact-detail">
+                <p className="meta-label">{copy.workspace.fieldFieldBox}</p>
+                <strong>{activeSuggestion ? pointSummary(activeSuggestion.field_polygon.length) : copy.workspace.fieldNoOverlay}</strong>
+                <p className="muted">{copy.workspace.fieldPolygonInput}</p>
+              </div>
+
+              <div className="detail-block compact-detail">
+                <p className="meta-label">{copy.workspace.fieldExpandedBox}</p>
+                <strong>{activeSuggestion ? pointSummary(activeSuggestion.expanded_polygon.length) : copy.workspace.fieldAwaitingSource}</strong>
+                <p className="muted mono">{activeSuggestion?.source ?? copy.workspace.fieldAwaitingSource}</p>
+              </div>
+            </div>
+
+            {activeSuggestion ? (
+              <>
                 <div className="field-manual-grid">
                   <label className="form-label">
                     <span className="meta-label">{copy.workspace.fieldPolygonInput}</span>
@@ -394,87 +514,14 @@ export function FieldSetupCard({
                 </div>
                 <p className="muted field-manual-hint">{copy.workspace.fieldInputHint}</p>
 
-                <div className="field-adjust-row">
-                  <div className="field-adjust-actions">
-                    <button
-                      type="button"
-                      className="chip-button"
-                      onClick={() =>
-                        applyAdjustment(
-                          updateSuggestionShape(
-                            activeSuggestion,
-                            scalePolygon(activeSuggestion.field_polygon, activeSuggestion.frame_width, activeSuggestion.frame_height, 0.96, 0.98),
-                          ),
-                        )
-                      }
-                    >
-                      {copy.workspace.fieldAdjustTighter}
-                    </button>
-                    <button
-                      type="button"
-                      className="chip-button"
-                      onClick={() =>
-                        applyAdjustment(
-                          updateSuggestionShape(
-                            activeSuggestion,
-                            scalePolygon(activeSuggestion.field_polygon, activeSuggestion.frame_width, activeSuggestion.frame_height, 1.04, 1.02),
-                          ),
-                        )
-                      }
-                    >
-                      {copy.workspace.fieldAdjustWider}
-                    </button>
-                    <button
-                      type="button"
-                      className="chip-button"
-                      onClick={() =>
-                        applyAdjustment(
-                          updateSuggestionShape(
-                            activeSuggestion,
-                            nudgeTop(
-                              activeSuggestion.field_polygon,
-                              activeSuggestion.frame_width,
-                              activeSuggestion.frame_height,
-                              -Math.max(6, activeSuggestion.frame_height * 0.02),
-                            ),
-                          ),
-                        )
-                      }
-                    >
-                      {copy.workspace.fieldAdjustRaise}
-                    </button>
-                    <button
-                      type="button"
-                      className="chip-button"
-                      onClick={() =>
-                        applyAdjustment(
-                          updateSuggestionShape(
-                            activeSuggestion,
-                            nudgeTop(
-                              activeSuggestion.field_polygon,
-                              activeSuggestion.frame_width,
-                              activeSuggestion.frame_height,
-                              Math.max(6, activeSuggestion.frame_height * 0.02),
-                            ),
-                          ),
-                        )
-                      }
-                    >
-                      {copy.workspace.fieldAdjustLower}
-                    </button>
-                  </div>
-                </div>
-
                 <div className="field-detail-actions">
                   <button type="button" className="secondary-button" onClick={onClear} disabled={loading}>
                     {copy.workspace.fieldClear}
                   </button>
                 </div>
-              </details>
-            </>
-          ) : (
-            <p className="notice-line subtle">{copy.workspace.fieldChooseSourceHint}</p>
-          )}
+              </>
+            ) : null}
+          </details>
         </>
       ) : (
         <div className="empty-state compact-empty">

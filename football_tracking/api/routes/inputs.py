@@ -23,7 +23,7 @@ def list_input_videos(service: ApiService = Depends(get_service)) -> InputCatalo
 @router.post("/inputs/field-preview", response_model=FieldPreviewResponse)
 def capture_field_preview(request: FieldPreviewRequest, service: ApiService = Depends(get_service)) -> FieldPreviewResponse:
     try:
-        return FieldPreviewResponse(**service.capture_field_preview(request.input_video))
+        return FieldPreviewResponse(**service.capture_field_preview(request.input_video, sample_index=request.sample_index))
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except RuntimeError as exc:

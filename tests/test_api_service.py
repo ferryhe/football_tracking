@@ -217,8 +217,8 @@ class ApiServiceSmokeTests(unittest.TestCase):
         self.assertEqual(640, suggestion["frame_width"])
         self.assertEqual(360, suggestion["frame_height"])
         self.assertEqual(4, len(suggestion["preview_bounds"]))
-        self.assertEqual(4, len(suggestion["field_polygon"]))
-        self.assertEqual(4, len(suggestion["expanded_polygon"]))
+        self.assertEqual(9, len(suggestion["field_polygon"]))
+        self.assertEqual(9, len(suggestion["expanded_polygon"]))
         field_roi = suggestion["field_roi"]
         expanded_roi = suggestion["expanded_roi"]
         self.assertLess(field_roi[0], field_roi[2])
@@ -226,7 +226,7 @@ class ApiServiceSmokeTests(unittest.TestCase):
         self.assertLessEqual(expanded_roi[0], field_roi[0])
         self.assertGreaterEqual(expanded_roi[2], field_roi[2])
         self.assertEqual(list(expanded_roi), suggestion["config_patch"]["filtering"]["roi"])
-        self.assertEqual(4, len(suggestion["config_patch"]["scene_bias"]["ground_zones"][0]["points"]))
+        self.assertEqual(9, len(suggestion["config_patch"]["scene_bias"]["ground_zones"][0]["points"]))
 
     def test_capture_field_preview_returns_fixed_preview_frame(self) -> None:
         video_path = self.write_video("data/preview_only.avi")
@@ -237,6 +237,20 @@ class ApiServiceSmokeTests(unittest.TestCase):
         self.assertEqual(640, preview["frame_width"])
         self.assertEqual(360, preview["frame_height"])
         self.assertGreaterEqual(preview["frame_index"], 0)
+        self.assertEqual(2, preview["sample_index"])
+        self.assertEqual(3, preview["sample_count"])
+
+    def test_capture_field_preview_can_select_specific_sample(self) -> None:
+        video_path = self.write_video("data/preview_cycle.avi")
+
+        preview_first = self.service.capture_field_preview(str(video_path), sample_index=1)
+        preview_last = self.service.capture_field_preview(str(video_path), sample_index=3)
+
+        self.assertEqual(1, preview_first["sample_index"])
+        self.assertEqual(3, preview_last["sample_index"])
+        self.assertEqual(3, preview_first["sample_count"])
+        self.assertEqual(3, preview_last["sample_count"])
+        self.assertNotEqual(preview_first["frame_index"], preview_last["frame_index"])
 
     def test_suggest_field_setup_prefers_existing_config_polygon(self) -> None:
         video_path = self.write_video("data/config_preview.avi")
@@ -278,8 +292,10 @@ class ApiServiceSmokeTests(unittest.TestCase):
         suggestion = self.service.suggest_field_setup(str(video_path))
 
         self.assertEqual((0, 0, 1280, 360), suggestion["preview_bounds"])
-        self.assertEqual(4, len(suggestion["field_polygon"]))
-        self.assertLess(suggestion["field_polygon"][0][1], suggestion["field_polygon"][3][1])
+        self.assertEqual(9, len(suggestion["field_polygon"]))
+        self.assertLess(suggestion["field_polygon"][3][1], suggestion["field_polygon"][0][1])
+        self.assertLess(suggestion["field_polygon"][3][1], suggestion["field_polygon"][6][1])
+        self.assertGreater(suggestion["field_polygon"][7][1], suggestion["field_polygon"][3][1])
 
     def test_sample_video_frames_uses_warmup_before_target_seek(self) -> None:
         class FakeCapture:

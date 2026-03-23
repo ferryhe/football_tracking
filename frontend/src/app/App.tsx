@@ -231,8 +231,13 @@ export function App() {
     setFieldLoading(true);
     setFieldMessage(null);
     try {
+      const nextSampleIndex =
+        activeFieldPreview && activeFieldPreview.sample_count > 1
+          ? (activeFieldPreview.sample_index % activeFieldPreview.sample_count) + 1
+          : undefined;
       const preview = await api.captureFieldPreview({
         input_video: selectedInputPath,
+        sample_index: nextSampleIndex,
       });
       setFieldPreviews((current) => ({
         ...current,

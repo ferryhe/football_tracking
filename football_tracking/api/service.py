@@ -14,6 +14,7 @@ from typing import Any
 from uuid import uuid4
 
 import cv2
+import numpy as np
 import yaml
 
 from football_tracking.api.ai_provider import OpenAIResponsesClient, load_provider_settings
@@ -139,9 +140,9 @@ class ApiService:
             "videos": videos,
         }
 
-    def capture_field_preview(self, input_video: str) -> dict[str, Any]:
+    def capture_field_preview(self, input_video: str, sample_index: int | None = None) -> dict[str, Any]:
         video_path = self._resolve_input_video_path(input_video)
-        preview_sample = self._pick_field_preview_sample(video_path)
+        preview_sample = self._pick_field_preview_sample(video_path, sample_index=sample_index)
         return self._build_field_preview_response(video_path, preview_sample)
 
     def suggest_field_setup(
@@ -1134,10 +1135,13 @@ class ApiService:
         capture.release()
         return samples
 
-    def _pick_field_preview_sample(self, video_path: Path) -> dict[str, Any]:
+    def _pick_field_preview_sample(self, video_path: Path, sample_index: int | None = None) -> dict[str, Any]:
         samples = self._sample_video_frames(video_path)
         if not samples:
             raise RuntimeError(f"Unable to read preview frames from input video: {video_path}")
+        if sample_index is not None:
+            clamped_index = max(1, min(int(sample_index), len(samples)))
+            return samples[clamped_index - 1]
         return samples[len(samples) // 2]
 
     def _read_video_frame(self, video_path: Path, frame_index: int) -> dict[str, Any]:
@@ -1194,21 +1198,84 @@ class ApiService:
         band_height = max(6, int(round(content_height * 0.03)))
         top_span = self._mask_row_span(mask, content_x1, content_x2, int(round(content_y1 + content_height * 0.18)), band_height)
         bottom_span = self._mask_row_span(mask, content_x1, content_x2, int(round(content_y1 + content_height * 0.92)), band_height)
+        upper_contour = self._estimate_upper_field_contour(mask, content_bounds, point_count=7)
 
-        if coverage >= 0.08 and top_span and bottom_span:
+        if coverage >= 0.08 and upper_contour and bottom_span:
             polygon = self._clip_polygon(
-                [
-                    (top_span[0], top_span[2]),
-                    (top_span[1], top_span[2]),
-                    (bottom_span[1], bottom_span[2]),
-                    (bottom_span[0], bottom_span[2]),
+                upper_contour
+                + [
+                    (content_x2, max(bottom_span[2], int(round(content_y1 + content_height * 0.96)))),
+                    (content_x1, max(bottom_span[2], int(round(content_y1 + content_height * 0.96)))),
                 ],
                 frame_width=frame_width,
                 frame_height=frame_height,
             )
             return polygon, coverage, True
 
+        if coverage >= 0.08 and top_span and bottom_span:
+            polygon = self._clip_polygon(
+                self._polygon_to_nine_point_field(
+                    [
+                        (top_span[0], top_span[2]),
+                        (top_span[1], top_span[2]),
+                        (bottom_span[1], bottom_span[2]),
+                        (bottom_span[0], bottom_span[2]),
+                    ]
+                ),
+                frame_width=frame_width,
+                frame_height=frame_height,
+            )
+            return polygon, coverage, True
+
         return self._default_field_polygon(content_bounds), 0.0, False
+
+    def _estimate_upper_field_contour(
+        self,
+        mask: Any,
+        content_bounds: tuple[int, int, int, int],
+        *,
+        point_count: int,
+    ) -> list[tuple[int, int]] | None:
+        content_x1, content_y1, content_x2, content_y2 = content_bounds
+        content_width = max(1, content_x2 - content_x1)
+        content_height = max(1, content_y2 - content_y1)
+        search_y2 = min(mask.shape[0], int(round(content_y1 + content_height * 0.72)))
+        if search_y2 <= content_y1:
+            return None
+
+        slice_half_width = max(18, int(round(content_width * 0.06)))
+        ratios = np.linspace(0.0, 1.0, point_count)
+        points: list[tuple[int, int]] = []
+
+        for index, ratio in enumerate(ratios):
+            anchor_x = int(round(content_x1 + ratio * content_width))
+            slice_x1 = max(content_x1, anchor_x - slice_half_width)
+            slice_x2 = min(content_x2, anchor_x + slice_half_width)
+            if slice_x2 <= slice_x1:
+                return None
+
+            band = mask[content_y1:search_y2, slice_x1:slice_x2]
+            band_points = cv2.findNonZero(band)
+            if band_points is None:
+                return None
+
+            ys = band_points[:, 0, 1]
+            xs = band_points[:, 0, 0]
+            percentile = 8 if index in {0, point_count - 1} else 12
+            point_y = content_y1 + int(round(float(np.percentile(ys, percentile))))
+            if index == 0:
+                point_x = slice_x1 + int(round(float(np.percentile(xs, 8))))
+            elif index == point_count - 1:
+                point_x = slice_x1 + int(round(float(np.percentile(xs, 92))))
+            else:
+                point_x = anchor_x
+            points.append((point_x, point_y))
+
+        smoothed: list[tuple[int, int]] = []
+        for index, (point_x, _) in enumerate(points):
+            neighbor_ys = [points[neighbor][1] for neighbor in range(max(0, index - 1), min(len(points), index + 2))]
+            smoothed.append((point_x, int(round(sum(neighbor_ys) / len(neighbor_ys)))))
+        return smoothed
 
     def _detect_content_bounds(self, frame: Any) -> tuple[int, int, int, int]:
         frame_height, frame_width = frame.shape[:2]
@@ -1244,24 +1311,42 @@ class ApiService:
         width = max(1, x2 - x1)
         height = max(1, y2 - y1)
         if width / float(height) >= 2.6:
-            return [
+            return self._polygon_to_nine_point_field(
+                [
                 (int(round(x1 + width * 0.18)), int(round(y1 + height * 0.18))),
                 (int(round(x1 + width * 0.82)), int(round(y1 + height * 0.18))),
                 (int(round(x1 + width * 0.98)), int(round(y1 + height * 0.96))),
                 (int(round(x1 + width * 0.02)), int(round(y1 + height * 0.96))),
-            ]
-        return self._roi_to_polygon(
-            (
-                int(round(x1 + width * 0.08)),
-                int(round(y1 + height * 0.10)),
-                int(round(x2 - width * 0.08)),
-                int(round(y2 - height * 0.06)),
+                ]
+            )
+        return self._polygon_to_nine_point_field(
+            self._roi_to_polygon(
+                (
+                    int(round(x1 + width * 0.08)),
+                    int(round(y1 + height * 0.10)),
+                    int(round(x2 - width * 0.08)),
+                    int(round(y2 - height * 0.06)),
+                )
             )
         )
 
     def _roi_to_polygon(self, roi: tuple[int, int, int, int]) -> list[tuple[int, int]]:
         x1, y1, x2, y2 = roi
         return [(x1, y1), (x2, y1), (x2, y2), (x1, y2)]
+
+    def _polygon_to_nine_point_field(self, polygon: list[tuple[int, int]]) -> list[tuple[int, int]]:
+        if len(polygon) != 4:
+            return polygon
+        top_left, top_right, bottom_right, bottom_left = polygon
+        top_ratios = [0.0, 0.18, 0.36, 0.5, 0.64, 0.82, 1.0]
+        top_edge = [
+            (
+                int(round(top_left[0] + (top_right[0] - top_left[0]) * ratio)),
+                int(round(top_left[1] + (top_right[1] - top_left[1]) * ratio)),
+            )
+            for ratio in top_ratios
+        ]
+        return top_edge + [bottom_right, bottom_left]
 
     def _polygon_bounds(self, polygon: list[tuple[int, int]]) -> tuple[int, int, int, int]:
         xs = [point[0] for point in polygon]

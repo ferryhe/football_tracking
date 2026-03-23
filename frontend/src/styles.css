@@ -861,6 +861,39 @@ table {
   grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
 }
 
+.field-legend-row {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.field-legend-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-radius: 999px;
+  border: 1px solid var(--border-soft);
+  background: rgba(255, 255, 255, 0.035);
+  cursor: help;
+}
+
+.field-legend-line {
+  width: 20px;
+  height: 0;
+  border-top-width: 3px;
+  border-top-style: solid;
+}
+
+.field-legend-line.field {
+  border-top-color: rgba(118, 185, 109, 0.96);
+}
+
+.field-legend-line.expanded {
+  border-top-color: rgba(240, 210, 122, 0.92);
+  border-top-style: dashed;
+}
+
 .field-manual-grid {
   display: grid;
   gap: 12px;
