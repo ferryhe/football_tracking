@@ -12,6 +12,22 @@ Make sure these are ready:
 - model weights are available
 - at least one baseline config exists under `config/`
 
+### Detector Weight Requirement
+
+The default configs expect this file:
+
+- `weights/football_ball_yolo.pt`
+
+Important details:
+
+- all shipped YAML files point to `detector.model_path: "./weights/football_ball_yolo.pt"` unless you change them
+- the path is resolved from the repo root
+- the file should be an Ultralytics YOLO detect checkpoint
+- if your model emits labels other than `sports ball` or `ball`, update `detector.allowed_labels`
+- if you run on CPU only, set `detector.device: "cpu"` and `detector.use_half: false`
+
+If the weight file is missing, the baseline run fails before detection starts.
+
 If you only want the simplest local launch:
 
 ```powershell

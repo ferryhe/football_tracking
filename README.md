@@ -34,6 +34,26 @@ This repository tracks a single in-play football from high-resolution fisheye-st
 - CUDA and cuDNN installed correctly
 - Node.js and `npm` available in PATH
 
+### Detector Weights
+
+This is critical for the first successful run.
+
+- All shipped YAML configs default to:
+  - `detector.model_path: "./weights/football_ball_yolo.pt"`
+- That path is resolved relative to the repo root.
+- The default expected file is:
+  - `weights/football_ball_yolo.pt`
+- The `.pt` file must be an Ultralytics YOLO detection checkpoint.
+  - Good: detect model weights exported for Ultralytics YOLO
+  - Not suitable: classification, segmentation, pose, or OBB checkpoints
+- The filename does not have to stay `football_ball_yolo.pt` if you update `detector.model_path` in the YAML.
+- Default configs accept labels `sports ball` and `ball`, so your model should emit one of those labels or you should update `detector.allowed_labels`.
+- If you run on CPU only, set:
+  - `detector.device: "cpu"`
+  - `detector.use_half: false`
+
+If the weight file is missing, the baseline run will fail before detection starts.
+
 ### Quick Start
 
 1. Create and activate a virtual environment.
@@ -216,6 +236,26 @@ Type-check scope note / 类型检查范围说明：`pyright` 当前先覆盖 `py
 - 建议使用 NVIDIA GPU
 - 正确安装 CUDA 和 cuDNN
 - PATH 中可用 `npm`
+
+### 检测权重
+
+这一步很关键，第一次跑不起来多数就是这里没放对。
+
+- 仓库里自带的 YAML 默认都指向：
+  - `detector.model_path: "./weights/football_ball_yolo.pt"`
+- 这个相对路径是按仓库根目录解析的。
+- 默认应放在这里：
+  - `weights/football_ball_yolo.pt`
+- 这个 `.pt` 必须是 Ultralytics YOLO 的检测模型权重。
+  - 可以：`detect` 类型的 YOLO `.pt`
+  - 不适合：`classification`、`segmentation`、`pose`、`OBB` 这类权重
+- 文件名不一定非要叫 `football_ball_yolo.pt`，但如果你改了文件名或放到别处，就要同步修改 YAML 里的 `detector.model_path`
+- 当前默认配置接受的类别名是 `sports ball` 和 `ball`，如果你的模型输出别的类别名，要同步修改 `detector.allowed_labels`
+- 如果只用 CPU，建议改成：
+  - `detector.device: "cpu"`
+  - `detector.use_half: false`
+
+如果权重文件不存在，基线任务会在检测开始前直接失败。
 
 ### 快速开始
 

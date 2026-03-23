@@ -24,6 +24,22 @@
 .\start_ui.cmd --no-reload
 ```
 
+### 检测权重要求
+
+默认配置期望这个文件存在：
+
+- `weights/football_ball_yolo.pt`
+
+关键点：
+
+- 仓库里的 YAML 默认都写的是 `detector.model_path: "./weights/football_ball_yolo.pt"`
+- 这个相对路径按仓库根目录解析
+- 这个 `.pt` 应该是 Ultralytics YOLO 的 detect 权重
+- 如果你的模型输出类别名不是 `sports ball` 或 `ball`，要同步修改 `detector.allowed_labels`
+- 如果只用 CPU，建议改成 `detector.device: "cpu"` 和 `detector.use_half: false`
+
+如果权重文件不存在，基线任务会在检测开始前直接失败。
+
 ## 2. 四个标签分别做什么
 
 ### 跑基线
