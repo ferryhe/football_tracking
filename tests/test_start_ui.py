@@ -6,7 +6,14 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from scripts.start_ui import build_frontend_env, cleanup_managed_processes, find_available_port, load_state, save_state
+from scripts.start_ui import (
+    build_frontend_env,
+    cleanup_managed_processes,
+    find_available_port,
+    listening_pid_for_port,
+    load_state,
+    save_state,
+)
 
 
 class StartUiScriptTests(unittest.TestCase):
@@ -49,9 +56,15 @@ class StartUiScriptTests(unittest.TestCase):
     def test_cleanup_managed_processes_kills_known_processes_and_removes_state(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             state_path = Path(temp_dir) / "ui_state.json"
-            save_state(state_path, {"backend_pid": 101, "frontend_pid": 202})
+            save_state(
+                state_path,
+                {"backend_pid": 101, "backend_port": 8000, "frontend_pid": 202, "frontend_port": 5173},
+            )
 
             with patch("scripts.start_ui.is_process_running", return_value=True), patch(
+                "scripts.start_ui.is_expected_managed_process",
+                return_value=True,
+            ), patch(
                 "scripts.start_ui.terminate_process_tree"
             ) as terminate_process_tree:
                 did_cleanup = cleanup_managed_processes(state_path)
@@ -59,6 +72,43 @@ class StartUiScriptTests(unittest.TestCase):
             self.assertTrue(did_cleanup)
             self.assertFalse(state_path.exists())
             self.assertEqual(2, terminate_process_tree.call_count)
+
+    def test_cleanup_managed_processes_skips_pid_when_port_does_not_match(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_path = Path(temp_dir) / "ui_state.json"
+            save_state(
+                state_path,
+                {"backend_pid": 101, "backend_port": 8000, "frontend_pid": 202, "frontend_port": 5173},
+            )
+
+            with patch("scripts.start_ui.is_process_running", return_value=True), patch(
+                "scripts.start_ui.is_expected_managed_process",
+                return_value=False,
+            ), patch(
+                "scripts.start_ui.terminate_process_tree"
+            ) as terminate_process_tree:
+                did_cleanup = cleanup_managed_processes(state_path)
+
+            self.assertFalse(did_cleanup)
+            self.assertFalse(state_path.exists())
+            terminate_process_tree.assert_not_called()
+
+    def test_listening_pid_for_port_parses_windows_netstat_output(self) -> None:
+        output = "\n".join(
+            [
+                "Active Connections",
+                "",
+                "  Proto  Local Address          Foreign Address        State           PID",
+                "  TCP    127.0.0.1:5173         0.0.0.0:0              LISTENING       2222",
+            ]
+        )
+
+        with patch("scripts.start_ui.os.name", "nt"), patch("scripts.start_ui.subprocess.run") as run_mock:
+            run_mock.return_value.returncode = 0
+            run_mock.return_value.stdout = output
+            pid = listening_pid_for_port(5173)
+
+        self.assertEqual(2222, pid)
 
 
 if __name__ == "__main__":

@@ -106,6 +106,53 @@ def terminate_process_tree(pid: int) -> None:
         return
 
 
+def listening_pid_for_port(port: int) -> int | None:
+    if port <= 0:
+        return None
+    if os.name == "nt":
+        result = subprocess.run(
+            ["netstat", "-ano", "-p", "tcp"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if result.returncode != 0:
+            return None
+        for raw_line in result.stdout.splitlines():
+            parts = raw_line.split()
+            if len(parts) < 5 or parts[0].upper() != "TCP":
+                continue
+            local_address = parts[1]
+            state = parts[3].upper()
+            pid_text = parts[4]
+            if state != "LISTENING" or not local_address.endswith(f":{port}") or not pid_text.isdigit():
+                continue
+            return int(pid_text)
+        return None
+
+    if shutil.which("lsof") is None:
+        return None
+    result = subprocess.run(
+        ["lsof", "-nP", f"-iTCP:{port}", "-sTCP:LISTEN", "-t"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        return None
+    for line in result.stdout.splitlines():
+        candidate = line.strip()
+        if candidate.isdigit():
+            return int(candidate)
+    return None
+
+
+def is_expected_managed_process(pid: int, port: int | None) -> bool:
+    if pid <= 0 or not isinstance(port, int) or port <= 0:
+        return False
+    return listening_pid_for_port(port) == pid
+
+
 def cleanup_managed_processes(path: Path) -> bool:
     state = load_state(path)
     if not state:
@@ -113,9 +160,10 @@ def cleanup_managed_processes(path: Path) -> bool:
         return False
 
     did_cleanup = False
-    for key in ("frontend_pid", "backend_pid"):
-        pid = state.get(key)
-        if isinstance(pid, int) and is_process_running(pid):
+    for pid_key, port_key in (("frontend_pid", "frontend_port"), ("backend_pid", "backend_port")):
+        pid = state.get(pid_key)
+        port = state.get(port_key)
+        if isinstance(pid, int) and is_process_running(pid) and is_expected_managed_process(pid, port):
             terminate_process_tree(pid)
             did_cleanup = True
 

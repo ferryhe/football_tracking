@@ -89,8 +89,10 @@ function adjustExpandedGap(current: FieldSuggestion, factor: number): FieldSugge
   return updateSuggestionShape(current, current.field_polygon, nextExpandedPolygon);
 }
 
-function buildConfigPatch(fieldPolygon: FieldPoint[], expandedPolygon: FieldPoint[]) {
+export function buildConfigPatch(fieldPolygon: FieldPoint[], expandedPolygon: FieldPoint[]) {
   const expandedRoi = polygonBounds(expandedPolygon);
+  const expandedWidth = Math.max(1, expandedRoi[2] - expandedRoi[0]);
+  const expandedHeight = Math.max(1, expandedRoi[3] - expandedRoi[1]);
   return {
     filtering: {
       roi: expandedRoi,
@@ -111,8 +113,8 @@ function buildConfigPatch(fieldPolygon: FieldPoint[], expandedPolygon: FieldPoin
       ],
       dynamic_air_recovery: {
         enabled: true,
-        edge_reentry_expand_x: expandedRoi[2] - expandedRoi[0],
-        edge_reentry_expand_y: expandedRoi[3] - expandedRoi[1],
+        edge_reentry_expand_x: expandedWidth,
+        edge_reentry_expand_y: expandedHeight,
       },
     },
   };
