@@ -21,11 +21,6 @@ function formatClock(totalSeconds: number): string {
   return `${minutes}:${String(seconds).padStart(2, "0")}`;
 }
 
-function roiLabel(roi: [number, number, number, number]) {
-  const [x1, y1, x2, y2] = roi;
-  return `${x1}, ${y1} -> ${x2}, ${y2}`;
-}
-
 function polygonBounds(points: FieldPoint[]): [number, number, number, number] {
   const xs = points.map((point) => point[0]);
   const ys = points.map((point) => point[1]);
@@ -93,24 +88,47 @@ function buildConfigPatch(fieldPolygon: FieldPoint[], expandedPolygon: FieldPoin
   };
 }
 
-function updateSuggestionShape(current: FieldSuggestion, nextFieldPolygon: FieldPoint[]): FieldSuggestion {
-  const expandedPolygon = deriveExpandedPolygon(nextFieldPolygon, current.frame_width, current.frame_height);
-  const nextFieldRoi = polygonBounds(nextFieldPolygon);
+function formatPointList(points: FieldPoint[]) {
+  return points.map((point) => `${point[0]},${point[1]}`).join(" | ");
+}
+
+function parsePointList(input: string): FieldPoint[] | null {
+  const trimmed = input.trim();
+  if (!trimmed) {
+    return null;
+  }
+  const matches = [...trimmed.matchAll(/(-?\d+)\s*,\s*(-?\d+)/g)];
+  const remainder = trimmed.replace(/-?\d+\s*,\s*-?\d+/g, "").replace(/[|\s;]+/g, "");
+  if (remainder.length > 0 || matches.length < 4) {
+    return null;
+  }
+  return matches.map((match) => [Number(match[1]), Number(match[2])] as FieldPoint);
+}
+
+function updateSuggestionShape(
+  current: FieldSuggestion,
+  nextFieldPolygon: FieldPoint[],
+  nextExpandedPolygon?: FieldPoint[],
+): FieldSuggestion {
+  const fieldPolygon = nextFieldPolygon.map((point) => clampPoint(point, current.frame_width, current.frame_height));
+  const expandedPolygon = (nextExpandedPolygon ?? deriveExpandedPolygon(fieldPolygon, current.frame_width, current.frame_height)).map(
+    (point) => clampPoint(point, current.frame_width, current.frame_height),
+  );
+  const nextFieldRoi = polygonBounds(fieldPolygon);
   const nextExpandedRoi = polygonBounds(expandedPolygon);
   return {
     ...current,
     accepted: false,
-    field_polygon: nextFieldPolygon,
+    field_polygon: fieldPolygon,
     expanded_polygon: expandedPolygon,
     field_roi: nextFieldRoi,
     expanded_roi: nextExpandedRoi,
-    config_patch: buildConfigPatch(nextFieldPolygon, expandedPolygon),
+    config_patch: buildConfigPatch(fieldPolygon, expandedPolygon),
   };
 }
 
-function polygonPath(points: FieldPoint[], previewBounds: [number, number, number, number]) {
-  const [previewX1, previewY1] = previewBounds;
-  return points.map((point) => `${point[0] - previewX1},${point[1] - previewY1}`).join(" ");
+function polygonPath(points: FieldPoint[]) {
+  return points.map((point) => `${point[0]},${point[1]}`).join(" ");
 }
 
 export function FieldSetupCard({
@@ -122,25 +140,61 @@ export function FieldSetupCard({
   onUpdate,
   onAccept,
 }: FieldSetupCardProps) {
-  const { copy } = useI18n();
+  const { copy, language } = useI18n();
   const [draft, setDraft] = useState<FieldSuggestion | null>(suggestion);
+  const [fieldInput, setFieldInput] = useState("");
+  const [expandedInput, setExpandedInput] = useState("");
+  const [manualError, setManualError] = useState<string | null>(null);
 
   useEffect(() => {
     setDraft(suggestion);
+    setFieldInput(suggestion ? formatPointList(suggestion.field_polygon) : "");
+    setExpandedInput(suggestion ? formatPointList(suggestion.expanded_polygon) : "");
+    setManualError(null);
   }, [suggestion]);
 
   const activeSuggestion = draft;
   const hasSuggestion = Boolean(activeSuggestion);
-  const previewBounds = activeSuggestion?.preview_bounds ?? [0, 0, 1, 1];
-  const previewWidth = Math.max(1, previewBounds[2] - previewBounds[0]);
-  const previewHeight = Math.max(1, previewBounds[3] - previewBounds[1]);
+  const previewWidth = activeSuggestion?.frame_width ?? 1;
+  const previewHeight = activeSuggestion?.frame_height ?? 1;
+
+  function pointSummary(count: number) {
+    return language === "zh" ? `${count} 个点 / ${count * 2} 个值` : `${count} points / ${count * 2} values`;
+  }
 
   function applyAdjustment(nextSuggestion: FieldSuggestion | null) {
     if (!nextSuggestion) {
       return;
     }
+    setManualError(null);
     setDraft(nextSuggestion);
+    setFieldInput(formatPointList(nextSuggestion.field_polygon));
+    setExpandedInput(formatPointList(nextSuggestion.expanded_polygon));
     onUpdate(nextSuggestion);
+  }
+
+  function applyFieldInput() {
+    if (!activeSuggestion) {
+      return;
+    }
+    const parsed = parsePointList(fieldInput);
+    if (!parsed) {
+      setManualError(copy.workspace.fieldInputError);
+      return;
+    }
+    applyAdjustment(updateSuggestionShape(activeSuggestion, parsed));
+  }
+
+  function applyExpandedInput() {
+    if (!activeSuggestion) {
+      return;
+    }
+    const parsed = parsePointList(expandedInput);
+    if (!parsed) {
+      setManualError(copy.workspace.fieldInputError);
+      return;
+    }
+    applyAdjustment(updateSuggestionShape(activeSuggestion, activeSuggestion.field_polygon, parsed));
   }
 
   return (
@@ -182,6 +236,7 @@ export function FieldSetupCard({
       </div>
 
       {message ? <p className="notice-line">{message}</p> : null}
+      {manualError ? <p className="notice-line">{manualError}</p> : null}
 
       {activeSuggestion ? (
         <>
@@ -190,14 +245,11 @@ export function FieldSetupCard({
             <svg
               className="field-preview-overlay"
               viewBox={`0 0 ${previewWidth} ${previewHeight}`}
-              preserveAspectRatio="none"
+              preserveAspectRatio="xMidYMid meet"
               aria-hidden="true"
             >
-              <polygon
-                className="field-polygon expanded"
-                points={polygonPath(activeSuggestion.expanded_polygon, previewBounds)}
-              />
-              <polygon className="field-polygon field" points={polygonPath(activeSuggestion.field_polygon, previewBounds)} />
+              <polygon className="field-polygon expanded" points={polygonPath(activeSuggestion.expanded_polygon)} />
+              <polygon className="field-polygon field" points={polygonPath(activeSuggestion.field_polygon)} />
             </svg>
           </div>
 
@@ -205,8 +257,9 @@ export function FieldSetupCard({
             <div className="detail-block compact-detail">
               <p className="meta-label">{copy.workspace.fieldFrame}</p>
               <strong>
-                {formatClock(activeSuggestion.frame_time_seconds)} · {activeSuggestion.sample_index}/{activeSuggestion.sample_count}
+                {formatClock(activeSuggestion.frame_time_seconds)} | {activeSuggestion.sample_index}/{activeSuggestion.sample_count}
               </strong>
+              <p className="muted">{activeSuggestion.frame_width} x {activeSuggestion.frame_height}</p>
               <p className="muted">
                 {activeSuggestion.confidence === "config"
                   ? copy.workspace.fieldConfidenceConfig
@@ -218,16 +271,51 @@ export function FieldSetupCard({
 
             <div className="detail-block compact-detail">
               <p className="meta-label">{copy.workspace.fieldFieldBox}</p>
-              <strong className="mono">{roiLabel(activeSuggestion.field_roi)}</strong>
-              <p className="muted">{Math.round(activeSuggestion.field_coverage * 100)}%</p>
+              <strong>{pointSummary(activeSuggestion.field_polygon.length)}</strong>
+              <p className="muted">{copy.workspace.fieldPolygonInput}</p>
             </div>
 
             <div className="detail-block compact-detail">
               <p className="meta-label">{copy.workspace.fieldExpandedBox}</p>
-              <strong className="mono">{roiLabel(activeSuggestion.expanded_roi)}</strong>
+              <strong>{pointSummary(activeSuggestion.expanded_polygon.length)}</strong>
+              <p className="muted">{copy.workspace.fieldExpandedInput}</p>
               <p className="muted mono">{activeSuggestion.source}</p>
             </div>
           </div>
+
+          <div className="field-manual-grid">
+            <label className="form-label">
+              <span className="meta-label">{copy.workspace.fieldPolygonInput}</span>
+              <input
+                className="mono"
+                value={fieldInput}
+                onChange={(event) => setFieldInput(event.target.value)}
+                onBlur={applyFieldInput}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter") {
+                    event.preventDefault();
+                    applyFieldInput();
+                  }
+                }}
+              />
+            </label>
+            <label className="form-label">
+              <span className="meta-label">{copy.workspace.fieldExpandedInput}</span>
+              <input
+                className="mono"
+                value={expandedInput}
+                onChange={(event) => setExpandedInput(event.target.value)}
+                onBlur={applyExpandedInput}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter") {
+                    event.preventDefault();
+                    applyExpandedInput();
+                  }
+                }}
+              />
+            </label>
+          </div>
+          <p className="muted field-manual-hint">{copy.workspace.fieldInputHint}</p>
 
           <div className="field-adjust-row">
             <span className="meta-label">{copy.workspace.fieldAdjustTitle}</span>
@@ -235,28 +323,66 @@ export function FieldSetupCard({
               <button
                 type="button"
                 className="chip-button"
-                onClick={() => applyAdjustment(updateSuggestionShape(activeSuggestion, scalePolygon(activeSuggestion.field_polygon, activeSuggestion.frame_width, activeSuggestion.frame_height, 0.96, 0.98)))}
+                onClick={() =>
+                  applyAdjustment(
+                    updateSuggestionShape(
+                      activeSuggestion,
+                      scalePolygon(activeSuggestion.field_polygon, activeSuggestion.frame_width, activeSuggestion.frame_height, 0.96, 0.98),
+                    ),
+                  )
+                }
               >
                 {copy.workspace.fieldAdjustTighter}
               </button>
               <button
                 type="button"
                 className="chip-button"
-                onClick={() => applyAdjustment(updateSuggestionShape(activeSuggestion, scalePolygon(activeSuggestion.field_polygon, activeSuggestion.frame_width, activeSuggestion.frame_height, 1.04, 1.02)))}
+                onClick={() =>
+                  applyAdjustment(
+                    updateSuggestionShape(
+                      activeSuggestion,
+                      scalePolygon(activeSuggestion.field_polygon, activeSuggestion.frame_width, activeSuggestion.frame_height, 1.04, 1.02),
+                    ),
+                  )
+                }
               >
                 {copy.workspace.fieldAdjustWider}
               </button>
               <button
                 type="button"
                 className="chip-button"
-                onClick={() => applyAdjustment(updateSuggestionShape(activeSuggestion, nudgeTop(activeSuggestion.field_polygon, activeSuggestion.frame_width, activeSuggestion.frame_height, -Math.max(6, activeSuggestion.frame_height * 0.02))))}
+                onClick={() =>
+                  applyAdjustment(
+                    updateSuggestionShape(
+                      activeSuggestion,
+                      nudgeTop(
+                        activeSuggestion.field_polygon,
+                        activeSuggestion.frame_width,
+                        activeSuggestion.frame_height,
+                        -Math.max(6, activeSuggestion.frame_height * 0.02),
+                      ),
+                    ),
+                  )
+                }
               >
                 {copy.workspace.fieldAdjustRaise}
               </button>
               <button
                 type="button"
                 className="chip-button"
-                onClick={() => applyAdjustment(updateSuggestionShape(activeSuggestion, nudgeTop(activeSuggestion.field_polygon, activeSuggestion.frame_width, activeSuggestion.frame_height, Math.max(6, activeSuggestion.frame_height * 0.02))))}
+                onClick={() =>
+                  applyAdjustment(
+                    updateSuggestionShape(
+                      activeSuggestion,
+                      nudgeTop(
+                        activeSuggestion.field_polygon,
+                        activeSuggestion.frame_width,
+                        activeSuggestion.frame_height,
+                        Math.max(6, activeSuggestion.frame_height * 0.02),
+                      ),
+                    ),
+                  )
+                }
               >
                 {copy.workspace.fieldAdjustLower}
               </button>

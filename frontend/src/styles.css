@@ -768,6 +768,16 @@ table {
   grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
 }
 
+.field-manual-grid {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.field-manual-hint {
+  margin: 0;
+}
+
 .field-adjust-row {
   display: grid;
   gap: 10px;
@@ -1431,6 +1441,7 @@ td {
   .command-footer,
   .selector-grid,
   .step-form-grid,
+  .field-manual-grid,
   .assistant-stage-grid,
   .assistant-mini-grid,
   .compact-actions,

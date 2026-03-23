@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import json
 import tempfile
 import unittest
@@ -74,6 +75,13 @@ class ApiServiceSmokeTests(unittest.TestCase):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
         return path
+
+    def decode_preview_image(self, data_url: str) -> np.ndarray:
+        encoded = data_url.split(",", 1)[1]
+        buffer = np.frombuffer(base64.b64decode(encoded), dtype=np.uint8)
+        image = cv2.imdecode(buffer, cv2.IMREAD_COLOR)
+        self.assertIsNotNone(image)
+        return image
 
     def write_yaml(self, relative_path: str, payload: object) -> Path:
         path = self.repo_root / relative_path
@@ -249,6 +257,9 @@ class ApiServiceSmokeTests(unittest.TestCase):
         self.assertEqual("config:polygon.yaml", suggestion["source"])
         self.assertEqual((32, 96), suggestion["field_polygon"][0])
         self.assertEqual((8, 80), suggestion["expanded_polygon"][0])
+        preview_image = self.decode_preview_image(suggestion["preview_data_url"])
+        self.assertLessEqual(preview_image.shape[1], 1600)
+        self.assertAlmostEqual(640 / 360, preview_image.shape[1] / preview_image.shape[0], places=2)
 
     def test_suggest_field_setup_crops_preview_for_wide_video(self) -> None:
         video_path = self.write_wide_video("data/fisheye_preview.avi")

@@ -209,11 +209,9 @@ class ApiService:
 
         if best_sample is None:
             raise RuntimeError(f"Unable to build a field suggestion for input video: {video_path}")
-
-        preview_x1, preview_y1, preview_x2, preview_y2 = best_sample["preview_bounds"]
         return {
             "input_video": str(video_path),
-            "preview_data_url": self._encode_frame_data_url(best_sample["frame"][preview_y1:preview_y2, preview_x1:preview_x2]),
+            "preview_data_url": self._encode_frame_data_url(self._prepare_preview_frame(best_sample["frame"])),
             "preview_bounds": best_sample["preview_bounds"],
             "frame_width": best_sample["frame_width"],
             "frame_height": best_sample["frame_height"],
@@ -1386,6 +1384,14 @@ class ApiService:
             raise RuntimeError("Unable to encode preview frame.")
         payload = base64.b64encode(encoded.tobytes()).decode("ascii")
         return f"data:image/jpeg;base64,{payload}"
+
+    def _prepare_preview_frame(self, frame: Any, max_width: int = 1600) -> Any:
+        frame_height, frame_width = frame.shape[:2]
+        if frame_width <= max_width:
+            return frame
+        scale = max_width / float(frame_width)
+        target_size = (max_width, max(1, int(round(frame_height * scale))))
+        return cv2.resize(frame, target_size, interpolation=cv2.INTER_AREA)
 
     def _build_field_config_patch(
         self,

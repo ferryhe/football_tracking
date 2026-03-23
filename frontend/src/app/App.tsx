@@ -257,7 +257,10 @@ export function App() {
     setFieldLoading(true);
     setFieldMessage(null);
     try {
-      const suggestion = await api.suggestFieldSetup({ input_video: selectedInputPath });
+      const suggestion = await api.suggestFieldSetup({
+        input_video: selectedInputPath,
+        config_name: selectedConfigName || undefined,
+      });
       setFieldSuggestions((current) => ({
         ...current,
         [selectedInputPath]: { ...suggestion, accepted: false },
