@@ -107,6 +107,7 @@ class ApiService:
         self.repo_root = repo_root
         self.config_dir = repo_root / "config"
         self.outputs_dir = repo_root / "outputs"
+        self.run_outputs_dir = self.outputs_dir / "runs"
         self.data_dir = repo_root / "data"
         self.registry_path = repo_root / "data" / "run_registry.json"
         self.generated_config_dir = self.config_dir / "generated"
@@ -311,6 +312,7 @@ class ApiService:
         with self._lock:
             registry = self._read_registry()
             self._refresh_discovered_runs_locked(registry)
+            self._normalize_registry_runs_locked(registry)
             run = next((item for item in registry["runs"] if item.get("run_id") == run_id), None)
             if run is None:
                 raise KeyError(run_id)
@@ -324,6 +326,9 @@ class ApiService:
             self._write_registry(registry)
         if output_dir.exists():
             shutil.rmtree(output_dir)
+            parent_dir = output_dir.parent
+            if parent_dir != self.outputs_dir.resolve() and parent_dir.exists() and not any(parent_dir.iterdir()):
+                parent_dir.rmdir()
         return {
             "name": run_id,
             "path": str(output_dir),
@@ -351,9 +356,115 @@ class ApiService:
         with self._lock:
             registry = self._read_registry()
             self._refresh_discovered_runs_locked(registry)
+            self._normalize_registry_runs_locked(registry)
             self._write_registry(registry)
-            runs = sorted(registry["runs"], key=lambda item: item.get("created_at", ""), reverse=True)
+            runs = sorted(
+                registry["runs"],
+                key=lambda item: self._timestamp_value(self._run_activity_at(item)),
+                reverse=True,
+            )
         return runs
+
+    def list_asset_groups(self) -> list[dict[str, Any]]:
+        inputs_payload = self.list_input_videos()
+        videos = inputs_payload["videos"]
+        configs = self.list_configs()
+        runs = self.list_runs()
+
+        input_index = {video["path"]: video for video in videos}
+        groups: dict[str, dict[str, Any]] = {}
+
+        def ensure_group(input_path: str | None) -> dict[str, Any]:
+            if input_path and input_path in input_index:
+                video = input_index[input_path]
+                existing = groups.get(input_path)
+                if existing is not None:
+                    return existing
+                created = {
+                    "group_id": self._slugify(video["name"]) or "input-group",
+                    "title": video["name"],
+                    "input_video": video,
+                    "last_activity_at": video.get("modified_at"),
+                    "run_count": 0,
+                    "config_count": 0,
+                    "output_count": 0,
+                    "runs": [],
+                    "configs": [],
+                    "outputs": [],
+                    "is_unbound": False,
+                }
+                groups[input_path] = created
+                return created
+
+            existing = groups.get("__unbound__")
+            if existing is not None:
+                return existing
+            created = {
+                "group_id": "unbound-legacy",
+                "title": "Unbound / Legacy",
+                "input_video": None,
+                "last_activity_at": None,
+                "run_count": 0,
+                "config_count": 0,
+                "output_count": 0,
+                "runs": [],
+                "configs": [],
+                "outputs": [],
+                "is_unbound": True,
+            }
+            groups["__unbound__"] = created
+            return created
+
+        for video in videos:
+            ensure_group(video["path"])
+
+        for config in configs:
+            ensure_group(config.get("input_video")).get("configs", []).append(config)
+
+        for run in runs:
+            group = ensure_group(run.get("input_video"))
+            group.get("runs", []).append(run)
+            if run.get("output_dir"):
+                group.get("outputs", []).append(run)
+
+        prepared_groups: list[dict[str, Any]] = []
+        for group in groups.values():
+            group["configs"] = sorted(group["configs"], key=lambda item: self._timestamp_value(item.get("created_at")), reverse=True)
+            group["runs"] = sorted(group["runs"], key=lambda item: self._timestamp_value(self._run_activity_at(item)), reverse=True)
+            group["outputs"] = sorted(group["outputs"], key=lambda item: self._timestamp_value(self._run_activity_at(item)), reverse=True)
+            group["run_count"] = len(group["runs"])
+            group["config_count"] = len(group["configs"])
+            group["output_count"] = len(group["outputs"])
+
+            activity_candidates: list[str] = []
+            if group.get("input_video"):
+                input_modified_at = group["input_video"].get("modified_at")
+                if isinstance(input_modified_at, str):
+                    activity_candidates.append(input_modified_at)
+            activity_candidates.extend(
+                value
+                for value in (item.get("created_at") for item in group["configs"])
+                if isinstance(value, str)
+            )
+            activity_candidates.extend(
+                value
+                for value in (self._run_activity_at(item) for item in group["runs"])
+                if isinstance(value, str)
+            )
+            normalized_candidates = [candidate for candidate in (_normalize_iso_timestamp(item) for item in activity_candidates) if candidate]
+            group["last_activity_at"] = max(normalized_candidates, default=None)
+
+            if group["is_unbound"] and not (group["runs"] or group["configs"] or group["outputs"]):
+                continue
+            prepared_groups.append(group)
+
+        prepared_groups.sort(
+            key=lambda item: (
+                1 if item.get("is_unbound") else 0,
+                -self._timestamp_value(item.get("last_activity_at")),
+            )
+        )
+        return prepared_groups
 
     def get_run(self, run_id: str) -> dict[str, Any]:
         with self._lock:
@@ -896,7 +1007,7 @@ class ApiService:
         if request.get("max_frames") is not None:
             config.runtime.max_frames = int(request["max_frames"])
 
-        config.output_dir = (self.outputs_dir / "api_runs" / run_id).resolve()
+        config.output_dir = self._build_run_output_dir(run_id=run_id, input_video=config.input_video)
         if config.output_dir.exists() and any(config.output_dir.iterdir()):
             raise FileExistsError(str(config.output_dir))
         config.output_dir.mkdir(parents=True, exist_ok=True)
@@ -956,7 +1067,7 @@ class ApiService:
         if not run_id:
             run_id = f"deliver_{source_run_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid4().hex[:6]}"
 
-        config.output_dir = (self.outputs_dir / "api_runs" / run_id).resolve()
+        config.output_dir = self._build_run_output_dir(run_id=run_id, input_video=config.input_video)
         if config.output_dir.exists() and any(config.output_dir.iterdir()):
             raise FileExistsError(str(config.output_dir))
         config.output_dir.mkdir(parents=True, exist_ok=True)
@@ -1169,6 +1280,31 @@ class ApiService:
                 )
             )
 
+    def _normalize_registry_runs_locked(self, registry: dict[str, Any]) -> None:
+        for run in registry["runs"]:
+            created_at = _normalize_iso_timestamp(run.get("created_at"))
+            started_at = _normalize_iso_timestamp(run.get("started_at"))
+            completed_at = _normalize_iso_timestamp(run.get("completed_at"))
+            output_dir = Path(run["output_dir"]).resolve() if run.get("output_dir") else None
+            output_mtime = None
+            if output_dir is not None and output_dir.exists():
+                output_mtime = datetime.fromtimestamp(output_dir.stat().st_mtime, tz=timezone.utc).isoformat()
+
+            if created_at and run.get("created_at") != created_at:
+                run["created_at"] = created_at
+            if started_at and run.get("started_at") != started_at:
+                run["started_at"] = started_at
+            if completed_at and run.get("completed_at") != completed_at:
+                run["completed_at"] = completed_at
+
+            status = run.get("status")
+            if status == "running" and not run.get("started_at"):
+                run["started_at"] = created_at or output_mtime or _utc_now_iso()
+            if status in {"completed", "failed"} and not run.get("completed_at"):
+                run["completed_at"] = output_mtime or started_at or created_at or _utc_now_iso()
+            if status == "completed" and not run.get("started_at"):
+                run["started_at"] = created_at or run.get("completed_at")
+
     def _build_run_snapshot(
         self,
         *,
@@ -1186,13 +1322,18 @@ class ApiService:
         started_at: str | None = None,
         completed_at: str | None = None,
     ) -> dict[str, Any]:
+        normalized_created_at = _normalize_iso_timestamp(created_at) or created_at
+        normalized_started_at = _normalize_iso_timestamp(started_at) if started_at else None
+        normalized_completed_at = _normalize_iso_timestamp(completed_at) if completed_at else None
+        if status in {"completed", "failed"} and normalized_completed_at is None:
+            normalized_completed_at = normalized_started_at or normalized_created_at
         return {
             "run_id": run_id,
             "source": source,
             "status": status,
-            "created_at": created_at,
-            "started_at": started_at,
-            "completed_at": completed_at,
+            "created_at": normalized_created_at,
+            "started_at": normalized_started_at,
+            "completed_at": normalized_completed_at,
             "config_name": config_name,
             "config_path": config_path,
             "input_video": input_video,
@@ -1840,6 +1981,34 @@ class ApiService:
             yaml.safe_dump(merged, handle, sort_keys=False, allow_unicode=False)
         return output_path, output_path.relative_to(self.config_dir).as_posix()
 
+    def _build_run_output_dir(self, *, run_id: str, input_video: Path | None) -> Path:
+        input_group = self._input_group_slug(input_video)
+        return (self.run_outputs_dir / input_group / run_id).resolve()
+
+    def _input_group_slug(self, input_video: Path | None) -> str:
+        if input_video is None:
+            return "unbound"
+        resolved_input = input_video.resolve()
+        try:
+            relative = resolved_input.relative_to(self.data_dir.resolve())
+            slug_source = str(relative.with_suffix("")).replace("\\", "/").replace("/", "_")
+        except ValueError:
+            slug_source = resolved_input.stem
+        return self._slugify(slug_source) or "input"
+
+    def _run_activity_at(self, run: dict[str, Any]) -> str | None:
+        return (
+            _normalize_iso_timestamp(run.get("completed_at"))
+            or _normalize_iso_timestamp(run.get("started_at"))
+            or _normalize_iso_timestamp(run.get("created_at"))
+        )
+
+    def _timestamp_value(self, value: str | None) -> float:
+        normalized = _normalize_iso_timestamp(value)
+        if not normalized:
+            return 0.0
+        return datetime.fromisoformat(normalized).timestamp()
+
     def _iter_output_run_dirs(self) -> list[Path]:
         if not self.outputs_dir.exists():
             return []
@@ -1849,6 +2018,12 @@ class ApiService:
                 continue
             if child.name == "api_runs":
                 discovered.extend(sorted((item for item in child.iterdir() if item.is_dir()), key=lambda item: item.name))
+                continue
+            if child.name == "runs":
+                for input_group_dir in sorted((item for item in child.iterdir() if item.is_dir()), key=lambda item: item.name):
+                    discovered.extend(sorted((item for item in input_group_dir.iterdir() if item.is_dir()), key=lambda item: item.name))
+                continue
+            if child.name == "_scratch":
                 continue
             discovered.append(child)
         return discovered

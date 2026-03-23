@@ -3,7 +3,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, HTTPException
 
 from football_tracking.api.dependencies import get_service
-from football_tracking.api.schemas import CreateRunRequest, DeleteResourceResponse, FollowCamRenderRequest, RunRecord
+from football_tracking.api.schemas import AssetGroup, CreateRunRequest, DeleteResourceResponse, FollowCamRenderRequest, RunRecord
 from football_tracking.api.service import ApiService
 
 router = APIRouter()
@@ -12,6 +12,11 @@ router = APIRouter()
 @router.get("/runs", response_model=list[RunRecord])
 def list_runs(service: ApiService = Depends(get_service)) -> list[RunRecord]:
     return [RunRecord(**item) for item in service.list_runs()]
+
+
+@router.get("/runs/asset-groups", response_model=list[AssetGroup])
+def list_asset_groups(service: ApiService = Depends(get_service)) -> list[AssetGroup]:
+    return [AssetGroup(**item) for item in service.list_asset_groups()]
 
 
 @router.get("/runs/{run_id}", response_model=RunRecord)

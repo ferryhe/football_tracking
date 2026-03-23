@@ -1259,6 +1259,13 @@ textarea {
   background: rgba(255, 255, 255, 0.03);
 }
 
+.resource-list-card,
+.resource-copy,
+.resource-grid {
+  align-content: start;
+  align-items: start;
+}
+
 .history-action-card h4,
 .resource-panel h4 {
   margin: 0;
@@ -1357,6 +1364,92 @@ textarea {
   order: -1;
 }
 
+.history-management-panel,
+.asset-group-list,
+.asset-group-card,
+.asset-group-grid,
+.asset-section,
+.asset-entry,
+.asset-entry-copy,
+.asset-entry-detail {
+  display: grid;
+  gap: 14px;
+}
+
+.asset-group-list,
+.asset-group-grid {
+  align-items: start;
+}
+
+.asset-group-card {
+  padding: 16px;
+  border-radius: 20px;
+  border: 1px solid var(--border-soft);
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.asset-group-card > summary,
+.asset-entry > summary {
+  list-style: none;
+  cursor: pointer;
+}
+
+.asset-group-card > summary::-webkit-details-marker,
+.asset-entry > summary::-webkit-details-marker {
+  display: none;
+}
+
+.asset-group-summary,
+.asset-entry-summary {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 14px;
+}
+
+.asset-group-copy,
+.asset-entry-copy {
+  flex: 1 1 auto;
+  min-width: 0;
+  align-content: start;
+}
+
+.asset-group-meta,
+.asset-entry-time {
+  flex: 0 0 auto;
+  text-align: right;
+}
+
+.asset-group-meta {
+  display: grid;
+  gap: 4px;
+  justify-items: end;
+}
+
+.asset-group-grid {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.asset-section {
+  align-content: start;
+  align-items: start;
+}
+
+.asset-entry {
+  padding: 14px 16px;
+  border-radius: 18px;
+  border: 1px solid var(--border-soft);
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.asset-entry-detail {
+  align-content: start;
+}
+
+.asset-entry .secondary-button {
+  align-self: start;
+}
+
 .resource-row {
   display: flex;
   justify-content: space-between;
@@ -1384,6 +1477,12 @@ textarea {
   line-height: 1.35;
   overflow-wrap: anywhere;
   word-break: break-word;
+}
+
+.asset-entry-time,
+.asset-group-meta strong {
+  font-size: 0.84rem;
+  color: var(--text-muted);
 }
 
 .selection-summary-head .summary-title {
@@ -1858,6 +1957,7 @@ td {
   .delivery-row-compact,
   .history-grid,
   .resource-grid,
+  .asset-group-grid,
   .history-render-grid,
   .render-summary-strip,
   .render-footer,
@@ -1875,7 +1975,9 @@ td {
   .topbar-actions,
   .header-meta,
   .meta-row,
-  .title-row {
+  .title-row,
+  .asset-group-summary,
+  .asset-entry-summary {
     flex-direction: column;
     align-items: flex-start;
   }

@@ -5,6 +5,7 @@ import type {
   CameraPathResponse,
   ConfigDetail,
   ConfigListItem,
+  AssetGroup,
   FieldPreview,
   FieldSuggestion,
   HealthResponse,
@@ -67,6 +68,7 @@ export const api = {
       body: JSON.stringify(body),
     }),
   listRuns: () => request<RunRecord[]>("/runs"),
+  listAssetGroups: () => request<AssetGroup[]>("/runs/asset-groups"),
   getRun: (runId: string) => request<RunRecord>(`/runs/${encodeURIComponent(runId)}`),
   getCleanupReport: (runId: string) => request<Record<string, unknown>>(`/runs/${encodeURIComponent(runId)}/cleanup-report`),
   getFollowCamReport: (runId: string) =>

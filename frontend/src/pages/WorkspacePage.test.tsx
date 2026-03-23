@@ -2,7 +2,7 @@ import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-li
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { I18nProvider } from "../lib/i18n";
-import type { ConfigListItem, InputCatalog, RunRecord } from "../lib/types";
+import type { AssetGroup, ConfigListItem, InputCatalog, RunRecord } from "../lib/types";
 import { WorkspacePage, type WorkspaceStage } from "./WorkspacePage";
 
 function setLanguage(value: "en" | "zh") {
@@ -30,7 +30,7 @@ function buildConfigs(inputCatalog: InputCatalog): ConfigListItem[] {
       path: "C:/Projects/foot_ball_tracking/config/real_first_run.yaml",
       created_at: "2026-03-20T09:00:00Z",
       input_video: inputCatalog.videos[0].path,
-      output_dir: "C:/Projects/foot_ball_tracking/outputs/game_01",
+      output_dir: "C:/Projects/foot_ball_tracking/outputs/runs/game_01",
       detector_model_path: "C:/Projects/foot_ball_tracking/weights/football_ball_yolo.pt",
       postprocess_enabled: true,
       follow_cam_enabled: true,
@@ -55,12 +55,12 @@ function buildRuns(inputCatalog: InputCatalog): RunRecord[] {
       config_name: "real_first_run.yaml",
       config_path: "C:/Projects/foot_ball_tracking/config/real_first_run.yaml",
       input_video: inputCatalog.videos[0].path,
-      output_dir: "C:/Projects/foot_ball_tracking/outputs/api_runs/baseline_run_20260323_120000",
+      output_dir: "C:/Projects/foot_ball_tracking/outputs/runs/game_01/baseline_run_20260323_120000",
       modules_enabled: { postprocess: true, follow_cam: true },
       artifacts: [
         {
           name: "ball_track.csv",
-          path: "C:/Projects/foot_ball_tracking/outputs/api_runs/baseline_run_20260323_120000/ball_track.csv",
+          path: "C:/Projects/foot_ball_tracking/outputs/runs/game_01/baseline_run_20260323_120000/ball_track.csv",
           kind: "csv",
           exists: true,
         },
@@ -80,12 +80,12 @@ function buildRuns(inputCatalog: InputCatalog): RunRecord[] {
       config_path: "C:/Projects/foot_ball_tracking/config/real_first_run.yaml",
       input_video: inputCatalog.videos[0].path,
       parent_run_id: "baseline_run_20260323_120000",
-      output_dir: "C:/Projects/foot_ball_tracking/outputs/api_runs/deliverable_run_20260323_121000",
+      output_dir: "C:/Projects/foot_ball_tracking/outputs/runs/game_01/deliverable_run_20260323_121000",
       modules_enabled: { postprocess: false, follow_cam: true },
       artifacts: [
         {
           name: "ball_track.csv",
-          path: "C:/Projects/foot_ball_tracking/outputs/api_runs/deliverable_run_20260323_121000/ball_track.csv",
+          path: "C:/Projects/foot_ball_tracking/outputs/runs/game_01/deliverable_run_20260323_121000/ball_track.csv",
           kind: "csv",
           exists: true,
         },
@@ -104,7 +104,7 @@ function buildRuns(inputCatalog: InputCatalog): RunRecord[] {
       config_name: "real_first_run.yaml",
       config_path: "C:/Projects/foot_ball_tracking/config/real_first_run.yaml",
       input_video: inputCatalog.videos[0].path,
-      output_dir: "C:/Projects/foot_ball_tracking/outputs/api_runs/failed_run_20260323_122000",
+      output_dir: "C:/Projects/foot_ball_tracking/outputs/runs/game_01/failed_run_20260323_122000",
       modules_enabled: { postprocess: true, follow_cam: false },
       artifacts: [],
       stats: {},
@@ -114,11 +114,30 @@ function buildRuns(inputCatalog: InputCatalog): RunRecord[] {
   ];
 }
 
+function buildAssetGroups(inputCatalog: InputCatalog, configs: ConfigListItem[], runs: RunRecord[]): AssetGroup[] {
+  return [
+    {
+      group_id: "game_01",
+      title: "game_01.mp4",
+      input_video: inputCatalog.videos[0],
+      last_activity_at: "2026-03-23T12:21:00Z",
+      run_count: runs.length,
+      config_count: configs.length,
+      output_count: runs.length,
+      runs,
+      configs,
+      outputs: runs,
+      is_unbound: false,
+    },
+  ];
+}
+
 function renderWorkspaceStage(
   stage: WorkspaceStage,
   overrides: {
     inputCatalog?: InputCatalog;
     configs?: ConfigListItem[];
+    assetGroups?: AssetGroup[];
     runs?: RunRecord[];
     selectedRun?: RunRecord | null;
     selectedConfigName?: string;
@@ -128,6 +147,7 @@ function renderWorkspaceStage(
   const inputCatalog = overrides.inputCatalog ?? buildInputCatalog();
   const configs = overrides.configs ?? buildConfigs(inputCatalog);
   const runs = overrides.runs ?? buildRuns(inputCatalog);
+  const assetGroups = overrides.assetGroups ?? buildAssetGroups(inputCatalog, configs, runs);
   const selectedRun = overrides.selectedRun ?? runs[0] ?? null;
   const selectedConfigName = overrides.selectedConfigName ?? configs[0]?.name ?? "";
   const selectedInputPath = overrides.selectedInputPath ?? inputCatalog.videos[0]?.path ?? "";
@@ -146,6 +166,7 @@ function renderWorkspaceStage(
           stage={stage}
           inputCatalog={inputCatalog}
           configs={configs}
+          assetGroups={assetGroups}
           runs={runs}
           selectedRun={selectedRun}
           selectedInputPath={selectedInputPath}
@@ -199,26 +220,33 @@ describe("WorkspacePage deliverable and history stages", () => {
     expect(screen.queryByText("Video and config cleanup")).not.toBeInTheDocument();
   });
 
-  it("filters history rows and keeps file management in the history tab", () => {
+  it("groups assets by source clip and filters history rows in the history tab", () => {
     renderWorkspaceStage("history");
     const historyFilter = screen.getByRole("tablist", { name: "History filter" });
     const historySection = historyFilter.closest("section");
     expect(historySection).not.toBeNull();
     const historyWithin = within(historySection!);
+    const assetGroupsSection = screen.getByText("Manage assets by source clip").closest("section");
+    expect(assetGroupsSection).not.toBeNull();
+    const assetGroupsWithin = within(assetGroupsSection!);
 
-    const resourceHeading = screen.getByText("Video and config cleanup");
-    const resourcePanel = resourceHeading.closest("details");
-    expect(resourcePanel).not.toBeNull();
-    expect(resourcePanel?.open).toBe(false);
-    fireEvent.click(resourceHeading.closest("summary")!);
-    expect(screen.getByText("Output folders")).toBeInTheDocument();
+    expect(screen.getByText("Manage assets by source clip")).toBeInTheDocument();
+    expect(screen.getAllByText("game_01.mp4").length).toBeGreaterThan(0);
+    expect(screen.getByText("Source")).toBeInTheDocument();
+    expect(screen.getAllByText("Configs").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("Outputs").length).toBeGreaterThan(0);
     expect(screen.getAllByText(/Mar/).length).toBeGreaterThan(0);
 
     expect(historyWithin.getAllByText("baseline_run_20260323_120000").length).toBeGreaterThan(0);
     expect(historyWithin.getAllByText("Completed").length).toBeGreaterThan(0);
     expect(historyWithin.getAllByText("Baseline").length).toBeGreaterThan(0);
-    expect(historyWithin.getAllByText("C:/Projects/foot_ball_tracking/outputs/api_runs/baseline_run_20260323_120000").length).toBeGreaterThan(0);
     expect(historyWithin.queryByText("Ran at")).not.toBeInTheDocument();
+    expect(
+      assetGroupsWithin.getByText("C:/Projects/foot_ball_tracking/outputs/runs/game_01/baseline_run_20260323_120000"),
+    ).not.toBeVisible();
+
+    fireEvent.click(assetGroupsWithin.getAllByText("baseline_run_20260323_120000")[0]);
+    expect(assetGroupsWithin.getByText("C:/Projects/foot_ball_tracking/outputs/runs/game_01/baseline_run_20260323_120000")).toBeInTheDocument();
 
     fireEvent.click(screen.getAllByRole("button", { name: "Deliverable" })[0]);
     expect(historyWithin.getAllByText("deliverable_run_20260323_121000").length).toBeGreaterThan(0);
@@ -231,11 +259,12 @@ describe("WorkspacePage deliverable and history stages", () => {
 
   it("requires typing DELETE before a file delete action can proceed", async () => {
     const view = renderWorkspaceStage("history");
+    const assetGroupsSection = screen.getByText("Manage assets by source clip").closest("section");
+    expect(assetGroupsSection).not.toBeNull();
+    const assetGroupsWithin = within(assetGroupsSection!);
 
-    const resourceHeading = screen.getByText("Video and config cleanup");
-    fireEvent.click(resourceHeading.closest("summary")!);
-
-    fireEvent.click(screen.getAllByRole("button", { name: "Delete" })[0]);
+    fireEvent.click(assetGroupsWithin.getAllByText("game_01.mp4")[1]);
+    fireEvent.click(assetGroupsWithin.getAllByRole("button", { name: "Delete" })[0]);
     expect(screen.getByRole("dialog", { name: "Confirm deletion" })).toBeInTheDocument();
 
     const confirmButton = screen.getByRole("button", { name: "Confirm delete" });
@@ -290,5 +319,22 @@ describe("WorkspacePage deliverable and history stages", () => {
 
     expect(screen.queryByText("Only runs created from the current source clip appear here.")).not.toBeInTheDocument();
     expect(screen.getAllByLabelText("Only runs created from the current source clip appear here.").length).toBeGreaterThan(0);
+  });
+
+  it("keeps config and deliverable explanations in hover tooltips", () => {
+    renderWorkspaceStage("history");
+
+    expect(screen.getByText("Manage assets by source clip")).toBeInTheDocument();
+    expect(screen.getAllByTitle(/Scope describes how broad or heavy this config is meant to be\./).length).toBeGreaterThan(0);
+    expect(screen.getAllByTitle("Cleanup postprocesses the raw track to remove bad points and smooth obvious breaks.").length).toBeGreaterThan(0);
+    expect(screen.getAllByTitle("Follow-cam renders the cropped tracking video from the selected track.").length).toBeGreaterThan(0);
+
+    cleanup();
+    renderWorkspaceStage("deliverable");
+    expect(
+      screen.getByLabelText("Prefer ball_track.cleaned.csv when it exists, then fall back to the raw track."),
+    ).toBeInTheDocument();
+    expect(screen.getByLabelText("Overlay the ball marker on the deliverable video.")).toBeInTheDocument();
+    expect(screen.getByLabelText("Overlay status text and frame annotations on the deliverable video.")).toBeInTheDocument();
   });
 });

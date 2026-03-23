@@ -130,6 +130,20 @@ class RunRecord(BaseModel):
     error: str | None = None
 
 
+class AssetGroup(BaseModel):
+    group_id: str
+    title: str
+    input_video: InputVideoItem | None = None
+    last_activity_at: str | None = None
+    run_count: int = 0
+    config_count: int = 0
+    output_count: int = 0
+    runs: list[RunRecord] = Field(default_factory=list)
+    configs: list[ConfigListItem] = Field(default_factory=list)
+    outputs: list[RunRecord] = Field(default_factory=list)
+    is_unbound: bool = False
+
+
 class CreateRunRequest(BaseModel):
     config_name: str
     input_video: str | None = None

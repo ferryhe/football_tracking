@@ -17,7 +17,7 @@ import { FieldSetupCard } from "../components/FieldSetupCard";
 import { TooltipBadge } from "../components/TooltipBadge";
 import { sortConfigsByCreatedAt } from "../lib/configs";
 import { useI18n } from "../lib/i18n";
-import type { ConfigListItem, FieldPreview, FieldSuggestion, InputCatalog, RunRecord } from "../lib/types";
+import type { AssetGroup, ConfigListItem, FieldPreview, FieldSuggestion, InputCatalog, RunRecord } from "../lib/types";
 
 export type WorkspaceStage = "baseline" | "ai" | "deliverable" | "history";
 type HistoryCategory = "baseline" | "deliverable" | "failed";
@@ -31,6 +31,7 @@ interface WorkspacePageProps {
   stage: WorkspaceStage;
   inputCatalog: InputCatalog;
   configs: ConfigListItem[];
+  assetGroups: AssetGroup[];
   runs: RunRecord[];
   selectedRun: RunRecord | null;
   selectedInputPath: string;
@@ -175,6 +176,7 @@ export function WorkspacePage({
   stage,
   inputCatalog,
   configs,
+  assetGroups,
   runs,
   selectedRun,
   selectedInputPath,
@@ -308,6 +310,61 @@ export function WorkspacePage({
     draw_ball_marker: false,
     draw_frame_text: false,
   });
+  const uiCopy = useMemo(
+    () =>
+      language === "zh"
+        ? {
+            assetGroupsEyebrow: "分组资产",
+            assetGroupsTitle: "按原视频分组管理",
+            assetGroupsSubtitle: "一个原视频下面收口它的源文件、配置和输出；没有输入视频关联的旧内容放到 Unbound / Legacy。",
+            groupSource: "Source",
+            groupConfigs: "Configs",
+            groupOutputs: "Outputs",
+            groupRuns: "Runs",
+            groupLastActivity: "最近活动",
+            groupNoSource: "这个分组没有可管理的源视频。",
+            groupNoConfigs: "这个分组还没有关联配置。",
+            groupNoOutputs: "这个分组还没有输出目录。",
+            groupPath: "路径",
+            groupStatus: "状态",
+            unboundGroupTitle: "Unbound / Legacy",
+            scopeTooltip: "Scope 表示这个配置预期的运行范围或强度。",
+            scopeStandardTooltip: "Standard 适合作为默认起点，速度和覆盖范围比较平衡。",
+            scopePartialTooltip: "Partial 更偏快速试跑，只覆盖片段或更保守的范围。",
+            scopeFullTooltip: "Full 更适合最终全量导出，通常更慢但覆盖更完整。",
+            cleanupTooltip: "Cleanup 会在原始轨迹之后做清洗，去掉坏点并补平明显异常。",
+            followCamTooltip: "Follow-cam 会根据轨迹生成跟随裁剪视频。",
+            renderUseCleanedTooltip: "优先使用清洗后的 ball_track.cleaned.csv；没有时再回退到原始轨迹。",
+            renderShowMarkerTooltip: "在成品视频里叠加球点标记。",
+            renderShowTextTooltip: "在成品视频里叠加状态文字和帧标注。",
+          }
+        : {
+            assetGroupsEyebrow: "Asset groups",
+            assetGroupsTitle: "Manage assets by source clip",
+            assetGroupsSubtitle: "Each source clip owns its source file, configs, and outputs. Items without a matched input clip stay under Unbound / Legacy.",
+            groupSource: "Source",
+            groupConfigs: "Configs",
+            groupOutputs: "Outputs",
+            groupRuns: "Runs",
+            groupLastActivity: "Last activity",
+            groupNoSource: "No source video is attached to this group.",
+            groupNoConfigs: "No configs are linked to this group yet.",
+            groupNoOutputs: "No output folders are linked to this group yet.",
+            groupPath: "Path",
+            groupStatus: "Status",
+            unboundGroupTitle: "Unbound / Legacy",
+            scopeTooltip: "Scope describes how broad or heavy this config is meant to be.",
+            scopeStandardTooltip: "Standard is the balanced default starting point.",
+            scopePartialTooltip: "Partial is a quicker or narrower probe pass.",
+            scopeFullTooltip: "Full is better suited for final full-length delivery runs.",
+            cleanupTooltip: "Cleanup postprocesses the raw track to remove bad points and smooth obvious breaks.",
+            followCamTooltip: "Follow-cam renders the cropped tracking video from the selected track.",
+            renderUseCleanedTooltip: "Prefer ball_track.cleaned.csv when it exists, then fall back to the raw track.",
+            renderShowMarkerTooltip: "Overlay the ball marker on the deliverable video.",
+            renderShowTextTooltip: "Overlay status text and frame annotations on the deliverable video.",
+          },
+    [language],
+  );
   const orderedConfigs = useMemo(() => sortConfigsByCreatedAt(configs), [configs]);
   const selectedVideo = inputCatalog.videos.find((item) => item.path === selectedInputPath) ?? null;
   const selectedConfig = orderedConfigs.find((item) => item.name === selectedConfigName) ?? null;
@@ -327,14 +384,23 @@ export function WorkspacePage({
     () => runs.filter((run) => historyCategoryForRun(run) === historyFilter),
     [historyFilter, runs],
   );
-  const manageableOutputRuns = useMemo(
-    () => runs.filter((run) => Boolean(run.output_dir)),
-    [runs],
-  );
   const activeRenderRun =
     renderableRuns.find((run) => run.run_id === renderRunId) ??
     (selectedRun && renderableRuns.some((run) => run.run_id === selectedRun.run_id) ? selectedRun : renderableRuns[0] ?? null);
   const deliverableOutputRoot = formatParentPath(activeRenderRun?.output_dir);
+  const aiCompletedMoment =
+    aiSelectedRun?.completed_at ??
+    (aiSelectedRun?.status === "completed" ? aiSelectedRun.started_at ?? aiSelectedRun.created_at : null);
+
+  function scopeTooltipText(scope: "full" | "partial" | "standard"): string {
+    if (scope === "full") {
+      return `${uiCopy.scopeTooltip} ${uiCopy.scopeFullTooltip}`;
+    }
+    if (scope === "partial") {
+      return `${uiCopy.scopeTooltip} ${uiCopy.scopePartialTooltip}`;
+    }
+    return `${uiCopy.scopeTooltip} ${uiCopy.scopeStandardTooltip}`;
+  }
 
   useEffect(() => {
     if (!pendingDelete) {
@@ -531,11 +597,21 @@ export function WorkspacePage({
                   </div>
                   <div className="tag-row">
                     {selectedConfig.created_at ? <span className="tag">{formatDateTime(selectedConfig.created_at)}</span> : null}
-                    <span className="tag">
+                    <span className="tag" title={scopeTooltipText(selectedScope)}>
                       {copy.workspace.scopeLabel}: {scopeLabel(copy, selectedScope)}
                     </span>
-                    <span className={`tag ${selectedConfig.postprocess_enabled ? "good" : ""}`}>{copy.workspace.cleanup}</span>
-                    <span className={`tag ${selectedConfig.follow_cam_enabled ? "good" : ""}`}>{copy.workspace.followCam}</span>
+                    <span
+                      className={`tag ${selectedConfig.postprocess_enabled ? "good" : ""}`}
+                      title={uiCopy.cleanupTooltip}
+                    >
+                      {copy.workspace.cleanup}
+                    </span>
+                    <span
+                      className={`tag ${selectedConfig.follow_cam_enabled ? "good" : ""}`}
+                      title={uiCopy.followCamTooltip}
+                    >
+                      {copy.workspace.followCam}
+                    </span>
                   </div>
                 </article>
               ) : (
@@ -661,43 +737,52 @@ export function WorkspacePage({
 
                   <div className="option-toggle-grid compact-toggle-grid">
                     <label className="option-toggle">
-                      <input
-                        type="checkbox"
-                        checked={renderOptions.prefer_cleaned_track}
-                        onChange={(event) =>
-                          setRenderOptions((current) => ({
-                            ...current,
-                            prefer_cleaned_track: event.target.checked,
-                          }))
-                        }
-                      />
-                      <span>{historyCopy.renderUseCleaned}</span>
+                      <span className="meta-inline">
+                        <input
+                          type="checkbox"
+                          checked={renderOptions.prefer_cleaned_track}
+                          onChange={(event) =>
+                            setRenderOptions((current) => ({
+                              ...current,
+                              prefer_cleaned_track: event.target.checked,
+                            }))
+                          }
+                        />
+                        <span>{historyCopy.renderUseCleaned}</span>
+                        <TooltipBadge label={uiCopy.renderUseCleanedTooltip} />
+                      </span>
                     </label>
                     <label className="option-toggle">
-                      <input
-                        type="checkbox"
-                        checked={renderOptions.draw_ball_marker}
-                        onChange={(event) =>
-                          setRenderOptions((current) => ({
-                            ...current,
-                            draw_ball_marker: event.target.checked,
-                          }))
-                        }
-                      />
-                      <span>{historyCopy.renderShowMarker}</span>
+                      <span className="meta-inline">
+                        <input
+                          type="checkbox"
+                          checked={renderOptions.draw_ball_marker}
+                          onChange={(event) =>
+                            setRenderOptions((current) => ({
+                              ...current,
+                              draw_ball_marker: event.target.checked,
+                            }))
+                          }
+                        />
+                        <span>{historyCopy.renderShowMarker}</span>
+                        <TooltipBadge label={uiCopy.renderShowMarkerTooltip} />
+                      </span>
                     </label>
                     <label className="option-toggle">
-                      <input
-                        type="checkbox"
-                        checked={renderOptions.draw_frame_text}
-                        onChange={(event) =>
-                          setRenderOptions((current) => ({
-                            ...current,
-                            draw_frame_text: event.target.checked,
-                          }))
-                        }
-                      />
-                      <span>{historyCopy.renderShowText}</span>
+                      <span className="meta-inline">
+                        <input
+                          type="checkbox"
+                          checked={renderOptions.draw_frame_text}
+                          onChange={(event) =>
+                            setRenderOptions((current) => ({
+                              ...current,
+                              draw_frame_text: event.target.checked,
+                            }))
+                          }
+                        />
+                        <span>{historyCopy.renderShowText}</span>
+                        <TooltipBadge label={uiCopy.renderShowTextTooltip} />
+                      </span>
                     </label>
                   </div>
 
@@ -809,119 +894,183 @@ export function WorkspacePage({
           {historyMessage ? <p className="notice-line">{historyMessage}</p> : null}
         </section>
 
-        <details className="panel resource-panel resource-panel-collapsed history-management-panel">
-          <summary className="resource-summary">
+        <section className="panel history-management-panel">
+          <div className="panel-header">
             <div className="title-row">
               <FolderIcon className="section-icon" />
               <div className="title-with-tooltip">
-                <p className="eyebrow">{historyCopy.manageEyebrow}</p>
+                <p className="eyebrow">{uiCopy.assetGroupsEyebrow}</p>
                 <div className="title-inline">
-                  <h4>{historyCopy.manageTitle}</h4>
-                  <TooltipBadge label={historyCopy.manageSubtitle} />
+                  <h4>{uiCopy.assetGroupsTitle}</h4>
+                  <TooltipBadge label={uiCopy.assetGroupsSubtitle} />
                 </div>
               </div>
             </div>
-          </summary>
-
-          <div className="resource-grid">
-            <section className="resource-list-card">
-              <div className="meta-row">
-                <span className="meta-label">{historyCopy.manageVideos}</span>
-                <strong>{inputCatalog.videos.length}</strong>
-              </div>
-              {inputCatalog.videos.length ? (
-                <div className="resource-list">
-                  {inputCatalog.videos.map((video) => (
-                    <article key={video.path} className="resource-row">
-                      <div className="resource-copy">
-                        <strong className="resource-title">{video.name}</strong>
-                        <p className="muted mono">{formatVideoSize(video.size_bytes)} | {formatDateTime(video.modified_at)}</p>
-                      </div>
-                      <button
-                        type="button"
-                        className="secondary-button icon-button danger-button"
-                        onClick={() => void handleDeleteVideo(video.name)}
-                        disabled={renderBusy}
-                      >
-                        <TrashIcon className="button-icon" />
-                        <span>{historyCopy.manageDelete}</span>
-                      </button>
-                    </article>
-                  ))}
-                </div>
-              ) : (
-                <p className="muted">{historyCopy.manageNoVideos}</p>
-              )}
-            </section>
-
-            <section className="resource-list-card">
-              <div className="meta-row">
-                <span className="meta-label">{historyCopy.manageConfigs}</span>
-                <strong>{orderedConfigs.length}</strong>
-              </div>
-              {orderedConfigs.length ? (
-                <div className="resource-list">
-                  {orderedConfigs.map((config) => (
-                    <article key={config.name} className="resource-row">
-                      <div className="resource-copy">
-                        <strong className="resource-title">{config.name}</strong>
-                        <div className="tag-row">
-                          <span className={`tag ${config.postprocess_enabled ? "good" : ""}`}>{copy.workspace.cleanup}</span>
-                          <span className={`tag ${config.follow_cam_enabled ? "good" : ""}`}>{copy.workspace.followCam}</span>
-                        </div>
-                        <p className="muted mono">
-                          {formatDateTime(config.created_at ?? null)}
-                        </p>
-                      </div>
-                      <button
-                        type="button"
-                        className="secondary-button icon-button danger-button"
-                        onClick={() => void handleDeleteConfigClick(config.name)}
-                        disabled={renderBusy}
-                      >
-                        <TrashIcon className="button-icon" />
-                        <span>{historyCopy.manageDelete}</span>
-                      </button>
-                    </article>
-                  ))}
-                </div>
-              ) : (
-                <p className="muted">{historyCopy.manageNoConfigs}</p>
-              )}
-            </section>
-
-            <section className="resource-list-card">
-              <div className="meta-row">
-                <span className="meta-label">{manageOutputsLabel}</span>
-                <strong>{manageableOutputRuns.length}</strong>
-              </div>
-              {manageableOutputRuns.length ? (
-                <div className="resource-list">
-                  {manageableOutputRuns.map((run) => (
-                    <article key={run.run_id} className="resource-row">
-                      <div className="resource-copy">
-                        <strong className="resource-title">{run.run_id}</strong>
-                        <p className="muted mono">{formatDateTime(runMoment(run))}</p>
-                        <p className="muted mono compact-resource-path">{run.output_dir}</p>
-                      </div>
-                      <button
-                        type="button"
-                        className="secondary-button icon-button danger-button"
-                        onClick={() => void handleDeleteRunOutputClick(run.run_id)}
-                        disabled={renderBusy || run.status === "queued" || run.status === "running"}
-                      >
-                        <TrashIcon className="button-icon" />
-                        <span>{historyCopy.manageDelete}</span>
-                      </button>
-                    </article>
-                  ))}
-                </div>
-              ) : (
-                <p className="muted">{manageNoOutputs}</p>
-              )}
-            </section>
           </div>
-        </details>
+
+          {assetGroups.length ? (
+            <div className="asset-group-list">
+              {assetGroups.map((group) => (
+                <details
+                  key={group.group_id}
+                  className="asset-group-card"
+                  open={group.is_unbound || group.input_video?.path === selectedInputPath}
+                >
+                  <summary className="asset-group-summary">
+                    <div className="asset-group-copy">
+                      <strong className="resource-title">{group.is_unbound ? uiCopy.unboundGroupTitle : group.title}</strong>
+                      <div className="tag-row">
+                        <span className="tag">{`${uiCopy.groupRuns}: ${group.run_count}`}</span>
+                        <span className="tag">{`${uiCopy.groupConfigs}: ${group.config_count}`}</span>
+                        <span className="tag">{`${uiCopy.groupOutputs}: ${group.output_count}`}</span>
+                      </div>
+                    </div>
+                    <div className="asset-group-meta">
+                      <span className="meta-label">{uiCopy.groupLastActivity}</span>
+                      <strong>{formatDateTime(group.last_activity_at)}</strong>
+                    </div>
+                  </summary>
+
+                  <div className="asset-group-grid">
+                    <section className="resource-list-card asset-section">
+                      <div className="meta-row">
+                        <span className="meta-label">{uiCopy.groupSource}</span>
+                        <strong>{group.input_video ? 1 : 0}</strong>
+                      </div>
+                      {group.input_video ? (
+                        <details className="asset-entry">
+                          <summary className="asset-entry-summary">
+                            <div className="asset-entry-copy">
+                              <strong className="resource-title">{group.input_video.name}</strong>
+                              <div className="tag-row">
+                                <span className="tag">{formatVideoSize(group.input_video.size_bytes)}</span>
+                              </div>
+                            </div>
+                            <span className="asset-entry-time">{formatDateTime(group.input_video.modified_at)}</span>
+                          </summary>
+                          <div className="asset-entry-detail">
+                            <p className="muted mono compact-resource-path">{group.input_video.path}</p>
+                            <button
+                              type="button"
+                              className="secondary-button icon-button danger-button"
+                              onClick={() => void handleDeleteVideo(group.input_video!.name)}
+                              disabled={renderBusy}
+                            >
+                              <TrashIcon className="button-icon" />
+                              <span>{historyCopy.manageDelete}</span>
+                            </button>
+                          </div>
+                        </details>
+                      ) : (
+                        <p className="muted">{uiCopy.groupNoSource}</p>
+                      )}
+                    </section>
+
+                    <section className="resource-list-card asset-section">
+                      <div className="meta-row">
+                        <span className="meta-label">{uiCopy.groupConfigs}</span>
+                        <strong>{group.config_count}</strong>
+                      </div>
+                      {group.configs.length ? (
+                        <div className="resource-list">
+                          {group.configs.map((config) => (
+                            <details key={config.name} className="asset-entry">
+                              <summary className="asset-entry-summary">
+                                <div className="asset-entry-copy">
+                                  <strong className="resource-title">{config.name}</strong>
+                                  <div className="tag-row">
+                                    <span className="tag" title={scopeTooltipText(inferConfigScope(config.name))}>
+                                      {copy.workspace.scopeLabel}: {scopeLabel(copy, inferConfigScope(config.name))}
+                                    </span>
+                                    <span
+                                      className={`tag ${config.postprocess_enabled ? "good" : ""}`}
+                                      title={uiCopy.cleanupTooltip}
+                                    >
+                                      {copy.workspace.cleanup}
+                                    </span>
+                                    <span
+                                      className={`tag ${config.follow_cam_enabled ? "good" : ""}`}
+                                      title={uiCopy.followCamTooltip}
+                                    >
+                                      {copy.workspace.followCam}
+                                    </span>
+                                  </div>
+                                </div>
+                                <span className="asset-entry-time">{formatDateTime(config.created_at)}</span>
+                              </summary>
+                              <div className="asset-entry-detail">
+                                <p className="muted mono compact-resource-path">{config.path}</p>
+                                {config.output_dir ? <p className="muted mono compact-resource-path">{config.output_dir}</p> : null}
+                                <button
+                                  type="button"
+                                  className="secondary-button icon-button danger-button"
+                                  onClick={() => void handleDeleteConfigClick(config.name)}
+                                  disabled={renderBusy}
+                                >
+                                  <TrashIcon className="button-icon" />
+                                  <span>{historyCopy.manageDelete}</span>
+                                </button>
+                              </div>
+                            </details>
+                          ))}
+                        </div>
+                      ) : (
+                        <p className="muted">{uiCopy.groupNoConfigs}</p>
+                      )}
+                    </section>
+
+                    <section className="resource-list-card asset-section">
+                      <div className="meta-row">
+                        <span className="meta-label">{uiCopy.groupOutputs}</span>
+                        <strong>{group.output_count}</strong>
+                      </div>
+                      {group.outputs.length ? (
+                        <div className="resource-list">
+                          {group.outputs.map((run) => (
+                            <details key={run.run_id} className="asset-entry">
+                              <summary className="asset-entry-summary">
+                                <div className="asset-entry-copy">
+                                  <strong className="resource-title">{run.run_id}</strong>
+                                  <div className="tag-row">
+                                    <span className="tag">{formatRunStatus(run.status)}</span>
+                                    <span className="tag">
+                                      {run.source === "follow_cam_render" ? historyCopy.historyModeRender : historyCopy.historyModeBaseline}
+                                    </span>
+                                    {run.parent_run_id ? <span className="tag">{`${historyCopy.historySource}: ${run.parent_run_id}`}</span> : null}
+                                  </div>
+                                </div>
+                                <span className="asset-entry-time">{formatDateTime(runMoment(run))}</span>
+                              </summary>
+                              <div className="asset-entry-detail">
+                                <p className="muted mono compact-resource-path">{run.output_dir}</p>
+                                <button
+                                  type="button"
+                                  className="secondary-button icon-button danger-button"
+                                  onClick={() => void handleDeleteRunOutputClick(run.run_id)}
+                                  disabled={renderBusy || run.status === "queued" || run.status === "running"}
+                                >
+                                  <TrashIcon className="button-icon" />
+                                  <span>{historyCopy.manageDelete}</span>
+                                </button>
+                              </div>
+                            </details>
+                          ))}
+                        </div>
+                      ) : (
+                        <p className="muted">{uiCopy.groupNoOutputs}</p>
+                      )}
+                    </section>
+                  </div>
+                </details>
+              ))}
+            </div>
+          ) : (
+            <div className="empty-state">
+              <strong>{historyCopy.manageTitle}</strong>
+              <p className="muted">{historyCopy.manageSubtitle}</p>
+            </div>
+          )}
+        </section>
 
         <ConfirmDeleteDialog
           open={Boolean(pendingDelete)}
@@ -1042,7 +1191,7 @@ export function WorkspacePage({
               </div>
               <div className="detail-block">
                 <p className="meta-label">{copy.workspace.completed}</p>
-                <p>{aiSelectedRun?.completed_at ? formatDateTime(aiSelectedRun.completed_at) : copy.common.stillRunning}</p>
+                <p>{aiCompletedMoment ? formatDateTime(aiCompletedMoment) : copy.common.stillRunning}</p>
               </div>
             </div>
 

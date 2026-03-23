@@ -6,7 +6,7 @@ import { LanguageToggle } from "../components/LanguageToggle";
 import { api } from "../lib/api";
 import { sortConfigsByCreatedAt } from "../lib/configs";
 import { useI18n } from "../lib/i18n";
-import type { ConfigListItem, FieldPreview, FieldSuggestion, HealthResponse, InputCatalog, RunRecord } from "../lib/types";
+import type { AssetGroup, ConfigListItem, FieldPreview, FieldSuggestion, HealthResponse, InputCatalog, RunRecord } from "../lib/types";
 import { WorkspacePage, type WorkspaceStage } from "../pages/WorkspacePage";
 
 interface StageTab {
@@ -60,6 +60,7 @@ export function App() {
   const [inputCatalog, setInputCatalog] = useState<InputCatalog>({ root_dir: "", videos: [] });
   const [configs, setConfigs] = useState<ConfigListItem[]>([]);
   const [runs, setRuns] = useState<RunRecord[]>([]);
+  const [assetGroups, setAssetGroups] = useState<AssetGroup[]>([]);
   const [selectedRun, setSelectedRun] = useState<RunRecord | null>(null);
   const [selectedInputPath, setSelectedInputPath] = useState<string>("");
   const [selectedConfigName, setSelectedConfigName] = useState<string>("real_first_run.yaml");
@@ -91,6 +92,12 @@ export function App() {
     return nextRuns;
   }
 
+  async function refreshAssetGroups(): Promise<AssetGroup[]> {
+    const nextGroups = await api.listAssetGroups();
+    setAssetGroups(nextGroups);
+    return nextGroups;
+  }
+
   async function refreshInputs(): Promise<InputCatalog> {
     const nextInputs = await api.listInputs();
     setInputCatalog(nextInputs);
@@ -105,11 +112,12 @@ export function App() {
         setLoading(true);
       }
       try {
-        const [healthData, inputData, configData, runData] = await Promise.all([
+        const [healthData, inputData, configData, runData, assetGroupData] = await Promise.all([
           api.getHealth(),
           api.listInputs(),
           api.listConfigs(),
           api.listRuns(),
+          api.listAssetGroups(),
         ]);
         if (cancelled) {
           return;
@@ -119,6 +127,7 @@ export function App() {
         const sortedConfigData = sortConfigsByCreatedAt(configData);
         setConfigs(sortedConfigData);
         setRuns(runData);
+        setAssetGroups(assetGroupData);
         setError(null);
 
         setSelectedRun((current) => {
@@ -232,6 +241,7 @@ export function App() {
 
   async function syncCreatedRun(createdRun: RunRecord) {
     const runData = await refreshRuns();
+    await refreshAssetGroups();
     const matched = runData.find((item) => item.run_id === createdRun.run_id) ?? createdRun;
     setSelectedRun(matched);
     if (matched.input_video) {
@@ -409,7 +419,7 @@ export function App() {
 
   async function handleDeleteInputVideo(name: string) {
     await api.deleteInput(name);
-    const [nextInputs] = await Promise.all([refreshInputs(), refreshHealth()]);
+    const [nextInputs] = await Promise.all([refreshInputs(), refreshHealth(), refreshAssetGroups()]);
     const nextSelectedInput =
       selectedInputPath && nextInputs.videos.some((item) => item.path === selectedInputPath)
         ? selectedInputPath
@@ -420,13 +430,13 @@ export function App() {
 
   async function handleDeleteConfig(name: string) {
     await api.deleteConfig(name);
-    const [nextConfigs] = await Promise.all([refreshConfigs(), refreshHealth()]);
+    const [nextConfigs] = await Promise.all([refreshConfigs(), refreshHealth(), refreshAssetGroups()]);
     setSelectedConfigName((current) => pickPreferredConfigName(nextConfigs, orderedRuns, selectedInputPath, current === name ? "" : current));
   }
 
   async function handleDeleteRunOutput(runId: string) {
     await api.deleteRunOutput(runId);
-    const [nextRuns] = await Promise.all([refreshRuns(), refreshHealth()]);
+    const [nextRuns] = await Promise.all([refreshRuns(), refreshHealth(), refreshAssetGroups()]);
     setSelectedRun((current) => {
       if (current?.run_id === runId) {
         return nextRuns[0] ?? null;
@@ -526,6 +536,7 @@ export function App() {
             stage={stage}
             inputCatalog={inputCatalog}
             configs={orderedConfigs}
+            assetGroups={assetGroups}
             runs={orderedRuns}
             selectedRun={stage === "ai" ? aiFocusedRun : focusedRun}
             selectedInputPath={selectedInputPath}
@@ -565,6 +576,7 @@ export function App() {
               onConfigDerived={async () => {
                 await refreshConfigs();
                 await refreshInputs();
+                await refreshAssetGroups();
               }}
               onRunCreated={handleAssistantRunCreated}
             />

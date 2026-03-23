@@ -94,6 +94,20 @@ export interface RunRecord {
   error?: string | null;
 }
 
+export interface AssetGroup {
+  group_id: string;
+  title: string;
+  input_video: InputVideoItem | null;
+  last_activity_at: string | null;
+  run_count: number;
+  config_count: number;
+  output_count: number;
+  runs: RunRecord[];
+  configs: ConfigListItem[];
+  outputs: RunRecord[];
+  is_unbound: boolean;
+}
+
 export interface CameraPathResponse {
   columns: string[];
   offset: number;

@@ -386,10 +386,55 @@ class ApiServiceSmokeTests(unittest.TestCase):
         run = runs[0]
         self.assertEqual("scan_kept_baseline", run["run_id"])
         self.assertEqual("default.yaml", run["config_name"])
+        self.assertIsNotNone(run["completed_at"])
         self.assertEqual(3, run["stats"]["raw"]["frame_count"])
         self.assertEqual(2, run["stats"]["cleaned"]["detected"])
         self.assertEqual("cleaned", run["stats"]["follow_cam"]["track_source"])
         self.assertIn("follow_cam.mp4", {artifact["name"] for artifact in run["artifacts"]})
+
+    def test_list_asset_groups_groups_by_input_and_keeps_unbound_legacy(self) -> None:
+        self.create_output_bundle("kept_baseline")
+        self.create_output_bundle("legacy_only")
+
+        groups = self.service.list_asset_groups()
+
+        input_group = next(group for group in groups if group["input_video"] and group["input_video"]["name"] == "input.mp4")
+        self.assertEqual(1, input_group["run_count"])
+        self.assertGreaterEqual(input_group["config_count"], 1)
+        self.assertEqual(1, input_group["output_count"])
+        self.assertEqual("scan_kept_baseline", input_group["runs"][0]["run_id"])
+        self.assertEqual("scan_kept_baseline", input_group["outputs"][0]["run_id"])
+
+        unbound_group = next(group for group in groups if group["is_unbound"])
+        self.assertEqual("Unbound / Legacy", unbound_group["title"])
+        self.assertEqual("scan_legacy_only", unbound_group["runs"][0]["run_id"])
+        self.assertEqual("scan_legacy_only", unbound_group["outputs"][0]["run_id"])
+
+    def test_create_run_uses_grouped_output_dir_layout(self) -> None:
+        class PassiveThread:
+            def __init__(self, *, target, args, name, daemon) -> None:
+                self._alive = False
+
+            def start(self) -> None:
+                self._alive = False
+
+            def is_alive(self) -> bool:
+                return self._alive
+
+        with mock.patch("football_tracking.api.service.threading.Thread", PassiveThread):
+            created_run = self.service.create_run(
+                {
+                    "config_name": "default.yaml",
+                    "input_video": str((self.repo_root / "data" / "input.mp4").resolve()),
+                    "output_dir_name": "baseline_probe_run",
+                }
+            )
+
+        self.assertEqual(
+            (self.repo_root / "outputs" / "runs" / "input" / "baseline_probe_run").resolve().as_posix(),
+            Path(created_run["output_dir"]).resolve().as_posix(),
+        )
+        self.assertTrue(Path(created_run["output_dir"]).exists())
 
     def test_create_follow_cam_render_creates_standalone_deliverable_task(self) -> None:
         self.create_output_bundle("kept_baseline")
@@ -451,6 +496,7 @@ class ApiServiceSmokeTests(unittest.TestCase):
         self.assertEqual([1920, 1080], completed_run["stats"]["follow_cam"]["target_resolution"])
         self.assertIn("deliverable_16x9.mp4", {artifact["name"] for artifact in completed_run["artifacts"]})
         self.assertTrue((Path(completed_run["output_dir"]) / "ball_track.cleaned.csv").exists())
+        self.assertIn("/outputs/runs/input/", Path(completed_run["output_dir"]).resolve().as_posix())
 
     def test_delete_input_video_blocks_active_run_reference(self) -> None:
         active_input = (self.repo_root / "data" / "input.mp4").resolve()
@@ -545,6 +591,7 @@ class ApiServiceSmokeTests(unittest.TestCase):
             "/api/v1/configs",
             "/api/v1/configs/{name:path}",
             "/api/v1/runs",
+            "/api/v1/runs/asset-groups",
             "/api/v1/runs/{run_id}",
             "/api/v1/runs/{run_id}/follow-cam-render",
             "/api/v1/runs/{run_id}/artifacts",
