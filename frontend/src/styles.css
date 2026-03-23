@@ -1240,7 +1240,7 @@ textarea {
 }
 
 .resource-grid {
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
 }
 
 .resource-list-card,
@@ -1286,6 +1286,13 @@ textarea {
 .render-footer {
   display: flex;
   justify-content: flex-end;
+}
+
+.compact-resource-note,
+.compact-resource-path {
+  margin: 0;
+  font-size: 0.84rem;
+  line-height: 1.45;
 }
 
 .resource-panel-collapsed summary {
@@ -1336,11 +1343,15 @@ textarea {
   gap: 10px;
 }
 
+.history-management-panel {
+  order: -1;
+}
+
 .resource-row {
   display: flex;
   justify-content: space-between;
   gap: 14px;
-  align-items: center;
+  align-items: flex-start;
   padding: 14px 16px;
   border-radius: 18px;
   border: 1px solid var(--border-soft);
@@ -1349,6 +1360,10 @@ textarea {
 
 .resource-copy {
   min-width: 0;
+}
+
+.resource-row .secondary-button {
+  align-self: flex-start;
 }
 
 .artifact-stack,

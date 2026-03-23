@@ -292,6 +292,29 @@ class ApiService:
             "deleted": True,
         }
 
+    def delete_run_output(self, run_id: str) -> dict[str, Any]:
+        with self._lock:
+            registry = self._read_registry()
+            self._refresh_discovered_runs_locked(registry)
+            run = next((item for item in registry["runs"] if item.get("run_id") == run_id), None)
+            if run is None:
+                raise KeyError(run_id)
+            if run.get("status") in {"queued", "running"}:
+                raise RuntimeError(f"Run is still active and cannot be deleted: {run_id}")
+            output_dir = Path(run["output_dir"]).resolve()
+            outputs_root = self.outputs_dir.resolve()
+            if output_dir == outputs_root or outputs_root not in output_dir.parents:
+                raise RuntimeError(f"Run output must live under {outputs_root}: {output_dir}")
+            registry["runs"] = [item for item in registry["runs"] if item.get("run_id") != run_id]
+            self._write_registry(registry)
+        if output_dir.exists():
+            shutil.rmtree(output_dir)
+        return {
+            "name": run_id,
+            "path": str(output_dir),
+            "deleted": True,
+        }
+
     def derive_config(self, base_config_name: str, output_name: str, patch: dict[str, Any]) -> dict[str, Any]:
         base_path, _ = self._resolve_config_path(base_config_name)
         base_raw = self._load_raw_yaml(base_path)
@@ -1180,6 +1203,7 @@ class ApiService:
 
     def _build_config_summary(self, config_path: Path, relative_name: str) -> dict[str, Any]:
         raw = self._load_raw_yaml(config_path)
+        created_at = datetime.fromtimestamp(config_path.stat().st_ctime, tz=timezone.utc).isoformat()
         try:
             config = load_config(config_path)
             input_video = str(config.input_video)
@@ -1202,6 +1226,7 @@ class ApiService:
         return {
             "name": relative_name,
             "path": str(config_path),
+            "created_at": created_at,
             "input_video": input_video,
             "output_dir": output_dir,
             "detector_model_path": detector_model_path,

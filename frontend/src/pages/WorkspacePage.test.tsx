@@ -1,4 +1,4 @@
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { I18nProvider } from "../lib/i18n";
@@ -26,6 +26,7 @@ function renderWorkspaceStage(stage: WorkspaceStage) {
     {
       name: "real_first_run.yaml",
       path: "C:/Projects/foot_ball_tracking/config/real_first_run.yaml",
+      created_at: "2026-03-20T09:00:00Z",
       input_video: inputCatalog.videos[0].path,
       output_dir: "C:/Projects/foot_ball_tracking/outputs/game_01",
       detector_model_path: "C:/Projects/foot_ball_tracking/weights/football_ball_yolo.pt",
@@ -140,6 +141,7 @@ function renderWorkspaceStage(stage: WorkspaceStage) {
         onCreateFollowCamRender={vi.fn(async () => runs[1])}
         onDeleteInputVideo={vi.fn(async () => undefined)}
         onDeleteConfig={vi.fn(async () => undefined)}
+        onDeleteRunOutput={vi.fn(async () => undefined)}
       />
     </I18nProvider>,
   );
@@ -160,29 +162,37 @@ describe("WorkspacePage deliverable and history stages", () => {
     expect(screen.getByLabelText("Show frame text / annotation")).toBeInTheDocument();
     expect(screen.getByLabelText(/This does not rerun detector or baseline/)).toBeInTheDocument();
     expect(screen.queryByText("This does not rerun detector or baseline. It reuses the selected completed run and renders a clean deliverable.")).not.toBeInTheDocument();
+    expect(screen.getByText(/A new deliverable folder will be created under:/)).toBeInTheDocument();
     expect(screen.queryByText("Video and config cleanup")).not.toBeInTheDocument();
   });
 
   it("filters history rows and keeps file management in the history tab", () => {
     renderWorkspaceStage("history");
+    const historyFilter = screen.getByRole("tablist", { name: "History filter" });
+    const historySection = historyFilter.closest("section");
+    expect(historySection).not.toBeNull();
+    const historyWithin = within(historySection!);
 
     const resourceHeading = screen.getByText("Video and config cleanup");
     const resourcePanel = resourceHeading.closest("details");
     expect(resourcePanel).not.toBeNull();
     expect(resourcePanel?.open).toBe(false);
+    fireEvent.click(resourceHeading.closest("summary")!);
+    expect(screen.getByText("Output folders")).toBeInTheDocument();
+    expect(screen.getAllByText(/Mar/).length).toBeGreaterThan(0);
 
-    expect(screen.getAllByText("baseline_run_20260323_120000").length).toBeGreaterThan(0);
-    expect(screen.getAllByText("Completed").length).toBeGreaterThan(0);
-    expect(screen.getAllByText("Baseline").length).toBeGreaterThan(0);
-    expect(screen.getAllByText("C:/Projects/foot_ball_tracking/outputs/api_runs/baseline_run_20260323_120000").length).toBeGreaterThan(0);
-    expect(screen.queryByText("Ran at")).not.toBeInTheDocument();
+    expect(historyWithin.getAllByText("baseline_run_20260323_120000").length).toBeGreaterThan(0);
+    expect(historyWithin.getAllByText("Completed").length).toBeGreaterThan(0);
+    expect(historyWithin.getAllByText("Baseline").length).toBeGreaterThan(0);
+    expect(historyWithin.getAllByText("C:/Projects/foot_ball_tracking/outputs/api_runs/baseline_run_20260323_120000").length).toBeGreaterThan(0);
+    expect(historyWithin.queryByText("Ran at")).not.toBeInTheDocument();
 
     fireEvent.click(screen.getAllByRole("button", { name: "Deliverable" })[0]);
-    expect(screen.getAllByText("deliverable_run_20260323_121000").length).toBeGreaterThan(0);
-    expect(screen.queryByText("failed_run_20260323_122000")).not.toBeInTheDocument();
+    expect(historyWithin.getAllByText("deliverable_run_20260323_121000").length).toBeGreaterThan(0);
+    expect(historyWithin.queryByText("failed_run_20260323_122000")).not.toBeInTheDocument();
 
     fireEvent.click(screen.getAllByRole("button", { name: "Failed" })[0]);
-    expect(screen.getByText("failed_run_20260323_122000")).toBeInTheDocument();
-    expect(screen.queryByText("deliverable_run_20260323_121000")).not.toBeInTheDocument();
+    expect(historyWithin.getByText("failed_run_20260323_122000")).toBeInTheDocument();
+    expect(historyWithin.queryByText("deliverable_run_20260323_121000")).not.toBeInTheDocument();
   });
 });

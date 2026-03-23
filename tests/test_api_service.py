@@ -207,6 +207,13 @@ class ApiServiceSmokeTests(unittest.TestCase):
         generated_raw = yaml.safe_load(generated_path.read_text(encoding="utf-8"))
         self.assertEqual(6, generated_raw["follow_cam"]["zoom_out_confirm_frames"])
 
+    def test_list_configs_includes_created_at(self) -> None:
+        configs = self.service.list_configs()
+
+        default_config = next(item for item in configs if item["name"] == "default.yaml")
+        self.assertIn("created_at", default_config)
+        self.assertTrue(default_config["created_at"].endswith("+00:00"))
+
     def test_suggest_field_setup_returns_preview_and_config_patch(self) -> None:
         video_path = self.write_video("data/field_preview.avi")
 
@@ -456,6 +463,16 @@ class ApiServiceSmokeTests(unittest.TestCase):
         self.assertTrue(deleted_config["deleted"])
         self.assertFalse((self.repo_root / "data" / "clip.mov").exists())
         self.assertFalse((self.repo_root / "config" / "alt.yaml").exists())
+
+    def test_delete_run_output_removes_output_folder_and_registry_entry(self) -> None:
+        self.create_output_bundle("kept_baseline")
+        run = self.service.list_runs()[0]
+
+        deleted = self.service.delete_run_output(run["run_id"])
+
+        self.assertTrue(deleted["deleted"])
+        self.assertFalse(Path(run["output_dir"]).exists())
+        self.assertEqual([], self.service.list_runs())
 
     def test_ai_recommend_camera_objective_returns_follow_cam_patch(self) -> None:
         self.create_output_bundle("kept_baseline")

@@ -56,6 +56,10 @@ export const api = {
     request<{ name: string; path: string; deleted: boolean }>(`/configs?name=${encodeURIComponent(name)}`, {
       method: "DELETE",
     }),
+  deleteRunOutput: (runId: string) =>
+    request<{ name: string; path: string; deleted: boolean }>(`/runs?run_id=${encodeURIComponent(runId)}`, {
+      method: "DELETE",
+    }),
   getConfig: (name: string) => request<ConfigDetail>(`/configs/${encodeURIComponent(name)}`),
   deriveConfig: (body: Record<string, unknown>) =>
     request<ConfigDetail>("/configs/derive", {

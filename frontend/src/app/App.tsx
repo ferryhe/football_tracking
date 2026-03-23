@@ -421,6 +421,17 @@ export function App() {
     setSelectedConfigName((current) => pickPreferredConfigName(nextConfigs, orderedRuns, selectedInputPath, current === name ? "" : current));
   }
 
+  async function handleDeleteRunOutput(runId: string) {
+    await api.deleteRunOutput(runId);
+    const [nextRuns] = await Promise.all([refreshRuns(), refreshHealth()]);
+    setSelectedRun((current) => {
+      if (current?.run_id === runId) {
+        return nextRuns[0] ?? null;
+      }
+      return current ? nextRuns.find((item) => item.run_id === current.run_id) ?? null : nextRuns[0] ?? null;
+    });
+  }
+
   const stageTabs = useMemo<StageTab[]>(
     () => [
       {
@@ -538,6 +549,7 @@ export function App() {
             onCreateFollowCamRender={handleCreateFollowCamRender}
             onDeleteInputVideo={handleDeleteInputVideo}
             onDeleteConfig={handleDeleteConfig}
+            onDeleteRunOutput={handleDeleteRunOutput}
           />
         </section>
 

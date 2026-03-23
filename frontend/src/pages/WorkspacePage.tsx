@@ -57,6 +57,7 @@ interface WorkspacePageProps {
   ) => Promise<RunRecord>;
   onDeleteInputVideo: (name: string) => Promise<void>;
   onDeleteConfig: (name: string) => Promise<void>;
+  onDeleteRunOutput: (runId: string) => Promise<void>;
 }
 
 function getTrackStats(run: RunRecord | null): Record<string, unknown> | null {
@@ -95,6 +96,15 @@ function formatPathTail(path: string | null | undefined): string {
   }
   const pieces = path.split(/[\\/]/).filter(Boolean);
   return pieces.length ? pieces[pieces.length - 1] : path;
+}
+
+function formatParentPath(path: string | null | undefined): string {
+  if (!path) {
+    return "";
+  }
+  const normalized = path.replace(/[\\/]+$/, "");
+  const separatorIndex = Math.max(normalized.lastIndexOf("/"), normalized.lastIndexOf("\\"));
+  return separatorIndex >= 0 ? normalized.slice(0, separatorIndex) : normalized;
 }
 
 function supportsFollowCamRender(run: RunRecord): boolean {
@@ -192,6 +202,7 @@ export function WorkspacePage({
   onCreateFollowCamRender,
   onDeleteInputVideo,
   onDeleteConfig,
+  onDeleteRunOutput,
 }: WorkspacePageProps) {
   const { copy, formatDateTime, formatRunStatus, language } = useI18n();
   const historyCopy = useMemo(
@@ -241,6 +252,7 @@ export function WorkspacePage({
             renderSelect: "Source run",
             renderReady: "Runs ready for deliverable render",
             renderOutput: "Output",
+            renderOutputHint: "A new deliverable folder will be created under",
             renderSource: "Source",
             renderClip: "Clip",
             renderUseCleaned: "Prefer cleaned track CSV",
@@ -260,16 +272,19 @@ export function WorkspacePage({
             historyFilterFailed: "Failed",
             manageEyebrow: "File management",
             manageTitle: "Video and config cleanup",
-            manageSubtitle: "Remove videos and YAML configs you no longer need. Active runs stay protected.",
-            manageSummary: "Clean up unused videos and YAML configs",
+            manageSubtitle: "Remove videos, YAML configs, and output folders you no longer need. Active runs stay protected.",
+            manageSummary: "Clean up unused videos, YAML configs, and outputs",
             manageVideos: "Input videos",
             manageConfigs: "Config files",
+            manageOutputs: "Output folders",
             manageDelete: "Delete",
             manageNoVideos: "No videos to manage.",
             manageNoConfigs: "No configs to manage.",
+            manageNoOutputs: "No outputs to manage.",
             manageDeleted: "Deleted",
             manageDeleteVideoConfirm: "Delete this input video?",
             manageDeleteConfigConfirm: "Delete this config file?",
+            manageDeleteOutputConfirm: "Delete this output folder?",
           },
     [language],
   );
@@ -277,6 +292,10 @@ export function WorkspacePage({
   const [historyFilter, setHistoryFilter] = useState<HistoryCategory>("baseline");
   const [renderBusy, setRenderBusy] = useState(false);
   const [historyMessage, setHistoryMessage] = useState<string | null>(null);
+  const renderOutputHint = language === "zh" ? "新的成品文件夹会创建在" : "A new deliverable folder will be created under";
+  const manageOutputsLabel = language === "zh" ? "输出文件夹" : "Output folders";
+  const manageNoOutputs = language === "zh" ? "没有可管理的输出。" : "No outputs to manage.";
+  const manageDeleteOutputConfirm = language === "zh" ? "确定删除这个输出文件夹吗？" : "Delete this output folder?";
   const [renderOptions, setRenderOptions] = useState({
     prefer_cleaned_track: true,
     draw_ball_marker: false,
@@ -300,9 +319,14 @@ export function WorkspacePage({
     () => runs.filter((run) => historyCategoryForRun(run) === historyFilter),
     [historyFilter, runs],
   );
+  const manageableOutputRuns = useMemo(
+    () => runs.filter((run) => Boolean(run.output_dir)),
+    [runs],
+  );
   const activeRenderRun =
     renderableRuns.find((run) => run.run_id === renderRunId) ??
     (selectedRun && renderableRuns.some((run) => run.run_id === selectedRun.run_id) ? selectedRun : renderableRuns[0] ?? null);
+  const deliverableOutputRoot = formatParentPath(activeRenderRun?.output_dir);
 
   useEffect(() => {
     if (renderableRuns.some((run) => run.run_id === renderRunId)) {
@@ -367,6 +391,22 @@ export function WorkspacePage({
     }
   }
 
+  async function handleDeleteRunOutputClick(runId: string) {
+    if (typeof window !== "undefined" && !window.confirm(manageDeleteOutputConfirm)) {
+      return;
+    }
+    setRenderBusy(true);
+    setHistoryMessage(null);
+    try {
+      await onDeleteRunOutput(runId);
+      setHistoryMessage(`${historyCopy.manageDeleted}: ${runId}`);
+    } catch (caughtError) {
+      setHistoryMessage(caughtError instanceof Error ? caughtError.message : String(caughtError));
+    } finally {
+      setRenderBusy(false);
+    }
+  }
+
   if (stage === "baseline") {
     return (
       <div className="page-stack">
@@ -374,10 +414,12 @@ export function WorkspacePage({
           <div className="panel-header">
             <div className="title-row">
               <PlayIcon className="section-icon" />
-              <div>
+              <div className="title-with-tooltip">
                 <p className="eyebrow">{copy.workspace.selectEyebrow}</p>
-                <h3>{copy.workspace.selectTitle}</h3>
-                <p className="muted">{copy.workspace.selectSubtitle}</p>
+                <div className="title-inline">
+                  <h3>{copy.workspace.selectTitle}</h3>
+                  <TooltipBadge label={copy.workspace.selectSubtitle} />
+                </div>
               </div>
             </div>
           </div>
@@ -591,6 +633,10 @@ export function WorkspacePage({
                     </article>
                   </div>
 
+                  {deliverableOutputRoot ? (
+                    <p className="muted compact-resource-note mono">{`${renderOutputHint}: ${deliverableOutputRoot}`}</p>
+                  ) : null}
+
                   <div className="option-toggle-grid compact-toggle-grid">
                     <label className="option-toggle">
                       <input
@@ -741,7 +787,7 @@ export function WorkspacePage({
           {historyMessage ? <p className="notice-line">{historyMessage}</p> : null}
         </section>
 
-        <details className="panel resource-panel resource-panel-collapsed">
+        <details className="panel resource-panel resource-panel-collapsed history-management-panel">
           <summary className="resource-summary">
             <div className="title-row">
               <FolderIcon className="section-icon" />
@@ -801,6 +847,9 @@ export function WorkspacePage({
                           <span className={`tag ${config.postprocess_enabled ? "good" : ""}`}>{copy.workspace.cleanup}</span>
                           <span className={`tag ${config.follow_cam_enabled ? "good" : ""}`}>{copy.workspace.followCam}</span>
                         </div>
+                        <p className="muted mono">
+                          {formatDateTime(config.created_at ?? null)}
+                        </p>
                       </div>
                       <button
                         type="button"
@@ -818,6 +867,37 @@ export function WorkspacePage({
                 <p className="muted">{historyCopy.manageNoConfigs}</p>
               )}
             </section>
+
+            <section className="resource-list-card">
+              <div className="meta-row">
+                <span className="meta-label">{manageOutputsLabel}</span>
+                <strong>{manageableOutputRuns.length}</strong>
+              </div>
+              {manageableOutputRuns.length ? (
+                <div className="resource-list">
+                  {manageableOutputRuns.map((run) => (
+                    <article key={run.run_id} className="resource-row">
+                      <div className="resource-copy">
+                        <strong>{run.run_id}</strong>
+                        <p className="muted mono">{formatDateTime(runMoment(run))}</p>
+                        <p className="muted mono compact-resource-path">{run.output_dir}</p>
+                      </div>
+                      <button
+                        type="button"
+                        className="secondary-button icon-button danger-button"
+                        onClick={() => void handleDeleteRunOutputClick(run.run_id)}
+                        disabled={renderBusy || run.status === "queued" || run.status === "running"}
+                      >
+                        <TrashIcon className="button-icon" />
+                        <span>{historyCopy.manageDelete}</span>
+                      </button>
+                    </article>
+                  ))}
+                </div>
+              ) : (
+                <p className="muted">{manageNoOutputs}</p>
+              )}
+            </section>
           </div>
         </details>
       </div>
@@ -830,10 +910,12 @@ export function WorkspacePage({
         <div className="panel-header">
           <div className="title-row">
             <SparkIcon className="section-icon" />
-            <div>
+            <div className="title-with-tooltip">
               <p className="eyebrow">{copy.workspace.focusEyebrow}</p>
-              <h3>{copy.workspace.focusTitle}</h3>
-              <p className="muted">{copy.workspace.focusSubtitle}</p>
+              <div className="title-inline">
+                <h3>{copy.workspace.focusTitle}</h3>
+                <TooltipBadge label={copy.workspace.focusSubtitle} />
+              </div>
             </div>
           </div>
         </div>

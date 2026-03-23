@@ -10,6 +10,7 @@ export interface HealthResponse {
 export interface ConfigListItem {
   name: string;
   path: string;
+  created_at: string | null;
   input_video: string | null;
   output_dir: string | null;
   detector_model_path: string | null;

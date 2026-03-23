@@ -19,6 +19,7 @@ class HealthResponse(BaseModel):
 class ConfigListItem(BaseModel):
     name: str
     path: str
+    created_at: str | None = None
     input_video: str | None = None
     output_dir: str | None = None
     detector_model_path: str | None = None

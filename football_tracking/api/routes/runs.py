@@ -3,7 +3,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, HTTPException
 
 from football_tracking.api.dependencies import get_service
-from football_tracking.api.schemas import CreateRunRequest, FollowCamRenderRequest, RunRecord
+from football_tracking.api.schemas import CreateRunRequest, DeleteResourceResponse, FollowCamRenderRequest, RunRecord
 from football_tracking.api.service import ApiService
 
 router = APIRouter()
@@ -20,6 +20,16 @@ def get_run(run_id: str, service: ApiService = Depends(get_service)) -> RunRecor
         return RunRecord(**service.get_run(run_id))
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=f"Run not found: {run_id}") from exc
+
+
+@router.delete("/runs", response_model=DeleteResourceResponse)
+def delete_run_output(run_id: str, service: ApiService = Depends(get_service)) -> DeleteResourceResponse:
+    try:
+        return DeleteResourceResponse(**service.delete_run_output(run_id))
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=f"Run not found: {run_id}") from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @router.post("/runs", response_model=RunRecord, status_code=202)
