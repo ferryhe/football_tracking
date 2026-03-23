@@ -9,8 +9,8 @@ function setLanguage(value: "en" | "zh") {
   window.localStorage.setItem("football-tracking-language", value);
 }
 
-function renderWorkspaceStage(stage: WorkspaceStage) {
-  const inputCatalog: InputCatalog = {
+function buildInputCatalog(): InputCatalog {
+  return {
     root_dir: "C:/Projects/foot_ball_tracking/data",
     videos: [
       {
@@ -21,8 +21,10 @@ function renderWorkspaceStage(stage: WorkspaceStage) {
       },
     ],
   };
+}
 
-  const configs: ConfigListItem[] = [
+function buildConfigs(inputCatalog: InputCatalog): ConfigListItem[] {
+  return [
     {
       name: "real_first_run.yaml",
       path: "C:/Projects/foot_ball_tracking/config/real_first_run.yaml",
@@ -39,8 +41,10 @@ function renderWorkspaceStage(stage: WorkspaceStage) {
       },
     },
   ];
+}
 
-  const runs: RunRecord[] = [
+function buildRuns(inputCatalog: InputCatalog): RunRecord[] {
+  return [
     {
       run_id: "baseline_run_20260323_120000",
       source: "api",
@@ -108,6 +112,25 @@ function renderWorkspaceStage(stage: WorkspaceStage) {
       error: "boom",
     },
   ];
+}
+
+function renderWorkspaceStage(
+  stage: WorkspaceStage,
+  overrides: {
+    inputCatalog?: InputCatalog;
+    configs?: ConfigListItem[];
+    runs?: RunRecord[];
+    selectedRun?: RunRecord | null;
+    selectedConfigName?: string;
+    selectedInputPath?: string;
+  } = {},
+) {
+  const inputCatalog = overrides.inputCatalog ?? buildInputCatalog();
+  const configs = overrides.configs ?? buildConfigs(inputCatalog);
+  const runs = overrides.runs ?? buildRuns(inputCatalog);
+  const selectedRun = overrides.selectedRun ?? runs[0] ?? null;
+  const selectedConfigName = overrides.selectedConfigName ?? configs[0]?.name ?? "";
+  const selectedInputPath = overrides.selectedInputPath ?? inputCatalog.videos[0]?.path ?? "";
 
   const onDeleteInputVideo = vi.fn(async () => undefined);
   const onDeleteConfig = vi.fn(async () => undefined);
@@ -124,9 +147,9 @@ function renderWorkspaceStage(stage: WorkspaceStage) {
           inputCatalog={inputCatalog}
           configs={configs}
           runs={runs}
-          selectedRun={runs[0]}
-          selectedInputPath={inputCatalog.videos[0].path}
-          selectedConfigName={configs[0].name}
+          selectedRun={selectedRun}
+          selectedInputPath={selectedInputPath}
+          selectedConfigName={selectedConfigName}
           loading={false}
           launching={false}
           launchMessage={null}
@@ -223,5 +246,49 @@ describe("WorkspacePage deliverable and history stages", () => {
 
     fireEvent.click(confirmButton);
     await waitFor(() => expect(view.onDeleteInputVideo).toHaveBeenCalledWith("game_01.mp4"));
+  });
+
+  it("sorts baseline configs by newest time and keeps helper copy inside tooltips", () => {
+    const inputCatalog = buildInputCatalog();
+    const baseConfig = buildConfigs(inputCatalog)[0];
+    const configs: ConfigListItem[] = [
+      {
+        ...baseConfig,
+        name: "older_probe.yaml",
+        path: "C:/Projects/foot_ball_tracking/config/older_probe.yaml",
+        created_at: "2025-01-01T10:00:00Z",
+      },
+      {
+        ...baseConfig,
+        name: "latest_probe.yaml",
+        path: "C:/Projects/foot_ball_tracking/config/latest_probe.yaml",
+        created_at: "2030-01-02T03:04:00Z",
+      },
+    ];
+
+    renderWorkspaceStage("baseline", {
+      inputCatalog,
+      configs,
+      selectedConfigName: "latest_probe.yaml",
+    });
+
+    const configSelect = screen.getAllByRole("combobox")[1];
+    const options = within(configSelect).getAllByRole("option");
+    expect(options[0]).toHaveTextContent("latest_probe.yaml");
+    expect(options[1]).toHaveTextContent("older_probe.yaml");
+    expect(screen.getAllByText("latest_probe.yaml").length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/Jan/).length).toBeGreaterThan(0);
+    expect(screen.queryByText("Pick the source video for the next baseline run.")).not.toBeInTheDocument();
+    expect(screen.getByLabelText("Pick the source video for the next baseline run.")).toBeInTheDocument();
+    expect(
+      screen.getByLabelText("Keep the main surface simple. Open this only when you need full paths and config context."),
+    ).toBeInTheDocument();
+  });
+
+  it("moves stage-2 focus helper copy into tooltips instead of inline notes", () => {
+    renderWorkspaceStage("ai");
+
+    expect(screen.queryByText("Only runs created from the current source clip appear here.")).not.toBeInTheDocument();
+    expect(screen.getAllByLabelText("Only runs created from the current source clip appear here.").length).toBeGreaterThan(0);
   });
 });

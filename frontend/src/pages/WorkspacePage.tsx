@@ -6,7 +6,6 @@ import {
   ClockIcon,
   FileIcon,
   FolderIcon,
-  InfoIcon,
   LayersIcon,
   PlayIcon,
   SparkIcon,
@@ -15,6 +14,8 @@ import {
 } from "../components/Icons";
 import { ConfirmDeleteDialog } from "../components/ConfirmDeleteDialog";
 import { FieldSetupCard } from "../components/FieldSetupCard";
+import { TooltipBadge } from "../components/TooltipBadge";
+import { sortConfigsByCreatedAt } from "../lib/configs";
 import { useI18n } from "../lib/i18n";
 import type { ConfigListItem, FieldPreview, FieldSuggestion, InputCatalog, RunRecord } from "../lib/types";
 
@@ -170,14 +171,6 @@ function scopeLabel(copy: ReturnType<typeof useI18n>["copy"], scope: "full" | "p
   return copy.workspace.scopeStandard;
 }
 
-function TooltipBadge({ label }: { label: string }) {
-  return (
-    <span className="tooltip-badge" title={label} aria-label={label}>
-      <InfoIcon className="tooltip-icon" />
-    </span>
-  );
-}
-
 export function WorkspacePage({
   stage,
   inputCatalog,
@@ -315,8 +308,9 @@ export function WorkspacePage({
     draw_ball_marker: false,
     draw_frame_text: false,
   });
+  const orderedConfigs = useMemo(() => sortConfigsByCreatedAt(configs), [configs]);
   const selectedVideo = inputCatalog.videos.find((item) => item.path === selectedInputPath) ?? null;
-  const selectedConfig = configs.find((item) => item.name === selectedConfigName) ?? null;
+  const selectedConfig = orderedConfigs.find((item) => item.name === selectedConfigName) ?? null;
   const selectedScope = inferConfigScope(selectedConfig?.name);
   const hasRunHistoryForInput = runs.some((run) => run.input_video === selectedInputPath);
   const aiRuns = selectedInputPath ? runs.filter((run) => run.input_video === selectedInputPath) : runs;
@@ -447,9 +441,11 @@ export function WorkspacePage({
             <section className="step-form-section">
               <div className="section-intro title-row">
                 <VideoIcon className="section-icon" />
-                <div>
-                  <h4>{copy.workspace.inputTitle}</h4>
-                  <p className="muted">{copy.workspace.inputSubtitle}</p>
+                <div className="title-with-tooltip">
+                  <div className="title-inline">
+                    <h4>{copy.workspace.inputTitle}</h4>
+                    <TooltipBadge label={copy.workspace.inputSubtitle} />
+                  </div>
                 </div>
               </div>
 
@@ -468,7 +464,7 @@ export function WorkspacePage({
               {selectedVideo ? (
                 <div className="selection-summary-card">
                   <div className="selection-summary-head">
-                    <strong>{selectedVideo.name}</strong>
+                    <strong className="summary-title">{selectedVideo.name}</strong>
                     {inputCatalog.root_dir ? <span className="minor-path mono">({inputCatalog.root_dir})</span> : null}
                   </div>
                   <div className="tag-row">
@@ -507,19 +503,21 @@ export function WorkspacePage({
             <section className="step-form-section">
               <div className="section-intro title-row">
                 <LayersIcon className="section-icon" />
-                <div>
-                  <h4>{copy.workspace.baselineTitle}</h4>
-                  <p className="muted">{copy.workspace.baselineSubtitle}</p>
+                <div className="title-with-tooltip">
+                  <div className="title-inline">
+                    <h4>{copy.workspace.baselineTitle}</h4>
+                    <TooltipBadge label={copy.workspace.baselineSubtitle} />
+                  </div>
                 </div>
               </div>
 
               <label className="form-label">
                 <span className="meta-label">{copy.workspace.selectedBaseline}</span>
-                <select value={selectedConfigName} onChange={(event) => onSelectConfig(event.target.value)} disabled={!configs.length}>
-                  {configs.length ? null : <option value="">{copy.workspace.noBaselineTitle}</option>}
-                  {configs.map((config) => (
+                <select value={selectedConfigName} onChange={(event) => onSelectConfig(event.target.value)} disabled={!orderedConfigs.length}>
+                  {orderedConfigs.length ? null : <option value="">{copy.workspace.noBaselineTitle}</option>}
+                  {orderedConfigs.map((config) => (
                     <option key={config.name} value={config.name}>
-                      {config.name}
+                      {config.created_at ? `${config.name} | ${formatDateTime(config.created_at)}` : config.name}
                     </option>
                   ))}
                 </select>
@@ -527,15 +525,18 @@ export function WorkspacePage({
 
               {selectedConfig ? (
                 <article className="selection-summary-card compact-selection-card">
-                  <strong>{selectedConfig.name}</strong>
+                  <div className="selection-summary-head">
+                    <strong className="summary-title">{selectedConfig.name}</strong>
+                    <TooltipBadge label={hasRunHistoryForInput ? copy.workspace.baselineReuseHint : copy.workspace.baselineDefaultHint} />
+                  </div>
                   <div className="tag-row">
+                    {selectedConfig.created_at ? <span className="tag">{formatDateTime(selectedConfig.created_at)}</span> : null}
                     <span className="tag">
                       {copy.workspace.scopeLabel}: {scopeLabel(copy, selectedScope)}
                     </span>
                     <span className={`tag ${selectedConfig.postprocess_enabled ? "good" : ""}`}>{copy.workspace.cleanup}</span>
                     <span className={`tag ${selectedConfig.follow_cam_enabled ? "good" : ""}`}>{copy.workspace.followCam}</span>
                   </div>
-                  <p className="muted">{hasRunHistoryForInput ? copy.workspace.baselineReuseHint : copy.workspace.baselineDefaultHint}</p>
                 </article>
               ) : (
                 <div className="empty-state">
@@ -547,8 +548,10 @@ export function WorkspacePage({
           </div>
 
           <details className="assistant-card detail-card selection-tail-card">
-            <summary>{copy.workspace.selectionDetails}</summary>
-            <p className="muted">{copy.workspace.selectionDetailsSubtitle}</p>
+            <summary className="detail-summary-inline">
+              <span>{copy.workspace.selectionDetails}</span>
+              <TooltipBadge label={copy.workspace.selectionDetailsSubtitle} />
+            </summary>
             {selectedVideo ? (
               <div className="detail-grid">
                 <div className="detail-block">
@@ -831,7 +834,7 @@ export function WorkspacePage({
                   {inputCatalog.videos.map((video) => (
                     <article key={video.path} className="resource-row">
                       <div className="resource-copy">
-                        <strong>{video.name}</strong>
+                        <strong className="resource-title">{video.name}</strong>
                         <p className="muted mono">{formatVideoSize(video.size_bytes)} | {formatDateTime(video.modified_at)}</p>
                       </div>
                       <button
@@ -854,14 +857,14 @@ export function WorkspacePage({
             <section className="resource-list-card">
               <div className="meta-row">
                 <span className="meta-label">{historyCopy.manageConfigs}</span>
-                <strong>{configs.length}</strong>
+                <strong>{orderedConfigs.length}</strong>
               </div>
-              {configs.length ? (
+              {orderedConfigs.length ? (
                 <div className="resource-list">
-                  {configs.map((config) => (
+                  {orderedConfigs.map((config) => (
                     <article key={config.name} className="resource-row">
                       <div className="resource-copy">
-                        <strong>{config.name}</strong>
+                        <strong className="resource-title">{config.name}</strong>
                         <div className="tag-row">
                           <span className={`tag ${config.postprocess_enabled ? "good" : ""}`}>{copy.workspace.cleanup}</span>
                           <span className={`tag ${config.follow_cam_enabled ? "good" : ""}`}>{copy.workspace.followCam}</span>
@@ -897,7 +900,7 @@ export function WorkspacePage({
                   {manageableOutputRuns.map((run) => (
                     <article key={run.run_id} className="resource-row">
                       <div className="resource-copy">
-                        <strong>{run.run_id}</strong>
+                        <strong className="resource-title">{run.run_id}</strong>
                         <p className="muted mono">{formatDateTime(runMoment(run))}</p>
                         <p className="muted mono compact-resource-path">{run.output_dir}</p>
                       </div>
@@ -979,7 +982,10 @@ export function WorkspacePage({
 
             <article className="summary-card spotlight-card icon-card">
               <ActivityIcon className="section-icon" />
-              <p className="meta-label">{copy.workspace.currentFocus}</p>
+              <span className="meta-inline">
+                <span className="meta-label">{copy.workspace.currentFocus}</span>
+                <TooltipBadge label={copy.workspace.focusSubtitle} />
+              </span>
               <strong>{aiSelectedRun?.run_id ?? copy.common.notAvailable}</strong>
               <p className="muted">
                 {formatRunStatus(aiSelectedRun?.status ?? "queued")} | {aiSelectedRun?.config_name ?? copy.common.notAvailable}
@@ -989,27 +995,35 @@ export function WorkspacePage({
             <div className="mini-stat-grid">
               <article className="mini-stat icon-card">
                 <CheckIcon className="section-icon" />
-                <p className="meta-label">{copy.workspace.detected}</p>
+                <span className="meta-inline">
+                  <span className="meta-label">{copy.workspace.detected}</span>
+                  <TooltipBadge label={copy.workspace.focusSubtitle} />
+                </span>
                 <strong>{readNumber(stats, "detected")}</strong>
-                <p className="muted">{copy.workspace.focusSubtitle}</p>
               </article>
               <article className="mini-stat icon-card">
                 <ActivityIcon className="section-icon" />
-                <p className="meta-label">{copy.workspace.lost}</p>
+                <span className="meta-inline">
+                  <span className="meta-label">{copy.workspace.lost}</span>
+                  <TooltipBadge label={copy.workspace.focusSubtitle} />
+                </span>
                 <strong>{readNumber(stats, "lost")}</strong>
-                <p className="muted">{copy.workspace.focusSubtitle}</p>
               </article>
               <article className="mini-stat icon-card">
                 <FileIcon className="section-icon" />
-                <p className="meta-label">{copy.workspace.artifacts}</p>
+                <span className="meta-inline">
+                  <span className="meta-label">{copy.workspace.artifacts}</span>
+                  <TooltipBadge label={copy.workspace.evidenceSubtitle} />
+                </span>
                 <strong>{aiSelectedRun?.artifacts.length ?? 0}</strong>
-                <p className="muted">{copy.workspace.evidenceSubtitle}</p>
               </article>
               <article className="mini-stat icon-card">
                 <ClockIcon className="section-icon" />
-                <p className="meta-label">{copy.workspace.lastEvent}</p>
+                <span className="meta-inline">
+                  <span className="meta-label">{copy.workspace.lastEvent}</span>
+                  <TooltipBadge label={copy.common.refreshHint} />
+                </span>
                 <strong>{formatDateTime(aiSelectedRun ? runMoment(aiSelectedRun) : null)}</strong>
-                <p className="muted">{copy.common.refreshHint}</p>
               </article>
             </div>
 

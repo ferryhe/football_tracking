@@ -4,6 +4,7 @@ import { AIPanel } from "../components/AIPanel";
 import { ActivityIcon, ClockIcon, FileIcon, PlayIcon, SparkIcon, VideoIcon } from "../components/Icons";
 import { LanguageToggle } from "../components/LanguageToggle";
 import { api } from "../lib/api";
+import { sortConfigsByCreatedAt } from "../lib/configs";
 import { useI18n } from "../lib/i18n";
 import type { ConfigListItem, FieldPreview, FieldSuggestion, HealthResponse, InputCatalog, RunRecord } from "../lib/types";
 import { WorkspacePage, type WorkspaceStage } from "../pages/WorkspacePage";
@@ -79,7 +80,7 @@ export function App() {
   }
 
   async function refreshConfigs(): Promise<ConfigListItem[]> {
-    const nextConfigs = await api.listConfigs();
+    const nextConfigs = sortConfigsByCreatedAt(await api.listConfigs());
     setConfigs(nextConfigs);
     return nextConfigs;
   }
@@ -115,7 +116,8 @@ export function App() {
         }
         setHealth(healthData);
         setInputCatalog(inputData);
-        setConfigs(configData);
+        const sortedConfigData = sortConfigsByCreatedAt(configData);
+        setConfigs(sortedConfigData);
         setRuns(runData);
         setError(null);
 
@@ -141,7 +143,7 @@ export function App() {
           return nextSelectedInput;
         });
 
-        setSelectedConfigName((current) => pickPreferredConfigName(configData, runData, nextSelectedInput, current));
+        setSelectedConfigName((current) => pickPreferredConfigName(sortedConfigData, runData, nextSelectedInput, current));
       } catch (caughtError) {
         if (!cancelled) {
           setError(caughtError instanceof Error ? caughtError.message : String(caughtError));
@@ -196,9 +198,10 @@ export function App() {
       }),
     [runs],
   );
+  const orderedConfigs = useMemo(() => sortConfigsByCreatedAt(configs), [configs]);
 
   const selectedVideo = inputCatalog.videos.find((item) => item.path === selectedInputPath) ?? null;
-  const selectedConfig = configs.find((item) => item.name === selectedConfigName) ?? null;
+  const selectedConfig = orderedConfigs.find((item) => item.name === selectedConfigName) ?? null;
   const activeFieldPreview = selectedInputPath ? fieldPreviews[selectedInputPath] ?? null : null;
   const activeFieldSuggestion = selectedInputPath ? fieldSuggestions[selectedInputPath] ?? null : null;
   const activeRun = orderedRuns.find((item) => item.status === "running" || item.status === "queued") ?? null;
@@ -224,7 +227,7 @@ export function App() {
 
   function handleSelectInput(path: string) {
     setSelectedInputPath(path);
-    setSelectedConfigName(pickPreferredConfigName(configs, orderedRuns, path));
+    setSelectedConfigName(pickPreferredConfigName(orderedConfigs, orderedRuns, path));
   }
 
   async function syncCreatedRun(createdRun: RunRecord) {
@@ -412,7 +415,7 @@ export function App() {
         ? selectedInputPath
         : (nextInputs.videos[0]?.path ?? "");
     setSelectedInputPath(nextSelectedInput);
-    setSelectedConfigName((current) => pickPreferredConfigName(configs, orderedRuns, nextSelectedInput, current));
+    setSelectedConfigName((current) => pickPreferredConfigName(orderedConfigs, orderedRuns, nextSelectedInput, current));
   }
 
   async function handleDeleteConfig(name: string) {
@@ -522,7 +525,7 @@ export function App() {
           <WorkspacePage
             stage={stage}
             inputCatalog={inputCatalog}
-            configs={configs}
+            configs={orderedConfigs}
             runs={orderedRuns}
             selectedRun={stage === "ai" ? aiFocusedRun : focusedRun}
             selectedInputPath={selectedInputPath}
@@ -557,7 +560,7 @@ export function App() {
           <aside className="assistant-column">
             <AIPanel
               run={aiFocusedRun}
-              configs={configs}
+              configs={orderedConfigs}
               targetInputVideo={selectedInputPath || undefined}
               onConfigDerived={async () => {
                 await refreshConfigs();

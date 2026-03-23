@@ -680,6 +680,7 @@ table {
   align-items: center;
   justify-content: space-between;
   flex-wrap: wrap;
+  min-width: 0;
 }
 
 .minor-path {
@@ -1320,6 +1321,15 @@ textarea {
   gap: 8px;
 }
 
+.meta-inline,
+.detail-summary-inline {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
 .tooltip-badge {
   display: inline-grid;
   place-items: center;
@@ -1360,10 +1370,34 @@ textarea {
 
 .resource-copy {
   min-width: 0;
+  align-content: start;
 }
 
 .resource-row .secondary-button {
   align-self: flex-start;
+}
+
+.summary-title,
+.resource-title {
+  display: block;
+  min-width: 0;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.selection-summary-head .summary-title {
+  flex: 1 1 220px;
+}
+
+.minor-path,
+.resource-copy .mono,
+.compact-resource-path,
+.detail-block .mono,
+.meta-row .mono {
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  white-space: normal;
 }
 
 .artifact-stack,

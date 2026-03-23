@@ -10,7 +10,8 @@ import type {
   ConfigListItem,
   RunRecord,
 } from "../lib/types";
-import { FileIcon, PlayIcon, SparkIcon, WandIcon } from "./Icons";
+import { PlayIcon, SparkIcon, WandIcon } from "./Icons";
+import { TooltipBadge } from "./TooltipBadge";
 
 interface AIPanelProps {
   run: RunRecord | null;
@@ -238,10 +239,12 @@ export function AIPanel({ run, configs, targetInputVideo, onConfigDerived, onRun
       <section className="assistant-card primary">
         <div className="assistant-header title-row">
           <WandIcon className="section-icon" />
-          <div>
+          <div className="title-with-tooltip">
             <p className="eyebrow">{copy.ai.eyebrow}</p>
-            <h3>{copy.ai.title}</h3>
-            <p className="muted">{copy.ai.subtitle}</p>
+            <div className="title-inline">
+              <h3>{copy.ai.title}</h3>
+              <TooltipBadge label={copy.ai.subtitle} />
+            </div>
           </div>
         </div>
 
@@ -261,7 +264,13 @@ export function AIPanel({ run, configs, targetInputVideo, onConfigDerived, onRun
         </div>
 
         <div className="assistant-actions compact-actions">
-          <button type="button" className="secondary-button icon-button" onClick={handleExplain} disabled={!run || loading}>
+          <button
+            type="button"
+            className="secondary-button icon-button"
+            onClick={handleExplain}
+            disabled={!run || loading}
+            title={panelCopy.explainHint}
+          >
             <SparkIcon className="button-icon" />
             <span>{panelCopy.explainButton}</span>
           </button>
@@ -270,13 +279,13 @@ export function AIPanel({ run, configs, targetInputVideo, onConfigDerived, onRun
             className="primary-button icon-button"
             onClick={handleApplyAndRun}
             disabled={!run || !suggestion || !diffPreview || loading}
+            title={panelCopy.runHint}
           >
             <PlayIcon className="button-icon" />
             <span>{copy.ai.buttonRun}</span>
           </button>
         </div>
 
-        <p className="notice-line subtle">{panelCopy.explainHint}</p>
         {activityLabel ? <p className="notice-line subtle">{activityLabel}</p> : null}
         {statusMessage ? <p className="notice-line">{statusMessage}</p> : null}
 
@@ -287,14 +296,16 @@ export function AIPanel({ run, configs, targetInputVideo, onConfigDerived, onRun
 
         <div className="signal-card">
           <div className="meta-row">
-            <span className="meta-label">{panelCopy.suggestionTitle}</span>
+            <span className="meta-inline">
+              <span className="meta-label">{panelCopy.suggestionTitle}</span>
+              <TooltipBadge label={panelCopy.runHint} />
+            </span>
             <strong className="mono">{nextConfigName}</strong>
           </div>
           {suggestion ? (
             <>
               <p className="assistant-reco">{suggestion.recommendation}</p>
               <p className="muted">{suggestion.expected_tradeoff}</p>
-              <p className="muted">{panelCopy.runHint}</p>
             </>
           ) : (
             <p className="assistant-summary-copy">{panelCopy.suggestionEmpty}</p>
@@ -308,8 +319,10 @@ export function AIPanel({ run, configs, targetInputVideo, onConfigDerived, onRun
       </section>
 
       <details className="assistant-card detail-card">
-        <summary>{panelCopy.objectiveDetails}</summary>
-        <p className="muted">{panelCopy.updateHint}</p>
+        <summary className="detail-summary-inline">
+          <span>{panelCopy.objectiveDetails}</span>
+          <TooltipBadge label={panelCopy.updateHint} />
+        </summary>
 
         <label className="assistant-form-label">
           <span className="meta-label">{copy.ai.objective}</span>
@@ -346,6 +359,7 @@ export function AIPanel({ run, configs, targetInputVideo, onConfigDerived, onRun
             className="secondary-button icon-button"
             onClick={handleRefreshSuggestion}
             disabled={!run || !explanation || loading}
+            title={panelCopy.updateHint}
           >
             <SparkIcon className="button-icon" />
             <span>{panelCopy.updateButton}</span>

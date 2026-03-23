@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 
 import { CheckIcon, FileIcon, PlayIcon, SparkIcon, WandIcon } from "./Icons";
+import { TooltipBadge } from "./TooltipBadge";
 import { useI18n } from "../lib/i18n";
 import type { FieldPoint, FieldPreview, FieldSuggestion } from "../lib/types";
 
@@ -241,9 +242,11 @@ export function FieldSetupCard({
     <section className="field-setup-card">
       <div className="section-intro title-row">
         <SparkIcon className="section-icon" />
-        <div>
-          <h4>{copy.workspace.fieldSetupTitle}</h4>
-          <p className="muted">{copy.workspace.fieldSetupSubtitle}</p>
+        <div className="title-with-tooltip">
+          <div className="title-inline">
+            <h4>{copy.workspace.fieldSetupTitle}</h4>
+            <TooltipBadge label={`${copy.workspace.fieldSetupSubtitle} ${copy.workspace.fieldChooseSourceHint}`} />
+          </div>
         </div>
       </div>
 
@@ -253,6 +256,7 @@ export function FieldSetupCard({
           className={`field-action-button ${activePreview ? "complete" : "active"}`}
           onClick={onCapturePreview}
           disabled={loading}
+          title={activePreview?.sample_count && activePreview.sample_count > 1 ? copy.workspace.fieldPreviewCycleHint : undefined}
         >
           <span className="field-action-index">1</span>
           <span className="field-action-icon">
@@ -268,6 +272,7 @@ export function FieldSetupCard({
           className={`field-action-button ${sourceFromConfig ? "complete" : activePreview ? "active" : ""}`}
           onClick={onLoadFromConfig}
           disabled={!activePreview || !canLoadFromConfig || loading}
+          title={copy.workspace.fieldChooseSourceHint}
         >
           <span className="field-action-index">2</span>
           <span className="field-action-icon">
@@ -283,6 +288,7 @@ export function FieldSetupCard({
           className={`field-action-button ${sourceFromAi ? "complete" : activePreview ? "active" : ""}`}
           onClick={onGenerate}
           disabled={!activePreview || loading}
+          title={copy.workspace.fieldChooseSourceHint}
         >
           <span className="field-action-index">3</span>
           <span className="field-action-icon">
@@ -302,6 +308,7 @@ export function FieldSetupCard({
             }
           }}
           disabled={!activeSuggestion || loading}
+          title={copy.workspace.fieldApplyHint}
         >
           <span className="field-action-index">4</span>
           <span className="field-action-icon">
@@ -348,8 +355,6 @@ export function FieldSetupCard({
               </svg>
             ) : null}
           </div>
-
-          {activePreview.sample_count > 1 ? <p className="notice-line subtle">{copy.workspace.fieldPreviewCycleHint}</p> : null}
 
           {activeSuggestion ? (
             <>
@@ -442,16 +447,17 @@ export function FieldSetupCard({
                 </div>
               </div>
 
-              <p className={`notice-line subtle ${activeSuggestion.accepted ? "accepted" : ""}`}>
-                {activeSuggestion.accepted ? copy.workspace.fieldAccepted : copy.workspace.fieldApplyHint}
-              </p>
+              {activeSuggestion.accepted ? (
+                <p className="notice-line subtle accepted">{copy.workspace.fieldAccepted}</p>
+              ) : null}
             </>
-          ) : (
-            <p className="notice-line subtle">{copy.workspace.fieldChooseSourceHint}</p>
-          )}
+          ) : null}
 
           <details className="detail-card field-manual-card">
-            <summary>{copy.workspace.fieldDetailsTitle}</summary>
+            <summary className="detail-summary-inline">
+              <span>{copy.workspace.fieldDetailsTitle}</span>
+              <TooltipBadge label={copy.workspace.fieldInputHint} />
+            </summary>
 
             <div className="field-meta-grid">
               <div className="detail-block compact-detail">
@@ -512,8 +518,6 @@ export function FieldSetupCard({
                     />
                   </label>
                 </div>
-                <p className="muted field-manual-hint">{copy.workspace.fieldInputHint}</p>
-
                 <div className="field-detail-actions">
                   <button type="button" className="secondary-button" onClick={onClear} disabled={loading}>
                     {copy.workspace.fieldClear}
