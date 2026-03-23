@@ -5,10 +5,13 @@ import tempfile
 import unittest
 from pathlib import Path
 
+import cv2
+import numpy as np
 import yaml
 
 from football_tracking.api.app import create_app
 from football_tracking.api.service import ApiService
+from football_tracking.config import load_config
 
 
 def build_sample_config(output_dir: str = "./outputs/kept_baseline") -> dict[str, object]:
@@ -87,6 +90,24 @@ class ApiServiceSmokeTests(unittest.TestCase):
             lines.append(",".join(str(row[key]) for key in headers))
         return self.write_text(relative_path, "\n".join(lines) + "\n")
 
+    def write_video(self, relative_path: str) -> Path:
+        path = self.repo_root / relative_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        writer = cv2.VideoWriter(
+            str(path),
+            cv2.VideoWriter_fourcc(*"MJPG"),
+            6.0,
+            (640, 360),
+        )
+        if not writer.isOpened():
+            self.skipTest("OpenCV video writer is unavailable in this environment.")
+        for frame_index in range(12):
+            frame = np.zeros((360, 640, 3), dtype=np.uint8)
+            cv2.rectangle(frame, (70, 72), (580, 308), (10, 150 + frame_index * 6, 10), thickness=-1)
+            writer.write(frame)
+        writer.release()
+        return path
+
     def create_output_bundle(self, folder_name: str) -> Path:
         output_dir = self.repo_root / "outputs" / folder_name
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -158,6 +179,42 @@ class ApiServiceSmokeTests(unittest.TestCase):
         generated_raw = yaml.safe_load(generated_path.read_text(encoding="utf-8"))
         self.assertEqual(6, generated_raw["follow_cam"]["zoom_out_confirm_frames"])
 
+    def test_suggest_field_setup_returns_preview_and_config_patch(self) -> None:
+        video_path = self.write_video("data/field_preview.avi")
+
+        suggestion = self.service.suggest_field_setup(str(video_path))
+
+        self.assertTrue(suggestion["preview_data_url"].startswith("data:image/jpeg;base64,"))
+        self.assertEqual("detected", suggestion["confidence"])
+        self.assertEqual(640, suggestion["frame_width"])
+        self.assertEqual(360, suggestion["frame_height"])
+        field_roi = suggestion["field_roi"]
+        expanded_roi = suggestion["expanded_roi"]
+        self.assertLess(field_roi[0], field_roi[2])
+        self.assertLess(field_roi[1], field_roi[3])
+        self.assertLessEqual(expanded_roi[0], field_roi[0])
+        self.assertGreaterEqual(expanded_roi[2], field_roi[2])
+        self.assertEqual(list(expanded_roi), suggestion["config_patch"]["filtering"]["roi"])
+        self.assertEqual(list(field_roi), suggestion["config_patch"]["scene_bias"]["ground_zones"][0]["roi"])
+
+    def test_materialize_run_config_writes_generated_patch_file(self) -> None:
+        config_path, relative_name = self.service._resolve_config_path("default.yaml")
+
+        materialized_path, materialized_name = self.service._materialize_run_config(
+            base_config_path=config_path,
+            base_config_name=relative_name,
+            run_id="run_demo1234",
+            patch={"filtering": {"roi": [10, 20, 300, 320]}},
+            suffix="field_setup",
+        )
+
+        self.assertTrue(materialized_path.exists())
+        self.assertEqual("generated/default_field_setup_run_demo1234.yaml", materialized_name)
+        generated_raw = yaml.safe_load(materialized_path.read_text(encoding="utf-8"))
+        self.assertEqual([10, 20, 300, 320], generated_raw["filtering"]["roi"])
+        resolved = load_config(materialized_path)
+        self.assertEqual((self.repo_root / "data" / "input.mp4").resolve().as_posix(), resolved.input_video.as_posix())
+
     def test_list_runs_discovers_output_dirs_and_summarizes_stats(self) -> None:
         self.create_output_bundle("kept_baseline")
 
@@ -222,6 +279,7 @@ class ApiServiceSmokeTests(unittest.TestCase):
         expected_paths = {
             "/api/v1/health",
             "/api/v1/inputs",
+            "/api/v1/inputs/field-suggestion",
             "/api/v1/configs",
             "/api/v1/configs/{name:path}",
             "/api/v1/runs",

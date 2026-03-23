@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import csv
 import json
 import mimetypes
@@ -12,6 +13,7 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+import cv2
 import yaml
 
 from football_tracking.api.ai_provider import OpenAIResponsesClient, load_provider_settings
@@ -135,6 +137,60 @@ class ApiService:
         return {
             "root_dir": str(self.data_dir.resolve()),
             "videos": videos,
+        }
+
+    def suggest_field_setup(self, input_video: str) -> dict[str, Any]:
+        video_path = self._resolve_input_video_path(input_video)
+        samples = self._sample_video_frames(video_path)
+        if not samples:
+            raise RuntimeError(f"Unable to read preview frames from input video: {video_path}")
+
+        best_sample: dict[str, Any] | None = None
+        for sample in samples:
+            field_roi, coverage, detected = self._detect_field_roi(sample["frame"])
+            candidate = {
+                **sample,
+                "field_roi": field_roi,
+                "expanded_roi": self._expand_roi(
+                    field_roi,
+                    frame_width=sample["frame_width"],
+                    frame_height=sample["frame_height"],
+                    padding_x_ratio=0.08,
+                    padding_y_ratio=0.10,
+                ),
+                "coverage": round(coverage, 4),
+                "confidence": "detected" if detected else "fallback",
+                "source": "field-green-heuristic" if detected else "safe-full-frame",
+            }
+            if best_sample is None:
+                best_sample = candidate
+                continue
+            if candidate["confidence"] == "detected" and best_sample["confidence"] != "detected":
+                best_sample = candidate
+                continue
+            if candidate["coverage"] > best_sample["coverage"]:
+                best_sample = candidate
+
+        if best_sample is None:
+            raise RuntimeError(f"Unable to build a field suggestion for input video: {video_path}")
+
+        return {
+            "input_video": str(video_path),
+            "preview_data_url": self._encode_frame_data_url(best_sample["frame"]),
+            "frame_width": best_sample["frame_width"],
+            "frame_height": best_sample["frame_height"],
+            "frame_time_seconds": round(best_sample["frame_time_seconds"], 2),
+            "sample_index": best_sample["sample_index"],
+            "sample_count": best_sample["sample_count"],
+            "field_roi": best_sample["field_roi"],
+            "expanded_roi": best_sample["expanded_roi"],
+            "confidence": best_sample["confidence"],
+            "source": best_sample["source"],
+            "field_coverage": best_sample["coverage"],
+            "config_patch": self._build_field_config_patch(
+                field_roi=best_sample["field_roi"],
+                expanded_roi=best_sample["expanded_roi"],
+            ),
         }
 
     def get_config(self, name: str) -> dict[str, Any]:
@@ -682,7 +738,21 @@ class ApiService:
         return context
 
     def create_run(self, request: dict[str, Any]) -> dict[str, Any]:
+        requested_output_name = request.get("output_dir_name")
+        run_id = Path(requested_output_name).name if requested_output_name else ""
+        if not run_id:
+            run_id = f"run_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid4().hex[:8]}"
+
         config_path, relative_name = self._resolve_config_path(request["config_name"])
+        config_patch = request.get("config_patch") or {}
+        if config_patch:
+            config_path, relative_name = self._materialize_run_config(
+                base_config_path=config_path,
+                base_config_name=relative_name,
+                run_id=run_id,
+                patch=config_patch,
+                suffix="field_setup",
+            )
         config = load_config(config_path)
 
         if request.get("input_video"):
@@ -696,10 +766,6 @@ class ApiService:
         if request.get("max_frames") is not None:
             config.runtime.max_frames = int(request["max_frames"])
 
-        requested_output_name = request.get("output_dir_name")
-        run_id = Path(requested_output_name).name if requested_output_name else ""
-        if not run_id:
-            run_id = f"run_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid4().hex[:8]}"
         config.output_dir = (self.outputs_dir / "api_runs" / run_id).resolve()
         if config.output_dir.exists() and any(config.output_dir.iterdir()):
             raise FileExistsError(str(config.output_dir))
@@ -947,6 +1013,192 @@ class ApiService:
             if self.config_dir.resolve() in candidate.parents and candidate.exists() and candidate.is_file():
                 return candidate, candidate.relative_to(self.config_dir).as_posix()
         raise FileNotFoundError(name)
+
+    def _resolve_input_video_path(self, input_video: str) -> Path:
+        candidate = Path(input_video).resolve()
+        data_root = self.data_dir.resolve()
+        if candidate != data_root and data_root not in candidate.parents:
+            raise FileNotFoundError(f"Input video must live under {data_root}: {input_video}")
+        if not candidate.exists() or not candidate.is_file():
+            raise FileNotFoundError(f"Input video not found: {input_video}")
+        return candidate
+
+    def _sample_video_frames(self, video_path: Path) -> list[dict[str, Any]]:
+        capture = cv2.VideoCapture(str(video_path))
+        if not capture.isOpened():
+            return []
+
+        fps = float(capture.get(cv2.CAP_PROP_FPS) or 0.0)
+        frame_count = int(capture.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+        fractions = [0.18, 0.5, 0.82] if frame_count > 3 else [0.5]
+        samples: list[dict[str, Any]] = []
+
+        for index, fraction in enumerate(fractions, start=1):
+            frame_index = max(0, int(round((max(frame_count, 1) - 1) * fraction)))
+            capture.set(cv2.CAP_PROP_POS_FRAMES, frame_index)
+            ok, frame = capture.read()
+            if not ok or frame is None:
+                continue
+            frame_height, frame_width = frame.shape[:2]
+            samples.append(
+                {
+                    "frame": frame,
+                    "frame_index": frame_index,
+                    "frame_time_seconds": frame_index / fps if fps > 0 else 0.0,
+                    "frame_width": int(frame_width),
+                    "frame_height": int(frame_height),
+                    "sample_index": index,
+                    "sample_count": len(fractions),
+                }
+            )
+
+        if not samples:
+            capture.set(cv2.CAP_PROP_POS_FRAMES, 0)
+            ok, frame = capture.read()
+            if ok and frame is not None:
+                frame_height, frame_width = frame.shape[:2]
+                samples.append(
+                    {
+                        "frame": frame,
+                        "frame_index": 0,
+                        "frame_time_seconds": 0.0,
+                        "frame_width": int(frame_width),
+                        "frame_height": int(frame_height),
+                        "sample_index": 1,
+                        "sample_count": 1,
+                    }
+                )
+
+        capture.release()
+        return samples
+
+    def _detect_field_roi(self, frame: Any) -> tuple[tuple[int, int, int, int], float, bool]:
+        frame_height, frame_width = frame.shape[:2]
+        hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+        mask = cv2.inRange(hsv, (28, 28, 20), (96, 255, 255))
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (15, 15))
+        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+
+        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        best_box: tuple[int, int, int, int] | None = None
+        best_area = 0.0
+        for contour in contours:
+            x, y, width, height = cv2.boundingRect(contour)
+            area = float(width * height)
+            if width < frame_width * 0.18 or height < frame_height * 0.18:
+                continue
+            if area > best_area:
+                best_area = area
+                best_box = (x, y, x + width, y + height)
+
+        if best_box is None or best_area / float(frame_width * frame_height) < 0.10:
+            return self._default_field_roi(frame_width, frame_height), 0.0, False
+
+        return self._pad_roi(best_box, frame_width, frame_height, pad_x_ratio=0.015, pad_y_ratio=0.02), best_area / float(
+            frame_width * frame_height
+        ), True
+
+    def _default_field_roi(self, frame_width: int, frame_height: int) -> tuple[int, int, int, int]:
+        return (
+            int(round(frame_width * 0.05)),
+            int(round(frame_height * 0.10)),
+            int(round(frame_width * 0.95)),
+            int(round(frame_height * 0.92)),
+        )
+
+    def _pad_roi(
+        self,
+        roi: tuple[int, int, int, int],
+        frame_width: int,
+        frame_height: int,
+        pad_x_ratio: float,
+        pad_y_ratio: float,
+    ) -> tuple[int, int, int, int]:
+        x1, y1, x2, y2 = roi
+        pad_x = int(round(frame_width * pad_x_ratio))
+        pad_y = int(round(frame_height * pad_y_ratio))
+        return (
+            max(0, x1 - pad_x),
+            max(0, y1 - pad_y),
+            min(frame_width, x2 + pad_x),
+            min(frame_height, y2 + pad_y),
+        )
+
+    def _expand_roi(
+        self,
+        roi: tuple[int, int, int, int],
+        *,
+        frame_width: int,
+        frame_height: int,
+        padding_x_ratio: float,
+        padding_y_ratio: float,
+    ) -> tuple[int, int, int, int]:
+        return self._pad_roi(
+            roi,
+            frame_width=frame_width,
+            frame_height=frame_height,
+            pad_x_ratio=padding_x_ratio,
+            pad_y_ratio=padding_y_ratio,
+        )
+
+    def _encode_frame_data_url(self, frame: Any) -> str:
+        ok, encoded = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), 82])
+        if not ok:
+            raise RuntimeError("Unable to encode preview frame.")
+        payload = base64.b64encode(encoded.tobytes()).decode("ascii")
+        return f"data:image/jpeg;base64,{payload}"
+
+    def _build_field_config_patch(
+        self,
+        *,
+        field_roi: tuple[int, int, int, int],
+        expanded_roi: tuple[int, int, int, int],
+    ) -> dict[str, Any]:
+        expanded_width = max(1, expanded_roi[2] - expanded_roi[0])
+        expanded_height = max(1, expanded_roi[3] - expanded_roi[1])
+        return {
+            "filtering": {
+                "roi": list(expanded_roi),
+            },
+            "scene_bias": {
+                "enabled": True,
+                "ground_zones": [
+                    {
+                        "name": "field_core",
+                        "roi": list(field_roi),
+                    }
+                ],
+                "positive_rois": [
+                    {
+                        "name": "field_buffer",
+                        "roi": list(expanded_roi),
+                    }
+                ],
+                "dynamic_air_recovery": {
+                    "enabled": True,
+                    "edge_reentry_expand_x": float(expanded_width),
+                    "edge_reentry_expand_y": float(expanded_height),
+                },
+            },
+        }
+
+    def _materialize_run_config(
+        self,
+        *,
+        base_config_path: Path,
+        base_config_name: str,
+        run_id: str,
+        patch: dict[str, Any],
+        suffix: str,
+    ) -> tuple[Path, str]:
+        merged = _deep_merge(self._load_raw_yaml(base_config_path), patch)
+        output_name = f"{Path(base_config_name).stem}_{suffix}_{run_id}.yaml"
+        self.generated_config_dir.mkdir(parents=True, exist_ok=True)
+        output_path = self.generated_config_dir / output_name
+        with output_path.open("w", encoding="utf-8") as handle:
+            yaml.safe_dump(merged, handle, sort_keys=False, allow_unicode=False)
+        return output_path, output_path.relative_to(self.config_dir).as_posix()
 
     def _iter_output_run_dirs(self) -> list[Path]:
         if not self.outputs_dir.exists():

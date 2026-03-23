@@ -8,8 +8,9 @@ import {
   SparkIcon,
   VideoIcon,
 } from "../components/Icons";
+import { FieldSetupCard } from "../components/FieldSetupCard";
 import { useI18n } from "../lib/i18n";
-import type { ConfigListItem, InputCatalog, RunRecord } from "../lib/types";
+import type { ConfigListItem, FieldSuggestion, InputCatalog, RunRecord } from "../lib/types";
 
 export type WorkspaceStage = "baseline" | "ai" | "delivery";
 
@@ -24,9 +25,14 @@ interface WorkspacePageProps {
   loading: boolean;
   launching: boolean;
   launchMessage: string | null;
+  fieldSuggestion: FieldSuggestion | null;
+  fieldLoading: boolean;
+  fieldMessage: string | null;
   onSelectRun: (run: RunRecord) => void;
   onSelectInput: (path: string) => void;
   onSelectConfig: (name: string) => void;
+  onGenerateFieldSuggestion: () => Promise<void>;
+  onClearFieldSuggestion: () => void;
   onStartBaselineRun: () => Promise<void>;
 }
 
@@ -117,16 +123,22 @@ export function WorkspacePage({
   loading,
   launching,
   launchMessage,
+  fieldSuggestion,
+  fieldLoading,
+  fieldMessage,
   onSelectRun,
   onSelectInput,
   onSelectConfig,
+  onGenerateFieldSuggestion,
+  onClearFieldSuggestion,
   onStartBaselineRun,
 }: WorkspacePageProps) {
   const { copy, formatDateTime, formatRunStatus } = useI18n();
   const selectedVideo = inputCatalog.videos.find((item) => item.path === selectedInputPath) ?? null;
   const selectedConfig = configs.find((item) => item.name === selectedConfigName) ?? null;
   const selectedScope = inferConfigScope(selectedConfig?.name);
-  const canLaunch = !loading && !launching && Boolean(selectedInputPath) && Boolean(selectedConfigName);
+  const canLaunch = !loading && !launching && Boolean(selectedInputPath) && Boolean(selectedConfig);
+  const hasRunHistoryForInput = runs.some((run) => run.input_video === selectedInputPath);
   const aiRuns = selectedInputPath ? runs.filter((run) => run.input_video === selectedInputPath) : runs;
   const aiSelectedRun = selectedRun && aiRuns.some((run) => run.run_id === selectedRun.run_id) ? selectedRun : aiRuns[0] ?? null;
   const stats = getTrackStats(aiSelectedRun ?? selectedRun);
@@ -168,15 +180,12 @@ export function WorkspacePage({
                 </select>
               </label>
 
-              <div className="info-block compact-block">
-                <p className="meta-label">{copy.workspace.inputDirectory}</p>
-                <p className="mono">{inputCatalog.root_dir || copy.common.unavailable}</p>
-              </div>
-
               {selectedVideo ? (
                 <div className="selection-summary-card">
-                  <strong>{selectedVideo.name}</strong>
-                  <p className="muted mono">{selectedVideo.path}</p>
+                  <div className="selection-summary-head">
+                    <strong>{selectedVideo.name}</strong>
+                    {inputCatalog.root_dir ? <span className="minor-path mono">({inputCatalog.root_dir})</span> : null}
+                  </div>
                   <div className="tag-row">
                     <span className="tag">{formatVideoSize(selectedVideo.size_bytes)}</span>
                     <span className="tag">{formatDateTime(selectedVideo.modified_at)}</span>
@@ -188,6 +197,16 @@ export function WorkspacePage({
                   <p className="muted">{copy.workspace.noInputBody}</p>
                 </div>
               )}
+
+              {selectedVideo ? (
+                <FieldSetupCard
+                  suggestion={fieldSuggestion}
+                  loading={fieldLoading}
+                  message={fieldMessage}
+                  onGenerate={onGenerateFieldSuggestion}
+                  onClear={onClearFieldSuggestion}
+                />
+              ) : null}
             </section>
 
             <section className="step-form-section">
@@ -212,8 +231,7 @@ export function WorkspacePage({
               </label>
 
               {selectedConfig ? (
-                <article className="selection-summary-card config-summary-card">
-                  <p className="meta-label">{copy.workspace.baselineSummaryTitle}</p>
+                <article className="selection-summary-card compact-selection-card">
                   <strong>{selectedConfig.name}</strong>
                   <div className="tag-row">
                     <span className="tag">
@@ -222,10 +240,7 @@ export function WorkspacePage({
                     <span className={`tag ${selectedConfig.postprocess_enabled ? "good" : ""}`}>{copy.workspace.cleanup}</span>
                     <span className={`tag ${selectedConfig.follow_cam_enabled ? "good" : ""}`}>{copy.workspace.followCam}</span>
                   </div>
-                  <p className="muted mono">
-                    {selectedConfig.detector_model_path ? formatPathTail(selectedConfig.detector_model_path) : copy.common.notAvailable}
-                  </p>
-                  <p className="muted mono">{selectedConfig.output_dir ?? copy.common.unavailable}</p>
+                  <p className="muted">{hasRunHistoryForInput ? copy.workspace.baselineReuseHint : copy.workspace.baselineDefaultHint}</p>
                 </article>
               ) : (
                 <div className="empty-state">
@@ -237,13 +252,8 @@ export function WorkspacePage({
           </div>
 
           <div className="step-footer">
-            <div className="info-block compact-block">
-              <p className="meta-label">{copy.workspace.scopeLabel}</p>
-              <p className="muted">{copy.workspace.baselineLoopHint}</p>
-            </div>
-
             <div className="launch-actions">
-              <p className="muted">{copy.workspace.launchCopy}</p>
+              <p className="muted">{copy.workspace.baselineLoopHint}</p>
               <button type="button" className="primary-button icon-button" onClick={onStartBaselineRun} disabled={!canLaunch}>
                 <PlayIcon className="button-icon" />
                 <span>{launching ? copy.workspace.launchStarting : copy.workspace.launchButton}</span>
@@ -251,6 +261,41 @@ export function WorkspacePage({
               {launchMessage ? <p className="notice-line">{launchMessage}</p> : null}
             </div>
           </div>
+
+          <details className="assistant-card detail-card selection-tail-card">
+            <summary>{copy.workspace.selectionDetails}</summary>
+            <p className="muted">{copy.workspace.selectionDetailsSubtitle}</p>
+            {selectedVideo ? (
+              <div className="detail-grid">
+                <div className="detail-block">
+                  <p className="meta-label">{copy.workspace.selectedInput}</p>
+                  <p className="mono">{selectedVideo.path}</p>
+                </div>
+                <div className="detail-block">
+                  <p className="meta-label">{copy.workspace.inputDirectory}</p>
+                  <p className="mono">{inputCatalog.root_dir || copy.common.unavailable}</p>
+                </div>
+              </div>
+            ) : null}
+            {selectedConfig ? (
+              <div className="detail-grid">
+                <div className="detail-block">
+                  <p className="meta-label">{copy.workspace.selectedBaseline}</p>
+                  <p className="mono">{selectedConfig.name}</p>
+                </div>
+                <div className="detail-block">
+                  <p className="meta-label">{copy.workspace.baselineSummaryTitle}</p>
+                  <p className="mono">
+                    {selectedConfig.detector_model_path ? formatPathTail(selectedConfig.detector_model_path) : copy.common.notAvailable}
+                  </p>
+                </div>
+                <div className="detail-block">
+                  <p className="meta-label">{copy.workspace.outputDirectory}</p>
+                  <p className="mono">{selectedConfig.output_dir ?? copy.common.unavailable}</p>
+                </div>
+              </div>
+            ) : null}
+          </details>
         </section>
       </div>
     );

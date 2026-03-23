@@ -635,8 +635,76 @@ table {
   background: rgba(255, 255, 255, 0.035);
 }
 
+.selection-summary-head,
+.field-setup-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+}
+
+.minor-path {
+  font-size: 0.8rem;
+  color: var(--text-soft);
+}
+
 .config-summary-card {
   background: linear-gradient(180deg, rgba(240, 210, 122, 0.08), rgba(255, 255, 255, 0.03));
+}
+
+.compact-selection-card {
+  background: linear-gradient(180deg, rgba(240, 210, 122, 0.08), rgba(255, 255, 255, 0.03));
+}
+
+.field-setup-card {
+  display: grid;
+  gap: 14px;
+  padding: 18px;
+  border-radius: 20px;
+  border: 1px solid var(--border-soft);
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.field-preview-shell {
+  position: relative;
+  overflow: hidden;
+  border-radius: 18px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: #050806;
+  min-height: 220px;
+}
+
+.field-preview-shell img {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+
+.field-overlay-box {
+  position: absolute;
+  pointer-events: none;
+  border-radius: 16px;
+}
+
+.field-overlay-box.field {
+  border: 2px solid rgba(118, 185, 109, 0.95);
+  box-shadow: inset 0 0 0 1px rgba(118, 185, 109, 0.18);
+}
+
+.field-overlay-box.expanded {
+  border: 2px dashed rgba(240, 210, 122, 0.95);
+  box-shadow: inset 0 0 0 1px rgba(240, 210, 122, 0.12);
+}
+
+.field-meta-grid {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+}
+
+.compact-empty {
+  padding: 16px 18px;
 }
 
 .choice-card,
@@ -719,7 +787,7 @@ table {
 .step-footer {
   display: grid;
   gap: 18px;
-  grid-template-columns: minmax(0, 1fr) minmax(280px, 0.8fr);
+  grid-template-columns: minmax(0, 1fr);
   align-items: start;
   margin-top: 18px;
   padding-top: 18px;
@@ -730,6 +798,11 @@ table {
   display: grid;
   gap: 12px;
   align-content: start;
+  max-width: 480px;
+}
+
+.selection-tail-card {
+  margin-top: 18px;
 }
 
 .detail-grid,

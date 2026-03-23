@@ -30,6 +30,22 @@ export interface InputCatalog {
   videos: InputVideoItem[];
 }
 
+export interface FieldSuggestion {
+  input_video: string;
+  preview_data_url: string;
+  frame_width: number;
+  frame_height: number;
+  frame_time_seconds: number;
+  sample_index: number;
+  sample_count: number;
+  field_roi: [number, number, number, number];
+  expanded_roi: [number, number, number, number];
+  confidence: "detected" | "fallback";
+  source: string;
+  field_coverage: number;
+  config_patch: Record<string, unknown>;
+}
+
 export interface ConfigDetail {
   name: string;
   path: string;

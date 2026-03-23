@@ -39,6 +39,26 @@ class InputCatalogResponse(BaseModel):
     videos: list[InputVideoItem] = Field(default_factory=list)
 
 
+class FieldSuggestionRequest(BaseModel):
+    input_video: str
+
+
+class FieldSuggestionResponse(BaseModel):
+    input_video: str
+    preview_data_url: str
+    frame_width: int
+    frame_height: int
+    frame_time_seconds: float
+    sample_index: int
+    sample_count: int
+    field_roi: tuple[int, int, int, int]
+    expanded_roi: tuple[int, int, int, int]
+    confidence: Literal["detected", "fallback"]
+    source: str
+    field_coverage: float
+    config_patch: dict[str, Any] = Field(default_factory=dict)
+
+
 class ConfigDetail(BaseModel):
     name: str
     path: str
@@ -84,6 +104,7 @@ class CreateRunRequest(BaseModel):
     config_name: str
     input_video: str | None = None
     output_dir_name: str | None = None
+    config_patch: dict[str, Any] = Field(default_factory=dict)
     enable_postprocess: bool | None = None
     enable_follow_cam: bool | None = None
     start_frame: int | None = None

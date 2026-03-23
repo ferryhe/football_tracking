@@ -5,7 +5,7 @@ import { ActivityIcon, FileIcon, PlayIcon, SparkIcon } from "../components/Icons
 import { LanguageToggle } from "../components/LanguageToggle";
 import { api } from "../lib/api";
 import { useI18n } from "../lib/i18n";
-import type { ConfigListItem, HealthResponse, InputCatalog, RunRecord } from "../lib/types";
+import type { ConfigListItem, FieldSuggestion, HealthResponse, InputCatalog, RunRecord } from "../lib/types";
 import { WorkspacePage, type WorkspaceStage } from "../pages/WorkspacePage";
 
 interface StageTab {
@@ -16,6 +16,26 @@ interface StageTab {
   state: "complete" | "current" | "upcoming";
 }
 
+function pickPreferredConfigName(configs: ConfigListItem[], runs: RunRecord[], inputPath: string, current = ""): string {
+  const knownNames = new Set(configs.map((item) => item.name));
+  if (current && knownNames.has(current)) {
+    return current;
+  }
+
+  const latestRunForInput = runs.find((item) => item.input_video === inputPath && item.config_name && knownNames.has(item.config_name));
+  if (latestRunForInput?.config_name) {
+    return latestRunForInput.config_name;
+  }
+
+  for (const preferredName of ["real_first_run.yaml", "default.yaml", "real_v24_full_postclean.yaml"]) {
+    if (knownNames.has(preferredName)) {
+      return preferredName;
+    }
+  }
+
+  return configs[0]?.name ?? current;
+}
+
 export function App() {
   const { copy, formatDateTime } = useI18n();
   const [health, setHealth] = useState<HealthResponse | null>(null);
@@ -24,11 +44,14 @@ export function App() {
   const [runs, setRuns] = useState<RunRecord[]>([]);
   const [selectedRun, setSelectedRun] = useState<RunRecord | null>(null);
   const [selectedInputPath, setSelectedInputPath] = useState<string>("");
-  const [selectedConfigName, setSelectedConfigName] = useState<string>("real_v24_full_postclean.yaml");
+  const [selectedConfigName, setSelectedConfigName] = useState<string>("real_first_run.yaml");
   const [stage, setStage] = useState<WorkspaceStage>("baseline");
   const [loading, setLoading] = useState(true);
   const [launching, setLaunching] = useState(false);
   const [launchMessage, setLaunchMessage] = useState<string | null>(null);
+  const [fieldSuggestions, setFieldSuggestions] = useState<Record<string, FieldSuggestion>>({});
+  const [fieldLoading, setFieldLoading] = useState(false);
+  const [fieldMessage, setFieldMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   async function refreshConfigs(): Promise<ConfigListItem[]> {
@@ -79,24 +102,22 @@ export function App() {
           return runData[0] ?? null;
         });
 
+        let nextSelectedInput = "";
         setSelectedInputPath((current) => {
           if (current && inputData.videos.some((item) => item.path === current)) {
+            nextSelectedInput = current;
             return current;
           }
           const selectedRunInput = runData[0]?.input_video;
           if (selectedRunInput && inputData.videos.some((item) => item.path === selectedRunInput)) {
+            nextSelectedInput = selectedRunInput;
             return selectedRunInput;
           }
-          return inputData.videos[0]?.path ?? "";
+          nextSelectedInput = inputData.videos[0]?.path ?? "";
+          return nextSelectedInput;
         });
 
-        setSelectedConfigName((current) => {
-          if (current && configData.some((item) => item.name === current)) {
-            return current;
-          }
-          const preferred = configData.find((item) => item.name === "real_v24_full_postclean.yaml");
-          return preferred?.name ?? configData[0]?.name ?? current;
-        });
+        setSelectedConfigName((current) => pickPreferredConfigName(configData, runData, nextSelectedInput, current));
       } catch (caughtError) {
         if (!cancelled) {
           setError(caughtError instanceof Error ? caughtError.message : String(caughtError));
@@ -121,7 +142,32 @@ export function App() {
 
   useEffect(() => {
     setLaunchMessage(null);
+    setFieldMessage(null);
   }, [selectedConfigName, selectedInputPath]);
+
+  const orderedRuns = useMemo(
+    () =>
+      [...runs].sort((left, right) => {
+        const leftTime = new Date(left.completed_at ?? left.started_at ?? left.created_at).getTime();
+        const rightTime = new Date(right.completed_at ?? right.started_at ?? right.created_at).getTime();
+        return rightTime - leftTime;
+      }),
+    [runs],
+  );
+
+  const selectedVideo = inputCatalog.videos.find((item) => item.path === selectedInputPath) ?? null;
+  const selectedConfig = configs.find((item) => item.name === selectedConfigName) ?? null;
+  const activeFieldSuggestion = selectedInputPath ? fieldSuggestions[selectedInputPath] ?? null : null;
+  const activeRun = orderedRuns.find((item) => item.status === "running" || item.status === "queued") ?? null;
+  const latestCompletedRun = orderedRuns.find((item) => item.status === "completed") ?? null;
+  const latestHistoryRun = orderedRuns[0] ?? null;
+  const focusedRun = selectedRun ?? activeRun ?? latestCompletedRun ?? orderedRuns[0] ?? null;
+  const aiScopedRuns = useMemo(
+    () => (selectedInputPath ? orderedRuns.filter((item) => item.input_video === selectedInputPath) : orderedRuns),
+    [orderedRuns, selectedInputPath],
+  );
+  const aiFocusedRun =
+    selectedRun && aiScopedRuns.some((item) => item.run_id === selectedRun.run_id) ? selectedRun : aiScopedRuns[0] ?? null;
 
   function handleSelectRun(run: RunRecord) {
     setSelectedRun(run);
@@ -131,6 +177,11 @@ export function App() {
     if (run.config_name) {
       setSelectedConfigName(run.config_name);
     }
+  }
+
+  function handleSelectInput(path: string) {
+    setSelectedInputPath(path);
+    setSelectedConfigName(pickPreferredConfigName(configs, orderedRuns, path));
   }
 
   async function syncCreatedRun(createdRun: RunRecord) {
@@ -146,16 +197,53 @@ export function App() {
     return matched;
   }
 
+  async function handleGenerateFieldSuggestion() {
+    if (!selectedInputPath) {
+      return;
+    }
+    setFieldLoading(true);
+    setFieldMessage(null);
+    try {
+      const suggestion = await api.suggestFieldSetup({ input_video: selectedInputPath });
+      setFieldSuggestions((current) => ({
+        ...current,
+        [selectedInputPath]: suggestion,
+      }));
+      setFieldMessage(copy.workspace.fieldReadyMessage);
+    } catch (caughtError) {
+      setFieldMessage(caughtError instanceof Error ? caughtError.message : String(caughtError));
+    } finally {
+      setFieldLoading(false);
+    }
+  }
+
+  function handleClearFieldSuggestion() {
+    if (!selectedInputPath) {
+      return;
+    }
+    setFieldSuggestions((current) => {
+      const next = { ...current };
+      delete next[selectedInputPath];
+      return next;
+    });
+    setFieldMessage(null);
+  }
+
   async function handleStartBaselineRun() {
+    if (!selectedConfig) {
+      setLaunchMessage(copy.workspace.noBaselineBody);
+      return;
+    }
     setLaunching(true);
     setLaunchMessage(null);
     try {
       const createdRun = await api.createRun({
         config_name: selectedConfigName,
         input_video: selectedInputPath || undefined,
+        config_patch: activeFieldSuggestion?.config_patch,
         enable_postprocess: true,
         enable_follow_cam: true,
-        notes: `Workspace baseline run for ${selectedVideo?.name ?? "selected input"}`,
+        notes: `Workspace baseline run for ${selectedVideo?.name ?? "selected input"}${activeFieldSuggestion ? " | field setup applied" : ""}`,
       });
       await syncCreatedRun(createdRun);
       setLaunchMessage(copy.common.refreshHint);
@@ -171,29 +259,6 @@ export function App() {
     await syncCreatedRun(createdRun);
     setStage("delivery");
   }
-
-  const orderedRuns = useMemo(
-    () =>
-      [...runs].sort((left, right) => {
-        const leftTime = new Date(left.completed_at ?? left.started_at ?? left.created_at).getTime();
-        const rightTime = new Date(right.completed_at ?? right.started_at ?? right.created_at).getTime();
-        return rightTime - leftTime;
-      }),
-    [runs],
-  );
-
-  const selectedVideo = inputCatalog.videos.find((item) => item.path === selectedInputPath) ?? null;
-  const selectedConfig = configs.find((item) => item.name === selectedConfigName) ?? null;
-  const activeRun = orderedRuns.find((item) => item.status === "running" || item.status === "queued") ?? null;
-  const latestCompletedRun = orderedRuns.find((item) => item.status === "completed") ?? null;
-  const latestHistoryRun = orderedRuns[0] ?? null;
-  const focusedRun = selectedRun ?? activeRun ?? latestCompletedRun ?? orderedRuns[0] ?? null;
-  const aiScopedRuns = useMemo(
-    () => (selectedInputPath ? orderedRuns.filter((item) => item.input_video === selectedInputPath) : orderedRuns),
-    [orderedRuns, selectedInputPath],
-  );
-  const aiFocusedRun =
-    selectedRun && aiScopedRuns.some((item) => item.run_id === selectedRun.run_id) ? selectedRun : aiScopedRuns[0] ?? null;
 
   const stageTabs = useMemo<StageTab[]>(
     () => [
@@ -285,9 +350,14 @@ export function App() {
             loading={loading}
             launching={launching}
             launchMessage={launchMessage}
+            fieldSuggestion={activeFieldSuggestion}
+            fieldLoading={fieldLoading}
+            fieldMessage={fieldMessage}
             onSelectRun={handleSelectRun}
-            onSelectInput={setSelectedInputPath}
+            onSelectInput={handleSelectInput}
             onSelectConfig={setSelectedConfigName}
+            onGenerateFieldSuggestion={handleGenerateFieldSuggestion}
+            onClearFieldSuggestion={handleClearFieldSuggestion}
             onStartBaselineRun={handleStartBaselineRun}
           />
         </section>

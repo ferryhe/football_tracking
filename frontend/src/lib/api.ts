@@ -5,6 +5,7 @@ import type {
   CameraPathResponse,
   ConfigDetail,
   ConfigListItem,
+  FieldSuggestion,
   HealthResponse,
   InputCatalog,
   RunRecord,
@@ -35,6 +36,11 @@ export const api = {
   baseUrl: API_BASE_URL,
   getHealth: () => request<HealthResponse>("/health"),
   listInputs: () => request<InputCatalog>("/inputs"),
+  suggestFieldSetup: (body: Record<string, unknown>) =>
+    request<FieldSuggestion>("/inputs/field-suggestion", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
   listConfigs: () => request<ConfigListItem[]>("/configs"),
   getConfig: (name: string) => request<ConfigDetail>(`/configs/${encodeURIComponent(name)}`),
   deriveConfig: (body: Record<string, unknown>) =>
