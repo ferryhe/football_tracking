@@ -69,6 +69,21 @@ def _localized_text(language: str, *, en: str, zh: str) -> str:
     return zh if language == "zh" else en
 
 
+def _normalize_iso_timestamp(value: Any) -> str | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    candidate = value.strip()
+    if candidate.endswith("Z"):
+        candidate = f"{candidate[:-1]}+00:00"
+    try:
+        parsed = datetime.fromisoformat(candidate)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc).isoformat()
+
+
 def _localized_run_status(language: str, status: str) -> str:
     labels = {
         "en": {
@@ -319,6 +334,11 @@ class ApiService:
         base_path, _ = self._resolve_config_path(base_config_name)
         base_raw = self._load_raw_yaml(base_path)
         merged = _deep_merge(base_raw, patch)
+        metadata = merged.get("metadata")
+        if not isinstance(metadata, dict):
+            metadata = {}
+        metadata["created_at"] = _utc_now_iso()
+        merged["metadata"] = metadata
         output_stem = Path(output_name).name
         output_file_name = output_stem if output_stem.endswith(".yaml") else f"{output_stem}.yaml"
         self.generated_config_dir.mkdir(parents=True, exist_ok=True)
@@ -1203,7 +1223,12 @@ class ApiService:
 
     def _build_config_summary(self, config_path: Path, relative_name: str) -> dict[str, Any]:
         raw = self._load_raw_yaml(config_path)
-        created_at = datetime.fromtimestamp(config_path.stat().st_ctime, tz=timezone.utc).isoformat()
+        metadata = raw.get("metadata") if isinstance(raw, dict) else None
+        created_at = (
+            _normalize_iso_timestamp(metadata.get("created_at") if isinstance(metadata, dict) else None)
+            or _normalize_iso_timestamp(raw.get("created_at") if isinstance(raw, dict) else None)
+            or datetime.fromtimestamp(config_path.stat().st_ctime, tz=timezone.utc).isoformat()
+        )
         try:
             config = load_config(config_path)
             input_video = str(config.input_video)

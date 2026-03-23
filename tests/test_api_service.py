@@ -214,6 +214,22 @@ class ApiServiceSmokeTests(unittest.TestCase):
         self.assertIn("created_at", default_config)
         self.assertTrue(default_config["created_at"].endswith("+00:00"))
 
+    def test_list_configs_prefers_embedded_created_at_before_file_timestamp(self) -> None:
+        self.write_yaml(
+            "config/embedded_time.yaml",
+            {
+                **build_sample_config("./outputs/embedded_time"),
+                "metadata": {
+                    "created_at": "2024-01-02T03:04:05Z",
+                },
+            },
+        )
+
+        configs = self.service.list_configs()
+
+        embedded = next(item for item in configs if item["name"] == "embedded_time.yaml")
+        self.assertEqual("2024-01-02T03:04:05+00:00", embedded["created_at"])
+
     def test_suggest_field_setup_returns_preview_and_config_patch(self) -> None:
         video_path = self.write_video("data/field_preview.avi")
 
