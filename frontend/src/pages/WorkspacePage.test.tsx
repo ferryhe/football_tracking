@@ -3,13 +3,13 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { I18nProvider } from "../lib/i18n";
 import type { ConfigListItem, InputCatalog, RunRecord } from "../lib/types";
-import { WorkspacePage } from "./WorkspacePage";
+import { WorkspacePage, type WorkspaceStage } from "./WorkspacePage";
 
 function setLanguage(value: "en" | "zh") {
   window.localStorage.setItem("football-tracking-language", value);
 }
 
-function renderDeliveryStage() {
+function renderWorkspaceStage(stage: WorkspaceStage) {
   const inputCatalog: InputCatalog = {
     root_dir: "C:/Projects/foot_ball_tracking/data",
     videos: [
@@ -111,7 +111,7 @@ function renderDeliveryStage() {
   return render(
     <I18nProvider>
       <WorkspacePage
-        stage="delivery"
+        stage={stage}
         inputCatalog={inputCatalog}
         configs={configs}
         runs={runs}
@@ -145,14 +145,14 @@ function renderDeliveryStage() {
   );
 }
 
-describe("WorkspacePage delivery stage", () => {
+describe("WorkspacePage deliverable and history stages", () => {
   beforeEach(() => {
     window.localStorage.clear();
     setLanguage("en");
   });
 
-  it("keeps standalone deliverable controls visible and resource management collapsed by default", () => {
-    renderDeliveryStage();
+  it("keeps deliverable controls visible without showing file management in the deliverable tab", () => {
+    renderWorkspaceStage("deliverable");
 
     expect(screen.getByRole("button", { name: "Start 16:9 deliverable render" })).toBeInTheDocument();
     expect(screen.getByLabelText("Prefer cleaned track CSV")).toBeInTheDocument();
@@ -160,15 +160,16 @@ describe("WorkspacePage delivery stage", () => {
     expect(screen.getByLabelText("Show frame text / annotation")).toBeInTheDocument();
     expect(screen.getByLabelText(/This does not rerun detector or baseline/)).toBeInTheDocument();
     expect(screen.queryByText("This does not rerun detector or baseline. It reuses the selected completed run and renders a clean deliverable.")).not.toBeInTheDocument();
+    expect(screen.queryByText("Video and config cleanup")).not.toBeInTheDocument();
+  });
+
+  it("filters history rows and keeps file management in the history tab", () => {
+    renderWorkspaceStage("history");
 
     const resourceHeading = screen.getByText("Video and config cleanup");
     const resourcePanel = resourceHeading.closest("details");
     expect(resourcePanel).not.toBeNull();
     expect(resourcePanel?.open).toBe(false);
-  });
-
-  it("filters history rows to baseline, deliverable, and failed runs", () => {
-    renderDeliveryStage();
 
     expect(screen.getAllByText("baseline_run_20260323_120000").length).toBeGreaterThan(0);
     expect(screen.getAllByText("Completed").length).toBeGreaterThan(0);

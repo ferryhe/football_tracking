@@ -17,7 +17,7 @@ import { FieldSetupCard } from "../components/FieldSetupCard";
 import { useI18n } from "../lib/i18n";
 import type { ConfigListItem, FieldPreview, FieldSuggestion, InputCatalog, RunRecord } from "../lib/types";
 
-export type WorkspaceStage = "baseline" | "ai" | "delivery";
+export type WorkspaceStage = "baseline" | "ai" | "deliverable" | "history";
 type HistoryCategory = "baseline" | "deliverable" | "failed";
 
 interface WorkspacePageProps {
@@ -235,7 +235,7 @@ export function WorkspacePage({
             manageDeleteConfigConfirm: "确定删除这个配置文件吗？",
           }
         : {
-            renderEyebrow: "Standalone deliverable task",
+            renderEyebrow: "Deliverable task",
             renderTitle: "Create a 16:9 deliverable from history",
             renderSubtitle: "This does not rerun detector or baseline. It reuses the selected completed run and renders a clean deliverable.",
             renderSelect: "Source run",
@@ -248,9 +248,9 @@ export function WorkspacePage({
             renderShowText: "Show frame text / annotation",
             renderDefaults: "Final deliverables default to a clean 16:9 frame with marker and annotation turned off.",
             renderButton: "Start 16:9 deliverable render",
-            renderEmpty: "Complete at least one run with track CSVs before starting a standalone 16:9 render.",
-            renderCreated: "Standalone deliverable task created",
-            renderConfirm: "Start a new standalone 16:9 render task?",
+            renderEmpty: "Complete at least one run with track CSVs before starting a 16:9 deliverable render.",
+            renderCreated: "Deliverable task created",
+            renderConfirm: "Start a new 16:9 deliverable task?",
             historySource: "Source run",
             historyModeBaseline: "Baseline",
             historyModeRender: "Deliverable",
@@ -524,7 +524,7 @@ export function WorkspacePage({
     );
   }
 
-  if (stage === "delivery") {
+  if (stage === "deliverable") {
     return (
       <div className="page-stack">
         <section className="panel">
@@ -532,10 +532,10 @@ export function WorkspacePage({
             <div className="title-row">
               <FileIcon className="section-icon" />
               <div className="title-with-tooltip">
-                <p className="eyebrow">{copy.workspace.deliveryEyebrow}</p>
+                <p className="eyebrow">{copy.workspace.deliverableEyebrow}</p>
                 <div className="title-inline">
-                  <h3>{copy.workspace.deliveryTitle}</h3>
-                  <TooltipBadge label={copy.workspace.deliverySubtitle} />
+                  <h3>{copy.workspace.deliverableTitle}</h3>
+                  <TooltipBadge label={copy.workspace.deliverableSubtitle} />
                 </div>
               </div>
             </div>
@@ -577,9 +577,9 @@ export function WorkspacePage({
                   </label>
 
                   <div className="render-summary-strip">
-                    <article className="summary-card compact-summary-card">
+                    <article className="summary-card compact-summary-card source-summary-card">
                       <p className="meta-label">{historyCopy.renderSource}</p>
-                      <strong>{activeRenderRun?.run_id ?? copy.common.notAvailable}</strong>
+                      <p className="mono summary-value compact-source-value">{activeRenderRun?.run_id ?? copy.common.notAvailable}</p>
                     </article>
                     <article className="summary-card compact-summary-card">
                       <p className="meta-label">{historyCopy.renderClip}</p>
@@ -654,98 +654,24 @@ export function WorkspacePage({
 
               {historyMessage ? <p className="notice-line">{historyMessage}</p> : null}
             </article>
-
-            <details className="panel resource-panel resource-panel-collapsed">
-              <summary className="resource-summary">
-                <div className="title-row">
-                  <FolderIcon className="section-icon" />
-                  <div className="title-with-tooltip">
-                    <p className="eyebrow">{historyCopy.manageEyebrow}</p>
-                    <div className="title-inline">
-                      <h4>{historyCopy.manageTitle}</h4>
-                      <TooltipBadge label={historyCopy.manageSubtitle} />
-                    </div>
-                  </div>
-                </div>
-              </summary>
-
-              <div className="resource-grid">
-                <section className="resource-list-card">
-                  <div className="meta-row">
-                    <span className="meta-label">{historyCopy.manageVideos}</span>
-                    <strong>{inputCatalog.videos.length}</strong>
-                  </div>
-                  {inputCatalog.videos.length ? (
-                    <div className="resource-list">
-                      {inputCatalog.videos.map((video) => (
-                        <article key={video.path} className="resource-row">
-                          <div className="resource-copy">
-                            <strong>{video.name}</strong>
-                            <p className="muted mono">{formatVideoSize(video.size_bytes)} | {formatDateTime(video.modified_at)}</p>
-                          </div>
-                          <button
-                            type="button"
-                            className="secondary-button icon-button danger-button"
-                            onClick={() => void handleDeleteVideo(video.name)}
-                            disabled={renderBusy}
-                          >
-                            <TrashIcon className="button-icon" />
-                            <span>{historyCopy.manageDelete}</span>
-                          </button>
-                        </article>
-                      ))}
-                    </div>
-                  ) : (
-                    <p className="muted">{historyCopy.manageNoVideos}</p>
-                  )}
-                </section>
-
-                <section className="resource-list-card">
-                  <div className="meta-row">
-                    <span className="meta-label">{historyCopy.manageConfigs}</span>
-                    <strong>{configs.length}</strong>
-                  </div>
-                  {configs.length ? (
-                    <div className="resource-list">
-                      {configs.map((config) => (
-                        <article key={config.name} className="resource-row">
-                          <div className="resource-copy">
-                            <strong>{config.name}</strong>
-                            <div className="tag-row">
-                              <span className={`tag ${config.postprocess_enabled ? "good" : ""}`}>{copy.workspace.cleanup}</span>
-                              <span className={`tag ${config.follow_cam_enabled ? "good" : ""}`}>{copy.workspace.followCam}</span>
-                            </div>
-                          </div>
-                          <button
-                            type="button"
-                            className="secondary-button icon-button danger-button"
-                            onClick={() => void handleDeleteConfigClick(config.name)}
-                            disabled={renderBusy}
-                          >
-                            <TrashIcon className="button-icon" />
-                            <span>{historyCopy.manageDelete}</span>
-                          </button>
-                        </article>
-                      ))}
-                    </div>
-                  ) : (
-                    <p className="muted">{historyCopy.manageNoConfigs}</p>
-                  )}
-                </section>
-              </div>
-            </details>
           </div>
         </section>
+      </div>
+    );
+  }
 
+  if (stage === "history") {
+    return (
+      <div className="page-stack">
         <section className="panel">
           <div className="panel-header">
             <div className="title-row">
               <ClockIcon className="section-icon" />
               <div className="title-with-tooltip">
-                <p className="eyebrow">{copy.workspace.queueEyebrow}</p>
+                <p className="eyebrow">{copy.workspace.historyEyebrow}</p>
                 <div className="title-inline">
-                  <h3>{copy.workspace.deliveryTitle}</h3>
-                  <TooltipBadge label={copy.workspace.deliverySubtitle} />
+                  <h3>{copy.workspace.historyTitle}</h3>
+                  <TooltipBadge label={copy.workspace.historySubtitle} />
                 </div>
               </div>
             </div>
@@ -787,7 +713,7 @@ export function WorkspacePage({
                       ? historyCopy.historyFilterFailed
                       : historyCopy.historyModeBaseline;
                 return (
-                  <article key={run.run_id} className={`delivery-row ${activeRenderRun?.run_id === run.run_id ? "selected" : ""}`}>
+                  <article key={run.run_id} className={`delivery-row ${selectedRun?.run_id === run.run_id ? "selected" : ""}`}>
                     <div className="delivery-row-compact">
                       <div className="title-row compact delivery-row-id">
                         <StatusIcon className="section-icon tiny" />
@@ -811,7 +737,89 @@ export function WorkspacePage({
               <p className="muted">{copy.workspace.deliveryEmptyBody}</p>
             </div>
           )}
+
+          {historyMessage ? <p className="notice-line">{historyMessage}</p> : null}
         </section>
+
+        <details className="panel resource-panel resource-panel-collapsed">
+          <summary className="resource-summary">
+            <div className="title-row">
+              <FolderIcon className="section-icon" />
+              <div className="title-with-tooltip">
+                <p className="eyebrow">{historyCopy.manageEyebrow}</p>
+                <div className="title-inline">
+                  <h4>{historyCopy.manageTitle}</h4>
+                  <TooltipBadge label={historyCopy.manageSubtitle} />
+                </div>
+              </div>
+            </div>
+          </summary>
+
+          <div className="resource-grid">
+            <section className="resource-list-card">
+              <div className="meta-row">
+                <span className="meta-label">{historyCopy.manageVideos}</span>
+                <strong>{inputCatalog.videos.length}</strong>
+              </div>
+              {inputCatalog.videos.length ? (
+                <div className="resource-list">
+                  {inputCatalog.videos.map((video) => (
+                    <article key={video.path} className="resource-row">
+                      <div className="resource-copy">
+                        <strong>{video.name}</strong>
+                        <p className="muted mono">{formatVideoSize(video.size_bytes)} | {formatDateTime(video.modified_at)}</p>
+                      </div>
+                      <button
+                        type="button"
+                        className="secondary-button icon-button danger-button"
+                        onClick={() => void handleDeleteVideo(video.name)}
+                        disabled={renderBusy}
+                      >
+                        <TrashIcon className="button-icon" />
+                        <span>{historyCopy.manageDelete}</span>
+                      </button>
+                    </article>
+                  ))}
+                </div>
+              ) : (
+                <p className="muted">{historyCopy.manageNoVideos}</p>
+              )}
+            </section>
+
+            <section className="resource-list-card">
+              <div className="meta-row">
+                <span className="meta-label">{historyCopy.manageConfigs}</span>
+                <strong>{configs.length}</strong>
+              </div>
+              {configs.length ? (
+                <div className="resource-list">
+                  {configs.map((config) => (
+                    <article key={config.name} className="resource-row">
+                      <div className="resource-copy">
+                        <strong>{config.name}</strong>
+                        <div className="tag-row">
+                          <span className={`tag ${config.postprocess_enabled ? "good" : ""}`}>{copy.workspace.cleanup}</span>
+                          <span className={`tag ${config.follow_cam_enabled ? "good" : ""}`}>{copy.workspace.followCam}</span>
+                        </div>
+                      </div>
+                      <button
+                        type="button"
+                        className="secondary-button icon-button danger-button"
+                        onClick={() => void handleDeleteConfigClick(config.name)}
+                        disabled={renderBusy}
+                      >
+                        <TrashIcon className="button-icon" />
+                        <span>{historyCopy.manageDelete}</span>
+                      </button>
+                    </article>
+                  ))}
+                </div>
+              ) : (
+                <p className="muted">{historyCopy.manageNoConfigs}</p>
+              )}
+            </section>
+          </div>
+        </details>
       </div>
     );
   }

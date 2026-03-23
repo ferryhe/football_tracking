@@ -129,7 +129,7 @@ textarea {
 }
 
 .step-tabs {
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   margin-bottom: 22px;
 }
 
@@ -357,11 +357,11 @@ table {
   justify-items: center;
   align-content: center;
   width: 100%;
-  min-height: 130px;
+  min-height: 122px;
   text-align: center;
   color: inherit;
   cursor: pointer;
-  padding: 22px 18px 18px;
+  padding: 20px 18px;
   border-radius: 22px;
   border: 1px solid var(--border-soft);
   background: var(--bg-panel);
@@ -497,8 +497,8 @@ table {
 }
 
 .step-tab-icon-shell {
-  width: 62px;
-  height: 62px;
+  width: 68px;
+  height: 68px;
   flex-shrink: 0;
   display: grid;
   place-items: center;
@@ -508,8 +508,8 @@ table {
 }
 
 .step-tab-icon-shell .section-icon {
-  width: 28px;
-  height: 28px;
+  width: 30px;
+  height: 30px;
 }
 
 .workflow-copy p:last-child,
@@ -1201,6 +1201,10 @@ textarea {
   align-items: start;
 }
 
+.history-grid > :only-child {
+  grid-column: 1 / -1;
+}
+
 .history-render-grid {
   grid-template-columns: repeat(2, minmax(0, 1fr));
 }
@@ -1261,6 +1265,22 @@ textarea {
 
 .compact-summary-card {
   gap: 6px;
+}
+
+.compact-summary-card strong,
+.compact-summary-card .summary-value {
+  margin: 0;
+  font-size: 1rem;
+  line-height: 1.35;
+}
+
+.source-summary-card {
+  min-width: 0;
+}
+
+.compact-source-value {
+  color: var(--text-muted);
+  word-break: break-word;
 }
 
 .render-footer {
@@ -1793,7 +1813,7 @@ td {
   }
 
   .step-tabs {
-    grid-template-columns: repeat(3, minmax(0, 1fr));
+    grid-template-columns: repeat(4, minmax(0, 1fr));
   }
 
   .field-action-grid {
@@ -1803,7 +1823,7 @@ td {
 
 @media (max-width: 760px) {
   .step-tabs {
-    grid-template-columns: 1fr;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
 

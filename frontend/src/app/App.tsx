@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState, type ComponentType, type SVGProps } from "react";
 
 import { AIPanel } from "../components/AIPanel";
-import { ActivityIcon, FileIcon, PlayIcon, SparkIcon } from "../components/Icons";
+import { ActivityIcon, ClockIcon, FileIcon, PlayIcon, SparkIcon, VideoIcon } from "../components/Icons";
 import { LanguageToggle } from "../components/LanguageToggle";
 import { api } from "../lib/api";
 import { useI18n } from "../lib/i18n";
@@ -12,6 +12,7 @@ interface StageTab {
   key: WorkspaceStage;
   icon: ComponentType<SVGProps<SVGSVGElement>>;
   title: string;
+  description: string;
   state: "complete" | "current" | "upcoming";
 }
 
@@ -41,6 +42,15 @@ function configHasFieldSetup(raw: Record<string, unknown>): boolean {
   const groundZones = Array.isArray(sceneBias.ground_zones) ? sceneBias.ground_zones : [];
   const positiveRois = Array.isArray(sceneBias.positive_rois) ? sceneBias.positive_rois : [];
   return Boolean(filtering.roi) || groundZones.length > 0 || positiveRois.length > 0;
+}
+
+function supportsFollowCamRender(run: RunRecord): boolean {
+  return (
+    run.status === "completed" &&
+    Boolean(run.input_video) &&
+    Boolean(run.config_name || run.config_path) &&
+    run.artifacts.some((artifact) => artifact.name === "ball_track.csv" || artifact.name === "ball_track.cleaned.csv")
+  );
 }
 
 export function App() {
@@ -377,7 +387,7 @@ export function App() {
 
   async function handleAssistantRunCreated(createdRun: RunRecord) {
     await syncCreatedRun(createdRun);
-    setStage("delivery");
+    setStage("history");
   }
 
   async function handleCreateFollowCamRender(
@@ -390,7 +400,7 @@ export function App() {
   ) {
     const createdRun = await api.createFollowCamRender(runId, options);
     await syncCreatedRun(createdRun);
-    setStage("delivery");
+    setStage("history");
     return createdRun;
   }
 
@@ -417,22 +427,37 @@ export function App() {
         key: "baseline",
         icon: PlayIcon,
         title: copy.workspace.flowRunTitle,
-        state: focusedRun ? "complete" : "current",
+        description: `${copy.workspace.selectEyebrow}: ${copy.workspace.flowRunDetail}`,
+        state: stage === "baseline" ? "current" : focusedRun ? "complete" : "upcoming",
       },
       {
         key: "ai",
         icon: SparkIcon,
         title: copy.workspace.flowAiTitle,
+        description: `${copy.workspace.focusEyebrow}: ${copy.workspace.flowAiDetail}`,
         state: stage === "ai" ? "current" : aiFocusedRun ? "complete" : "upcoming",
       },
       {
-        key: "delivery",
-        icon: FileIcon,
-        title: copy.workspace.deliveryTitle,
-        state: stage === "delivery" ? "current" : latestHistoryRun ? "complete" : "upcoming",
+        key: "deliverable",
+        icon: VideoIcon,
+        title: copy.workspace.flowDeliverableTitle,
+        description: `${copy.workspace.deliverableEyebrow}: ${copy.workspace.flowDeliverableDetail}`,
+        state:
+          stage === "deliverable"
+            ? "current"
+            : orderedRuns.some((run) => supportsFollowCamRender(run))
+              ? "complete"
+              : "upcoming",
+      },
+      {
+        key: "history",
+        icon: ClockIcon,
+        title: copy.workspace.flowHistoryTitle,
+        description: `${copy.workspace.historyEyebrow}: ${copy.workspace.flowHistoryDetail}`,
+        state: stage === "history" ? "current" : latestHistoryRun ? "complete" : "upcoming",
       },
     ],
-    [aiFocusedRun, copy, focusedRun, latestHistoryRun, stage],
+    [aiFocusedRun, copy, focusedRun, latestHistoryRun, orderedRuns, stage],
   );
 
   return (
@@ -459,7 +484,7 @@ export function App() {
       {error ? <div className="error-banner">{error}</div> : null}
 
       <section className="step-tabs" aria-label="Workflow steps">
-        {stageTabs.map((tab, index) => {
+        {stageTabs.map((tab) => {
           const Icon = tab.icon;
           return (
             <button
@@ -467,8 +492,9 @@ export function App() {
               key={tab.key}
               className={`step-tab ${stage === tab.key ? "active" : ""} ${tab.state}`}
               onClick={() => setStage(tab.key)}
+              title={tab.description}
+              aria-label={`${tab.title}. ${tab.description}`}
             >
-              <span className="step-tab-index">{index + 1}</span>
               <div className="step-tab-icon-shell">
                 <Icon className="section-icon" />
               </div>
