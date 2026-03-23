@@ -8,7 +8,7 @@ from pathlib import Path
 
 import cv2
 
-from football_tracking.config import AppConfig, FollowCamConfig
+from football_tracking.config import AppConfig
 from football_tracking.types import OutputStatus
 
 

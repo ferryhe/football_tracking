@@ -171,7 +171,6 @@ function renderWorkspaceStage(
           selectedRun={selectedRun}
           selectedInputPath={selectedInputPath}
           selectedConfigName={selectedConfigName}
-          loading={false}
           launching={false}
           launchMessage={null}
           fieldPreview={null}

@@ -3,7 +3,13 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, HTTPException
 
 from football_tracking.api.dependencies import get_service
-from football_tracking.api.schemas import AssetGroup, CreateRunRequest, DeleteResourceResponse, FollowCamRenderRequest, RunRecord
+from football_tracking.api.schemas import (
+    AssetGroup,
+    CreateRunRequest,
+    DeleteResourceResponse,
+    FollowCamRenderRequest,
+    RunRecord,
+)
 from football_tracking.api.service import ApiService
 
 router = APIRouter()

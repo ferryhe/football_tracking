@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from collections import deque
 import math
+from collections import deque
 
 from football_tracking.config import TrackingConfig
 from football_tracking.kalman import ConstantAccelerationKalmanFilter
@@ -9,10 +9,10 @@ from football_tracking.physics import compute_acceleration, compute_velocity, pr
 from football_tracking.types import (
     OutputStatus,
     SelectionDecision,
+    TrackerContext,
     TrackPoint,
     TrackResult,
     TrackState,
-    TrackerContext,
 )
 
 

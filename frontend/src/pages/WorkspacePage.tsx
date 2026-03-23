@@ -36,7 +36,6 @@ interface WorkspacePageProps {
   selectedRun: RunRecord | null;
   selectedInputPath: string;
   selectedConfigName: string;
-  loading: boolean;
   launching: boolean;
   launchMessage: string | null;
   fieldPreview: FieldPreview | null;
@@ -181,7 +180,6 @@ export function WorkspacePage({
   selectedRun,
   selectedInputPath,
   selectedConfigName,
-  loading,
   launching,
   launchMessage,
   fieldPreview,
@@ -296,8 +294,6 @@ export function WorkspacePage({
   const [pendingDelete, setPendingDelete] = useState<PendingDelete | null>(null);
   const [deleteConfirmValue, setDeleteConfirmValue] = useState("");
   const renderOutputHint = language === "zh" ? "新的成品文件夹会创建在" : "A new deliverable folder will be created under";
-  const manageOutputsLabel = language === "zh" ? "输出文件夹" : "Output folders";
-  const manageNoOutputs = language === "zh" ? "没有可管理的输出。" : "No outputs to manage.";
   const manageDeleteOutputConfirm = language === "zh" ? "确定删除这个输出文件夹吗？" : "Delete this output folder?";
   const deleteDialogTitle = language === "zh" ? "确认删除" : "Confirm deletion";
   const deleteDialogTarget = language === "zh" ? "目标" : "Target";
@@ -405,6 +401,20 @@ export function WorkspacePage({
           failed: "Latest failed",
           empty: "No linked runs yet.",
         };
+  const fieldSetupKey = useMemo(() => {
+    const previewKey = fieldPreview ? `${fieldPreview.frame_index}:${fieldPreview.sample_index}` : "no-preview";
+    if (!fieldSuggestion) {
+      return `${selectedInputPath}|${previewKey}|no-suggestion`;
+    }
+    return [
+      selectedInputPath,
+      previewKey,
+      fieldSuggestion.source,
+      fieldSuggestion.accepted ? "accepted" : "draft",
+      fieldSuggestion.field_polygon.map((point) => point.join(",")).join(";"),
+      fieldSuggestion.expanded_polygon.map((point) => point.join(",")).join(";"),
+    ].join("|");
+  }, [fieldPreview, fieldSuggestion, selectedInputPath]);
 
   function scopeTooltipText(scope: "full" | "partial" | "standard"): string {
     if (scope === "full") {
@@ -573,6 +583,7 @@ export function WorkspacePage({
 
               {selectedVideo ? (
                 <FieldSetupCard
+                  key={fieldSetupKey}
                   preview={fieldPreview}
                   suggestion={fieldSuggestion}
                   loading={fieldLoading}

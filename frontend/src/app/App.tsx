@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState, type ComponentType, type SVGProps } from "react";
 
 import { AIPanel } from "../components/AIPanel";
-import { ActivityIcon, ClockIcon, FileIcon, PlayIcon, SparkIcon, VideoIcon } from "../components/Icons";
+import { ActivityIcon, ClockIcon, PlayIcon, SparkIcon, VideoIcon } from "../components/Icons";
 import { LanguageToggle } from "../components/LanguageToggle";
 import { api } from "../lib/api";
 import { sortConfigsByCreatedAt } from "../lib/configs";
@@ -541,7 +541,6 @@ export function App() {
             selectedRun={stage === "ai" ? aiFocusedRun : focusedRun}
             selectedInputPath={selectedInputPath}
             selectedConfigName={selectedConfigName}
-            loading={loading}
             launching={launching}
             launchMessage={launchMessage}
             fieldPreview={activeFieldPreview}

@@ -7,7 +7,7 @@ from pathlib import Path
 
 import cv2
 
-from football_tracking.config import AppConfig, PostprocessConfig, SceneZoneConfig
+from football_tracking.config import AppConfig, SceneZoneConfig
 from football_tracking.renderer import FrameRenderer
 from football_tracking.types import OutputStatus, TrackPoint, TrackResult, TrackState
 

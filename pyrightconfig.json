@@ -1,0 +1,18 @@
+{
+  "venvPath": ".",
+  "venv": ".venv",
+  "include": [
+    "football_tracking/api/ai_provider.py",
+    "football_tracking/api/schemas.py",
+    "scripts/start_ui.py"
+  ],
+  "exclude": [
+    ".venv",
+    "frontend",
+    "outputs",
+    "data",
+    "weights"
+  ],
+  "typeCheckingMode": "basic",
+  "reportMissingTypeStubs": "none"
+}

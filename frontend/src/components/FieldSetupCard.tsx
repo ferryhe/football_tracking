@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 
 import { CheckIcon, FileIcon, PlayIcon, SparkIcon, WandIcon } from "./Icons";
 import { TooltipBadge } from "./TooltipBadge";
@@ -181,17 +181,10 @@ export function FieldSetupCard({
   onStartBaseline,
 }: FieldSetupCardProps) {
   const { copy } = useI18n();
-  const [draft, setDraft] = useState<FieldSuggestion | null>(suggestion);
-  const [fieldInput, setFieldInput] = useState("");
-  const [expandedInput, setExpandedInput] = useState("");
+  const [draft, setDraft] = useState<FieldSuggestion | null>(() => suggestion);
+  const [fieldInput, setFieldInput] = useState(() => (suggestion ? formatPointList(suggestion.field_polygon) : ""));
+  const [expandedInput, setExpandedInput] = useState(() => (suggestion ? formatPointList(suggestion.expanded_polygon) : ""));
   const [manualError, setManualError] = useState<string | null>(null);
-
-  useEffect(() => {
-    setDraft(suggestion);
-    setFieldInput(suggestion ? formatPointList(suggestion.field_polygon) : "");
-    setExpandedInput(suggestion ? formatPointList(suggestion.expanded_polygon) : "");
-    setManualError(null);
-  }, [suggestion]);
 
   const activeSuggestion = draft;
   const activePreview = preview ?? activeSuggestion;

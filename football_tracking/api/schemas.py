@@ -4,7 +4,6 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
-
 RunStatus = Literal["queued", "running", "completed", "failed"]
 AIResponseLanguage = Literal["en", "zh"]
 

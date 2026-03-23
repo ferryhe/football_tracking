@@ -166,6 +166,8 @@ Frontend:
 
 ```powershell
 cd frontend
+npm run lint
+npm run typecheck
 npm test
 npm run build
 ```
@@ -173,8 +175,13 @@ npm run build
 Backend:
 
 ```powershell
+.\.venv\Scripts\python.exe -m pip install -r requirements-dev.txt
+.\.venv\Scripts\python.exe -m ruff check .
+.\.venv\Scripts\python.exe -m pyright
 .\.venv\Scripts\python.exe -m unittest discover -s tests -p "test_*.py"
 ```
+
+Type-check scope note / 类型检查范围说明：`pyright` 当前先覆盖 `pyrightconfig.json` 里配置的稳定入口面：API schema/provider 和本地启动脚本。依赖 OpenCV 的跟踪主流水线还没有完成全量类型化。
 
 ---
 
@@ -342,6 +349,8 @@ outputs/runs/<input_slug>/<run_id>/
 
 ```powershell
 cd frontend
+npm run lint
+npm run typecheck
 npm test
 npm run build
 ```
@@ -349,5 +358,8 @@ npm run build
 后端：
 
 ```powershell
+.\.venv\Scripts\python.exe -m pip install -r requirements-dev.txt
+.\.venv\Scripts\python.exe -m ruff check .
+.\.venv\Scripts\python.exe -m pyright
 .\.venv\Scripts\python.exe -m unittest discover -s tests -p "test_*.py"
 ```

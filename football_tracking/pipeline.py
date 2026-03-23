@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 import logging
 import math
+from dataclasses import dataclass
 
 import cv2
 import torch
@@ -18,7 +18,7 @@ from football_tracking.renderer import FrameRenderer
 from football_tracking.scene_bias import SceneBiasResolver
 from football_tracking.selector import UniqueBallSelector
 from football_tracking.tracker import BallTracker
-from football_tracking.types import OutputStatus, SelectionDecision, TrackState, TrackerContext
+from football_tracking.types import OutputStatus, SelectionDecision, TrackerContext, TrackState
 
 
 @dataclass(slots=True)

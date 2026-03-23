@@ -208,6 +208,7 @@ def spawn_console(title: str, command: list[str], cwd: Path, env: dict[str, str]
         cwd=str(cwd),
         env=env,
         creationflags=creationflags,
+        text=True,
     )
 
 
