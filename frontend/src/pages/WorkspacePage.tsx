@@ -6,6 +6,7 @@ import {
   ClockIcon,
   FileIcon,
   FolderIcon,
+  InfoIcon,
   LayersIcon,
   PlayIcon,
   SparkIcon,
@@ -17,6 +18,7 @@ import { useI18n } from "../lib/i18n";
 import type { ConfigListItem, FieldPreview, FieldSuggestion, InputCatalog, RunRecord } from "../lib/types";
 
 export type WorkspaceStage = "baseline" | "ai" | "delivery";
+type HistoryCategory = "baseline" | "deliverable" | "failed";
 
 interface WorkspacePageProps {
   stage: WorkspaceStage;
@@ -104,6 +106,16 @@ function supportsFollowCamRender(run: RunRecord): boolean {
   );
 }
 
+function historyCategoryForRun(run: RunRecord): HistoryCategory {
+  if (run.status === "failed") {
+    return "failed";
+  }
+  if (run.source === "follow_cam_render") {
+    return "deliverable";
+  }
+  return "baseline";
+}
+
 function runStatusIcon(status: string) {
   if (status === "completed") {
     return CheckIcon;
@@ -140,6 +152,14 @@ function scopeLabel(copy: ReturnType<typeof useI18n>["copy"], scope: "full" | "p
     return copy.workspace.scopePartial;
   }
   return copy.workspace.scopeStandard;
+}
+
+function TooltipBadge({ label }: { label: string }) {
+  return (
+    <span className="tooltip-badge" title={label} aria-label={label}>
+      <InfoIcon className="tooltip-icon" />
+    </span>
+  );
 }
 
 export function WorkspacePage({
@@ -198,6 +218,9 @@ export function WorkspacePage({
             historyModeBaseline: "基线",
             historyModeRender: "成品",
             historyModeScan: "扫描",
+            historyFilterBaseline: "Baseline",
+            historyFilterDeliverable: "Deliverable",
+            historyFilterFailed: "Failed",
             manageEyebrow: "资源管理",
             manageTitle: "视频和配置文件管理",
             manageSubtitle: "这里可以清理不再需要的输入视频和 YAML 配置。正在运行中的任务会被保护，不能删除。",
@@ -232,6 +255,9 @@ export function WorkspacePage({
             historyModeBaseline: "Baseline",
             historyModeRender: "Deliverable",
             historyModeScan: "Scanned",
+            historyFilterBaseline: "Baseline",
+            historyFilterDeliverable: "Deliverable",
+            historyFilterFailed: "Failed",
             manageEyebrow: "File management",
             manageTitle: "Video and config cleanup",
             manageSubtitle: "Remove videos and YAML configs you no longer need. Active runs stay protected.",
@@ -248,6 +274,7 @@ export function WorkspacePage({
     [language],
   );
   const [renderRunId, setRenderRunId] = useState("");
+  const [historyFilter, setHistoryFilter] = useState<HistoryCategory>("baseline");
   const [renderBusy, setRenderBusy] = useState(false);
   const [historyMessage, setHistoryMessage] = useState<string | null>(null);
   const [renderOptions, setRenderOptions] = useState({
@@ -268,6 +295,10 @@ export function WorkspacePage({
         (run) => supportsFollowCamRender(run) && inputCatalog.videos.some((item) => item.path === run.input_video),
       ),
     [inputCatalog.videos, runs],
+  );
+  const filteredHistoryRuns = useMemo(
+    () => runs.filter((run) => historyCategoryForRun(run) === historyFilter),
+    [historyFilter, runs],
   );
   const activeRenderRun =
     renderableRuns.find((run) => run.run_id === renderRunId) ??
@@ -500,10 +531,12 @@ export function WorkspacePage({
           <div className="panel-header">
             <div className="title-row">
               <FileIcon className="section-icon" />
-              <div>
+              <div className="title-with-tooltip">
                 <p className="eyebrow">{copy.workspace.deliveryEyebrow}</p>
-                <h3>{copy.workspace.deliveryTitle}</h3>
-                <p className="muted">{copy.workspace.deliverySubtitle}</p>
+                <div className="title-inline">
+                  <h3>{copy.workspace.deliveryTitle}</h3>
+                  <TooltipBadge label={copy.workspace.deliverySubtitle} />
+                </div>
               </div>
             </div>
           </div>
@@ -512,10 +545,12 @@ export function WorkspacePage({
             <article className="assistant-card primary history-action-card">
               <div className="title-row">
                 <VideoIcon className="section-icon" />
-                <div>
+                <div className="title-with-tooltip">
                   <p className="eyebrow">{historyCopy.renderEyebrow}</p>
-                  <h4>{historyCopy.renderTitle}</h4>
-                  <p className="muted compact-lead">{historyCopy.renderSubtitle}</p>
+                  <div className="title-inline">
+                    <h4>{historyCopy.renderTitle}</h4>
+                    <TooltipBadge label={`${historyCopy.renderSubtitle} ${historyCopy.renderDefaults}`} />
+                  </div>
                 </div>
               </div>
 
@@ -599,7 +634,6 @@ export function WorkspacePage({
                   </div>
 
                   <div className="render-footer">
-                    <p className="notice-line subtle compact-notice">{historyCopy.renderDefaults}</p>
                     <button
                       type="button"
                       className="primary-button icon-button"
@@ -625,15 +659,15 @@ export function WorkspacePage({
               <summary className="resource-summary">
                 <div className="title-row">
                   <FolderIcon className="section-icon" />
-                  <div>
+                  <div className="title-with-tooltip">
                     <p className="eyebrow">{historyCopy.manageEyebrow}</p>
-                    <h4>{historyCopy.manageTitle}</h4>
-                    <p className="muted compact-lead">{historyCopy.manageSummary}</p>
+                    <div className="title-inline">
+                      <h4>{historyCopy.manageTitle}</h4>
+                      <TooltipBadge label={historyCopy.manageSubtitle} />
+                    </div>
                   </div>
                 </div>
               </summary>
-
-              <p className="muted">{historyCopy.manageSubtitle}</p>
 
               <div className="resource-grid">
                 <section className="resource-list-card">
@@ -707,23 +741,50 @@ export function WorkspacePage({
           <div className="panel-header">
             <div className="title-row">
               <ClockIcon className="section-icon" />
-              <div>
+              <div className="title-with-tooltip">
                 <p className="eyebrow">{copy.workspace.queueEyebrow}</p>
-                <h3>{copy.workspace.deliveryTitle}</h3>
-                <p className="muted">{copy.workspace.deliverySubtitle}</p>
+                <div className="title-inline">
+                  <h3>{copy.workspace.deliveryTitle}</h3>
+                  <TooltipBadge label={copy.workspace.deliverySubtitle} />
+                </div>
               </div>
             </div>
           </div>
 
-          {runs.length ? (
+          <div className="history-filter-row" role="tablist" aria-label="History filter">
+            <button
+              type="button"
+              className={`chip-button ${historyFilter === "baseline" ? "selected" : ""}`}
+              onClick={() => setHistoryFilter("baseline")}
+            >
+              {historyCopy.historyFilterBaseline}
+            </button>
+            <button
+              type="button"
+              className={`chip-button ${historyFilter === "deliverable" ? "selected" : ""}`}
+              onClick={() => setHistoryFilter("deliverable")}
+            >
+              {historyCopy.historyFilterDeliverable}
+            </button>
+            <button
+              type="button"
+              className={`chip-button ${historyFilter === "failed" ? "selected" : ""}`}
+              onClick={() => setHistoryFilter("failed")}
+            >
+              {historyCopy.historyFilterFailed}
+            </button>
+          </div>
+
+          {filteredHistoryRuns.length ? (
             <div className="delivery-list">
-              {runs.map((run) => {
+              {filteredHistoryRuns.map((run) => {
                 const StatusIcon = runStatusIcon(run.status);
+                const category = historyCategoryForRun(run);
                 const modeLabel =
-                  run.source === "follow_cam_render"
+                  category === "deliverable"
                     ? historyCopy.historyModeRender
-                    : run.source === "filesystem_scan"
-                      ? historyCopy.historyModeScan
+                    : category === "failed"
+                      ? historyCopy.historyFilterFailed
                       : historyCopy.historyModeBaseline;
                 return (
                   <article key={run.run_id} className={`delivery-row ${activeRenderRun?.run_id === run.run_id ? "selected" : ""}`}>

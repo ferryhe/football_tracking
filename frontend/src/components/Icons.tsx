@@ -139,3 +139,13 @@ export function TrashIcon(props: IconProps) {
     </BaseIcon>
   );
 }
+
+export function InfoIcon(props: IconProps) {
+  return (
+    <BaseIcon {...props}>
+      <circle cx="12" cy="12" r="9" />
+      <path d="M12 10v6" />
+      <path d="M12 7h.01" />
+    </BaseIcon>
+  );
+}

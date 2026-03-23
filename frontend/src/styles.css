@@ -1190,7 +1190,8 @@ textarea {
 .history-render-grid,
 .option-toggle-grid,
 .render-summary-strip,
-.render-footer {
+.render-footer,
+.history-filter-row {
   display: grid;
   gap: 16px;
 }
@@ -1262,17 +1263,9 @@ textarea {
   gap: 6px;
 }
 
-.compact-lead {
-  margin: 4px 0 0;
-}
-
 .render-footer {
-  grid-template-columns: minmax(0, 1fr) auto;
-  align-items: center;
-}
-
-.compact-notice {
-  padding: 10px 12px;
+  display: flex;
+  justify-content: flex-end;
 }
 
 .resource-panel-collapsed summary {
@@ -1287,6 +1280,40 @@ textarea {
 .resource-summary {
   margin: -2px;
   padding: 2px;
+}
+
+.title-with-tooltip {
+  display: grid;
+  gap: 4px;
+}
+
+.title-inline {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.tooltip-badge {
+  display: inline-grid;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  color: var(--text-soft);
+  background: rgba(255, 255, 255, 0.04);
+  cursor: help;
+}
+
+.tooltip-icon {
+  width: 12px;
+  height: 12px;
+}
+
+.history-filter-row {
+  grid-template-columns: repeat(3, max-content);
+  justify-content: flex-start;
+  gap: 10px;
 }
 
 .resource-row {
@@ -1730,7 +1757,8 @@ td {
   .resource-grid,
   .history-render-grid,
   .render-summary-strip,
-  .render-footer {
+  .render-footer,
+  .history-filter-row {
     grid-template-columns: 1fr;
   }
 }

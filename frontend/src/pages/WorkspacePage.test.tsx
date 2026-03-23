@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { I18nProvider } from "../lib/i18n";
@@ -41,7 +41,7 @@ function renderDeliveryStage() {
 
   const runs: RunRecord[] = [
     {
-      run_id: "run_20260323_120000",
+      run_id: "baseline_run_20260323_120000",
       source: "api",
       status: "completed",
       created_at: "2026-03-23T12:00:00Z",
@@ -50,12 +50,12 @@ function renderDeliveryStage() {
       config_name: "real_first_run.yaml",
       config_path: "C:/Projects/foot_ball_tracking/config/real_first_run.yaml",
       input_video: inputCatalog.videos[0].path,
-      output_dir: "C:/Projects/foot_ball_tracking/outputs/api_runs/run_20260323_120000",
+      output_dir: "C:/Projects/foot_ball_tracking/outputs/api_runs/baseline_run_20260323_120000",
       modules_enabled: { postprocess: true, follow_cam: true },
       artifacts: [
         {
           name: "ball_track.csv",
-          path: "C:/Projects/foot_ball_tracking/outputs/api_runs/run_20260323_120000/ball_track.csv",
+          path: "C:/Projects/foot_ball_tracking/outputs/api_runs/baseline_run_20260323_120000/ball_track.csv",
           kind: "csv",
           exists: true,
         },
@@ -63,6 +63,48 @@ function renderDeliveryStage() {
       stats: {},
       notes: null,
       error: null,
+    },
+    {
+      run_id: "deliverable_run_20260323_121000",
+      source: "follow_cam_render",
+      status: "completed",
+      created_at: "2026-03-23T12:10:00Z",
+      started_at: "2026-03-23T12:10:03Z",
+      completed_at: "2026-03-23T12:12:00Z",
+      config_name: "real_first_run.yaml",
+      config_path: "C:/Projects/foot_ball_tracking/config/real_first_run.yaml",
+      input_video: inputCatalog.videos[0].path,
+      parent_run_id: "baseline_run_20260323_120000",
+      output_dir: "C:/Projects/foot_ball_tracking/outputs/api_runs/deliverable_run_20260323_121000",
+      modules_enabled: { postprocess: false, follow_cam: true },
+      artifacts: [
+        {
+          name: "ball_track.csv",
+          path: "C:/Projects/foot_ball_tracking/outputs/api_runs/deliverable_run_20260323_121000/ball_track.csv",
+          kind: "csv",
+          exists: true,
+        },
+      ],
+      stats: {},
+      notes: null,
+      error: null,
+    },
+    {
+      run_id: "failed_run_20260323_122000",
+      source: "api",
+      status: "failed",
+      created_at: "2026-03-23T12:20:00Z",
+      started_at: "2026-03-23T12:20:02Z",
+      completed_at: "2026-03-23T12:21:00Z",
+      config_name: "real_first_run.yaml",
+      config_path: "C:/Projects/foot_ball_tracking/config/real_first_run.yaml",
+      input_video: inputCatalog.videos[0].path,
+      output_dir: "C:/Projects/foot_ball_tracking/outputs/api_runs/failed_run_20260323_122000",
+      modules_enabled: { postprocess: true, follow_cam: false },
+      artifacts: [],
+      stats: {},
+      notes: null,
+      error: "boom",
     },
   ];
 
@@ -95,7 +137,7 @@ function renderDeliveryStage() {
         onUpdateFieldSuggestion={vi.fn()}
         onAcceptFieldSuggestion={vi.fn()}
         onStartBaselineRun={vi.fn(async () => undefined)}
-        onCreateFollowCamRender={vi.fn(async () => runs[0])}
+        onCreateFollowCamRender={vi.fn(async () => runs[1])}
         onDeleteInputVideo={vi.fn(async () => undefined)}
         onDeleteConfig={vi.fn(async () => undefined)}
       />
@@ -116,6 +158,8 @@ describe("WorkspacePage delivery stage", () => {
     expect(screen.getByLabelText("Prefer cleaned track CSV")).toBeInTheDocument();
     expect(screen.getByLabelText("Show ball marker")).toBeInTheDocument();
     expect(screen.getByLabelText("Show frame text / annotation")).toBeInTheDocument();
+    expect(screen.getByLabelText(/This does not rerun detector or baseline/)).toBeInTheDocument();
+    expect(screen.queryByText("This does not rerun detector or baseline. It reuses the selected completed run and renders a clean deliverable.")).not.toBeInTheDocument();
 
     const resourceHeading = screen.getByText("Video and config cleanup");
     const resourcePanel = resourceHeading.closest("details");
@@ -123,13 +167,21 @@ describe("WorkspacePage delivery stage", () => {
     expect(resourcePanel?.open).toBe(false);
   });
 
-  it("renders history rows in compact form with run id, time, and output folder", () => {
+  it("filters history rows to baseline, deliverable, and failed runs", () => {
     renderDeliveryStage();
 
-    expect(screen.getAllByText("run_20260323_120000").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("baseline_run_20260323_120000").length).toBeGreaterThan(0);
     expect(screen.getAllByText("Completed").length).toBeGreaterThan(0);
     expect(screen.getAllByText("Baseline").length).toBeGreaterThan(0);
-    expect(screen.getAllByText("C:/Projects/foot_ball_tracking/outputs/api_runs/run_20260323_120000").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("C:/Projects/foot_ball_tracking/outputs/api_runs/baseline_run_20260323_120000").length).toBeGreaterThan(0);
     expect(screen.queryByText("Ran at")).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getAllByRole("button", { name: "Deliverable" })[0]);
+    expect(screen.getAllByText("deliverable_run_20260323_121000").length).toBeGreaterThan(0);
+    expect(screen.queryByText("failed_run_20260323_122000")).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getAllByRole("button", { name: "Failed" })[0]);
+    expect(screen.getByText("failed_run_20260323_122000")).toBeInTheDocument();
+    expect(screen.queryByText("deliverable_run_20260323_121000")).not.toBeInTheDocument();
   });
 });
