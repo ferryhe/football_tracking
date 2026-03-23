@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 import { api } from "../lib/api";
 import type { ConfigListItem, RunRecord } from "../lib/types";
@@ -11,7 +11,7 @@ interface RunsPageProps {
 }
 
 export function RunsPage({ configs, runs, loading, onRunCreated }: RunsPageProps) {
-  const [configName, setConfigName] = useState<string>(configs[0]?.name ?? "real_v24_full_postclean.yaml");
+  const [configName, setConfigName] = useState<string>("real_v24_full_postclean.yaml");
   const [startFrame, setStartFrame] = useState("0");
   const [maxFrames, setMaxFrames] = useState("");
   const [enablePostprocess, setEnablePostprocess] = useState(true);
@@ -19,6 +19,15 @@ export function RunsPage({ configs, runs, loading, onRunCreated }: RunsPageProps
   const [notes, setNotes] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!configs.length) {
+      return;
+    }
+    if (!configs.some((config) => config.name === configName)) {
+      setConfigName(configs[0].name);
+    }
+  }, [configs, configName]);
 
   async function handleSubmit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -43,10 +52,11 @@ export function RunsPage({ configs, runs, loading, onRunCreated }: RunsPageProps
   }
 
   return (
-    <div className="page-grid two-column">
+    <div className="page-stack">
       <section className="panel">
         <div className="panel-header">
           <h3>Launch Run</h3>
+          <p className="muted">Pick one config, limit the frame range if needed, and keep the notes short.</p>
         </div>
         <form className="form-stack" onSubmit={handleSubmit}>
           <label>
@@ -84,11 +94,11 @@ export function RunsPage({ configs, runs, loading, onRunCreated }: RunsPageProps
 
           <label>
             <span>Notes</span>
-            <textarea value={notes} onChange={(event) => setNotes(event.target.value)} rows={4} />
+            <textarea value={notes} onChange={(event) => setNotes(event.target.value)} rows={3} />
           </label>
 
           <button className="primary-button" type="submit" disabled={loading || submitting}>
-            {submitting ? "Starting…" : "Start Run"}
+            {submitting ? "Starting..." : "Start Run"}
           </button>
           {message ? <p className="muted">{message}</p> : null}
         </form>
@@ -97,8 +107,9 @@ export function RunsPage({ configs, runs, loading, onRunCreated }: RunsPageProps
       <section className="panel">
         <div className="panel-header">
           <h3>Run Queue</h3>
+          <p className="muted">Recent activity only. Use Review when you need the full evidence bundle.</p>
         </div>
-        <div className="run-list">
+        <div className="run-list compact-list">
           {runs.map((run) => (
             <div key={run.run_id} className="run-row static">
               <div>

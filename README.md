@@ -1,61 +1,45 @@
 # High-Resolution Football Ball Tracking
 
-This repository tracks a single in-play football from `5120 x 1440 / 20 FPS` fisheye-style match video.
-The current backend is stabilized around two practical workflows:
+English | [中文](#中文说明)
 
-- raw tracking
-- raw tracking plus conservative post-cleanup
-- raw tracking plus post-cleanup plus 16:9 follow-cam rendering
+This repository tracks a single in-play football from high-resolution fisheye-style match video and provides a local workspace UI for baseline runs, AI-assisted tuning, deliverable rendering, and history management.
 
-## Current Recommended Configs
+## English
+
+### What This Repo Includes
+
+- Python tracking pipeline for raw tracking, cleanup, and follow-cam rendering
+- Local FastAPI backend for configs, runs, artifacts, AI suggestions, and asset management
+- Local React/Vite workspace UI with 4 main tabs:
+  - `Baseline`
+  - `AI analysis`
+  - `Deliverable task`
+  - `History`
+- Managed Windows launcher scripts for one-click local startup
+
+### Recommended Starting Configs
 
 - `config/real_first_run.yaml`
-  Use for short debugging runs and first-pass tuning on the first 200 frames.
+  - Best for short probe runs and first-pass tuning
 - `config/real_best_full.yaml`
-  Best current full-video raw tracking config.
+  - Best current full-video raw tracking config
 - `config/real_v24_full_postclean.yaml`
-  Best current full-video delivery config with post-cleanup enabled.
-  It also enables follow-cam rendering.
+  - Best current full-video delivery config with cleanup and follow-cam enabled
 
-## Kept Output Baselines
-
-- `outputs/real_first_run_full_accept000`
-  Early historical baseline kept for comparison.
-- `outputs/real_best_full`
-  Best current raw full-video output.
-- `outputs/real_v24_full_postclean`
-  Best current cleaned full-video output.
-
-## Pipeline
-
-The active backend flow is:
-
-1. Detection: YOLO + SAHI candidate generation
-2. Filtering: confidence, size, aspect ratio, base spatial filtering
-3. Scene bias: ground polygon, negative zones, dynamic air recovery
-4. Selection: choose one candidate using distance, direction, velocity, and history
-5. Tracking: state machine + Kalman CA + adaptive gating + burst recovery
-6. Raw export: video, CSV, debug JSONL
-7. Postprocess cleanup: conservative cleanup of short isolated noise islands
-8. Follow-cam: render a smoothed 16:9 auto-follow view from the cleaned track
-
-## Main Modules
-
-- `football_tracking/config.py`
-- `football_tracking/pipeline.py`
-- `football_tracking/scene_bias.py`
-- `football_tracking/tracker.py`
-- `football_tracking/postprocess.py`
-- `football_tracking/types.py`
-
-## Environment
+### Environment
 
 - Windows 10 / 11
 - Python 3.10 or 3.11
-- NVIDIA GPU, recommended 8 GB VRAM or higher
-- CUDA runtime and cuDNN installed correctly
+- NVIDIA GPU recommended
+- CUDA and cuDNN installed correctly
+- Node.js and `npm` available in PATH
 
-## Setup
+### Quick Start
+
+1. Create and activate a virtual environment.
+2. Install Python dependencies.
+3. Install frontend dependencies.
+4. Start the managed local UI.
 
 ```powershell
 python -m venv .venv
@@ -63,204 +47,307 @@ python -m venv .venv
 python -m pip install --upgrade pip
 pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124
 pip install -r requirements.txt
+
+cd frontend
+npm install
+cd ..
+
+.\start_ui.cmd
 ```
 
-## Data Layout
+If you want the steadiest backend startup on Windows:
+
+```powershell
+.\start_ui.cmd --no-reload
+```
+
+To stop managed UI processes:
+
+```powershell
+.\stop_ui.cmd
+```
+
+### Workspace Flow
+
+1. `Baseline`
+   - Pick a source video from `data/`
+   - Pick a baseline config
+   - Capture a preview frame
+   - Load field setup from config or ask AI for a suggestion
+   - Accept the field setup
+   - Start a baseline run
+2. `AI analysis`
+   - Select a finished run tied to the current source clip
+   - Trigger AI explanation manually
+   - Review the suggested config
+   - Run the next task if the suggestion looks right
+3. `Deliverable task`
+   - Pick a completed source run
+   - Render a clean `16:9` deliverable without rerunning the full baseline pipeline
+4. `History`
+   - Review past runs
+   - Filter `baseline / deliverable / failed`
+   - Manage source videos, configs, and output folders grouped by source clip
+
+### Current Storage Model
+
+- Source videos live under `data/`
+- Configs live under `config/`
+- Generated configs live under `config/generated/`
+- New runs are written to:
 
 ```text
-foot_ball_tracking/
-|-- data/
-|   `-- raw5760x144020fps.mp4
-`-- weights/
-    `-- football_ball_yolo.pt
+outputs/runs/<input_slug>/<run_id>/
 ```
 
-If your local names differ, update `input_video` and `detector.model_path` in the chosen config.
+- History scanning is backward-compatible and still reads:
+  - `outputs/*`
+  - `outputs/api_runs/*`
+  - `outputs/runs/<input_slug>/<run_id>`
 
-## Run
+### Common Commands
 
-Short integration run:
+Short probe run:
 
 ```powershell
 .\.venv\Scripts\python.exe main.py --config config/real_first_run.yaml
 ```
 
-Full raw tracking:
+Full raw run:
 
 ```powershell
 .\.venv\Scripts\python.exe main.py --config config/real_best_full.yaml
 ```
 
-Full cleaned delivery:
+Full cleaned delivery run:
 
 ```powershell
 .\.venv\Scripts\python.exe main.py --config config/real_v24_full_postclean.yaml
 ```
 
-## Outputs
+Run backend only:
 
-Raw tracking normally writes:
+```powershell
+.\.venv\Scripts\python.exe -m uvicorn football_tracking.api.app:app --reload
+```
+
+### Main Outputs
+
+Raw tracking usually writes:
 
 - `annotated.mp4`
 - `ball_track.csv`
 - `debug.jsonl`
 
-When postprocess is enabled it also writes:
+Cleanup adds:
 
 - `annotated.cleaned.mp4`
 - `ball_track.cleaned.csv`
 - `debug.cleaned.jsonl`
 - `cleanup_report.json`
 
-When follow-cam is enabled it also writes:
+Follow-cam adds:
 
 - `follow_cam.mp4`
 - `camera_path.csv`
 - `follow_cam_report.json`
 
-`cleanup_report.json` is the main handoff artifact for future UI integration. It records:
+### Docs
 
-- which frames were modified by cleanup
-- why they were modified
-- which nuisance zone was hit
-- which short detected islands were scrubbed
+- English operation guide: [docs/operation-guide.en.md](docs/operation-guide.en.md)
+- 中文操作指南: [docs/operation-guide.zh.md](docs/operation-guide.zh.md)
+- Frontend planning notes:
+  - `docs/plans/2026-03-21-ai-native-frontend-plan.md`
+  - `docs/plans/2026-03-21-frontend-phase1-execution-plan.md`
 
-`follow_cam_report.json` records:
+### Verification
 
-- which track source was used (`raw` or `cleaned`)
-- output resolution
-- crop size range
-- status counts carried into follow-cam rendering
-
-## Postprocess Scope
-
-The current post-cleanup is intentionally conservative. It targets only very short isolated
-`Detected` islands so that it can:
-
-- remove obvious spare-ball or head-like noise
-- avoid damaging the main recovery gains already achieved in raw tracking
-- stay compatible with later manual or UI-assisted tuning
-
-Current postprocess controls are defined in `config/real_v24_full_postclean.yaml`, including:
-
-- `nuisance_zones`
-- `protected_ranges`
-- island length threshold
-- jump distance threshold
-- low-confidence threshold
-
-Current follow-cam controls are also defined in `config/real_v24_full_postclean.yaml`, including:
-
-- output resolution
-- crop size range
-- dead-zone size
-- glide / catch-up pan behavior
-- speed-based zoom out
-- zoom confirmation, deadband, and hold behavior
-- predicted and lost behavior
-- home framing and recenter behavior
-
-## Known Limits
-
-- Fast airborne ball segments can still drop detector recall.
-- Keeper possession, heavy occlusion, and out-of-field spare balls can still create local noise.
-- Some bad segments are not short isolated islands, so they need stronger temporal logic or manual protection.
-- The first follow-cam version is intentionally conservative and may lag behind very fast ball flight.
-
-## Follow-Cam Design Notes
-
-The current follow-cam is intentionally closer to a slow operator camera than a frame-perfect crop.
-
-It uses:
-
-- `glide` and `catch_up` pan states
-- zoom deadband and confirmation windows
-- slower zoom-in than zoom-out
-- hold behavior so it does not immediately reverse zoom direction
-- weaker camera response on `Predicted`
-- recenter behavior after longer `Lost` stretches
-
-The goal is to reduce visual jitter and avoid amplifying single-frame tracking noise.
-
-## Repo Conventions
-
-- `outputs/`, `data/`, and `weights/` are ignored and are not committed.
-- The repo keeps only the most useful configs and docs, not every historical experiment config.
-- New work should start from:
-  - `config/real_first_run.yaml`
-  - `config/real_best_full.yaml`
-  - `config/real_v24_full_postclean.yaml`
-
-## Frontend Planning Docs
-
-- `docs/plans/2026-03-21-ai-native-frontend-plan.md`
-- `docs/plans/2026-03-21-frontend-phase1-execution-plan.md`
-
-## API Shell
-
-The repo now includes a local FastAPI shell for frontend integration.
-
-Run locally:
+Frontend:
 
 ```powershell
-.\.venv\Scripts\python.exe -m uvicorn football_tracking.api.app:app --reload
+cd frontend
+npm test
+npm run build
 ```
 
-Current phase-1 endpoints:
-
-- `GET /api/v1/health`
-- `GET /api/v1/configs`
-- `GET /api/v1/configs/{name}`
-- `POST /api/v1/configs/derive`
-- `GET /api/v1/runs`
-- `POST /api/v1/runs`
-- `GET /api/v1/runs/{run_id}`
-- `GET /api/v1/runs/{run_id}/artifacts`
-- `GET /api/v1/runs/{run_id}/artifacts/{artifact_name}`
-- `GET /api/v1/runs/{run_id}/cleanup-report`
-- `GET /api/v1/runs/{run_id}/follow-cam-report`
-- `GET /api/v1/runs/{run_id}/camera-path`
-- `POST /api/v1/ai/explain`
-- `POST /api/v1/ai/recommend`
-- `POST /api/v1/ai/config-diff`
-
-The API shell is filesystem-backed:
-
-- configs come from `config/`
-- run history comes from `data/run_registry.json`
-- kept baselines are discovered from `outputs/`
-- new API-triggered runs default to `outputs/api_runs/<run_id>/`
-
-AI behavior:
-
-- if `PROVIDER_OPENAI_API_KEY` is configured in `.env`, the backend uses the OpenAI provider for:
-  - `POST /api/v1/ai/explain`
-  - `POST /api/v1/ai/recommend`
-- if no provider is configured, the backend falls back to local heuristic suggestions
-
-## Frontend Shell
-
-The repo now includes a local React/Vite frontend shell in `frontend/`.
-
-Run locally:
+Backend:
 
 ```powershell
-# terminal 1
-.\.venv\Scripts\python.exe -m uvicorn football_tracking.api.app:app --reload
+.\.venv\Scripts\python.exe -m unittest discover -s tests -p "test_*.py"
+```
 
-# terminal 2
+---
+
+## 中文说明
+
+这个仓库用于从高分辨率鱼眼比赛视频中跟踪单个比赛用球，并提供本地 workspace 界面来完成基线运行、AI 调参、成品导出和历史管理。
+
+### 仓库包含什么
+
+- Python 跟踪主流程：原始跟踪、清洗、跟随裁剪
+- 本地 FastAPI 后端：配置、任务、产物、AI 建议、资源管理
+- 本地 React/Vite workspace 界面，当前有 4 个主标签：
+  - `跑基线`
+  - `AI 分析`
+  - `成品任务`
+  - `历史`
+- Windows 一键启动脚本，负责本地 UI 的托管启动和停止
+
+### 建议优先使用的配置
+
+- `config/real_first_run.yaml`
+  - 适合短探测和首轮调参
+- `config/real_best_full.yaml`
+  - 当前较好的全量原始跟踪配置
+- `config/real_v24_full_postclean.yaml`
+  - 当前较好的全量交付配置，已启用清洗和 follow-cam
+
+### 环境要求
+
+- Windows 10 / 11
+- Python 3.10 或 3.11
+- 建议使用 NVIDIA GPU
+- 正确安装 CUDA 和 cuDNN
+- PATH 中可用 `npm`
+
+### 快速开始
+
+1. 创建并激活虚拟环境
+2. 安装 Python 依赖
+3. 安装前端依赖
+4. 启动本地托管 UI
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\activate
+python -m pip install --upgrade pip
+pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124
+pip install -r requirements.txt
+
 cd frontend
 npm install
-npm run dev
+cd ..
+
+.\start_ui.cmd
 ```
 
-Current frontend scope:
+如果你想要更稳的后端启动方式：
 
-- Dashboard for kept configs and recent runs
-- Runs page to launch local jobs through the API
-- Review page for raw/cleaned/follow-cam artifacts and reports
-- AI-native side panel that can:
-  - explain a selected run
-  - generate a grounded recommendation
-  - preview a config patch
-  - derive a new generated config with explicit confirmation
+```powershell
+.\start_ui.cmd --no-reload
+```
+
+停止托管的 UI 进程：
+
+```powershell
+.\stop_ui.cmd
+```
+
+### 当前 Workspace 流程
+
+1. `跑基线`
+   - 从 `data/` 里选择原视频
+   - 选择一个基线配置
+   - 截取预览帧
+   - 从配置读取球场设置，或者让 AI 给建议
+   - 接受球场设置
+   - 启动一次基线任务
+2. `AI 分析`
+   - 选择与当前原视频关联的已完成 run
+   - 人工触发 AI 解释
+   - 查看建议的新配置
+   - 如果建议合理，直接启动下一次任务
+3. `成品任务`
+   - 选择一个已完成 run
+   - 单独导出干净的 `16:9` 成品，不需要重新跑完整基线
+4. `历史`
+   - 查看过往 run
+   - 按 `baseline / deliverable / failed` 过滤
+   - 按原视频分组管理源视频、配置和输出目录
+
+### 当前存储结构
+
+- 原视频在 `data/`
+- 配置文件在 `config/`
+- 派生配置在 `config/generated/`
+- 新任务输出会写到：
+
+```text
+outputs/runs/<input_slug>/<run_id>/
+```
+
+- 历史扫描仍兼容旧目录：
+  - `outputs/*`
+  - `outputs/api_runs/*`
+  - `outputs/runs/<input_slug>/<run_id>`
+
+### 常用命令
+
+短探测运行：
+
+```powershell
+.\.venv\Scripts\python.exe main.py --config config/real_first_run.yaml
+```
+
+全量原始跟踪：
+
+```powershell
+.\.venv\Scripts\python.exe main.py --config config/real_best_full.yaml
+```
+
+全量清洗交付：
+
+```powershell
+.\.venv\Scripts\python.exe main.py --config config/real_v24_full_postclean.yaml
+```
+
+只启动后端：
+
+```powershell
+.\.venv\Scripts\python.exe -m uvicorn football_tracking.api.app:app --reload
+```
+
+### 主要输出文件
+
+原始跟踪通常会输出：
+
+- `annotated.mp4`
+- `ball_track.csv`
+- `debug.jsonl`
+
+启用清洗后还会输出：
+
+- `annotated.cleaned.mp4`
+- `ball_track.cleaned.csv`
+- `debug.cleaned.jsonl`
+- `cleanup_report.json`
+
+启用 follow-cam 后还会输出：
+
+- `follow_cam.mp4`
+- `camera_path.csv`
+- `follow_cam_report.json`
+
+### 文档入口
+
+- English operation guide: [docs/operation-guide.en.md](docs/operation-guide.en.md)
+- 中文操作指南: [docs/operation-guide.zh.md](docs/operation-guide.zh.md)
+- 前端规划文档：
+  - `docs/plans/2026-03-21-ai-native-frontend-plan.md`
+  - `docs/plans/2026-03-21-frontend-phase1-execution-plan.md`
+
+### 验证命令
+
+前端：
+
+```powershell
+cd frontend
+npm test
+npm run build
+```
+
+后端：
+
+```powershell
+.\.venv\Scripts\python.exe -m unittest discover -s tests -p "test_*.py"
+```

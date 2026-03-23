@@ -52,12 +52,13 @@ export function ReviewPage({ runs, selectedRun, onSelectRun }: ReviewPageProps) 
   }, [selectedRun]);
 
   return (
-    <div className="page-grid review-layout">
+    <div className="page-stack">
       <section className="panel">
         <div className="panel-header">
-          <h3>Runs</h3>
+          <h3>Run Selection</h3>
+          <p className="muted">Keep one run in focus. The rest can stay collapsed in the queue or dashboard.</p>
         </div>
-        <div className="run-list">
+        <div className="run-list compact-list">
           {runs.map((run) => (
             <button
               type="button"
@@ -75,78 +76,90 @@ export function ReviewPage({ runs, selectedRun, onSelectRun }: ReviewPageProps) 
         </div>
       </section>
 
-      <section className="panel panel-span-2">
-        <div className="panel-header">
-          <h3>Artifacts</h3>
-        </div>
-        {selectedRun ? (
-          <>
+      {selectedRun ? (
+        <>
+          <section className="panel">
+            <div className="panel-header">
+              <h3>Playback</h3>
+              <p className="muted mono">{selectedRun.run_id}</p>
+            </div>
             <div className="video-grid">
               <div className="video-card">
-                <p className="meta-label">Cleaned Follow-Cam</p>
+                <p className="meta-label">Follow-cam</p>
                 <video controls src={api.artifactUrl(selectedRun.run_id, "follow_cam.mp4")} />
               </div>
               <div className="video-card">
-                <p className="meta-label">Annotated Cleaned</p>
+                <p className="meta-label">Annotated cleaned</p>
                 <video controls src={api.artifactUrl(selectedRun.run_id, "annotated.cleaned.mp4")} />
               </div>
             </div>
-            <ArtifactList
-              run={selectedRun}
-              preferredNames={[
-                "follow_cam.mp4",
-                "annotated.cleaned.mp4",
-                "annotated.mp4",
-                "cleanup_report.json",
-                "follow_cam_report.json",
-                "ball_track.cleaned.csv",
-              ]}
-            />
-          </>
-        ) : (
-          <p className="muted">Select a run to inspect its outputs.</p>
-        )}
-      </section>
+          </section>
 
-      <section className="panel">
-        <div className="panel-header">
-          <h3>Reports</h3>
-        </div>
-        <div className="report-stack">
-          <div className="report-card">
-            <p className="meta-label">Cleanup report</p>
-            <pre className="code-block compact">{cleanupReport ? JSON.stringify(cleanupReport, null, 2) : "not available"}</pre>
-          </div>
-          <div className="report-card">
-            <p className="meta-label">Follow-cam report</p>
-            <pre className="code-block compact">{followCamReport ? JSON.stringify(followCamReport, null, 2) : "not available"}</pre>
-          </div>
-        </div>
-      </section>
+          <div className="content-grid two-up">
+            <section className="panel">
+              <div className="panel-header">
+                <h3>Artifacts</h3>
+              </div>
+              <ArtifactList
+                run={selectedRun}
+                preferredNames={[
+                  "follow_cam.mp4",
+                  "annotated.cleaned.mp4",
+                  "annotated.mp4",
+                  "cleanup_report.json",
+                  "follow_cam_report.json",
+                  "ball_track.cleaned.csv",
+                ]}
+              />
+            </section>
 
-      <section className="panel panel-span-2">
-        <div className="panel-header">
-          <h3>Camera Path Preview</h3>
-        </div>
-        <div className="table-shell">
-          <table>
-            <thead>
-              <tr>
-                {cameraPathRows[0] ? Object.keys(cameraPathRows[0]).map((key) => <th key={key}>{key}</th>) : null}
-              </tr>
-            </thead>
-            <tbody>
-              {cameraPathRows.map((row, index) => (
-                <tr key={index}>
-                  {Object.entries(row).map(([key, value]) => (
-                    <td key={key}>{value}</td>
+            <section className="panel">
+              <div className="panel-header">
+                <h3>Reports</h3>
+              </div>
+              <div className="report-stack">
+                <div className="report-card">
+                  <p className="meta-label">Cleanup report</p>
+                  <pre className="code-block compact">{cleanupReport ? JSON.stringify(cleanupReport, null, 2) : "not available"}</pre>
+                </div>
+                <div className="report-card">
+                  <p className="meta-label">Follow-cam report</p>
+                  <pre className="code-block compact">{followCamReport ? JSON.stringify(followCamReport, null, 2) : "not available"}</pre>
+                </div>
+              </div>
+            </section>
+          </div>
+
+          <section className="panel">
+            <div className="panel-header">
+              <h3>Camera Path Preview</h3>
+              <p className="muted">Small sample only. Full path stays in the artifact bundle.</p>
+            </div>
+            <div className="table-shell">
+              <table>
+                <thead>
+                  <tr>
+                    {cameraPathRows[0] ? Object.keys(cameraPathRows[0]).map((key) => <th key={key}>{key}</th>) : null}
+                  </tr>
+                </thead>
+                <tbody>
+                  {cameraPathRows.map((row, index) => (
+                    <tr key={index}>
+                      {Object.entries(row).map(([key, value]) => (
+                        <td key={key}>{value}</td>
+                      ))}
+                    </tr>
                   ))}
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      </section>
+                </tbody>
+              </table>
+            </div>
+          </section>
+        </>
+      ) : (
+        <section className="panel">
+          <p className="muted">Select a run to inspect playback, reports, and camera-path evidence.</p>
+        </section>
+      )}
     </div>
   );
 }

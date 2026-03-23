@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import base64
 import csv
 import json
 import mimetypes
+import shutil
 import threading
+import unicodedata
 from copy import deepcopy
 from dataclasses import asdict, is_dataclass
 from datetime import datetime, timezone
@@ -11,10 +14,13 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+import cv2
+import numpy as np
 import yaml
 
 from football_tracking.api.ai_provider import OpenAIResponsesClient, load_provider_settings
 from football_tracking.config import AppConfig, load_config
+from football_tracking.follow_cam import FollowCamGenerator
 from football_tracking.pipeline import BallTrackingPipeline
 
 
@@ -55,11 +61,54 @@ def _flatten_patch_lines(patch: dict[str, Any], prefix: str = "") -> list[str]:
     return lines
 
 
+def _normalize_ai_language(language: str | None) -> str:
+    return "zh" if language == "zh" else "en"
+
+
+def _localized_text(language: str, *, en: str, zh: str) -> str:
+    return zh if language == "zh" else en
+
+
+def _normalize_iso_timestamp(value: Any) -> str | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    candidate = value.strip()
+    if candidate.endswith("Z"):
+        candidate = f"{candidate[:-1]}+00:00"
+    try:
+        parsed = datetime.fromisoformat(candidate)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc).isoformat()
+
+
+def _localized_run_status(language: str, status: str) -> str:
+    labels = {
+        "en": {
+            "queued": "queued",
+            "running": "running",
+            "completed": "completed",
+            "failed": "failed",
+        },
+        "zh": {
+            "queued": "\u6392\u961f\u4e2d",
+            "running": "\u8fd0\u884c\u4e2d",
+            "completed": "\u5df2\u5b8c\u6210",
+            "failed": "\u5931\u8d25",
+        },
+    }
+    return labels[language].get(status, status)
+
+
 class ApiService:
     def __init__(self, repo_root: Path) -> None:
         self.repo_root = repo_root
         self.config_dir = repo_root / "config"
         self.outputs_dir = repo_root / "outputs"
+        self.run_outputs_dir = self.outputs_dir / "runs"
+        self.data_dir = repo_root / "data"
         self.registry_path = repo_root / "data" / "run_registry.json"
         self.generated_config_dir = self.config_dir / "generated"
         self._lock = threading.Lock()
@@ -86,6 +135,156 @@ class ApiService:
                 items.append(self._build_config_summary(config_path, relative_name))
         return items
 
+    def list_input_videos(self) -> dict[str, Any]:
+        supported_suffixes = {".mp4", ".mov", ".mkv", ".avi", ".m4v"}
+        videos: list[dict[str, Any]] = []
+        if self.data_dir.exists():
+            for video_path in sorted(self.data_dir.rglob("*"), key=lambda item: item.name.lower()):
+                if not video_path.is_file():
+                    continue
+                if video_path.suffix.lower() not in supported_suffixes:
+                    continue
+                stat = video_path.stat()
+                videos.append(
+                    {
+                        "name": video_path.relative_to(self.data_dir).as_posix(),
+                        "path": str(video_path.resolve()),
+                        "size_bytes": stat.st_size,
+                        "modified_at": datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat(),
+                    }
+                )
+        return {
+            "root_dir": str(self.data_dir.resolve()),
+            "videos": videos,
+        }
+
+    def delete_input_video(self, name: str) -> dict[str, Any]:
+        video_path = self._resolve_input_video_name(name)
+        with self._lock:
+            self._assert_path_not_used_by_active_run_locked(input_video=video_path)
+        video_path.unlink()
+        return {
+            "name": name,
+            "path": str(video_path),
+            "deleted": True,
+        }
+
+    def capture_field_preview(self, input_video: str, sample_index: int | None = None) -> dict[str, Any]:
+        video_path = self._resolve_input_video_path(input_video)
+        preview_sample = self._pick_field_preview_sample(video_path, sample_index=sample_index)
+        return self._build_field_preview_response(video_path, preview_sample)
+
+    def suggest_field_setup(
+        self,
+        input_video: str,
+        config_name: str | None = None,
+        frame_index: int | None = None,
+    ) -> dict[str, Any]:
+        video_path = self._resolve_input_video_path(input_video)
+        samples = [self._read_video_frame(video_path, frame_index)] if frame_index is not None else self._sample_video_frames(video_path)
+        if not samples:
+            raise RuntimeError(f"Unable to read preview frames from input video: {video_path}")
+
+        best_sample: dict[str, Any] | None = None
+        config_shape: dict[str, Any] | None = None
+
+        if config_name:
+            config_shape = self._load_field_setup_from_config(
+                config_name=config_name,
+                frame_width=samples[len(samples) // 2]["frame_width"],
+                frame_height=samples[len(samples) // 2]["frame_height"],
+            )
+            if config_shape is not None:
+                sample = samples[len(samples) // 2]
+                preview_bounds = self._build_preview_bounds(
+                    expanded_polygon=config_shape["expanded_polygon"],
+                    content_bounds=self._detect_content_bounds(sample["frame"]),
+                    frame_width=sample["frame_width"],
+                    frame_height=sample["frame_height"],
+                )
+                best_sample = {
+                    **sample,
+                    **config_shape,
+                    "coverage": 1.0,
+                    "confidence": "config",
+                    "source": f"config:{config_name}",
+                    "preview_bounds": preview_bounds,
+                }
+
+        if best_sample is None:
+            for sample in samples:
+                content_bounds = self._detect_content_bounds(sample["frame"])
+                field_polygon, coverage, detected = self._detect_field_polygon(sample["frame"], content_bounds)
+                expanded_polygon = self._expand_polygon(
+                    field_polygon,
+                    frame_width=sample["frame_width"],
+                    frame_height=sample["frame_height"],
+                    scale_x=1.08,
+                    scale_y=1.10,
+                )
+                candidate = {
+                    **sample,
+                    "field_polygon": field_polygon,
+                    "expanded_polygon": expanded_polygon,
+                    "field_roi": self._polygon_bounds(field_polygon),
+                    "expanded_roi": self._polygon_bounds(expanded_polygon),
+                    "coverage": round(coverage, 4),
+                    "confidence": "detected" if detected else "fallback",
+                    "source": "field-green-heuristic" if detected else "safe-trapezoid-fallback",
+                    "preview_bounds": self._build_preview_bounds(
+                        expanded_polygon=expanded_polygon,
+                        content_bounds=content_bounds,
+                        frame_width=sample["frame_width"],
+                        frame_height=sample["frame_height"],
+                    ),
+                }
+                if best_sample is None:
+                    best_sample = candidate
+                    continue
+                if candidate["confidence"] == "detected" and best_sample["confidence"] != "detected":
+                    best_sample = candidate
+                    continue
+                if candidate["coverage"] > best_sample["coverage"]:
+                    best_sample = candidate
+
+        if best_sample is None:
+            raise RuntimeError(f"Unable to build a field suggestion for input video: {video_path}")
+        return {
+            "input_video": str(video_path),
+            "preview_data_url": self._encode_frame_data_url(self._prepare_preview_frame(best_sample["frame"])),
+            "preview_bounds": (0, 0, best_sample["frame_width"], best_sample["frame_height"]),
+            "frame_width": best_sample["frame_width"],
+            "frame_height": best_sample["frame_height"],
+            "frame_index": best_sample["frame_index"],
+            "frame_time_seconds": round(best_sample["frame_time_seconds"], 2),
+            "sample_index": best_sample["sample_index"],
+            "sample_count": best_sample["sample_count"],
+            "field_polygon": best_sample["field_polygon"],
+            "expanded_polygon": best_sample["expanded_polygon"],
+            "field_roi": best_sample["field_roi"],
+            "expanded_roi": best_sample["expanded_roi"],
+            "confidence": best_sample["confidence"],
+            "source": best_sample["source"],
+            "field_coverage": best_sample["coverage"],
+            "config_patch": self._build_field_config_patch(
+                field_polygon=best_sample["field_polygon"],
+                expanded_polygon=best_sample["expanded_polygon"],
+                expanded_roi=best_sample["expanded_roi"],
+            ),
+        }
+
+    def _build_field_preview_response(self, video_path: Path, sample: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "input_video": str(video_path),
+            "preview_data_url": self._encode_frame_data_url(self._prepare_preview_frame(sample["frame"])),
+            "frame_width": sample["frame_width"],
+            "frame_height": sample["frame_height"],
+            "frame_index": sample["frame_index"],
+            "frame_time_seconds": round(sample["frame_time_seconds"], 2),
+            "sample_index": sample["sample_index"],
+            "sample_count": sample["sample_count"],
+        }
+
     def get_config(self, name: str) -> dict[str, Any]:
         config_path, relative_name = self._resolve_config_path(name)
         raw = self._load_raw_yaml(config_path)
@@ -98,10 +297,53 @@ class ApiService:
             "summary": self._build_config_summary(config_path, relative_name),
         }
 
+    def delete_config(self, name: str) -> dict[str, Any]:
+        config_path, relative_name = self._resolve_config_path(name)
+        with self._lock:
+            self._assert_path_not_used_by_active_run_locked(config_path=config_path)
+        config_path.unlink()
+        return {
+            "name": relative_name,
+            "path": str(config_path),
+            "deleted": True,
+        }
+
+    def delete_run_output(self, run_id: str) -> dict[str, Any]:
+        with self._lock:
+            registry = self._read_registry()
+            self._refresh_discovered_runs_locked(registry)
+            self._normalize_registry_runs_locked(registry)
+            run = next((item for item in registry["runs"] if item.get("run_id") == run_id), None)
+            if run is None:
+                raise KeyError(run_id)
+            if run.get("status") in {"queued", "running"}:
+                raise RuntimeError(f"Run is still active and cannot be deleted: {run_id}")
+            output_dir = Path(run["output_dir"]).resolve()
+            outputs_root = self.outputs_dir.resolve()
+            if output_dir == outputs_root or outputs_root not in output_dir.parents:
+                raise RuntimeError(f"Run output must live under {outputs_root}: {output_dir}")
+            registry["runs"] = [item for item in registry["runs"] if item.get("run_id") != run_id]
+            self._write_registry(registry)
+        if output_dir.exists():
+            shutil.rmtree(output_dir)
+            parent_dir = output_dir.parent
+            if parent_dir != self.outputs_dir.resolve() and parent_dir.exists() and not any(parent_dir.iterdir()):
+                parent_dir.rmdir()
+        return {
+            "name": run_id,
+            "path": str(output_dir),
+            "deleted": True,
+        }
+
     def derive_config(self, base_config_name: str, output_name: str, patch: dict[str, Any]) -> dict[str, Any]:
         base_path, _ = self._resolve_config_path(base_config_name)
         base_raw = self._load_raw_yaml(base_path)
         merged = _deep_merge(base_raw, patch)
+        metadata = merged.get("metadata")
+        if not isinstance(metadata, dict):
+            metadata = {}
+        metadata["created_at"] = _utc_now_iso()
+        merged["metadata"] = metadata
         output_stem = Path(output_name).name
         output_file_name = output_stem if output_stem.endswith(".yaml") else f"{output_stem}.yaml"
         self.generated_config_dir.mkdir(parents=True, exist_ok=True)
@@ -114,9 +356,115 @@ class ApiService:
         with self._lock:
             registry = self._read_registry()
             self._refresh_discovered_runs_locked(registry)
+            self._normalize_registry_runs_locked(registry)
             self._write_registry(registry)
-            runs = sorted(registry["runs"], key=lambda item: item.get("created_at", ""), reverse=True)
+            runs = sorted(
+                registry["runs"],
+                key=lambda item: self._timestamp_value(self._run_activity_at(item)),
+                reverse=True,
+            )
         return runs
+
+    def list_asset_groups(self) -> list[dict[str, Any]]:
+        inputs_payload = self.list_input_videos()
+        videos = inputs_payload["videos"]
+        configs = self.list_configs()
+        runs = self.list_runs()
+
+        input_index = {video["path"]: video for video in videos}
+        groups: dict[str, dict[str, Any]] = {}
+
+        def ensure_group(input_path: str | None) -> dict[str, Any]:
+            if input_path and input_path in input_index:
+                video = input_index[input_path]
+                existing = groups.get(input_path)
+                if existing is not None:
+                    return existing
+                created = {
+                    "group_id": self._slugify(video["name"]) or "input-group",
+                    "title": video["name"],
+                    "input_video": video,
+                    "last_activity_at": video.get("modified_at"),
+                    "run_count": 0,
+                    "config_count": 0,
+                    "output_count": 0,
+                    "runs": [],
+                    "configs": [],
+                    "outputs": [],
+                    "is_unbound": False,
+                }
+                groups[input_path] = created
+                return created
+
+            existing = groups.get("__unbound__")
+            if existing is not None:
+                return existing
+            created = {
+                "group_id": "unbound-legacy",
+                "title": "Unbound / Legacy",
+                "input_video": None,
+                "last_activity_at": None,
+                "run_count": 0,
+                "config_count": 0,
+                "output_count": 0,
+                "runs": [],
+                "configs": [],
+                "outputs": [],
+                "is_unbound": True,
+            }
+            groups["__unbound__"] = created
+            return created
+
+        for video in videos:
+            ensure_group(video["path"])
+
+        for config in configs:
+            ensure_group(config.get("input_video")).get("configs", []).append(config)
+
+        for run in runs:
+            group = ensure_group(run.get("input_video"))
+            group.get("runs", []).append(run)
+            if run.get("output_dir"):
+                group.get("outputs", []).append(run)
+
+        prepared_groups: list[dict[str, Any]] = []
+        for group in groups.values():
+            group["configs"] = sorted(group["configs"], key=lambda item: self._timestamp_value(item.get("created_at")), reverse=True)
+            group["runs"] = sorted(group["runs"], key=lambda item: self._timestamp_value(self._run_activity_at(item)), reverse=True)
+            group["outputs"] = sorted(group["outputs"], key=lambda item: self._timestamp_value(self._run_activity_at(item)), reverse=True)
+            group["run_count"] = len(group["runs"])
+            group["config_count"] = len(group["configs"])
+            group["output_count"] = len(group["outputs"])
+
+            activity_candidates: list[str] = []
+            if group.get("input_video"):
+                input_modified_at = group["input_video"].get("modified_at")
+                if isinstance(input_modified_at, str):
+                    activity_candidates.append(input_modified_at)
+            activity_candidates.extend(
+                value
+                for value in (item.get("created_at") for item in group["configs"])
+                if isinstance(value, str)
+            )
+            activity_candidates.extend(
+                value
+                for value in (self._run_activity_at(item) for item in group["runs"])
+                if isinstance(value, str)
+            )
+            normalized_candidates = [candidate for candidate in (_normalize_iso_timestamp(item) for item in activity_candidates) if candidate]
+            group["last_activity_at"] = max(normalized_candidates, default=None)
+
+            if group["is_unbound"] and not (group["runs"] or group["configs"] or group["outputs"]):
+                continue
+            prepared_groups.append(group)
+
+        prepared_groups.sort(
+            key=lambda item: (
+                1 if item.get("is_unbound") else 0,
+                -self._timestamp_value(item.get("last_activity_at")),
+            )
+        )
+        return prepared_groups
 
     def get_run(self, run_id: str) -> dict[str, Any]:
         with self._lock:
@@ -161,23 +509,51 @@ class ApiService:
             "rows": rows[offset : offset + limit],
         }
 
-    def ai_explain(self, run_id: str | None, config_name: str | None, focus: str | None) -> dict[str, Any]:
+    def ai_explain(
+        self,
+        run_id: str | None,
+        config_name: str | None,
+        focus: str | None,
+        language: str | None = None,
+    ) -> dict[str, Any]:
+        resolved_language = _normalize_ai_language(language)
         if self.ai_client.is_enabled():
             try:
-                return self._ai_explain_with_model(run_id=run_id, config_name=config_name, focus=focus)
+                return self._ai_explain_with_model(
+                    run_id=run_id,
+                    config_name=config_name,
+                    focus=focus,
+                    language=resolved_language,
+                )
             except Exception:
                 pass
-        return self._ai_explain_heuristic(run_id=run_id, config_name=config_name, focus=focus)
+        return self._ai_explain_heuristic(
+            run_id=run_id,
+            config_name=config_name,
+            focus=focus,
+            language=resolved_language,
+        )
 
-    def ai_recommend(self, run_id: str, objective: str | None) -> dict[str, Any]:
+    def ai_recommend(self, run_id: str, objective: str | None, language: str | None = None) -> dict[str, Any]:
+        resolved_language = _normalize_ai_language(language)
         if self.ai_client.is_enabled():
             try:
-                return self._ai_recommend_with_model(run_id=run_id, objective=objective)
+                return self._ai_recommend_with_model(
+                    run_id=run_id,
+                    objective=objective,
+                    language=resolved_language,
+                )
             except Exception:
                 pass
-        return self._ai_recommend_heuristic(run_id=run_id, objective=objective)
+        return self._ai_recommend_heuristic(run_id=run_id, objective=objective, language=resolved_language)
 
-    def _ai_explain_heuristic(self, run_id: str | None, config_name: str | None, focus: str | None) -> dict[str, Any]:
+    def _ai_explain_heuristic(
+        self,
+        run_id: str | None,
+        config_name: str | None,
+        focus: str | None,
+        language: str,
+    ) -> dict[str, Any]:
         evidence: list[str] = []
         summary_parts: list[str] = []
 
@@ -186,17 +562,43 @@ class ApiService:
             raw_stats = run.get("stats", {}).get("raw", {})
             cleaned_stats = run.get("stats", {}).get("cleaned", {})
             summary_parts.append(
-                f"Run {run_id} is {run['status']} with cleaned detected ratio "
-                f"{float(cleaned_stats.get('detected_ratio', raw_stats.get('detected_ratio', 0.0))) * 100:.1f}%."
+                _localized_text(
+                    language,
+                    en=(
+                        f"Run {run_id} is {_localized_run_status(language, run['status'])} with cleaned detected ratio "
+                        f"{float(cleaned_stats.get('detected_ratio', raw_stats.get('detected_ratio', 0.0))) * 100:.1f}%."
+                    ),
+                    zh=(
+                        f"\u8fd0\u884c {run_id} \u5f53\u524d\u4e3a{_localized_run_status(language, run['status'])}"
+                        f"\uff0c\u6e05\u6d17\u540e\u68c0\u6d4b\u7387\u4e3a "
+                        f"{float(cleaned_stats.get('detected_ratio', raw_stats.get('detected_ratio', 0.0))) * 100:.1f}%\u3002"
+                    ),
+                )
             )
             evidence.extend(
                 [
-                    f"run.status={run['status']}",
-                    f"run.config={run.get('config_name')}",
-                    f"raw.detected={raw_stats.get('detected')}",
-                    f"raw.lost={raw_stats.get('lost')}",
-                    f"cleaned.detected={cleaned_stats.get('detected')}",
-                    f"cleaned.lost={cleaned_stats.get('lost')}",
+                    _localized_text(language, en=f"Run status={run['status']}", zh=f"\u8fd0\u884c\u72b6\u6001={run['status']}"),
+                    _localized_text(
+                        language,
+                        en=f"Run config={run.get('config_name')}",
+                        zh=f"\u8fd0\u884c\u914d\u7f6e={run.get('config_name')}",
+                    ),
+                    _localized_text(
+                        language,
+                        en=f"Raw detected={raw_stats.get('detected')}",
+                        zh=f"\u539f\u59cb\u68c0\u6d4b={raw_stats.get('detected')}",
+                    ),
+                    _localized_text(language, en=f"Raw lost={raw_stats.get('lost')}", zh=f"\u539f\u59cb\u4e22\u5931={raw_stats.get('lost')}"),
+                    _localized_text(
+                        language,
+                        en=f"Cleaned detected={cleaned_stats.get('detected')}",
+                        zh=f"\u6e05\u6d17\u540e\u68c0\u6d4b={cleaned_stats.get('detected')}",
+                    ),
+                    _localized_text(
+                        language,
+                        en=f"Cleaned lost={cleaned_stats.get('lost')}",
+                        zh=f"\u6e05\u6d17\u540e\u4e22\u5931={cleaned_stats.get('lost')}",
+                    ),
                 ]
             )
 
@@ -204,28 +606,58 @@ class ApiService:
             config = self.get_config(config_name)
             resolved = config["resolved"]
             summary_parts.append(
-                f"Config {config_name} has postprocess={resolved.get('postprocess', {}).get('enabled')} "
-                f"and follow_cam={resolved.get('follow_cam', {}).get('enabled')}."
+                _localized_text(
+                    language,
+                    en=(
+                        f"Config {config_name} has postprocess={resolved.get('postprocess', {}).get('enabled')} "
+                        f"and follow_cam={resolved.get('follow_cam', {}).get('enabled')}."
+                    ),
+                    zh=(
+                        f"\u914d\u7f6e {config_name} \u4e2d postprocess="
+                        f"{resolved.get('postprocess', {}).get('enabled')} \uff0cfollow_cam="
+                        f"{resolved.get('follow_cam', {}).get('enabled')}\u3002"
+                    ),
+                )
             )
             evidence.extend(
                 [
-                    f"config.output_dir={config['summary']['output_dir']}",
-                    f"config.input_video={config['summary']['input_video']}",
+                    _localized_text(
+                        language,
+                        en=f"Config output={config['summary']['output_dir']}",
+                        zh=f"\u914d\u7f6e\u8f93\u51fa\u76ee\u5f55={config['summary']['output_dir']}",
+                    ),
+                    _localized_text(
+                        language,
+                        en=f"Config input={config['summary']['input_video']}",
+                        zh=f"\u914d\u7f6e\u8f93\u5165\u89c6\u9891={config['summary']['input_video']}",
+                    ),
                 ]
             )
 
         if focus:
-            summary_parts.append(f"Requested focus: {focus}.")
+            summary_parts.append(
+                _localized_text(
+                    language,
+                    en=f"Requested focus: {focus}.",
+                    zh=f"\u5f53\u524d\u76ee\u6807\uff1a{focus}\u3002",
+                )
+            )
 
         if not summary_parts:
-            summary_parts.append("No run or config was provided, so AI explanation has no grounded evidence yet.")
+            summary_parts.append(
+                _localized_text(
+                    language,
+                    en="No run or config was provided, so AI explanation has no grounded evidence yet.",
+                    zh="\u8fd8\u6ca1\u6709\u63d0\u4f9b run \u6216\u914d\u7f6e\uff0c\u6240\u4ee5\u73b0\u5728\u8fd8\u6ca1\u6709\u53ef\u843d\u5730\u7684\u8bc1\u636e\u6458\u8981\u3002",
+                )
+            )
 
         return {
             "summary": " ".join(summary_parts),
             "evidence": evidence,
         }
 
-    def _ai_recommend_heuristic(self, run_id: str, objective: str | None) -> dict[str, Any]:
+    def _ai_recommend_heuristic(self, run_id: str, objective: str | None, language: str) -> dict[str, Any]:
         run = self.get_run(run_id)
         config_name = run.get("config_name")
         if not config_name:
@@ -242,21 +674,49 @@ class ApiService:
         mean_crop_height = float(follow_cam_stats.get("mean_crop_height", 0.0) or 0.0)
 
         patch: dict[str, Any] = {}
-        title = "Grounded Recommendation"
-        diagnosis = (
-            f"Detected ratio is {detected_ratio * 100:.1f}% and lost ratio is {lost_ratio * 100:.1f}% "
-            f"for run {run_id}."
+        output_slug = "grounded_recommendation"
+        title = _localized_text(
+            language,
+            en="Grounded Recommendation",
+            zh="\u57fa\u4e8e\u8bc1\u636e\u7684\u5efa\u8bae",
         )
-        recommendation = "Stay on the current baseline and make only targeted adjustments."
-        expected_tradeoff = "Conservative changes keep current gains and avoid reintroducing noisy regressions."
+        diagnosis = _localized_text(
+            language,
+            en=(
+                f"Detected ratio is {detected_ratio * 100:.1f}% and lost ratio is {lost_ratio * 100:.1f}% "
+                f"for run {run_id}."
+            ),
+            zh=(
+                f"\u8fd0\u884c {run_id} \u7684\u68c0\u6d4b\u7387\u4e3a {detected_ratio * 100:.1f}%"
+                f"\uff0c\u4e22\u5931\u7387\u4e3a {lost_ratio * 100:.1f}%\u3002"
+            ),
+        )
+        recommendation = _localized_text(
+            language,
+            en="Stay on the current baseline and make only targeted adjustments.",
+            zh="\u5148\u7559\u5728\u5f53\u524d\u57fa\u7ebf\u4e0a\uff0c\u53ea\u505a\u6709\u9488\u5bf9\u6027\u7684\u5c0f\u8c03\u6574\u3002",
+        )
+        expected_tradeoff = _localized_text(
+            language,
+            en="Conservative changes keep current gains and avoid reintroducing noisy regressions.",
+            zh="\u4fdd\u5b88\u6539\u52a8\u80fd\u5c3d\u91cf\u4fdd\u4f4f\u73b0\u5728\u7684\u6536\u76ca\uff0c\u907f\u514d\u518d\u6b21\u5f15\u5165\u660e\u663e\u566a\u58f0\u56de\u9000\u3002",
+        )
         evidence = [
-            f"run_id={run_id}",
-            f"config={config_name}",
-            f"cleaned.detected_ratio={detected_ratio:.4f}",
-            f"cleaned.lost_ratio={lost_ratio:.4f}",
+            _localized_text(language, en=f"Run ID={run_id}", zh=f"\u8fd0\u884c ID={run_id}"),
+            _localized_text(language, en=f"Config={config_name}", zh=f"\u914d\u7f6e={config_name}"),
+            _localized_text(
+                language,
+                en=f"Cleaned detected ratio={detected_ratio:.4f}",
+                zh=f"\u6e05\u6d17\u540e\u68c0\u6d4b\u7387={detected_ratio:.4f}",
+            ),
+            _localized_text(
+                language,
+                en=f"Cleaned lost ratio={lost_ratio:.4f}",
+                zh=f"\u6e05\u6d17\u540e\u4e22\u5931\u7387={lost_ratio:.4f}",
+            ),
         ]
 
-        if any(token in objective_text for token in ["camera", "follow", "zoom", "pan"]):
+        if any(token in objective_text for token in ["camera", "follow", "zoom", "pan", "\u955c\u5934", "\u8ddf\u968f", "\u8ddf\u62cd", "\u5e73\u79fb", "\u7f29\u653e", "\u76f8\u673a"]):
             current_follow = config["resolved"].get("follow_cam", {})
             patch = {
                 "follow_cam": {
@@ -267,16 +727,38 @@ class ApiService:
                     "zoom_hold_frames_after_change": int(current_follow.get("zoom_hold_frames_after_change", 16)) + 4,
                 }
             }
-            title = "Follow-Cam Stabilization"
-            diagnosis = (
-                f"Mean crop height is {mean_crop_height:.1f}px. The fastest win is to make pan and zoom slower to react."
+            output_slug = "follow_cam_stabilization"
+            title = _localized_text(language, en="Follow-Cam Stabilization", zh="\u8ddf\u968f\u955c\u5934\u7a33\u5b9a\u5316")
+            diagnosis = _localized_text(
+                language,
+                en=f"Mean crop height is {mean_crop_height:.1f}px. The fastest win is to make pan and zoom slower to react.",
+                zh=(
+                    f"\u5e73\u5747\u88c1\u5207\u9ad8\u5ea6\u4e3a {mean_crop_height:.1f}px\u3002"
+                    "\u6700\u76f4\u63a5\u7684\u6539\u8fdb\u662f\u5148\u653e\u6162\u5e73\u79fb\u548c\u7f29\u653e\u7684\u53cd\u5e94\u901f\u5ea6\u3002"
+                ),
             )
-            recommendation = "Slow pan response first and require longer zoom confirmation before changing crop depth."
-            expected_tradeoff = "The camera will feel steadier, but fast breaks may take slightly longer to catch up."
+            recommendation = _localized_text(
+                language,
+                en="Slow pan response first and require longer zoom confirmation before changing crop depth.",
+                zh="\u5148\u653e\u6162\u5e73\u79fb\u54cd\u5e94\uff0c\u5e76\u63d0\u9ad8\u7f29\u653e\u786e\u8ba4\u65f6\u95f4\uff0c\u518d\u6539\u53d8\u753b\u9762\u6df1\u5ea6\u3002",
+            )
+            expected_tradeoff = _localized_text(
+                language,
+                en="The camera will feel steadier, but fast breaks may take slightly longer to catch up.",
+                zh="\u955c\u5934\u4f1a\u66f4\u7a33\uff0c\u4f46\u5feb\u901f\u653b\u9632\u8f6c\u6362\u65f6\u53ef\u80fd\u4f1a\u7a0d\u6162\u4e00\u70b9\u8ddf\u4e0a\u3002",
+            )
             evidence.extend(
                 [
-                    f"follow_cam.mean_crop_height={mean_crop_height:.2f}",
-                    f"follow_cam.enabled={run.get('modules_enabled', {}).get('follow_cam')}",
+                    _localized_text(
+                        language,
+                        en=f"Follow-cam mean crop height={mean_crop_height:.2f}",
+                        zh=f"\u8ddf\u968f\u955c\u5934\u5e73\u5747\u88c1\u5207\u9ad8\u5ea6={mean_crop_height:.2f}",
+                    ),
+                    _localized_text(
+                        language,
+                        en=f"Follow-cam enabled={run.get('modules_enabled', {}).get('follow_cam')}",
+                        zh=f"\u8ddf\u968f\u955c\u5934\u5df2\u542f\u7528={run.get('modules_enabled', {}).get('follow_cam')}",
+                    ),
                 ]
             )
         elif lost_ratio > 0.18:
@@ -299,10 +781,23 @@ class ApiService:
                     }
                 }
             }
-            title = "Reacquire Tightening"
-            diagnosis = "Lost ratio is still material, but global detector loosening is riskier than targeted reacquire tightening."
-            recommendation = "Tighten tentative reacquire acceptance before changing detector sensitivity."
-            expected_tradeoff = "This should suppress noisy far-jump recoveries, but may delay a few true long-gap reacquires."
+            output_slug = "reacquire_tightening"
+            title = _localized_text(language, en="Reacquire Tightening", zh="\u91cd\u65b0\u6355\u83b7\u6536\u7d27")
+            diagnosis = _localized_text(
+                language,
+                en="Lost ratio is still material, but global detector loosening is riskier than targeted reacquire tightening.",
+                zh="\u4e22\u5931\u7387\u4ecd\u7136\u504f\u9ad8\uff0c\u4f46\u76f4\u63a5\u5168\u5c40\u653e\u5bbd detector \u98ce\u9669\u66f4\u5927\uff0c\u5148\u6536\u7d27\u91cd\u65b0\u6355\u83b7\u4f1a\u66f4\u7a33\u3002",
+            )
+            recommendation = _localized_text(
+                language,
+                en="Tighten tentative reacquire acceptance before changing detector sensitivity.",
+                zh="\u5148\u6536\u7d27 tentative reacquire \u7684\u63a5\u53d7\u9608\u503c\uff0c\u518d\u8003\u8651\u52a8 detector \u7075\u654f\u5ea6\u3002",
+            )
+            expected_tradeoff = _localized_text(
+                language,
+                en="This should suppress noisy far-jump recoveries, but may delay a few true long-gap reacquires.",
+                zh="\u8fd9\u4f1a\u538b\u6389\u4e00\u4e9b\u566a\u58f0\u6027\u7684\u8fdc\u8df3\u6062\u590d\uff0c\u4f46\u4e5f\u53ef\u80fd\u8ba9\u5c11\u6570\u771f\u5b9e\u7684\u957f\u95f4\u9694\u91cd\u6355\u7a0d\u5fae\u6162\u4e00\u70b9\u3002",
+            )
         else:
             current_post = config["resolved"].get("postprocess", {})
             patch = {
@@ -314,13 +809,25 @@ class ApiService:
                     ),
                 }
             }
-            title = "Post-Cleanup Tightening"
-            diagnosis = "Tracking is already strong enough that cleanup is a safer place to shave visible noise."
-            recommendation = "Prefer small cleanup threshold changes before touching detector or tracker behavior."
-            expected_tradeoff = "A stricter cleanup pass may hide a few borderline true detections along with short noise islands."
+            output_slug = "post_cleanup_tightening"
+            title = _localized_text(language, en="Post-Cleanup Tightening", zh="\u6e05\u6d17\u9636\u6bb5\u6536\u7d27")
+            diagnosis = _localized_text(
+                language,
+                en="Tracking is already strong enough that cleanup is a safer place to shave visible noise.",
+                zh="\u8ddf\u8e2a\u4e3b\u4f53\u5df2\u7ecf\u8db3\u591f\u7a33\uff0c\u5148\u5728 cleanup \u73af\u8282\u53bb\u6389\u53ef\u89c1\u566a\u58f0\u4f1a\u66f4\u5b89\u5168\u3002",
+            )
+            recommendation = _localized_text(
+                language,
+                en="Prefer small cleanup threshold changes before touching detector or tracker behavior.",
+                zh="\u5148\u8c03\u5c0f cleanup \u9608\u503c\uff0c\u5c3d\u91cf\u4e0d\u8981\u5148\u52a8 detector \u6216 tracker \u884c\u4e3a\u3002",
+            )
+            expected_tradeoff = _localized_text(
+                language,
+                en="A stricter cleanup pass may hide a few borderline true detections along with short noise islands.",
+                zh="\u66f4\u4e25\u7684 cleanup \u53ef\u80fd\u4f1a\u5728\u538b\u6389\u77ed\u566a\u58f0\u6bb5\u7684\u540c\u65f6\uff0c\u4e5f\u85cf\u6389\u5c11\u91cf\u8fb9\u7f18\u771f\u5b9e\u68c0\u6d4b\u3002",
+            )
 
-        slug = self._slugify(objective or title)
-        output_name_suggestion = f"{Path(config_name).stem}_{slug}"
+        output_name_suggestion = f"{Path(config_name).stem}_{output_slug}"
 
         return {
             "title": title,
@@ -333,14 +840,26 @@ class ApiService:
             "output_name_suggestion": output_name_suggestion,
         }
 
-    def _ai_explain_with_model(self, run_id: str | None, config_name: str | None, focus: str | None) -> dict[str, Any]:
-        payload = self._build_ai_context(run_id=run_id, config_name=config_name, focus=focus)
+    def _ai_explain_with_model(
+        self,
+        run_id: str | None,
+        config_name: str | None,
+        focus: str | None,
+        language: str,
+    ) -> dict[str, Any]:
+        payload = self._build_ai_context(run_id=run_id, config_name=config_name, focus=focus, language=language)
         prompt = json.dumps(payload, ensure_ascii=False, indent=2)
+        language_instruction = _localized_text(
+            language,
+            en="Write all human-readable output in English.",
+            zh="Write all human-readable output in Simplified Chinese.",
+        )
         instructions = (
             "You are helping operate a football tracking system. "
             "Return strict JSON with keys: summary (string), evidence (array of short strings). "
             "Ground every sentence in the provided evidence. "
-            "Do not invent artifacts, files, or metrics."
+            "Do not invent artifacts, files, or metrics. "
+            f"{language_instruction}"
         )
         response = self.ai_client.create_json_response(
             instructions=instructions,
@@ -352,21 +871,28 @@ class ApiService:
             "evidence": [str(item) for item in response.get("evidence", []) if str(item).strip()],
         }
 
-    def _ai_recommend_with_model(self, run_id: str, objective: str | None) -> dict[str, Any]:
+    def _ai_recommend_with_model(self, run_id: str, objective: str | None, language: str) -> dict[str, Any]:
         run = self.get_run(run_id)
         config_name = run.get("config_name")
         if not config_name:
             raise FileNotFoundError(f"Run {run_id} is not linked to a config.")
 
-        payload = self._build_ai_context(run_id=run_id, config_name=config_name, focus=objective)
+        payload = self._build_ai_context(run_id=run_id, config_name=config_name, focus=objective, language=language)
         prompt = json.dumps(payload, ensure_ascii=False, indent=2)
+        language_instruction = _localized_text(
+            language,
+            en="Write all human-readable fields in English. Keep patch keys and patch_preview paths in code-style English.",
+            zh="Write all human-readable fields in Simplified Chinese. Keep patch keys and patch_preview paths in code-style English.",
+        )
         instructions = (
             "You are recommending the next config adjustment for a football tracking pipeline. "
             "Return strict JSON with keys: title, diagnosis, recommendation, expected_tradeoff, patch, patch_preview, evidence, output_name_suggestion. "
             "The patch must be a nested object suitable for YAML merge. "
             "Only touch conservative operator-facing parameters in follow_cam, postprocess, scene_bias.dynamic_air_recovery, selection, or tracking. "
             "Do not suggest destructive changes. "
-            "Patch preview must be a flat array of 'path: value' strings matching the patch object."
+            "Patch preview must be a flat array of 'path: value' strings matching the patch object. "
+            "output_name_suggestion must be a short lowercase ASCII slug. "
+            f"{language_instruction}"
         )
         response = self.ai_client.create_json_response(
             instructions=instructions,
@@ -402,8 +928,14 @@ class ApiService:
             "patch_preview": _flatten_patch_lines(patch),
         }
 
-    def _build_ai_context(self, run_id: str | None, config_name: str | None, focus: str | None) -> dict[str, Any]:
-        context: dict[str, Any] = {"focus": focus}
+    def _build_ai_context(
+        self,
+        run_id: str | None,
+        config_name: str | None,
+        focus: str | None,
+        language: str,
+    ) -> dict[str, Any]:
+        context: dict[str, Any] = {"focus": focus, "response_language": language}
 
         if config_name:
             config = self.get_config(config_name)
@@ -447,7 +979,21 @@ class ApiService:
         return context
 
     def create_run(self, request: dict[str, Any]) -> dict[str, Any]:
+        requested_output_name = request.get("output_dir_name")
+        run_id = Path(requested_output_name).name if requested_output_name else ""
+        if not run_id:
+            run_id = f"run_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid4().hex[:8]}"
+
         config_path, relative_name = self._resolve_config_path(request["config_name"])
+        config_patch = request.get("config_patch") or {}
+        if config_patch:
+            config_path, relative_name = self._materialize_run_config(
+                base_config_path=config_path,
+                base_config_name=relative_name,
+                run_id=run_id,
+                patch=config_patch,
+                suffix="field_setup",
+            )
         config = load_config(config_path)
 
         if request.get("input_video"):
@@ -461,11 +1007,7 @@ class ApiService:
         if request.get("max_frames") is not None:
             config.runtime.max_frames = int(request["max_frames"])
 
-        requested_output_name = request.get("output_dir_name")
-        run_id = Path(requested_output_name).name if requested_output_name else ""
-        if not run_id:
-            run_id = f"run_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid4().hex[:8]}"
-        config.output_dir = (self.outputs_dir / "api_runs" / run_id).resolve()
+        config.output_dir = self._build_run_output_dir(run_id=run_id, input_video=config.input_video)
         if config.output_dir.exists() and any(config.output_dir.iterdir()):
             raise FileExistsError(str(config.output_dir))
         config.output_dir.mkdir(parents=True, exist_ok=True)
@@ -480,6 +1022,7 @@ class ApiService:
             "config_name": relative_name,
             "config_path": str(config_path),
             "input_video": str(config.input_video),
+            "parent_run_id": request.get("parent_run_id"),
             "output_dir": str(config.output_dir),
             "modules_enabled": {
                 "postprocess": bool(config.postprocess.enabled),
@@ -504,7 +1047,85 @@ class ApiService:
                 daemon=True,
             )
             self._active_threads[run_id] = thread
-            thread.start()
+        thread.start()
+        return run_record
+
+    def create_follow_cam_render(self, source_run_id: str, request: dict[str, Any]) -> dict[str, Any]:
+        source_run = self.get_run(source_run_id)
+        if source_run.get("status") != "completed":
+            raise RuntimeError(f"Run must be completed before rendering a deliverable: {source_run_id}")
+
+        config_path, relative_name = self._resolve_run_config_reference(source_run)
+        config = load_config(config_path)
+        input_video = source_run.get("input_video") or str(config.input_video)
+        if not input_video:
+            raise FileNotFoundError(f"Run {source_run_id} is not linked to an input video.")
+
+        config.input_video = self._resolve_input_video_path(input_video)
+        requested_output_name = request.get("output_dir_name")
+        run_id = Path(requested_output_name).name if requested_output_name else ""
+        if not run_id:
+            run_id = f"deliver_{source_run_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid4().hex[:6]}"
+
+        config.output_dir = self._build_run_output_dir(run_id=run_id, input_video=config.input_video)
+        if config.output_dir.exists() and any(config.output_dir.iterdir()):
+            raise FileExistsError(str(config.output_dir))
+        config.output_dir.mkdir(parents=True, exist_ok=True)
+
+        config.postprocess.enabled = False
+        config.follow_cam.enabled = True
+        config.follow_cam.prefer_cleaned_track = bool(request.get("prefer_cleaned_track", True))
+        config.follow_cam.draw_ball_marker = bool(request.get("draw_ball_marker", False))
+        config.follow_cam.draw_frame_text = bool(request.get("draw_frame_text", False))
+        config.follow_cam.target_width = max(320, int(request.get("target_width") or 1920))
+        config.follow_cam.target_height = max(180, int(request.get("target_height") or 1080))
+        requested_video_name = str(request.get("output_video_name") or "deliverable_16x9.mp4")
+        config.follow_cam.output_video_name = Path(requested_video_name).name or "deliverable_16x9.mp4"
+
+        source_output_dir = Path(source_run["output_dir"]).resolve()
+        self._prepare_follow_cam_render_inputs(source_output_dir=source_output_dir, render_output_dir=config.output_dir, config=config)
+
+        render_notes = request.get("notes") or (
+            f"Standalone 16:9 render from {source_run_id} | "
+            f"marker={int(config.follow_cam.draw_ball_marker)} | "
+            f"annotation={int(config.follow_cam.draw_frame_text)}"
+        )
+        run_record = {
+            "run_id": run_id,
+            "source": "follow_cam_render",
+            "status": "queued",
+            "created_at": _utc_now_iso(),
+            "started_at": None,
+            "completed_at": None,
+            "config_name": relative_name,
+            "config_path": str(config_path),
+            "input_video": str(config.input_video),
+            "parent_run_id": source_run_id,
+            "output_dir": str(config.output_dir),
+            "modules_enabled": {
+                "postprocess": False,
+                "follow_cam": True,
+            },
+            "artifacts": self._collect_artifacts(config.output_dir),
+            "stats": self._collect_stats(config.output_dir),
+            "notes": render_notes,
+            "error": None,
+        }
+
+        with self._lock:
+            self._assert_no_active_run_locked()
+            registry = self._read_registry()
+            registry["runs"] = [run for run in registry["runs"] if run["run_id"] != run_id]
+            registry["runs"].append(run_record)
+            self._write_registry(registry)
+            thread = threading.Thread(
+                target=self._execute_follow_cam_render,
+                args=(run_id, config, source_run_id),
+                name=f"football-tracking-render-{run_id}",
+                daemon=True,
+            )
+            self._active_threads[run_id] = thread
+        thread.start()
         return run_record
 
     def _execute_run(self, run_id: str, config: AppConfig) -> None:
@@ -520,11 +1141,48 @@ class ApiService:
                 config_name=existing.get("config_name"),
                 config_path=existing.get("config_path"),
                 input_video=str(config.input_video),
+                parent_run_id=existing.get("parent_run_id"),
                 output_dir=config.output_dir,
                 modules_enabled={
                     "postprocess": bool(config.postprocess.enabled),
                     "follow_cam": bool(config.follow_cam.enabled),
                 },
+                notes=existing.get("notes"),
+                started_at=existing.get("started_at"),
+                completed_at=_utc_now_iso(),
+            )
+            self._replace_run(run_id, updated)
+        except Exception as exc:
+            self._update_run(
+                run_id,
+                {
+                    "status": "failed",
+                    "completed_at": _utc_now_iso(),
+                    "error": str(exc),
+                    "artifacts": self._collect_artifacts(config.output_dir),
+                    "stats": self._collect_stats(config.output_dir),
+                },
+            )
+        finally:
+            with self._lock:
+                self._active_threads.pop(run_id, None)
+
+    def _execute_follow_cam_render(self, run_id: str, config: AppConfig, parent_run_id: str) -> None:
+        self._update_run(run_id, {"status": "running", "started_at": _utc_now_iso(), "error": None})
+        try:
+            FollowCamGenerator(config).run()
+            existing = self.get_run(run_id)
+            updated = self._build_run_snapshot(
+                run_id=run_id,
+                source="follow_cam_render",
+                status="completed",
+                created_at=existing["created_at"],
+                config_name=existing.get("config_name"),
+                config_path=existing.get("config_path"),
+                input_video=str(config.input_video),
+                parent_run_id=parent_run_id,
+                output_dir=config.output_dir,
+                modules_enabled={"postprocess": False, "follow_cam": True},
                 notes=existing.get("notes"),
                 started_at=existing.get("started_at"),
                 completed_at=_utc_now_iso(),
@@ -615,11 +1273,37 @@ class ApiService:
                     config_name=None if config_meta is None else config_meta["name"],
                     config_path=None if config_meta is None else str(config_meta["path"]),
                     input_video=None if config_meta is None else config_meta["input_video"],
+                    parent_run_id=None,
                     output_dir=output_dir,
                     modules_enabled=self._collect_module_flags(output_dir, config_meta),
                     notes=None,
                 )
             )
+
+    def _normalize_registry_runs_locked(self, registry: dict[str, Any]) -> None:
+        for run in registry["runs"]:
+            created_at = _normalize_iso_timestamp(run.get("created_at"))
+            started_at = _normalize_iso_timestamp(run.get("started_at"))
+            completed_at = _normalize_iso_timestamp(run.get("completed_at"))
+            output_dir = Path(run["output_dir"]).resolve() if run.get("output_dir") else None
+            output_mtime = None
+            if output_dir is not None and output_dir.exists():
+                output_mtime = datetime.fromtimestamp(output_dir.stat().st_mtime, tz=timezone.utc).isoformat()
+
+            if created_at and run.get("created_at") != created_at:
+                run["created_at"] = created_at
+            if started_at and run.get("started_at") != started_at:
+                run["started_at"] = started_at
+            if completed_at and run.get("completed_at") != completed_at:
+                run["completed_at"] = completed_at
+
+            status = run.get("status")
+            if status == "running" and not run.get("started_at"):
+                run["started_at"] = created_at or output_mtime or _utc_now_iso()
+            if status in {"completed", "failed"} and not run.get("completed_at"):
+                run["completed_at"] = output_mtime or started_at or created_at or _utc_now_iso()
+            if status == "completed" and not run.get("started_at"):
+                run["started_at"] = created_at or run.get("completed_at")
 
     def _build_run_snapshot(
         self,
@@ -631,22 +1315,29 @@ class ApiService:
         config_name: str | None,
         config_path: str | None,
         input_video: str | None,
+        parent_run_id: str | None,
         output_dir: Path,
         modules_enabled: dict[str, bool],
         notes: str | None,
         started_at: str | None = None,
         completed_at: str | None = None,
     ) -> dict[str, Any]:
+        normalized_created_at = _normalize_iso_timestamp(created_at) or created_at
+        normalized_started_at = _normalize_iso_timestamp(started_at) if started_at else None
+        normalized_completed_at = _normalize_iso_timestamp(completed_at) if completed_at else None
+        if status in {"completed", "failed"} and normalized_completed_at is None:
+            normalized_completed_at = normalized_started_at or normalized_created_at
         return {
             "run_id": run_id,
             "source": source,
             "status": status,
-            "created_at": created_at,
-            "started_at": started_at,
-            "completed_at": completed_at,
+            "created_at": normalized_created_at,
+            "started_at": normalized_started_at,
+            "completed_at": normalized_completed_at,
             "config_name": config_name,
             "config_path": config_path,
             "input_video": input_video,
+            "parent_run_id": parent_run_id,
             "output_dir": str(output_dir.resolve()),
             "modules_enabled": modules_enabled,
             "artifacts": self._collect_artifacts(output_dir),
@@ -673,6 +1364,12 @@ class ApiService:
 
     def _build_config_summary(self, config_path: Path, relative_name: str) -> dict[str, Any]:
         raw = self._load_raw_yaml(config_path)
+        metadata = raw.get("metadata") if isinstance(raw, dict) else None
+        created_at = (
+            _normalize_iso_timestamp(metadata.get("created_at") if isinstance(metadata, dict) else None)
+            or _normalize_iso_timestamp(raw.get("created_at") if isinstance(raw, dict) else None)
+            or datetime.fromtimestamp(config_path.stat().st_ctime, tz=timezone.utc).isoformat()
+        )
         try:
             config = load_config(config_path)
             input_video = str(config.input_video)
@@ -695,6 +1392,7 @@ class ApiService:
         return {
             "name": relative_name,
             "path": str(config_path),
+            "created_at": created_at,
             "input_video": input_video,
             "output_dir": output_dir,
             "detector_model_path": detector_model_path,
@@ -713,6 +1411,604 @@ class ApiService:
                 return candidate, candidate.relative_to(self.config_dir).as_posix()
         raise FileNotFoundError(name)
 
+    def _resolve_run_config_reference(self, run: dict[str, Any]) -> tuple[Path, str]:
+        config_path_raw = run.get("config_path")
+        if config_path_raw:
+            config_path = Path(config_path_raw).resolve()
+            if config_path.exists() and config_path.is_file():
+                try:
+                    relative_name = config_path.relative_to(self.config_dir.resolve()).as_posix()
+                except ValueError:
+                    relative_name = run.get("config_name") or config_path.name
+                return config_path, relative_name
+        config_name = run.get("config_name")
+        if config_name:
+            return self._resolve_config_path(config_name)
+        raise FileNotFoundError(f"Run {run.get('run_id')} is not linked to a readable config.")
+
+    def _resolve_input_video_name(self, name: str) -> Path:
+        candidate = (self.data_dir / name).resolve()
+        data_root = self.data_dir.resolve()
+        if candidate != data_root and data_root not in candidate.parents:
+            raise FileNotFoundError(f"Input video must live under {data_root}: {name}")
+        if not candidate.exists() or not candidate.is_file():
+            raise FileNotFoundError(f"Input video not found: {name}")
+        return candidate
+
+    def _resolve_input_video_path(self, input_video: str) -> Path:
+        candidate = Path(input_video).resolve()
+        data_root = self.data_dir.resolve()
+        if candidate != data_root and data_root not in candidate.parents:
+            raise FileNotFoundError(f"Input video must live under {data_root}: {input_video}")
+        if not candidate.exists() or not candidate.is_file():
+            raise FileNotFoundError(f"Input video not found: {input_video}")
+        return candidate
+
+    def _prepare_follow_cam_render_inputs(self, source_output_dir: Path, render_output_dir: Path, config: AppConfig) -> None:
+        raw_csv = source_output_dir / config.output.csv_name
+        cleaned_csv = source_output_dir / config.postprocess.cleaned_csv_name
+        copied_any = False
+        for candidate in (raw_csv, cleaned_csv):
+            if not candidate.exists() or not candidate.is_file():
+                continue
+            shutil.copy2(candidate, render_output_dir / candidate.name)
+            copied_any = True
+        if not copied_any:
+            raise FileNotFoundError(f"Run output does not contain a usable track CSV: {source_output_dir}")
+
+    def _assert_path_not_used_by_active_run_locked(
+        self,
+        *,
+        input_video: Path | None = None,
+        config_path: Path | None = None,
+    ) -> None:
+        registry = self._read_registry()
+        for run in registry["runs"]:
+            if run.get("status") not in {"queued", "running"}:
+                continue
+            if input_video and run.get("input_video"):
+                run_input = Path(run["input_video"]).resolve()
+                if run_input == input_video.resolve():
+                    raise RuntimeError(f"File is used by active run: {run['run_id']}")
+            if config_path and run.get("config_path"):
+                run_config = Path(run["config_path"]).resolve()
+                if run_config == config_path.resolve():
+                    raise RuntimeError(f"Config is used by active run: {run['run_id']}")
+
+    def _sample_video_frames(self, video_path: Path) -> list[dict[str, Any]]:
+        capture = cv2.VideoCapture(str(video_path))
+        if not capture.isOpened():
+            return []
+
+        fps = float(capture.get(cv2.CAP_PROP_FPS) or 0.0)
+        frame_count = int(capture.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+        fractions = [0.18, 0.5, 0.82] if frame_count > 3 else [0.5]
+        samples: list[dict[str, Any]] = []
+        warmup_frames = 48
+
+        for index, fraction in enumerate(fractions, start=1):
+            frame_index = max(0, int(round((max(frame_count, 1) - 1) * fraction)))
+            ok, frame = self._read_frame_with_warmup(capture, frame_index, warmup_frames)
+            if not ok or frame is None:
+                continue
+            frame_height, frame_width = frame.shape[:2]
+            samples.append(
+                {
+                    "frame": frame,
+                    "frame_index": frame_index,
+                    "frame_time_seconds": frame_index / fps if fps > 0 else 0.0,
+                    "frame_width": int(frame_width),
+                    "frame_height": int(frame_height),
+                    "sample_index": index,
+                    "sample_count": len(fractions),
+                }
+            )
+
+        if not samples:
+            capture.set(cv2.CAP_PROP_POS_FRAMES, 0)
+            ok, frame = capture.read()
+            if ok and frame is not None:
+                frame_height, frame_width = frame.shape[:2]
+                samples.append(
+                    {
+                        "frame": frame,
+                        "frame_index": 0,
+                        "frame_time_seconds": 0.0,
+                        "frame_width": int(frame_width),
+                        "frame_height": int(frame_height),
+                        "sample_index": 1,
+                        "sample_count": 1,
+                    }
+                )
+
+        capture.release()
+        return samples
+
+    def _pick_field_preview_sample(self, video_path: Path, sample_index: int | None = None) -> dict[str, Any]:
+        samples = self._sample_video_frames(video_path)
+        if not samples:
+            raise RuntimeError(f"Unable to read preview frames from input video: {video_path}")
+        if sample_index is not None:
+            clamped_index = max(1, min(int(sample_index), len(samples)))
+            return samples[clamped_index - 1]
+        return samples[len(samples) // 2]
+
+    def _read_video_frame(self, video_path: Path, frame_index: int) -> dict[str, Any]:
+        capture = cv2.VideoCapture(str(video_path))
+        if not capture.isOpened():
+            raise RuntimeError(f"Unable to open input video: {video_path}")
+        fps = float(capture.get(cv2.CAP_PROP_FPS) or 0.0)
+        frame_count = int(capture.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+        clamped_index = max(0, min(frame_index, max(frame_count - 1, 0)))
+        ok, frame = self._read_frame_with_warmup(capture, clamped_index, warmup_frames=48)
+        capture.release()
+        if not ok or frame is None:
+            raise RuntimeError(f"Unable to read preview frame {clamped_index} from input video: {video_path}")
+        frame_height, frame_width = frame.shape[:2]
+        return {
+            "frame": frame,
+            "frame_index": clamped_index,
+            "frame_time_seconds": clamped_index / fps if fps > 0 else 0.0,
+            "frame_width": int(frame_width),
+            "frame_height": int(frame_height),
+            "sample_index": 1,
+            "sample_count": 1,
+        }
+
+    def _read_frame_with_warmup(self, capture: Any, frame_index: int, warmup_frames: int) -> tuple[bool, Any]:
+        seek_start = max(0, frame_index - warmup_frames)
+        capture.set(cv2.CAP_PROP_POS_FRAMES, seek_start)
+        ok = False
+        frame = None
+        for _ in range(frame_index - seek_start + 1):
+            ok, frame = capture.read()
+            if not ok or frame is None:
+                break
+        return ok, frame
+
+    def _detect_field_polygon(
+        self,
+        frame: Any,
+        content_bounds: tuple[int, int, int, int],
+    ) -> tuple[list[tuple[int, int]], float, bool]:
+        frame_height, frame_width = frame.shape[:2]
+        hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+        mask = cv2.inRange(hsv, (28, 28, 20), (96, 255, 255))
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (15, 15))
+        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+
+        content_x1, content_y1, content_x2, content_y2 = content_bounds
+        content_width = max(1, content_x2 - content_x1)
+        content_height = max(1, content_y2 - content_y1)
+        content_mask = mask[content_y1:content_y2, content_x1:content_x2]
+        coverage = float(cv2.countNonZero(content_mask)) / float(content_width * content_height)
+
+        band_height = max(6, int(round(content_height * 0.03)))
+        top_span = self._mask_row_span(mask, content_x1, content_x2, int(round(content_y1 + content_height * 0.18)), band_height)
+        bottom_span = self._mask_row_span(mask, content_x1, content_x2, int(round(content_y1 + content_height * 0.92)), band_height)
+        upper_contour = self._estimate_upper_field_contour(mask, content_bounds, point_count=7)
+
+        if coverage >= 0.08 and upper_contour and bottom_span:
+            polygon = self._clip_polygon(
+                upper_contour
+                + [
+                    (content_x2, max(bottom_span[2], int(round(content_y1 + content_height * 0.96)))),
+                    (content_x1, max(bottom_span[2], int(round(content_y1 + content_height * 0.96)))),
+                ],
+                frame_width=frame_width,
+                frame_height=frame_height,
+            )
+            return polygon, coverage, True
+
+        if coverage >= 0.08 and top_span and bottom_span:
+            polygon = self._clip_polygon(
+                self._polygon_to_nine_point_field(
+                    [
+                        (top_span[0], top_span[2]),
+                        (top_span[1], top_span[2]),
+                        (bottom_span[1], bottom_span[2]),
+                        (bottom_span[0], bottom_span[2]),
+                    ]
+                ),
+                frame_width=frame_width,
+                frame_height=frame_height,
+            )
+            return polygon, coverage, True
+
+        return self._default_field_polygon(content_bounds), 0.0, False
+
+    def _estimate_upper_field_contour(
+        self,
+        mask: Any,
+        content_bounds: tuple[int, int, int, int],
+        *,
+        point_count: int,
+    ) -> list[tuple[int, int]] | None:
+        content_x1, content_y1, content_x2, content_y2 = content_bounds
+        content_width = max(1, content_x2 - content_x1)
+        content_height = max(1, content_y2 - content_y1)
+        search_y2 = min(mask.shape[0], int(round(content_y1 + content_height * 0.72)))
+        if search_y2 <= content_y1:
+            return None
+
+        slice_half_width = max(18, int(round(content_width * 0.06)))
+        ratios = np.linspace(0.0, 1.0, point_count)
+        points: list[tuple[int, int]] = []
+
+        for index, ratio in enumerate(ratios):
+            anchor_x = int(round(content_x1 + ratio * content_width))
+            slice_x1 = max(content_x1, anchor_x - slice_half_width)
+            slice_x2 = min(content_x2, anchor_x + slice_half_width)
+            if slice_x2 <= slice_x1:
+                return None
+
+            band = mask[content_y1:search_y2, slice_x1:slice_x2]
+            band_points = cv2.findNonZero(band)
+            if band_points is None:
+                return None
+
+            ys = band_points[:, 0, 1]
+            xs = band_points[:, 0, 0]
+            percentile = 8 if index in {0, point_count - 1} else 12
+            point_y = content_y1 + int(round(float(np.percentile(ys, percentile))))
+            if index == 0:
+                point_x = slice_x1 + int(round(float(np.percentile(xs, 8))))
+            elif index == point_count - 1:
+                point_x = slice_x1 + int(round(float(np.percentile(xs, 92))))
+            else:
+                point_x = anchor_x
+            points.append((point_x, point_y))
+
+        smoothed: list[tuple[int, int]] = []
+        for index, (point_x, _) in enumerate(points):
+            neighbor_ys = [points[neighbor][1] for neighbor in range(max(0, index - 1), min(len(points), index + 2))]
+            smoothed.append((point_x, int(round(sum(neighbor_ys) / len(neighbor_ys)))))
+        return smoothed
+
+    def _detect_content_bounds(self, frame: Any) -> tuple[int, int, int, int]:
+        frame_height, frame_width = frame.shape[:2]
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        _, threshold = cv2.threshold(gray, 10, 255, cv2.THRESH_BINARY)
+        points = cv2.findNonZero(threshold)
+        if points is None:
+            return (0, 0, frame_width, frame_height)
+        x, y, width, height = cv2.boundingRect(points)
+        return (x, y, x + width, y + height)
+
+    def _mask_row_span(
+        self,
+        mask: Any,
+        x1: int,
+        x2: int,
+        y_center: int,
+        band_height: int,
+    ) -> tuple[int, int, int] | None:
+        y1 = max(0, y_center - band_height)
+        y2 = min(mask.shape[0], y_center + band_height)
+        if y2 <= y1 or x2 <= x1:
+            return None
+        band = mask[y1:y2, x1:x2]
+        points = cv2.findNonZero(band)
+        if points is None:
+            return None
+        xs = points[:, 0, 0]
+        return (x1 + int(xs.min()), x1 + int(xs.max()), int(round((y1 + y2) / 2.0)))
+
+    def _default_field_polygon(self, content_bounds: tuple[int, int, int, int]) -> list[tuple[int, int]]:
+        x1, y1, x2, y2 = content_bounds
+        width = max(1, x2 - x1)
+        height = max(1, y2 - y1)
+        if width / float(height) >= 2.6:
+            return self._polygon_to_nine_point_field(
+                [
+                (int(round(x1 + width * 0.18)), int(round(y1 + height * 0.18))),
+                (int(round(x1 + width * 0.82)), int(round(y1 + height * 0.18))),
+                (int(round(x1 + width * 0.98)), int(round(y1 + height * 0.96))),
+                (int(round(x1 + width * 0.02)), int(round(y1 + height * 0.96))),
+                ]
+            )
+        return self._polygon_to_nine_point_field(
+            self._roi_to_polygon(
+                (
+                    int(round(x1 + width * 0.08)),
+                    int(round(y1 + height * 0.10)),
+                    int(round(x2 - width * 0.08)),
+                    int(round(y2 - height * 0.06)),
+                )
+            )
+        )
+
+    def _roi_to_polygon(self, roi: tuple[int, int, int, int]) -> list[tuple[int, int]]:
+        x1, y1, x2, y2 = roi
+        return [(x1, y1), (x2, y1), (x2, y2), (x1, y2)]
+
+    def _polygon_to_nine_point_field(self, polygon: list[tuple[int, int]]) -> list[tuple[int, int]]:
+        if len(polygon) != 4:
+            return polygon
+        top_left, top_right, bottom_right, bottom_left = polygon
+        top_ratios = [0.0, 0.18, 0.36, 0.5, 0.64, 0.82, 1.0]
+        top_edge = [
+            (
+                int(round(top_left[0] + (top_right[0] - top_left[0]) * ratio)),
+                int(round(top_left[1] + (top_right[1] - top_left[1]) * ratio)),
+            )
+            for ratio in top_ratios
+        ]
+        return top_edge + [bottom_right, bottom_left]
+
+    def _polygon_bounds(self, polygon: list[tuple[int, int]]) -> tuple[int, int, int, int]:
+        xs = [point[0] for point in polygon]
+        ys = [point[1] for point in polygon]
+        return (min(xs), min(ys), max(xs), max(ys))
+
+    def _clip_polygon(
+        self,
+        polygon: list[tuple[int, int]],
+        *,
+        frame_width: int,
+        frame_height: int,
+    ) -> list[tuple[int, int]]:
+        return [
+            (
+                max(0, min(frame_width, int(round(x)))),
+                max(0, min(frame_height, int(round(y)))),
+            )
+            for x, y in polygon
+        ]
+
+    def _expand_polygon(
+        self,
+        polygon: list[tuple[int, int]],
+        *,
+        frame_width: int,
+        frame_height: int,
+        scale_x: float,
+        scale_y: float,
+    ) -> list[tuple[int, int]]:
+        bounds = self._polygon_bounds(polygon)
+        center_x = (bounds[0] + bounds[2]) / 2.0
+        center_y = (bounds[1] + bounds[3]) / 2.0
+        expanded: list[tuple[int, int]] = []
+        for x, y in polygon:
+            expanded.append(
+                (
+                    int(round(center_x + (x - center_x) * scale_x)),
+                    int(round(center_y + (y - center_y) * scale_y)),
+                )
+            )
+        return self._clip_polygon(expanded, frame_width=frame_width, frame_height=frame_height)
+
+    def _build_preview_bounds(
+        self,
+        *,
+        expanded_polygon: list[tuple[int, int]],
+        content_bounds: tuple[int, int, int, int],
+        frame_width: int,
+        frame_height: int,
+    ) -> tuple[int, int, int, int]:
+        content_x1, content_y1, content_x2, content_y2 = content_bounds
+        box_x1, box_y1, box_x2, box_y2 = self._polygon_bounds(expanded_polygon)
+        pad_x = max(12, int(round((content_x2 - content_x1) * 0.04)))
+        pad_y = max(12, int(round((content_y2 - content_y1) * 0.04)))
+        return (
+            max(0, max(content_x1, box_x1 - pad_x)),
+            max(0, max(content_y1, box_y1 - pad_y)),
+            min(frame_width, min(content_x2, box_x2 + pad_x)),
+            min(frame_height, min(content_y2, box_y2 + pad_y)),
+        )
+
+    def _normalize_points(self, raw_points: Any) -> list[tuple[int, int]]:
+        if not isinstance(raw_points, list):
+            return []
+        points: list[tuple[int, int]] = []
+        for raw_point in raw_points:
+            if not isinstance(raw_point, list) or len(raw_point) != 2:
+                return []
+            points.append((int(raw_point[0]), int(raw_point[1])))
+        return points
+
+    def _load_field_setup_from_config(
+        self,
+        *,
+        config_name: str,
+        frame_width: int,
+        frame_height: int,
+    ) -> dict[str, Any] | None:
+        config_path, _ = self._resolve_config_path(config_name)
+        raw = self._load_raw_yaml(config_path)
+        filtering_raw = raw.get("filtering") or {}
+        scene_bias_raw = raw.get("scene_bias") or {}
+        ground_zones = scene_bias_raw.get("ground_zones") or []
+        positive_rois = scene_bias_raw.get("positive_rois") or []
+
+        field_polygon: list[tuple[int, int]] = []
+        expanded_polygon: list[tuple[int, int]] = []
+
+        for zone in ground_zones:
+            if not isinstance(zone, dict):
+                continue
+            field_polygon = self._normalize_points(zone.get("points"))
+            if field_polygon:
+                break
+            roi = zone.get("roi")
+            if isinstance(roi, list) and len(roi) == 4:
+                field_polygon = self._roi_to_polygon(tuple(int(value) for value in roi))
+                break
+
+        for zone in positive_rois:
+            if not isinstance(zone, dict):
+                continue
+            expanded_polygon = self._normalize_points(zone.get("points"))
+            if expanded_polygon:
+                break
+            roi = zone.get("roi")
+            if isinstance(roi, list) and len(roi) == 4:
+                expanded_polygon = self._roi_to_polygon(tuple(int(value) for value in roi))
+                break
+
+        if not expanded_polygon:
+            roi = filtering_raw.get("roi")
+            if isinstance(roi, list) and len(roi) == 4:
+                expanded_polygon = self._roi_to_polygon(tuple(int(value) for value in roi))
+
+        if not field_polygon:
+            roi = filtering_raw.get("roi")
+            if isinstance(roi, list) and len(roi) == 4:
+                field_polygon = self._roi_to_polygon(tuple(int(value) for value in roi))
+
+        if not field_polygon:
+            return None
+
+        field_polygon = self._clip_polygon(field_polygon, frame_width=frame_width, frame_height=frame_height)
+        if not expanded_polygon:
+            expanded_polygon = self._expand_polygon(
+                field_polygon,
+                frame_width=frame_width,
+                frame_height=frame_height,
+                scale_x=1.08,
+                scale_y=1.10,
+            )
+        else:
+            expanded_polygon = self._clip_polygon(expanded_polygon, frame_width=frame_width, frame_height=frame_height)
+
+        return {
+            "field_polygon": field_polygon,
+            "expanded_polygon": expanded_polygon,
+            "field_roi": self._polygon_bounds(field_polygon),
+            "expanded_roi": self._polygon_bounds(expanded_polygon),
+        }
+
+    def _pad_roi(
+        self,
+        roi: tuple[int, int, int, int],
+        frame_width: int,
+        frame_height: int,
+        pad_x_ratio: float,
+        pad_y_ratio: float,
+    ) -> tuple[int, int, int, int]:
+        x1, y1, x2, y2 = roi
+        pad_x = int(round(frame_width * pad_x_ratio))
+        pad_y = int(round(frame_height * pad_y_ratio))
+        return (
+            max(0, x1 - pad_x),
+            max(0, y1 - pad_y),
+            min(frame_width, x2 + pad_x),
+            min(frame_height, y2 + pad_y),
+        )
+
+    def _expand_roi(
+        self,
+        roi: tuple[int, int, int, int],
+        *,
+        frame_width: int,
+        frame_height: int,
+        padding_x_ratio: float,
+        padding_y_ratio: float,
+    ) -> tuple[int, int, int, int]:
+        return self._pad_roi(
+            roi,
+            frame_width=frame_width,
+            frame_height=frame_height,
+            pad_x_ratio=padding_x_ratio,
+            pad_y_ratio=padding_y_ratio,
+        )
+
+    def _encode_frame_data_url(self, frame: Any) -> str:
+        ok, encoded = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), 82])
+        if not ok:
+            raise RuntimeError("Unable to encode preview frame.")
+        payload = base64.b64encode(encoded.tobytes()).decode("ascii")
+        return f"data:image/jpeg;base64,{payload}"
+
+    def _prepare_preview_frame(self, frame: Any, max_width: int = 1600) -> Any:
+        frame_height, frame_width = frame.shape[:2]
+        if frame_width <= max_width:
+            return frame
+        scale = max_width / float(frame_width)
+        target_size = (max_width, max(1, int(round(frame_height * scale))))
+        return cv2.resize(frame, target_size, interpolation=cv2.INTER_AREA)
+
+    def _build_field_config_patch(
+        self,
+        *,
+        field_polygon: list[tuple[int, int]],
+        expanded_polygon: list[tuple[int, int]],
+        expanded_roi: tuple[int, int, int, int],
+    ) -> dict[str, Any]:
+        expanded_width = max(1, expanded_roi[2] - expanded_roi[0])
+        expanded_height = max(1, expanded_roi[3] - expanded_roi[1])
+        return {
+            "filtering": {
+                "roi": list(expanded_roi),
+            },
+            "scene_bias": {
+                "enabled": True,
+                "ground_zones": [
+                    {
+                        "name": "field_core",
+                        "points": [list(point) for point in field_polygon],
+                    }
+                ],
+                "positive_rois": [
+                    {
+                        "name": "field_buffer",
+                        "points": [list(point) for point in expanded_polygon],
+                    }
+                ],
+                "dynamic_air_recovery": {
+                    "enabled": True,
+                    "edge_reentry_expand_x": float(expanded_width),
+                    "edge_reentry_expand_y": float(expanded_height),
+                },
+            },
+        }
+
+    def _materialize_run_config(
+        self,
+        *,
+        base_config_path: Path,
+        base_config_name: str,
+        run_id: str,
+        patch: dict[str, Any],
+        suffix: str,
+    ) -> tuple[Path, str]:
+        merged = _deep_merge(self._load_raw_yaml(base_config_path), patch)
+        output_name = f"{Path(base_config_name).stem}_{suffix}_{run_id}.yaml"
+        self.generated_config_dir.mkdir(parents=True, exist_ok=True)
+        output_path = self.generated_config_dir / output_name
+        with output_path.open("w", encoding="utf-8") as handle:
+            yaml.safe_dump(merged, handle, sort_keys=False, allow_unicode=False)
+        return output_path, output_path.relative_to(self.config_dir).as_posix()
+
+    def _build_run_output_dir(self, *, run_id: str, input_video: Path | None) -> Path:
+        input_group = self._input_group_slug(input_video)
+        return (self.run_outputs_dir / input_group / run_id).resolve()
+
+    def _input_group_slug(self, input_video: Path | None) -> str:
+        if input_video is None:
+            return "unbound"
+        resolved_input = input_video.resolve()
+        try:
+            relative = resolved_input.relative_to(self.data_dir.resolve())
+            slug_source = str(relative.with_suffix("")).replace("\\", "/").replace("/", "_")
+        except ValueError:
+            slug_source = resolved_input.stem
+        return self._slugify(slug_source) or "input"
+
+    def _run_activity_at(self, run: dict[str, Any]) -> str | None:
+        return (
+            _normalize_iso_timestamp(run.get("completed_at"))
+            or _normalize_iso_timestamp(run.get("started_at"))
+            or _normalize_iso_timestamp(run.get("created_at"))
+        )
+
+    def _timestamp_value(self, value: str | None) -> float:
+        normalized = _normalize_iso_timestamp(value)
+        if not normalized:
+            return 0.0
+        return datetime.fromisoformat(normalized).timestamp()
+
     def _iter_output_run_dirs(self) -> list[Path]:
         if not self.outputs_dir.exists():
             return []
@@ -722,6 +2018,12 @@ class ApiService:
                 continue
             if child.name == "api_runs":
                 discovered.extend(sorted((item for item in child.iterdir() if item.is_dir()), key=lambda item: item.name))
+                continue
+            if child.name == "runs":
+                for input_group_dir in sorted((item for item in child.iterdir() if item.is_dir()), key=lambda item: item.name):
+                    discovered.extend(sorted((item for item in input_group_dir.iterdir() if item.is_dir()), key=lambda item: item.name))
+                continue
+            if child.name == "_scratch":
                 continue
             discovered.append(child)
         return discovered
@@ -825,6 +2127,7 @@ class ApiService:
             return json.load(handle)
 
     def _slugify(self, text: str) -> str:
-        cleaned = "".join(char.lower() if char.isalnum() else "_" for char in text.strip())
+        normalized = unicodedata.normalize("NFKD", text.strip()).encode("ascii", "ignore").decode("ascii")
+        cleaned = "".join(char.lower() if char.isalnum() else "_" for char in normalized)
         collapsed = "_".join(filter(None, cleaned.split("_")))
         return collapsed[:48] or "ai_update"

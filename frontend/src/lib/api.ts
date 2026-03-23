@@ -5,13 +5,17 @@ import type {
   CameraPathResponse,
   ConfigDetail,
   ConfigListItem,
+  AssetGroup,
+  FieldPreview,
+  FieldSuggestion,
   HealthResponse,
+  InputCatalog,
   RunRecord,
 } from "./types";
 
 const API_BASE_URL =
   (import.meta.env.VITE_API_BASE_URL as string | undefined)?.replace(/\/$/, "") ??
-  "http://127.0.0.1:8000/api/v1";
+  "/api/v1";
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`${API_BASE_URL}${path}`, {
@@ -33,7 +37,30 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 export const api = {
   baseUrl: API_BASE_URL,
   getHealth: () => request<HealthResponse>("/health"),
+  listInputs: () => request<InputCatalog>("/inputs"),
+  deleteInput: (name: string) =>
+    request<{ name: string; path: string; deleted: boolean }>(`/inputs?name=${encodeURIComponent(name)}`, {
+      method: "DELETE",
+    }),
+  captureFieldPreview: (body: Record<string, unknown>) =>
+    request<FieldPreview>("/inputs/field-preview", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  suggestFieldSetup: (body: Record<string, unknown>) =>
+    request<FieldSuggestion>("/inputs/field-suggestion", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
   listConfigs: () => request<ConfigListItem[]>("/configs"),
+  deleteConfig: (name: string) =>
+    request<{ name: string; path: string; deleted: boolean }>(`/configs?name=${encodeURIComponent(name)}`, {
+      method: "DELETE",
+    }),
+  deleteRunOutput: (runId: string) =>
+    request<{ name: string; path: string; deleted: boolean }>(`/runs?run_id=${encodeURIComponent(runId)}`, {
+      method: "DELETE",
+    }),
   getConfig: (name: string) => request<ConfigDetail>(`/configs/${encodeURIComponent(name)}`),
   deriveConfig: (body: Record<string, unknown>) =>
     request<ConfigDetail>("/configs/derive", {
@@ -41,6 +68,7 @@ export const api = {
       body: JSON.stringify(body),
     }),
   listRuns: () => request<RunRecord[]>("/runs"),
+  listAssetGroups: () => request<AssetGroup[]>("/runs/asset-groups"),
   getRun: (runId: string) => request<RunRecord>(`/runs/${encodeURIComponent(runId)}`),
   getCleanupReport: (runId: string) => request<Record<string, unknown>>(`/runs/${encodeURIComponent(runId)}/cleanup-report`),
   getFollowCamReport: (runId: string) =>
@@ -49,6 +77,11 @@ export const api = {
     request<CameraPathResponse>(`/runs/${encodeURIComponent(runId)}/camera-path?limit=${limit}`),
   createRun: (body: Record<string, unknown>) =>
     request<RunRecord>("/runs", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  createFollowCamRender: (runId: string, body: Record<string, unknown>) =>
+    request<RunRecord>(`/runs/${encodeURIComponent(runId)}/follow-cam-render`, {
       method: "POST",
       body: JSON.stringify(body),
     }),

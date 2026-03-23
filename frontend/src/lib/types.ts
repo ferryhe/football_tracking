@@ -10,12 +10,52 @@ export interface HealthResponse {
 export interface ConfigListItem {
   name: string;
   path: string;
+  created_at: string | null;
   input_video: string | null;
   output_dir: string | null;
   detector_model_path: string | null;
   postprocess_enabled: boolean;
   follow_cam_enabled: boolean;
   exists: Record<string, boolean>;
+}
+
+export interface InputVideoItem {
+  name: string;
+  path: string;
+  size_bytes: number;
+  modified_at: string;
+}
+
+export interface InputCatalog {
+  root_dir: string;
+  videos: InputVideoItem[];
+}
+
+export type FieldPoint = [number, number];
+
+export interface FieldPreview {
+  input_video: string;
+  preview_data_url: string;
+  frame_width: number;
+  frame_height: number;
+  frame_index: number;
+  frame_time_seconds: number;
+  sample_index: number;
+  sample_count: number;
+}
+
+export interface FieldSuggestion extends FieldPreview {
+  input_video: string;
+  preview_bounds: [number, number, number, number];
+  field_polygon: FieldPoint[];
+  expanded_polygon: FieldPoint[];
+  field_roi: [number, number, number, number];
+  expanded_roi: [number, number, number, number];
+  confidence: "config" | "detected" | "fallback";
+  source: string;
+  field_coverage: number;
+  config_patch: Record<string, unknown>;
+  accepted?: boolean;
 }
 
 export interface ConfigDetail {
@@ -45,12 +85,27 @@ export interface RunRecord {
   config_name?: string | null;
   config_path?: string | null;
   input_video?: string | null;
+  parent_run_id?: string | null;
   output_dir: string;
   modules_enabled: Record<string, boolean>;
   artifacts: ArtifactSummary[];
   stats: Record<string, unknown>;
   notes?: string | null;
   error?: string | null;
+}
+
+export interface AssetGroup {
+  group_id: string;
+  title: string;
+  input_video: InputVideoItem | null;
+  last_activity_at: string | null;
+  run_count: number;
+  config_count: number;
+  output_count: number;
+  runs: RunRecord[];
+  configs: ConfigListItem[];
+  outputs: RunRecord[];
+  is_unbound: boolean;
 }
 
 export interface CameraPathResponse {

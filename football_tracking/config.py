@@ -613,6 +613,10 @@ def load_config(config_path: Path) -> AppConfig:
 
     config_path = config_path.resolve()
     base_dir = config_path.parent.parent
+    for parent in config_path.parents:
+        if parent.name == "config":
+            base_dir = parent.parent
+            break
 
     with config_path.open("r", encoding="utf-8") as file:
         raw = yaml.safe_load(file) or {}

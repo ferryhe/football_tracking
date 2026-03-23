@@ -3,7 +3,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, HTTPException
 
 from football_tracking.api.dependencies import get_service
-from football_tracking.api.schemas import ConfigDetail, ConfigListItem, DeriveConfigRequest
+from football_tracking.api.schemas import ConfigDetail, ConfigListItem, DeleteResourceResponse, DeriveConfigRequest
 from football_tracking.api.service import ApiService
 
 router = APIRouter()
@@ -34,3 +34,13 @@ def derive_config(request: DeriveConfigRequest, service: ApiService = Depends(ge
         )
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=f"Base config not found: {request.base_config_name}") from exc
+
+
+@router.delete("/configs", response_model=DeleteResourceResponse)
+def delete_config(name: str, service: ApiService = Depends(get_service)) -> DeleteResourceResponse:
+    try:
+        return DeleteResourceResponse(**service.delete_config(name))
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=f"Config not found: {name}") from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc

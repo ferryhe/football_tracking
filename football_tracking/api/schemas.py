@@ -6,6 +6,7 @@ from pydantic import BaseModel, Field
 
 
 RunStatus = Literal["queued", "running", "completed", "failed"]
+AIResponseLanguage = Literal["en", "zh"]
 
 
 class HealthResponse(BaseModel):
@@ -18,12 +19,73 @@ class HealthResponse(BaseModel):
 class ConfigListItem(BaseModel):
     name: str
     path: str
+    created_at: str | None = None
     input_video: str | None = None
     output_dir: str | None = None
     detector_model_path: str | None = None
     postprocess_enabled: bool
     follow_cam_enabled: bool
     exists: dict[str, bool]
+
+
+class InputVideoItem(BaseModel):
+    name: str
+    path: str
+    size_bytes: int
+    modified_at: str
+
+
+class InputCatalogResponse(BaseModel):
+    root_dir: str
+    videos: list[InputVideoItem] = Field(default_factory=list)
+
+
+class DeleteResourceResponse(BaseModel):
+    name: str
+    path: str
+    deleted: bool = True
+
+
+class FieldPreviewRequest(BaseModel):
+    input_video: str
+    sample_index: int | None = None
+
+
+class FieldPreviewResponse(BaseModel):
+    input_video: str
+    preview_data_url: str
+    frame_width: int
+    frame_height: int
+    frame_index: int
+    frame_time_seconds: float
+    sample_index: int
+    sample_count: int
+
+
+class FieldSuggestionRequest(BaseModel):
+    input_video: str
+    config_name: str | None = None
+    frame_index: int | None = None
+
+
+class FieldSuggestionResponse(BaseModel):
+    input_video: str
+    preview_data_url: str
+    preview_bounds: tuple[int, int, int, int]
+    frame_width: int
+    frame_height: int
+    frame_index: int
+    frame_time_seconds: float
+    sample_index: int
+    sample_count: int
+    field_polygon: list[tuple[int, int]] = Field(default_factory=list)
+    expanded_polygon: list[tuple[int, int]] = Field(default_factory=list)
+    field_roi: tuple[int, int, int, int]
+    expanded_roi: tuple[int, int, int, int]
+    confidence: Literal["config", "detected", "fallback"]
+    source: str
+    field_coverage: float
+    config_patch: dict[str, Any] = Field(default_factory=dict)
 
 
 class ConfigDetail(BaseModel):
@@ -59,6 +121,7 @@ class RunRecord(BaseModel):
     config_name: str | None = None
     config_path: str | None = None
     input_video: str | None = None
+    parent_run_id: str | None = None
     output_dir: str
     modules_enabled: dict[str, bool] = Field(default_factory=dict)
     artifacts: list[ArtifactSummary] = Field(default_factory=list)
@@ -67,14 +130,41 @@ class RunRecord(BaseModel):
     error: str | None = None
 
 
+class AssetGroup(BaseModel):
+    group_id: str
+    title: str
+    input_video: InputVideoItem | None = None
+    last_activity_at: str | None = None
+    run_count: int = 0
+    config_count: int = 0
+    output_count: int = 0
+    runs: list[RunRecord] = Field(default_factory=list)
+    configs: list[ConfigListItem] = Field(default_factory=list)
+    outputs: list[RunRecord] = Field(default_factory=list)
+    is_unbound: bool = False
+
+
 class CreateRunRequest(BaseModel):
     config_name: str
     input_video: str | None = None
+    parent_run_id: str | None = None
     output_dir_name: str | None = None
+    config_patch: dict[str, Any] = Field(default_factory=dict)
     enable_postprocess: bool | None = None
     enable_follow_cam: bool | None = None
     start_frame: int | None = None
     max_frames: int | None = None
+    notes: str | None = None
+
+
+class FollowCamRenderRequest(BaseModel):
+    output_dir_name: str | None = None
+    output_video_name: str | None = None
+    prefer_cleaned_track: bool = True
+    draw_ball_marker: bool = False
+    draw_frame_text: bool = False
+    target_width: int = 1920
+    target_height: int = 1080
     notes: str | None = None
 
 
@@ -90,11 +180,13 @@ class AIExplainRequest(BaseModel):
     run_id: str | None = None
     config_name: str | None = None
     focus: str | None = None
+    language: AIResponseLanguage = "en"
 
 
 class AIRecommendRequest(BaseModel):
     run_id: str
     objective: str | None = None
+    language: AIResponseLanguage = "en"
 
 
 class AIConfigDiffRequest(BaseModel):
