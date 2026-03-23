@@ -351,14 +351,17 @@ table {
 }
 
 .step-tab {
-  display: flex;
-  gap: 14px;
-  align-items: flex-start;
+  position: relative;
+  display: grid;
+  gap: 12px;
+  justify-items: center;
+  align-content: center;
   width: 100%;
-  text-align: left;
+  min-height: 130px;
+  text-align: center;
   color: inherit;
   cursor: pointer;
-  padding: 18px;
+  padding: 22px 18px 18px;
   border-radius: 22px;
   border: 1px solid var(--border-soft);
   background: var(--bg-panel);
@@ -422,6 +425,16 @@ table {
   color: var(--text-main);
 }
 
+.step-tab-index {
+  position: absolute;
+  top: 14px;
+  left: 14px;
+  width: 30px;
+  height: 30px;
+  border-radius: 12px;
+  font-size: 0.86rem;
+}
+
 .workflow-step.complete .workflow-marker,
 .step-tab.complete .step-tab-index,
 .assistant-stage.complete .assistant-stage-index {
@@ -448,6 +461,15 @@ table {
   min-width: 0;
 }
 
+.step-tab-copy.simple {
+  justify-items: center;
+}
+
+.step-tab-copy.simple strong {
+  font-size: 1.08rem;
+  letter-spacing: 0.01em;
+}
+
 .step-tab-copy p,
 .selection-summary-card p,
 .delivery-row p {
@@ -472,6 +494,22 @@ table {
   place-items: center;
   border-radius: 14px;
   background: rgba(255, 255, 255, 0.06);
+}
+
+.step-tab-icon-shell {
+  width: 62px;
+  height: 62px;
+  flex-shrink: 0;
+  display: grid;
+  place-items: center;
+  border-radius: 20px;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.08), rgba(255, 255, 255, 0.04));
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.03);
+}
+
+.step-tab-icon-shell .section-icon {
+  width: 28px;
+  height: 28px;
 }
 
 .workflow-copy p:last-child,
@@ -672,13 +710,40 @@ table {
   border-radius: 18px;
   border: 1px solid rgba(255, 255, 255, 0.08);
   background: #050806;
-  min-height: 220px;
+  min-height: 0;
 }
 
 .field-preview-shell img {
   display: block;
   width: 100%;
   height: auto;
+}
+
+.field-preview-overlay {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+}
+
+.field-polygon {
+  vector-effect: non-scaling-stroke;
+  stroke-linejoin: round;
+  stroke-linecap: round;
+}
+
+.field-polygon.field {
+  fill: rgba(118, 185, 109, 0.14);
+  stroke: rgba(118, 185, 109, 0.96);
+  stroke-width: 2.5px;
+}
+
+.field-polygon.expanded {
+  fill: rgba(240, 210, 122, 0.08);
+  stroke: rgba(240, 210, 122, 0.92);
+  stroke-width: 2px;
+  stroke-dasharray: 10 8;
 }
 
 .field-overlay-box {
@@ -701,6 +766,17 @@ table {
   display: grid;
   gap: 12px;
   grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+}
+
+.field-adjust-row {
+  display: grid;
+  gap: 10px;
+}
+
+.field-adjust-actions {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
 }
 
 .compact-empty {
@@ -1281,6 +1357,12 @@ td {
   color: var(--text-muted);
 }
 
+.notice-line.subtle.accepted {
+  color: #d5f2cf;
+  background: rgba(42, 111, 78, 0.22);
+  border-color: rgba(118, 185, 109, 0.28);
+}
+
 .icon-card .section-icon {
   color: var(--accent-warm);
 }
@@ -1329,7 +1411,6 @@ td {
 
   .top-tile-strip,
   .workflow-strip,
-  .step-tabs,
   .mini-stat-grid,
   .summary-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -1374,7 +1455,6 @@ td {
 
   .top-tile-strip,
   .workflow-strip,
-  .step-tabs,
   .command-picks,
   .content-grid.two-up,
   .hero-panel.compact,
@@ -1384,6 +1464,16 @@ td {
   .launch-summary,
   .mini-stat-grid,
   .detail-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .step-tabs {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 760px) {
+  .step-tabs {
     grid-template-columns: 1fr;
   }
 }

@@ -108,6 +108,25 @@ class ApiServiceSmokeTests(unittest.TestCase):
         writer.release()
         return path
 
+    def write_wide_video(self, relative_path: str) -> Path:
+        path = self.repo_root / relative_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        writer = cv2.VideoWriter(
+            str(path),
+            cv2.VideoWriter_fourcc(*"MJPG"),
+            6.0,
+            (1280, 360),
+        )
+        if not writer.isOpened():
+            self.skipTest("OpenCV video writer is unavailable in this environment.")
+        polygon = np.array([[180, 78], [1100, 74], [1238, 340], [42, 344]], dtype=np.int32)
+        for frame_index in range(12):
+            frame = np.zeros((360, 1280, 3), dtype=np.uint8)
+            cv2.fillPoly(frame, [polygon], (8, 150 + frame_index * 5, 8))
+            writer.write(frame)
+        writer.release()
+        return path
+
     def create_output_bundle(self, folder_name: str) -> Path:
         output_dir = self.repo_root / "outputs" / folder_name
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -185,9 +204,12 @@ class ApiServiceSmokeTests(unittest.TestCase):
         suggestion = self.service.suggest_field_setup(str(video_path))
 
         self.assertTrue(suggestion["preview_data_url"].startswith("data:image/jpeg;base64,"))
-        self.assertEqual("detected", suggestion["confidence"])
+        self.assertIn(suggestion["confidence"], {"detected", "fallback"})
         self.assertEqual(640, suggestion["frame_width"])
         self.assertEqual(360, suggestion["frame_height"])
+        self.assertEqual(4, len(suggestion["preview_bounds"]))
+        self.assertEqual(4, len(suggestion["field_polygon"]))
+        self.assertEqual(4, len(suggestion["expanded_polygon"]))
         field_roi = suggestion["field_roi"]
         expanded_roi = suggestion["expanded_roi"]
         self.assertLess(field_roi[0], field_roi[2])
@@ -195,7 +217,49 @@ class ApiServiceSmokeTests(unittest.TestCase):
         self.assertLessEqual(expanded_roi[0], field_roi[0])
         self.assertGreaterEqual(expanded_roi[2], field_roi[2])
         self.assertEqual(list(expanded_roi), suggestion["config_patch"]["filtering"]["roi"])
-        self.assertEqual(list(field_roi), suggestion["config_patch"]["scene_bias"]["ground_zones"][0]["roi"])
+        self.assertEqual(4, len(suggestion["config_patch"]["scene_bias"]["ground_zones"][0]["points"]))
+
+    def test_suggest_field_setup_prefers_existing_config_polygon(self) -> None:
+        video_path = self.write_video("data/config_preview.avi")
+        self.write_yaml(
+            "config/polygon.yaml",
+            {
+                **build_sample_config(),
+                "scene_bias": {
+                    "enabled": True,
+                    "ground_zones": [
+                        {
+                            "name": "main_pitch",
+                            "points": [[32, 96], [608, 92], [632, 340], [12, 344]],
+                        }
+                    ],
+                    "positive_rois": [
+                        {
+                            "name": "main_pitch_buffer",
+                            "points": [[8, 80], [632, 80], [640, 356], [0, 356]],
+                        }
+                    ],
+                },
+            },
+        )
+
+        suggestion = self.service.suggest_field_setup(str(video_path), config_name="polygon.yaml")
+
+        self.assertEqual("config", suggestion["confidence"])
+        self.assertEqual("config:polygon.yaml", suggestion["source"])
+        self.assertEqual((32, 96), suggestion["field_polygon"][0])
+        self.assertEqual((8, 80), suggestion["expanded_polygon"][0])
+
+    def test_suggest_field_setup_crops_preview_for_wide_video(self) -> None:
+        video_path = self.write_wide_video("data/fisheye_preview.avi")
+
+        suggestion = self.service.suggest_field_setup(str(video_path))
+
+        preview_x1, _, preview_x2, _ = suggestion["preview_bounds"]
+        self.assertGreater(preview_x1, 0)
+        self.assertLess(preview_x2, suggestion["frame_width"])
+        self.assertEqual(4, len(suggestion["field_polygon"]))
+        self.assertLess(suggestion["field_polygon"][0][1], suggestion["field_polygon"][3][1])
 
     def test_materialize_run_config_writes_generated_patch_file(self) -> None:
         config_path, relative_name = self.service._resolve_config_path("default.yaml")

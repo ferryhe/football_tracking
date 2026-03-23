@@ -139,56 +139,97 @@ class ApiService:
             "videos": videos,
         }
 
-    def suggest_field_setup(self, input_video: str) -> dict[str, Any]:
+    def suggest_field_setup(self, input_video: str, config_name: str | None = None) -> dict[str, Any]:
         video_path = self._resolve_input_video_path(input_video)
         samples = self._sample_video_frames(video_path)
         if not samples:
             raise RuntimeError(f"Unable to read preview frames from input video: {video_path}")
 
         best_sample: dict[str, Any] | None = None
-        for sample in samples:
-            field_roi, coverage, detected = self._detect_field_roi(sample["frame"])
-            candidate = {
-                **sample,
-                "field_roi": field_roi,
-                "expanded_roi": self._expand_roi(
-                    field_roi,
+        config_shape: dict[str, Any] | None = None
+
+        if config_name:
+            config_shape = self._load_field_setup_from_config(
+                config_name=config_name,
+                frame_width=samples[len(samples) // 2]["frame_width"],
+                frame_height=samples[len(samples) // 2]["frame_height"],
+            )
+            if config_shape is not None:
+                sample = samples[len(samples) // 2]
+                preview_bounds = self._build_preview_bounds(
+                    expanded_polygon=config_shape["expanded_polygon"],
+                    content_bounds=self._detect_content_bounds(sample["frame"]),
                     frame_width=sample["frame_width"],
                     frame_height=sample["frame_height"],
-                    padding_x_ratio=0.08,
-                    padding_y_ratio=0.10,
-                ),
-                "coverage": round(coverage, 4),
-                "confidence": "detected" if detected else "fallback",
-                "source": "field-green-heuristic" if detected else "safe-full-frame",
-            }
-            if best_sample is None:
-                best_sample = candidate
-                continue
-            if candidate["confidence"] == "detected" and best_sample["confidence"] != "detected":
-                best_sample = candidate
-                continue
-            if candidate["coverage"] > best_sample["coverage"]:
-                best_sample = candidate
+                )
+                best_sample = {
+                    **sample,
+                    **config_shape,
+                    "coverage": 1.0,
+                    "confidence": "config",
+                    "source": f"config:{config_name}",
+                    "preview_bounds": preview_bounds,
+                }
+
+        if best_sample is None:
+            for sample in samples:
+                content_bounds = self._detect_content_bounds(sample["frame"])
+                field_polygon, coverage, detected = self._detect_field_polygon(sample["frame"], content_bounds)
+                expanded_polygon = self._expand_polygon(
+                    field_polygon,
+                    frame_width=sample["frame_width"],
+                    frame_height=sample["frame_height"],
+                    scale_x=1.08,
+                    scale_y=1.10,
+                )
+                candidate = {
+                    **sample,
+                    "field_polygon": field_polygon,
+                    "expanded_polygon": expanded_polygon,
+                    "field_roi": self._polygon_bounds(field_polygon),
+                    "expanded_roi": self._polygon_bounds(expanded_polygon),
+                    "coverage": round(coverage, 4),
+                    "confidence": "detected" if detected else "fallback",
+                    "source": "field-green-heuristic" if detected else "safe-trapezoid-fallback",
+                    "preview_bounds": self._build_preview_bounds(
+                        expanded_polygon=expanded_polygon,
+                        content_bounds=content_bounds,
+                        frame_width=sample["frame_width"],
+                        frame_height=sample["frame_height"],
+                    ),
+                }
+                if best_sample is None:
+                    best_sample = candidate
+                    continue
+                if candidate["confidence"] == "detected" and best_sample["confidence"] != "detected":
+                    best_sample = candidate
+                    continue
+                if candidate["coverage"] > best_sample["coverage"]:
+                    best_sample = candidate
 
         if best_sample is None:
             raise RuntimeError(f"Unable to build a field suggestion for input video: {video_path}")
 
+        preview_x1, preview_y1, preview_x2, preview_y2 = best_sample["preview_bounds"]
         return {
             "input_video": str(video_path),
-            "preview_data_url": self._encode_frame_data_url(best_sample["frame"]),
+            "preview_data_url": self._encode_frame_data_url(best_sample["frame"][preview_y1:preview_y2, preview_x1:preview_x2]),
+            "preview_bounds": best_sample["preview_bounds"],
             "frame_width": best_sample["frame_width"],
             "frame_height": best_sample["frame_height"],
             "frame_time_seconds": round(best_sample["frame_time_seconds"], 2),
             "sample_index": best_sample["sample_index"],
             "sample_count": best_sample["sample_count"],
+            "field_polygon": best_sample["field_polygon"],
+            "expanded_polygon": best_sample["expanded_polygon"],
             "field_roi": best_sample["field_roi"],
             "expanded_roi": best_sample["expanded_roi"],
             "confidence": best_sample["confidence"],
             "source": best_sample["source"],
             "field_coverage": best_sample["coverage"],
             "config_patch": self._build_field_config_patch(
-                field_roi=best_sample["field_roi"],
+                field_polygon=best_sample["field_polygon"],
+                expanded_polygon=best_sample["expanded_polygon"],
                 expanded_roi=best_sample["expanded_roi"],
             ),
         }
@@ -1072,7 +1113,11 @@ class ApiService:
         capture.release()
         return samples
 
-    def _detect_field_roi(self, frame: Any) -> tuple[tuple[int, int, int, int], float, bool]:
+    def _detect_field_polygon(
+        self,
+        frame: Any,
+        content_bounds: tuple[int, int, int, int],
+    ) -> tuple[list[tuple[int, int]], float, bool]:
         frame_height, frame_width = frame.shape[:2]
         hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
         mask = cv2.inRange(hsv, (28, 28, 20), (96, 255, 255))
@@ -1080,32 +1125,225 @@ class ApiService:
         mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
         mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
 
-        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        best_box: tuple[int, int, int, int] | None = None
-        best_area = 0.0
-        for contour in contours:
-            x, y, width, height = cv2.boundingRect(contour)
-            area = float(width * height)
-            if width < frame_width * 0.18 or height < frame_height * 0.18:
-                continue
-            if area > best_area:
-                best_area = area
-                best_box = (x, y, x + width, y + height)
+        content_x1, content_y1, content_x2, content_y2 = content_bounds
+        content_width = max(1, content_x2 - content_x1)
+        content_height = max(1, content_y2 - content_y1)
+        content_mask = mask[content_y1:content_y2, content_x1:content_x2]
+        coverage = float(cv2.countNonZero(content_mask)) / float(content_width * content_height)
 
-        if best_box is None or best_area / float(frame_width * frame_height) < 0.10:
-            return self._default_field_roi(frame_width, frame_height), 0.0, False
+        band_height = max(6, int(round(content_height * 0.03)))
+        top_span = self._mask_row_span(mask, content_x1, content_x2, int(round(content_y1 + content_height * 0.18)), band_height)
+        bottom_span = self._mask_row_span(mask, content_x1, content_x2, int(round(content_y1 + content_height * 0.92)), band_height)
 
-        return self._pad_roi(best_box, frame_width, frame_height, pad_x_ratio=0.015, pad_y_ratio=0.02), best_area / float(
-            frame_width * frame_height
-        ), True
+        if coverage >= 0.08 and top_span and bottom_span:
+            polygon = self._clip_polygon(
+                [
+                    (top_span[0], top_span[2]),
+                    (top_span[1], top_span[2]),
+                    (bottom_span[1], bottom_span[2]),
+                    (bottom_span[0], bottom_span[2]),
+                ],
+                frame_width=frame_width,
+                frame_height=frame_height,
+            )
+            return polygon, coverage, True
 
-    def _default_field_roi(self, frame_width: int, frame_height: int) -> tuple[int, int, int, int]:
-        return (
-            int(round(frame_width * 0.05)),
-            int(round(frame_height * 0.10)),
-            int(round(frame_width * 0.95)),
-            int(round(frame_height * 0.92)),
+        return self._default_field_polygon(content_bounds), 0.0, False
+
+    def _detect_content_bounds(self, frame: Any) -> tuple[int, int, int, int]:
+        frame_height, frame_width = frame.shape[:2]
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        _, threshold = cv2.threshold(gray, 10, 255, cv2.THRESH_BINARY)
+        points = cv2.findNonZero(threshold)
+        if points is None:
+            return (0, 0, frame_width, frame_height)
+        x, y, width, height = cv2.boundingRect(points)
+        return (x, y, x + width, y + height)
+
+    def _mask_row_span(
+        self,
+        mask: Any,
+        x1: int,
+        x2: int,
+        y_center: int,
+        band_height: int,
+    ) -> tuple[int, int, int] | None:
+        y1 = max(0, y_center - band_height)
+        y2 = min(mask.shape[0], y_center + band_height)
+        if y2 <= y1 or x2 <= x1:
+            return None
+        band = mask[y1:y2, x1:x2]
+        points = cv2.findNonZero(band)
+        if points is None:
+            return None
+        xs = points[:, 0, 0]
+        return (x1 + int(xs.min()), x1 + int(xs.max()), int(round((y1 + y2) / 2.0)))
+
+    def _default_field_polygon(self, content_bounds: tuple[int, int, int, int]) -> list[tuple[int, int]]:
+        x1, y1, x2, y2 = content_bounds
+        width = max(1, x2 - x1)
+        height = max(1, y2 - y1)
+        if width / float(height) >= 2.6:
+            return [
+                (int(round(x1 + width * 0.18)), int(round(y1 + height * 0.18))),
+                (int(round(x1 + width * 0.82)), int(round(y1 + height * 0.18))),
+                (int(round(x1 + width * 0.98)), int(round(y1 + height * 0.96))),
+                (int(round(x1 + width * 0.02)), int(round(y1 + height * 0.96))),
+            ]
+        return self._roi_to_polygon(
+            (
+                int(round(x1 + width * 0.08)),
+                int(round(y1 + height * 0.10)),
+                int(round(x2 - width * 0.08)),
+                int(round(y2 - height * 0.06)),
+            )
         )
+
+    def _roi_to_polygon(self, roi: tuple[int, int, int, int]) -> list[tuple[int, int]]:
+        x1, y1, x2, y2 = roi
+        return [(x1, y1), (x2, y1), (x2, y2), (x1, y2)]
+
+    def _polygon_bounds(self, polygon: list[tuple[int, int]]) -> tuple[int, int, int, int]:
+        xs = [point[0] for point in polygon]
+        ys = [point[1] for point in polygon]
+        return (min(xs), min(ys), max(xs), max(ys))
+
+    def _clip_polygon(
+        self,
+        polygon: list[tuple[int, int]],
+        *,
+        frame_width: int,
+        frame_height: int,
+    ) -> list[tuple[int, int]]:
+        return [
+            (
+                max(0, min(frame_width, int(round(x)))),
+                max(0, min(frame_height, int(round(y)))),
+            )
+            for x, y in polygon
+        ]
+
+    def _expand_polygon(
+        self,
+        polygon: list[tuple[int, int]],
+        *,
+        frame_width: int,
+        frame_height: int,
+        scale_x: float,
+        scale_y: float,
+    ) -> list[tuple[int, int]]:
+        bounds = self._polygon_bounds(polygon)
+        center_x = (bounds[0] + bounds[2]) / 2.0
+        center_y = (bounds[1] + bounds[3]) / 2.0
+        expanded: list[tuple[int, int]] = []
+        for x, y in polygon:
+            expanded.append(
+                (
+                    int(round(center_x + (x - center_x) * scale_x)),
+                    int(round(center_y + (y - center_y) * scale_y)),
+                )
+            )
+        return self._clip_polygon(expanded, frame_width=frame_width, frame_height=frame_height)
+
+    def _build_preview_bounds(
+        self,
+        *,
+        expanded_polygon: list[tuple[int, int]],
+        content_bounds: tuple[int, int, int, int],
+        frame_width: int,
+        frame_height: int,
+    ) -> tuple[int, int, int, int]:
+        content_x1, content_y1, content_x2, content_y2 = content_bounds
+        box_x1, box_y1, box_x2, box_y2 = self._polygon_bounds(expanded_polygon)
+        pad_x = max(12, int(round((content_x2 - content_x1) * 0.04)))
+        pad_y = max(12, int(round((content_y2 - content_y1) * 0.04)))
+        return (
+            max(0, max(content_x1, box_x1 - pad_x)),
+            max(0, max(content_y1, box_y1 - pad_y)),
+            min(frame_width, min(content_x2, box_x2 + pad_x)),
+            min(frame_height, min(content_y2, box_y2 + pad_y)),
+        )
+
+    def _normalize_points(self, raw_points: Any) -> list[tuple[int, int]]:
+        if not isinstance(raw_points, list):
+            return []
+        points: list[tuple[int, int]] = []
+        for raw_point in raw_points:
+            if not isinstance(raw_point, list) or len(raw_point) != 2:
+                return []
+            points.append((int(raw_point[0]), int(raw_point[1])))
+        return points
+
+    def _load_field_setup_from_config(
+        self,
+        *,
+        config_name: str,
+        frame_width: int,
+        frame_height: int,
+    ) -> dict[str, Any] | None:
+        config_path, _ = self._resolve_config_path(config_name)
+        raw = self._load_raw_yaml(config_path)
+        filtering_raw = raw.get("filtering") or {}
+        scene_bias_raw = raw.get("scene_bias") or {}
+        ground_zones = scene_bias_raw.get("ground_zones") or []
+        positive_rois = scene_bias_raw.get("positive_rois") or []
+
+        field_polygon: list[tuple[int, int]] = []
+        expanded_polygon: list[tuple[int, int]] = []
+
+        for zone in ground_zones:
+            if not isinstance(zone, dict):
+                continue
+            field_polygon = self._normalize_points(zone.get("points"))
+            if field_polygon:
+                break
+            roi = zone.get("roi")
+            if isinstance(roi, list) and len(roi) == 4:
+                field_polygon = self._roi_to_polygon(tuple(int(value) for value in roi))
+                break
+
+        for zone in positive_rois:
+            if not isinstance(zone, dict):
+                continue
+            expanded_polygon = self._normalize_points(zone.get("points"))
+            if expanded_polygon:
+                break
+            roi = zone.get("roi")
+            if isinstance(roi, list) and len(roi) == 4:
+                expanded_polygon = self._roi_to_polygon(tuple(int(value) for value in roi))
+                break
+
+        if not expanded_polygon:
+            roi = filtering_raw.get("roi")
+            if isinstance(roi, list) and len(roi) == 4:
+                expanded_polygon = self._roi_to_polygon(tuple(int(value) for value in roi))
+
+        if not field_polygon:
+            roi = filtering_raw.get("roi")
+            if isinstance(roi, list) and len(roi) == 4:
+                field_polygon = self._roi_to_polygon(tuple(int(value) for value in roi))
+
+        if not field_polygon:
+            return None
+
+        field_polygon = self._clip_polygon(field_polygon, frame_width=frame_width, frame_height=frame_height)
+        if not expanded_polygon:
+            expanded_polygon = self._expand_polygon(
+                field_polygon,
+                frame_width=frame_width,
+                frame_height=frame_height,
+                scale_x=1.08,
+                scale_y=1.10,
+            )
+        else:
+            expanded_polygon = self._clip_polygon(expanded_polygon, frame_width=frame_width, frame_height=frame_height)
+
+        return {
+            "field_polygon": field_polygon,
+            "expanded_polygon": expanded_polygon,
+            "field_roi": self._polygon_bounds(field_polygon),
+            "expanded_roi": self._polygon_bounds(expanded_polygon),
+        }
 
     def _pad_roi(
         self,
@@ -1152,7 +1390,8 @@ class ApiService:
     def _build_field_config_patch(
         self,
         *,
-        field_roi: tuple[int, int, int, int],
+        field_polygon: list[tuple[int, int]],
+        expanded_polygon: list[tuple[int, int]],
         expanded_roi: tuple[int, int, int, int],
     ) -> dict[str, Any]:
         expanded_width = max(1, expanded_roi[2] - expanded_roi[0])
@@ -1166,13 +1405,13 @@ class ApiService:
                 "ground_zones": [
                     {
                         "name": "field_core",
-                        "roi": list(field_roi),
+                        "points": [list(point) for point in field_polygon],
                     }
                 ],
                 "positive_rois": [
                     {
                         "name": "field_buffer",
-                        "roi": list(expanded_roi),
+                        "points": [list(point) for point in expanded_polygon],
                     }
                 ],
                 "dynamic_air_recovery": {

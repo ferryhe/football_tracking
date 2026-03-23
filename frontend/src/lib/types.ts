@@ -30,20 +30,26 @@ export interface InputCatalog {
   videos: InputVideoItem[];
 }
 
+export type FieldPoint = [number, number];
+
 export interface FieldSuggestion {
   input_video: string;
   preview_data_url: string;
+  preview_bounds: [number, number, number, number];
   frame_width: number;
   frame_height: number;
   frame_time_seconds: number;
   sample_index: number;
   sample_count: number;
+  field_polygon: FieldPoint[];
+  expanded_polygon: FieldPoint[];
   field_roi: [number, number, number, number];
   expanded_roi: [number, number, number, number];
-  confidence: "detected" | "fallback";
+  confidence: "config" | "detected" | "fallback";
   source: string;
   field_coverage: number;
   config_patch: Record<string, unknown>;
+  accepted?: boolean;
 }
 
 export interface ConfigDetail {

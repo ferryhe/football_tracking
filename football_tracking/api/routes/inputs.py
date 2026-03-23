@@ -17,7 +17,7 @@ def list_input_videos(service: ApiService = Depends(get_service)) -> InputCatalo
 @router.post("/inputs/field-suggestion", response_model=FieldSuggestionResponse)
 def suggest_field_setup(request: FieldSuggestionRequest, service: ApiService = Depends(get_service)) -> FieldSuggestionResponse:
     try:
-        return FieldSuggestionResponse(**service.suggest_field_setup(request.input_video))
+        return FieldSuggestionResponse(**service.suggest_field_setup(request.input_video, config_name=request.config_name))
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except RuntimeError as exc:

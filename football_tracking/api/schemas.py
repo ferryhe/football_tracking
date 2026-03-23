@@ -41,19 +41,23 @@ class InputCatalogResponse(BaseModel):
 
 class FieldSuggestionRequest(BaseModel):
     input_video: str
+    config_name: str | None = None
 
 
 class FieldSuggestionResponse(BaseModel):
     input_video: str
     preview_data_url: str
+    preview_bounds: tuple[int, int, int, int]
     frame_width: int
     frame_height: int
     frame_time_seconds: float
     sample_index: int
     sample_count: int
+    field_polygon: list[tuple[int, int]] = Field(default_factory=list)
+    expanded_polygon: list[tuple[int, int]] = Field(default_factory=list)
     field_roi: tuple[int, int, int, int]
     expanded_roi: tuple[int, int, int, int]
-    confidence: Literal["detected", "fallback"]
+    confidence: Literal["config", "detected", "fallback"]
     source: str
     field_coverage: float
     config_patch: dict[str, Any] = Field(default_factory=dict)

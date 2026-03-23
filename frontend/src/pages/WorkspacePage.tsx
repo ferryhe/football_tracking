@@ -33,6 +33,8 @@ interface WorkspacePageProps {
   onSelectConfig: (name: string) => void;
   onGenerateFieldSuggestion: () => Promise<void>;
   onClearFieldSuggestion: () => void;
+  onUpdateFieldSuggestion: (suggestion: FieldSuggestion) => void;
+  onAcceptFieldSuggestion: (suggestion: FieldSuggestion) => void;
   onStartBaselineRun: () => Promise<void>;
 }
 
@@ -131,6 +133,8 @@ export function WorkspacePage({
   onSelectConfig,
   onGenerateFieldSuggestion,
   onClearFieldSuggestion,
+  onUpdateFieldSuggestion,
+  onAcceptFieldSuggestion,
   onStartBaselineRun,
 }: WorkspacePageProps) {
   const { copy, formatDateTime, formatRunStatus } = useI18n();
@@ -205,6 +209,8 @@ export function WorkspacePage({
                   message={fieldMessage}
                   onGenerate={onGenerateFieldSuggestion}
                   onClear={onClearFieldSuggestion}
+                  onUpdate={onUpdateFieldSuggestion}
+                  onAccept={onAcceptFieldSuggestion}
                 />
               ) : null}
             </section>

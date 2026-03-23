@@ -12,7 +12,6 @@ interface StageTab {
   key: WorkspaceStage;
   icon: ComponentType<SVGProps<SVGSVGElement>>;
   title: string;
-  detail: string;
   state: "complete" | "current" | "upcoming";
 }
 
@@ -36,8 +35,16 @@ function pickPreferredConfigName(configs: ConfigListItem[], runs: RunRecord[], i
   return configs[0]?.name ?? current;
 }
 
+function configHasFieldSetup(raw: Record<string, unknown>): boolean {
+  const filtering = (raw.filtering as Record<string, unknown> | undefined) ?? {};
+  const sceneBias = (raw.scene_bias as Record<string, unknown> | undefined) ?? {};
+  const groundZones = Array.isArray(sceneBias.ground_zones) ? sceneBias.ground_zones : [];
+  const positiveRois = Array.isArray(sceneBias.positive_rois) ? sceneBias.positive_rois : [];
+  return Boolean(filtering.roi) || groundZones.length > 0 || positiveRois.length > 0;
+}
+
 export function App() {
-  const { copy, formatDateTime } = useI18n();
+  const { copy } = useI18n();
   const [health, setHealth] = useState<HealthResponse | null>(null);
   const [inputCatalog, setInputCatalog] = useState<InputCatalog>({ root_dir: "", videos: [] });
   const [configs, setConfigs] = useState<ConfigListItem[]>([]);
@@ -145,6 +152,52 @@ export function App() {
     setFieldMessage(null);
   }, [selectedConfigName, selectedInputPath]);
 
+  useEffect(() => {
+    let cancelled = false;
+
+    async function syncFieldSetupFromConfig() {
+      if (!selectedInputPath || !selectedConfigName) {
+        return;
+      }
+      try {
+        const detail = await api.getConfig(selectedConfigName);
+        if (!configHasFieldSetup(detail.raw)) {
+          if (!cancelled) {
+            setFieldSuggestions((current) => {
+              const existing = current[selectedInputPath];
+              if (!existing?.source.startsWith("config:")) {
+                return current;
+              }
+              const next = { ...current };
+              delete next[selectedInputPath];
+              return next;
+            });
+          }
+          return;
+        }
+        const suggestion = await api.suggestFieldSetup({
+          input_video: selectedInputPath,
+          config_name: selectedConfigName,
+        });
+        if (cancelled) {
+          return;
+        }
+        setFieldSuggestions((current) => ({
+          ...current,
+          [selectedInputPath]: { ...suggestion, accepted: true },
+        }));
+        setFieldMessage(copy.workspace.fieldLoadedFromConfig);
+      } catch {
+        // Keep the current suggestion untouched when the config does not provide field setup.
+      }
+    }
+
+    void syncFieldSetupFromConfig();
+    return () => {
+      cancelled = true;
+    };
+  }, [copy.workspace.fieldLoadedFromConfig, selectedConfigName, selectedInputPath]);
+
   const orderedRuns = useMemo(
     () =>
       [...runs].sort((left, right) => {
@@ -207,7 +260,7 @@ export function App() {
       const suggestion = await api.suggestFieldSetup({ input_video: selectedInputPath });
       setFieldSuggestions((current) => ({
         ...current,
-        [selectedInputPath]: suggestion,
+        [selectedInputPath]: { ...suggestion, accepted: false },
       }));
       setFieldMessage(copy.workspace.fieldReadyMessage);
     } catch (caughtError) {
@@ -229,6 +282,27 @@ export function App() {
     setFieldMessage(null);
   }
 
+  function handleUpdateFieldSuggestion(nextSuggestion: FieldSuggestion) {
+    if (!selectedInputPath) {
+      return;
+    }
+    setFieldSuggestions((current) => ({
+      ...current,
+      [selectedInputPath]: nextSuggestion,
+    }));
+  }
+
+  function handleAcceptFieldSuggestion(nextSuggestion: FieldSuggestion) {
+    if (!selectedInputPath) {
+      return;
+    }
+    setFieldSuggestions((current) => ({
+      ...current,
+      [selectedInputPath]: { ...nextSuggestion, accepted: true },
+    }));
+    setFieldMessage(copy.workspace.fieldAcceptedMessage);
+  }
+
   async function handleStartBaselineRun() {
     if (!selectedConfig) {
       setLaunchMessage(copy.workspace.noBaselineBody);
@@ -240,10 +314,12 @@ export function App() {
       const createdRun = await api.createRun({
         config_name: selectedConfigName,
         input_video: selectedInputPath || undefined,
-        config_patch: activeFieldSuggestion?.config_patch,
+        config_patch: activeFieldSuggestion?.accepted ? activeFieldSuggestion.config_patch : undefined,
         enable_postprocess: true,
         enable_follow_cam: true,
-        notes: `Workspace baseline run for ${selectedVideo?.name ?? "selected input"}${activeFieldSuggestion ? " | field setup applied" : ""}`,
+        notes: `Workspace baseline run for ${selectedVideo?.name ?? "selected input"}${
+          activeFieldSuggestion?.accepted ? " | field setup applied" : ""
+        }`,
       });
       await syncCreatedRun(createdRun);
       setLaunchMessage(copy.common.refreshHint);
@@ -266,29 +342,22 @@ export function App() {
         key: "baseline",
         icon: PlayIcon,
         title: copy.workspace.flowRunTitle,
-        detail: selectedVideo && selectedConfig ? `${selectedVideo.name} | ${selectedConfig.name}` : copy.workspace.flowChooseDetail,
         state: focusedRun ? "complete" : "current",
       },
       {
         key: "ai",
         icon: SparkIcon,
         title: copy.workspace.flowAiTitle,
-        detail: aiFocusedRun ? aiFocusedRun.run_id : copy.workspace.flowAiDetail,
         state: stage === "ai" ? "current" : aiFocusedRun ? "complete" : "upcoming",
       },
       {
         key: "delivery",
         icon: FileIcon,
         title: copy.workspace.deliveryTitle,
-        detail: latestHistoryRun
-          ? `${latestHistoryRun.run_id} | ${formatDateTime(
-              latestHistoryRun.completed_at ?? latestHistoryRun.started_at ?? latestHistoryRun.created_at,
-            )}`
-          : copy.workspace.deliverySubtitle,
         state: stage === "delivery" ? "current" : latestHistoryRun ? "complete" : "upcoming",
       },
     ],
-    [aiFocusedRun, copy, focusedRun, formatDateTime, latestHistoryRun, selectedConfig, selectedVideo, stage],
+    [aiFocusedRun, copy, focusedRun, latestHistoryRun, stage],
   );
 
   return (
@@ -325,12 +394,11 @@ export function App() {
               onClick={() => setStage(tab.key)}
             >
               <span className="step-tab-index">{index + 1}</span>
-              <div className="step-tab-copy">
-                <div className="title-row compact">
-                  <Icon className="section-icon tiny" />
-                  <p className="meta-label">{tab.title}</p>
-                </div>
-                <p className="muted">{tab.detail}</p>
+              <div className="step-tab-icon-shell">
+                <Icon className="section-icon" />
+              </div>
+              <div className="step-tab-copy simple">
+                <strong>{tab.title}</strong>
               </div>
             </button>
           );
@@ -358,6 +426,8 @@ export function App() {
             onSelectConfig={setSelectedConfigName}
             onGenerateFieldSuggestion={handleGenerateFieldSuggestion}
             onClearFieldSuggestion={handleClearFieldSuggestion}
+            onUpdateFieldSuggestion={handleUpdateFieldSuggestion}
+            onAcceptFieldSuggestion={handleAcceptFieldSuggestion}
             onStartBaselineRun={handleStartBaselineRun}
           />
         </section>
