@@ -18,6 +18,7 @@ detector:
 sahi:
   slice_height: 640
   slice_width: 960
+  batch_size: 6
   overlap_height_ratio: 0.10
   overlap_width_ratio: 0.10
   perform_standard_pred: false

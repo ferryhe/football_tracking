@@ -27,6 +27,7 @@ class DetectorConfig:
 class SahiConfig:
     slice_height: int = 720
     slice_width: int = 1280
+    batch_size: int = 6
     overlap_height_ratio: float = 0.20
     overlap_width_ratio: float = 0.20
     perform_standard_pred: bool = False
@@ -635,6 +636,7 @@ def load_config(config_path: Path) -> AppConfig:
     sahi = SahiConfig(
         slice_height=int(sahi_raw.get("slice_height", 720)),
         slice_width=int(sahi_raw.get("slice_width", 1280)),
+        batch_size=max(1, int(sahi_raw.get("batch_size", 6))),
         overlap_height_ratio=float(sahi_raw.get("overlap_height_ratio", 0.2)),
         overlap_width_ratio=float(sahi_raw.get("overlap_width_ratio", 0.2)),
         perform_standard_pred=bool(sahi_raw.get("perform_standard_pred", False)),

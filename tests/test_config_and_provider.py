@@ -38,6 +38,9 @@ class ConfigAndProviderTests(unittest.TestCase):
                 "detector": {
                     "model_path": "./weights/model.pt",
                 },
+                "sahi": {
+                    "batch_size": 8,
+                },
                 "runtime": {
                     "start_frame": -5,
                     "max_frames": 0,
@@ -50,8 +53,25 @@ class ConfigAndProviderTests(unittest.TestCase):
         self.assertEqual((self.repo_root / "data" / "input.mp4").resolve(), config.input_video)
         self.assertEqual((self.repo_root / "outputs" / "run_a").resolve(), config.output_dir)
         self.assertEqual((self.repo_root / "weights" / "model.pt").resolve(), config.detector.model_path)
+        self.assertEqual(8, config.sahi.batch_size)
         self.assertEqual(0, config.runtime.start_frame)
         self.assertIsNone(config.runtime.max_frames)
+
+    def test_load_config_uses_default_sahi_batch_size(self) -> None:
+        config_path = self.write_yaml(
+            "config/default.yaml",
+            {
+                "input_video": "./data/input.mp4",
+                "output_dir": "./outputs/run_a",
+                "detector": {
+                    "model_path": "./weights/model.pt",
+                },
+            },
+        )
+
+        config = load_config(config_path)
+
+        self.assertEqual(6, config.sahi.batch_size)
 
     def test_load_config_rejects_invalid_filter_roi(self) -> None:
         config_path = self.write_yaml(

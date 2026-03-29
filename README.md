@@ -29,10 +29,47 @@ This repository tracks a single in-play football from high-resolution fisheye-st
 ### Environment
 
 - Windows 10 / 11
-- Python 3.10 or 3.11
+- Python 3.10 or 3.11, with 3.11 preferred
 - NVIDIA GPU recommended
 - CUDA and cuDNN installed correctly
 - Node.js and `npm` available in PATH
+
+### PyTorch / CUDA / GPU Match
+
+Pick the PyTorch wheel before `pip install -r requirements.txt`.
+The most common startup failure on newer GPUs is installing a wheel that is too old for the GPU architecture.
+
+| GPU family | Example cards | Recommended PyTorch wheel for this repo | Status in this repo |
+| --- | --- | --- | --- |
+| RTX 50 / Blackwell (`sm_120`) | `5070`, `5080`, `5090` | Use `cu128` or newer. Known-good on `2026-03-29`: `torch 2.9.1`, `torchvision 0.24.1`, `torchaudio 2.9.1` from `cu130` | Verified on `RTX 5080` |
+| RTX 40 / Ada | `4060`, `4070`, `4080`, `4090` | `cu124` is a safe default | Expected to work |
+| RTX 30 / Ampere | `3060`, `3070`, `3080`, `3090` | `cu121` or `cu124` | Expected to work |
+| CPU only | no NVIDIA GPU | CPU wheels are fine, or install GPU wheels and set `detector.device: "cpu"` and `detector.use_half: false` | Much slower |
+
+Known-good install examples:
+
+```powershell
+# RTX 50 / Blackwell, verified in this repo on 2026-03-29
+pip install torch==2.9.1 torchvision==0.24.1 torchaudio==2.9.1 --index-url https://download.pytorch.org/whl/cu130
+
+# RTX 40 / RTX 30
+pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124
+```
+
+If you see this error:
+
+```text
+RuntimeError: CUDA error: no kernel image is available for execution on the device
+```
+
+your PyTorch wheel is too old for your GPU family.
+For example, `cu124` is not enough for `RTX 5080`.
+
+Reference links:
+
+- PyTorch install matrix: https://docs.pytorch.org/get-started/locally/
+- CUDA 13.0 wheel index: https://download.pytorch.org/whl/cu130
+- PyTorch forum note on Blackwell requiring CUDA `12.8+`: https://discuss.pytorch.org/t/how-do-i-use-pytorch-with-rtx-5060-ti/220926
 
 ### Detector Weights
 
@@ -65,7 +102,14 @@ If the weight file is missing, the baseline run will fail before detection start
 python -m venv .venv
 .\.venv\Scripts\activate
 python -m pip install --upgrade pip
-pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124
+
+# Pick ONE command from "PyTorch / CUDA / GPU Match" above.
+# Example for RTX 50 / Blackwell:
+pip install torch==2.9.1 torchvision==0.24.1 torchaudio==2.9.1 --index-url https://download.pytorch.org/whl/cu130
+
+# Example for RTX 40 / RTX 30:
+# pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124
+
 pip install -r requirements.txt
 
 cd frontend
@@ -232,10 +276,47 @@ Type-check scope note / 类型检查范围说明：`pyright` 当前先覆盖 `py
 ### 环境要求
 
 - Windows 10 / 11
-- Python 3.10 或 3.11
+- Python 3.10 或 3.11，推荐优先使用 3.11
 - 建议使用 NVIDIA GPU
 - 正确安装 CUDA 和 cuDNN
 - PATH 中可用 `npm`
+
+### PyTorch / CUDA / GPU 对照
+
+在执行 `pip install -r requirements.txt` 之前，先按显卡代际选对 PyTorch wheel。
+新卡最常见的问题不是仓库代码本身，而是 PyTorch wheel 对这代 GPU 还不够新。
+
+| 显卡代际 | 常见型号 | 本仓库建议的 PyTorch wheel | 当前仓库状态 |
+| --- | --- | --- | --- |
+| RTX 50 / Blackwell (`sm_120`) | `5070`, `5080`, `5090` | 至少使用 `cu128`。`2026-03-29` 在本仓库实测可用的是 `torch 2.9.1`、`torchvision 0.24.1`、`torchaudio 2.9.1` + `cu130` | 已在 `RTX 5080` 验证 |
+| RTX 40 / Ada | `4060`, `4070`, `4080`, `4090` | `cu124` 是比较稳妥的默认值 | 预期可用 |
+| RTX 30 / Ampere | `3060`, `3070`, `3080`, `3090` | `cu121` 或 `cu124` | 预期可用 |
+| 仅 CPU | 没有 NVIDIA GPU | 可直接装 CPU wheel，或者装完后把 `detector.device` 改成 `"cpu"`，并把 `detector.use_half` 改成 `false` | 速度会明显变慢 |
+
+已验证的安装示例：
+
+```powershell
+# RTX 50 / Blackwell，已在本仓库于 2026-03-29 验证
+pip install torch==2.9.1 torchvision==0.24.1 torchaudio==2.9.1 --index-url https://download.pytorch.org/whl/cu130
+
+# RTX 40 / RTX 30
+pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124
+```
+
+如果你看到下面这个报错：
+
+```text
+RuntimeError: CUDA error: no kernel image is available for execution on the device
+```
+
+通常不是项目代码有问题，而是当前 PyTorch wheel 对你的显卡代际太旧。
+例如 `RTX 5080` 使用 `cu124` 就会报这个错。
+
+参考链接：
+
+- PyTorch 官方安装页：https://docs.pytorch.org/get-started/locally/
+- CUDA 13.0 wheel 索引：https://download.pytorch.org/whl/cu130
+- PyTorch 官方论坛里关于 Blackwell 需要 CUDA `12.8+` 的说明：https://discuss.pytorch.org/t/how-do-i-use-pytorch-with-rtx-5060-ti/220926
 
 ### 检测权重
 
@@ -268,7 +349,14 @@ Type-check scope note / 类型检查范围说明：`pyright` 当前先覆盖 `py
 python -m venv .venv
 .\.venv\Scripts\activate
 python -m pip install --upgrade pip
-pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124
+
+# 先从上面的“PyTorch / CUDA / GPU 对照”里选一条安装命令。
+# RTX 50 / Blackwell 示例：
+pip install torch==2.9.1 torchvision==0.24.1 torchaudio==2.9.1 --index-url https://download.pytorch.org/whl/cu130
+
+# RTX 40 / RTX 30 示例：
+# pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124
+
 pip install -r requirements.txt
 
 cd frontend
