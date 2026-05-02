@@ -9,10 +9,11 @@ import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Separator } from "@/components/ui/separator";
 import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
-import { Sparkles, Brain, AlertCircle, Loader2, CheckCircle2, ChevronDown, ChevronUp } from "lucide-react";
+import { Sparkles, Brain, AlertCircle, Loader2, CheckCircle2, ChevronDown, ChevronUp, Map } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useToast } from "@/hooks/use-toast";
-import type { AISuggestion } from "@/lib/types";
+import { FieldPreviewCanvas } from "@/components/FieldPreviewCanvas";
+import type { AISuggestion, FieldPreviewResponse } from "@/lib/types";
 import { useLanguage } from "@/contexts/LanguageContext";
 
 export default function AIAnalysisPage() {
@@ -22,6 +23,7 @@ export default function AIAnalysisPage() {
   const [objective, setObjective] = useState("");
   const [showPatch, setShowPatch] = useState(false);
   const [suggestion, setSuggestion] = useState<AISuggestion | null>(null);
+  const [fieldPreview, setFieldPreview] = useState<FieldPreviewResponse | null>(null);
 
   const { data: runs, isLoading: runsLoading } = useQuery({
     queryKey: ["runs"],
@@ -31,6 +33,13 @@ export default function AIAnalysisPage() {
 
   const completedRuns = (runs ?? []).filter((r) => r.status === "completed");
   const selectedRun = completedRuns.find((r) => r.run_id === selectedRunId) ?? null;
+
+  // Reset preview when run changes
+  function handleRunChange(id: string) {
+    setSelectedRunId(id);
+    setFieldPreview(null);
+    setSuggestion(null);
+  }
 
   const recommend = useMutation({
     mutationFn: () =>
@@ -43,6 +52,8 @@ export default function AIAnalysisPage() {
       toast({ title: t.aiAnalysis.recommendationFailed, description: err.message, variant: "destructive" });
     },
   });
+
+  const hasAnnotations = suggestion?.patch && Object.keys(suggestion.patch).length > 0;
 
   return (
     <div className="space-y-6">
@@ -73,7 +84,7 @@ export default function AIAnalysisPage() {
                 <AlertDescription>{t.aiAnalysis.noRuns}</AlertDescription>
               </Alert>
             ) : (
-              <Select value={selectedRunId} onValueChange={setSelectedRunId} data-testid="select-ai-run">
+              <Select value={selectedRunId} onValueChange={handleRunChange} data-testid="select-ai-run">
                 <SelectTrigger data-testid="trigger-ai-run">
                   <SelectValue placeholder={t.aiAnalysis.selectRunPlaceholder} />
                 </SelectTrigger>
@@ -140,7 +151,28 @@ export default function AIAnalysisPage() {
         </Card>
       </div>
 
-      {/* Results */}
+      {/* Field Preview with AI Annotations */}
+      {selectedRun && (
+        <Card data-testid="card-field-preview">
+          <CardHeader className="pb-3">
+            <CardTitle className="flex items-center gap-2 text-base">
+              <Map className="h-4 w-4 text-primary" />
+              {hasAnnotations ? t.fieldPreview.titleWithAnnotations : t.fieldPreview.title}
+            </CardTitle>
+            <CardDescription>{t.fieldPreview.desc}</CardDescription>
+          </CardHeader>
+          <CardContent>
+            <FieldPreviewCanvas
+              inputVideo={selectedRun.input_video}
+              suggestion={suggestion}
+              preview={fieldPreview}
+              onPreviewChange={setFieldPreview}
+            />
+          </CardContent>
+        </Card>
+      )}
+
+      {/* AI Suggestion Results */}
       {suggestion && (
         <Card data-testid="card-ai-suggestion">
           <CardHeader className="pb-3">
