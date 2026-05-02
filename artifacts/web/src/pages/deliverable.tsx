@@ -14,8 +14,10 @@ import { Label } from "@/components/ui/label";
 import { Film, Clapperboard, AlertCircle, Loader2, CheckCircle2 } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 import { StatusBadge } from "@/components/StatusBadge";
+import { useLanguage } from "@/contexts/LanguageContext";
 
 export default function DeliverablePage() {
+  const { t } = useLanguage();
   const { toast } = useToast();
   const queryClient = useQueryClient();
 
@@ -34,31 +36,25 @@ export default function DeliverablePage() {
     refetchInterval: 10_000,
   });
 
-  const renderableRuns = (runs ?? []).filter(
-    (r) => r.status === "completed" && !isDeliverable(r)
-  );
+  const renderableRuns = (runs ?? []).filter((r) => r.status === "completed" && !isDeliverable(r));
   const selectedRun = renderableRuns.find((r) => r.run_id === selectedRunId) ?? null;
 
   const createRender = useMutation({
     mutationFn: () => api.createFollowCamRender(selectedRunId, options),
     onSuccess: (run) => {
       queryClient.invalidateQueries({ queryKey: ["runs"] });
-      toast({ title: "Render queued", description: `${run.run_id} started.` });
+      toast({ title: t.deliverable.renderQueued, description: run.run_id });
     },
     onError: (err: Error) => {
-      toast({ title: "Render failed", description: err.message, variant: "destructive" });
+      toast({ title: t.deliverable.renderFailed, description: err.message, variant: "destructive" });
     },
   });
-
-  const canSubmit = !!selectedRunId && !createRender.isPending;
 
   return (
     <div className="space-y-6">
       <div>
-        <h1 className="text-2xl font-bold">Deliverable Task</h1>
-        <p className="text-muted-foreground mt-1">
-          Render a clean 16:9 follow-cam video from a completed baseline run.
-        </p>
+        <h1 className="text-2xl font-bold">{t.deliverable.title}</h1>
+        <p className="text-muted-foreground mt-1">{t.deliverable.subtitle}</p>
       </div>
 
       <div className="grid gap-4 md:grid-cols-2">
@@ -67,25 +63,25 @@ export default function DeliverablePage() {
           <CardHeader className="pb-3">
             <CardTitle className="flex items-center gap-2 text-base">
               <Clapperboard className="h-4 w-4 text-primary" />
-              Source Run
+              {t.deliverable.sourceRun}
             </CardTitle>
-            <CardDescription>Pick a completed baseline run to render from</CardDescription>
+            <CardDescription>{t.deliverable.sourceRunDesc}</CardDescription>
           </CardHeader>
           <CardContent className="space-y-3">
             {isLoading ? (
               <div className="flex items-center gap-2 text-muted-foreground text-sm">
                 <Loader2 className="h-4 w-4 animate-spin" />
-                Loading runs…
+                {t.deliverable.loadingRuns}
               </div>
             ) : !renderableRuns.length ? (
               <Alert>
                 <AlertCircle className="h-4 w-4" />
-                <AlertDescription>No completed baseline runs available yet.</AlertDescription>
+                <AlertDescription>{t.deliverable.noRuns}</AlertDescription>
               </Alert>
             ) : (
               <Select value={selectedRunId} onValueChange={setSelectedRunId} data-testid="select-render-run">
                 <SelectTrigger data-testid="trigger-render-run">
-                  <SelectValue placeholder="Select a baseline run…" />
+                  <SelectValue placeholder={t.deliverable.selectRunPlaceholder} />
                 </SelectTrigger>
                 <SelectContent>
                   {renderableRuns.map((r) => (
@@ -101,14 +97,10 @@ export default function DeliverablePage() {
               <div className="rounded-md bg-muted/50 p-3 space-y-2">
                 <div className="flex items-center gap-2">
                   <StatusBadge status={selectedRun.status} />
-                  <span className="text-xs text-muted-foreground">
-                    {formatDateTime(runMoment(selectedRun))}
-                  </span>
+                  <span className="text-xs text-muted-foreground">{formatDateTime(runMoment(selectedRun))}</span>
                 </div>
                 {selectedRun.input_video && (
-                  <p className="text-xs text-muted-foreground truncate">
-                    {selectedRun.input_video}
-                  </p>
+                  <p className="text-xs text-muted-foreground truncate">{selectedRun.input_video}</p>
                 )}
                 <div className="flex flex-wrap gap-1.5">
                   {selectedRun.artifacts.map((a) => (
@@ -127,15 +119,15 @@ export default function DeliverablePage() {
           <CardHeader className="pb-3">
             <CardTitle className="flex items-center gap-2 text-base">
               <Film className="h-4 w-4 text-primary" />
-              Render Options
+              {t.deliverable.renderOptions}
             </CardTitle>
-            <CardDescription>Control output quality and overlays</CardDescription>
+            <CardDescription>{t.deliverable.renderOptionsDesc}</CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
             <div className="flex items-center justify-between">
               <div>
-                <Label htmlFor="switch-prefer-cleaned" className="font-medium">Prefer cleaned track</Label>
-                <p className="text-xs text-muted-foreground mt-0.5">Use cleaned CSV when available</p>
+                <Label htmlFor="switch-prefer-cleaned" className="font-medium">{t.deliverable.preferCleaned}</Label>
+                <p className="text-xs text-muted-foreground mt-0.5">{t.deliverable.preferCleanedDesc}</p>
               </div>
               <Switch
                 id="switch-prefer-cleaned"
@@ -147,8 +139,8 @@ export default function DeliverablePage() {
             <Separator />
             <div className="flex items-center justify-between">
               <div>
-                <Label htmlFor="switch-ball-marker" className="font-medium">Ball marker overlay</Label>
-                <p className="text-xs text-muted-foreground mt-0.5">Draw marker on ball position</p>
+                <Label htmlFor="switch-ball-marker" className="font-medium">{t.deliverable.ballMarker}</Label>
+                <p className="text-xs text-muted-foreground mt-0.5">{t.deliverable.ballMarkerDesc}</p>
               </div>
               <Switch
                 id="switch-ball-marker"
@@ -160,8 +152,8 @@ export default function DeliverablePage() {
             <Separator />
             <div className="flex items-center justify-between">
               <div>
-                <Label htmlFor="switch-frame-text" className="font-medium">Frame text overlay</Label>
-                <p className="text-xs text-muted-foreground mt-0.5">Overlay status and frame info</p>
+                <Label htmlFor="switch-frame-text" className="font-medium">{t.deliverable.frameText}</Label>
+                <p className="text-xs text-muted-foreground mt-0.5">{t.deliverable.frameTextDesc}</p>
               </div>
               <Switch
                 id="switch-frame-text"
@@ -173,11 +165,11 @@ export default function DeliverablePage() {
             <Separator />
             <div className="grid grid-cols-2 gap-3">
               <div>
-                <Label className="text-xs text-muted-foreground">Width</Label>
+                <Label className="text-xs text-muted-foreground">{t.deliverable.width}</Label>
                 <p className="font-mono text-sm font-medium">{options.target_width}px</p>
               </div>
               <div>
-                <Label className="text-xs text-muted-foreground">Height</Label>
+                <Label className="text-xs text-muted-foreground">{t.deliverable.height}</Label>
                 <p className="font-mono text-sm font-medium">{options.target_height}px</p>
               </div>
             </div>
@@ -189,28 +181,17 @@ export default function DeliverablePage() {
         <Alert className="border-emerald-200 bg-emerald-50 dark:bg-emerald-900/20 dark:border-emerald-800">
           <CheckCircle2 className="h-4 w-4 text-emerald-600" />
           <AlertDescription className="text-emerald-700 dark:text-emerald-300">
-            Render <span className="font-mono font-medium">{createRender.data?.run_id}</span> queued.
+            {createRender.data?.run_id}
           </AlertDescription>
         </Alert>
       )}
 
       <div className="flex justify-end">
-        <Button
-          size="lg"
-          onClick={() => createRender.mutate()}
-          disabled={!canSubmit}
-          data-testid="button-start-render"
-        >
+        <Button size="lg" onClick={() => createRender.mutate()} disabled={!selectedRunId || createRender.isPending} data-testid="button-start-render">
           {createRender.isPending ? (
-            <>
-              <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-              Queuing…
-            </>
+            <><Loader2 className="h-4 w-4 mr-2 animate-spin" />{t.deliverable.queuing}</>
           ) : (
-            <>
-              <Film className="h-4 w-4 mr-2" />
-              Render Deliverable
-            </>
+            <><Film className="h-4 w-4 mr-2" />{t.deliverable.renderBtn}</>
           )}
         </Button>
       </div>
