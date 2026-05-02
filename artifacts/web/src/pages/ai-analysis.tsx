@@ -31,8 +31,8 @@ export default function AIAnalysisPage() {
     refetchInterval: 10_000,
   });
 
-  const completedRuns = (runs ?? []).filter((r) => r.status === "completed");
-  const selectedRun = completedRuns.find((r) => r.run_id === selectedRunId) ?? null;
+  const analysableRuns = (runs ?? []).filter((r) => r.status === "completed" || r.status === "failed");
+  const selectedRun = analysableRuns.find((r) => r.run_id === selectedRunId) ?? null;
 
   // Reset preview when run changes
   function handleRunChange(id: string) {
@@ -78,7 +78,7 @@ export default function AIAnalysisPage() {
                 <Loader2 className="h-4 w-4 animate-spin" />
                 {t.aiAnalysis.loadingRuns}
               </div>
-            ) : !completedRuns.length ? (
+            ) : !analysableRuns.length ? (
               <Alert>
                 <AlertCircle className="h-4 w-4" />
                 <AlertDescription>{t.aiAnalysis.noRuns}</AlertDescription>
@@ -89,9 +89,9 @@ export default function AIAnalysisPage() {
                   <SelectValue placeholder={t.aiAnalysis.selectRunPlaceholder} />
                 </SelectTrigger>
                 <SelectContent>
-                  {completedRuns.map((r) => (
+                  {analysableRuns.map((r) => (
                     <SelectItem key={r.run_id} value={r.run_id} data-testid={`option-ai-run-${r.run_id}`}>
-                      {r.run_id}
+                      {r.run_id} · {r.status}
                     </SelectItem>
                   ))}
                 </SelectContent>
