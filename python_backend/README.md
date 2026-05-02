@@ -1,6 +1,10 @@
-# High-Resolution Football Ball Tracking
+# High-Resolution Football Ball Tracking — Backend
 
 English | [中文](#中文说明)
+
+> **Replit deployment note**: This README is the original upstream README and describes a self-contained Windows-based workflow with the legacy `frontend/` desktop UI. On Replit, **the frontend in this folder has been replaced** by [`artifacts/web/`](../artifacts/web/) (a React/Vite app served via a Node.js reverse proxy). For Replit-specific setup, architecture, and run instructions, see the **[root README](../README.md)**. The Python pipeline, configs, weights, and outputs described below are unchanged.
+
+---
 
 This repository tracks a single in-play football from high-resolution fisheye-style match video and provides a local workspace UI for baseline runs, AI-assisted tuning, deliverable rendering, and history management.
 
