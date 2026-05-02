@@ -1,7 +1,7 @@
 import express, { type Express } from "express";
 import cors from "cors";
 import pinoHttp from "pino-http";
-import { createProxyMiddleware } from "http-proxy-middleware";
+import { createProxyMiddleware, fixRequestBody } from "http-proxy-middleware";
 import router from "./routes";
 import { logger } from "./lib/logger";
 
@@ -47,6 +47,9 @@ app.use(
     changeOrigin: true,
     pathRewrite: { "^/": "/api/v1/" },
     on: {
+      // Re-stream the parsed JSON body that express.json() already consumed,
+      // otherwise POST/PUT/PATCH requests hang on the upstream.
+      proxyReq: fixRequestBody,
       error(err, _req, res) {
         logger.error({ err }, "Proxy error — is the Python backend running?");
         if (res && "status" in res && typeof res.status === "function") {

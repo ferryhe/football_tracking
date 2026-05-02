@@ -84,6 +84,26 @@ export interface FieldPreviewResponse {
   sample_count: number;
 }
 
+export interface FieldSuggestionResponse {
+  input_video: string;
+  preview_data_url: string;
+  preview_bounds: [number, number, number, number];
+  frame_width: number;
+  frame_height: number;
+  frame_index: number;
+  frame_time_seconds: number;
+  sample_index: number;
+  sample_count: number;
+  field_polygon: [number, number][];
+  expanded_polygon: [number, number][];
+  field_roi: [number, number, number, number];
+  expanded_roi: [number, number, number, number];
+  confidence: "config" | "detected" | "fallback";
+  source: string;
+  field_coverage: number;
+  config_patch: Record<string, unknown>;
+}
+
 export interface AISuggestion {
   title: string;
   diagnosis: string;

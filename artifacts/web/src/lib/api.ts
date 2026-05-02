@@ -5,6 +5,7 @@ import type {
   ConfigListItem,
   CreateRunRequest,
   FieldPreviewResponse,
+  FieldSuggestionResponse,
   FollowCamRenderRequest,
   HealthResponse,
   InputCatalogResponse,
@@ -49,6 +50,11 @@ export const api = {
     request<FieldPreviewResponse>("/inputs/field-preview", {
       method: "POST",
       body: JSON.stringify({ input_video, sample_index }),
+    }),
+  suggestFieldSetup: (body: { input_video: string; config_name?: string; frame_index?: number }) =>
+    request<FieldSuggestionResponse>("/inputs/field-suggestion", {
+      method: "POST",
+      body: JSON.stringify(body),
     }),
   aiExplain: (body: { run_id?: string; config_name?: string; language?: string }) =>
     request<AIExplainResponse>("/ai/explain", {
