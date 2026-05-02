@@ -38,11 +38,14 @@ const pythonApiUrl = process.env.PYTHON_API_URL ?? "http://localhost:8000";
 
 logger.info({ pythonApiUrl }, "Proxying /api to Python backend");
 
+// Python FastAPI uses /api/v1/* prefix, but our frontend calls /api/*
+// Proxy rewrites: /api/configs → /api/v1/configs, etc.
 app.use(
   "/api",
   createProxyMiddleware({
     target: pythonApiUrl,
     changeOrigin: true,
+    pathRewrite: { "^/": "/api/v1/" },
     on: {
       error(err, _req, res) {
         logger.error({ err }, "Proxy error — is the Python backend running?");
@@ -50,7 +53,7 @@ app.use(
           res.status(502).json({
             error: "Python backend unavailable",
             detail: `Could not reach ${pythonApiUrl}. Make sure the Python FastAPI server is running.`,
-            hint: "Set PYTHON_API_URL env var if it runs on a different port.",
+            hint: "Set PYTHON_API_URL env var if it runs on a different port (default: 8000).",
           });
         }
       },
