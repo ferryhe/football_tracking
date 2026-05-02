@@ -5,7 +5,6 @@ import { formatDateTime, runMoment, statusBadgeClass } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { Badge } from "@/components/ui/badge";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Separator } from "@/components/ui/separator";
 import { Textarea } from "@/components/ui/textarea";
@@ -14,8 +13,10 @@ import { Sparkles, Brain, AlertCircle, Loader2, CheckCircle2, ChevronDown, Chevr
 import { cn } from "@/lib/utils";
 import { useToast } from "@/hooks/use-toast";
 import type { AISuggestion } from "@/lib/types";
+import { useLanguage } from "@/contexts/LanguageContext";
 
 export default function AIAnalysisPage() {
+  const { t, language } = useLanguage();
   const { toast } = useToast();
   const [selectedRunId, setSelectedRunId] = useState("");
   const [objective, setObjective] = useState("");
@@ -33,31 +34,21 @@ export default function AIAnalysisPage() {
 
   const recommend = useMutation({
     mutationFn: () =>
-      api.aiRecommend({
-        run_id: selectedRunId,
-        objective: objective.trim() || undefined,
-        language: "en",
-      }),
+      api.aiRecommend({ run_id: selectedRunId, objective: objective.trim() || undefined, language }),
     onSuccess: (data) => {
       setSuggestion(data);
-      toast({ title: "AI recommendation ready" });
+      toast({ title: t.aiAnalysis.recommendationReady });
     },
     onError: (err: Error) => {
-      toast({
-        title: "AI recommendation failed",
-        description: err.message,
-        variant: "destructive",
-      });
+      toast({ title: t.aiAnalysis.recommendationFailed, description: err.message, variant: "destructive" });
     },
   });
 
   return (
     <div className="space-y-6">
       <div>
-        <h1 className="text-2xl font-bold">AI Analysis</h1>
-        <p className="text-muted-foreground mt-1">
-          Select a completed run and ask the AI for tracking improvement recommendations.
-        </p>
+        <h1 className="text-2xl font-bold">{t.aiAnalysis.title}</h1>
+        <p className="text-muted-foreground mt-1">{t.aiAnalysis.subtitle}</p>
       </div>
 
       <div className="grid gap-4 md:grid-cols-2">
@@ -66,25 +57,25 @@ export default function AIAnalysisPage() {
           <CardHeader className="pb-3">
             <CardTitle className="flex items-center gap-2 text-base">
               <Brain className="h-4 w-4 text-primary" />
-              Select Run
+              {t.aiAnalysis.selectRun}
             </CardTitle>
-            <CardDescription>Only completed runs can be analysed</CardDescription>
+            <CardDescription>{t.aiAnalysis.selectRunDesc}</CardDescription>
           </CardHeader>
           <CardContent className="space-y-3">
             {runsLoading ? (
               <div className="flex items-center gap-2 text-muted-foreground text-sm">
                 <Loader2 className="h-4 w-4 animate-spin" />
-                Loading runs…
+                {t.aiAnalysis.loadingRuns}
               </div>
             ) : !completedRuns.length ? (
               <Alert>
                 <AlertCircle className="h-4 w-4" />
-                <AlertDescription>No completed runs found yet.</AlertDescription>
+                <AlertDescription>{t.aiAnalysis.noRuns}</AlertDescription>
               </Alert>
             ) : (
               <Select value={selectedRunId} onValueChange={setSelectedRunId} data-testid="select-ai-run">
                 <SelectTrigger data-testid="trigger-ai-run">
-                  <SelectValue placeholder="Select a completed run…" />
+                  <SelectValue placeholder={t.aiAnalysis.selectRunPlaceholder} />
                 </SelectTrigger>
                 <SelectContent>
                   {completedRuns.map((r) => (
@@ -102,15 +93,11 @@ export default function AIAnalysisPage() {
                   <span className={cn("text-xs font-medium px-2 py-0.5 rounded-full", statusBadgeClass(selectedRun.status))}>
                     {selectedRun.status}
                   </span>
-                  <span className="text-xs text-muted-foreground">
-                    {formatDateTime(runMoment(selectedRun))}
-                  </span>
+                  <span className="text-xs text-muted-foreground">{formatDateTime(runMoment(selectedRun))}</span>
                 </div>
                 <p className="text-xs font-mono text-muted-foreground truncate">{selectedRun.output_dir}</p>
                 {selectedRun.input_video && (
-                  <p className="text-xs text-muted-foreground truncate">
-                    Video: {selectedRun.input_video}
-                  </p>
+                  <p className="text-xs text-muted-foreground truncate">{selectedRun.input_video}</p>
                 )}
               </div>
             )}
@@ -122,15 +109,15 @@ export default function AIAnalysisPage() {
           <CardHeader className="pb-3">
             <CardTitle className="flex items-center gap-2 text-base">
               <Sparkles className="h-4 w-4 text-primary" />
-              Objective (optional)
+              {t.aiAnalysis.objective}
             </CardTitle>
-            <CardDescription>Describe what you want to improve</CardDescription>
+            <CardDescription>{t.aiAnalysis.objectiveDesc}</CardDescription>
           </CardHeader>
           <CardContent className="space-y-3">
-            <Label htmlFor="input-objective" className="sr-only">Objective</Label>
+            <Label htmlFor="input-objective" className="sr-only">{t.aiAnalysis.objective}</Label>
             <Textarea
               id="input-objective"
-              placeholder="e.g. Reduce lost frames in fast-moving sequences…"
+              placeholder={t.aiAnalysis.objectivePlaceholder}
               value={objective}
               onChange={(e) => setObjective(e.target.value)}
               rows={4}
@@ -144,15 +131,9 @@ export default function AIAnalysisPage() {
               data-testid="button-ai-recommend"
             >
               {recommend.isPending ? (
-                <>
-                  <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-                  Analysing…
-                </>
+                <><Loader2 className="h-4 w-4 mr-2 animate-spin" />{t.aiAnalysis.analysing}</>
               ) : (
-                <>
-                  <Sparkles className="h-4 w-4 mr-2" />
-                  Get Recommendation
-                </>
+                <><Sparkles className="h-4 w-4 mr-2" />{t.aiAnalysis.getRecommendation}</>
               )}
             </Button>
           </CardContent>
@@ -173,7 +154,7 @@ export default function AIAnalysisPage() {
           </CardHeader>
           <CardContent className="space-y-4">
             <div>
-              <p className="text-sm font-medium mb-1">Recommendation</p>
+              <p className="text-sm font-medium mb-1">{t.aiAnalysis.recommendation}</p>
               <p className="text-sm text-muted-foreground">{suggestion.recommendation}</p>
             </div>
 
@@ -181,7 +162,7 @@ export default function AIAnalysisPage() {
               <>
                 <Separator />
                 <div>
-                  <p className="text-sm font-medium mb-1">Expected tradeoff</p>
+                  <p className="text-sm font-medium mb-1">{t.aiAnalysis.expectedTradeoff}</p>
                   <p className="text-sm text-muted-foreground">{suggestion.expected_tradeoff}</p>
                 </div>
               </>
@@ -191,7 +172,7 @@ export default function AIAnalysisPage() {
               <>
                 <Separator />
                 <div>
-                  <p className="text-sm font-medium mb-2">Evidence</p>
+                  <p className="text-sm font-medium mb-2">{t.aiAnalysis.evidence}</p>
                   <ul className="space-y-1">
                     {suggestion.evidence.map((e, i) => (
                       <li key={i} className="text-sm text-muted-foreground flex gap-2">
@@ -214,7 +195,7 @@ export default function AIAnalysisPage() {
                     className="flex items-center gap-2 text-sm font-medium hover:text-primary transition-colors"
                     data-testid="button-toggle-patch"
                   >
-                    Config patch preview
+                    {t.aiAnalysis.configPatchPreview}
                     {showPatch ? <ChevronUp className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
                   </button>
                   {showPatch && (
@@ -228,18 +209,10 @@ export default function AIAnalysisPage() {
 
             {suggestion.output_name_suggestion && (
               <div className="rounded-md bg-accent/50 p-3">
-                <p className="text-xs text-muted-foreground">Suggested output name</p>
+                <p className="text-xs text-muted-foreground">{t.aiAnalysis.suggestedOutputName}</p>
                 <p className="font-mono text-sm font-medium">{suggestion.output_name_suggestion}</p>
               </div>
             )}
-
-            <div className="flex flex-wrap gap-2 pt-1">
-              {suggestion.output_name_suggestion && (
-                <Badge variant="outline">
-                  Suggested: {suggestion.output_name_suggestion}
-                </Badge>
-              )}
-            </div>
           </CardContent>
         </Card>
       )}

@@ -12,10 +12,12 @@ import { Loader2, AlertCircle, Trash2, Film, Crosshair, ChevronDown, ChevronRigh
 import { cn } from "@/lib/utils";
 import { useToast } from "@/hooks/use-toast";
 import type { RunRecord } from "@/lib/types";
+import { useLanguage } from "@/contexts/LanguageContext";
 
 type FilterCategory = "all" | "baseline" | "deliverable" | "failed";
 
 function RunDetailRow({ run, onDelete }: { run: RunRecord; onDelete: (id: string) => void }) {
+  const { t } = useLanguage();
   const [open, setOpen] = useState(false);
   const cat = historyCategory(run);
 
@@ -35,7 +37,7 @@ function RunDetailRow({ run, onDelete }: { run: RunRecord; onDelete: (id: string
         </span>
         <div className="flex-1 min-w-0">
           <p className="text-sm font-medium font-mono truncate">{run.run_id}</p>
-          <p className="text-xs text-muted-foreground truncate">{run.config_name ?? "—"}</p>
+          <p className="text-xs text-muted-foreground truncate">{run.config_name ?? t.common.notAvailable}</p>
         </div>
         <div className="shrink-0 flex items-center gap-2">
           <StatusBadge status={run.status} />
@@ -49,24 +51,24 @@ function RunDetailRow({ run, onDelete }: { run: RunRecord; onDelete: (id: string
         <div className="border-t px-3 py-3 bg-muted/20 space-y-3">
           <div className="grid grid-cols-2 gap-x-6 gap-y-2 text-sm">
             <div>
-              <p className="text-xs text-muted-foreground">Input</p>
-              <p className="font-mono text-xs truncate">{run.input_video ?? "—"}</p>
+              <p className="text-xs text-muted-foreground">{t.history.inputLabel}</p>
+              <p className="font-mono text-xs truncate">{run.input_video ?? t.common.notAvailable}</p>
             </div>
             <div>
-              <p className="text-xs text-muted-foreground">Output dir</p>
+              <p className="text-xs text-muted-foreground">{t.history.outputDirLabel}</p>
               <p className="font-mono text-xs truncate">{run.output_dir}</p>
             </div>
             <div>
-              <p className="text-xs text-muted-foreground">Created</p>
+              <p className="text-xs text-muted-foreground">{t.history.createdLabel}</p>
               <p className="text-xs">{formatDateTime(run.created_at)}</p>
             </div>
             <div>
-              <p className="text-xs text-muted-foreground">Completed</p>
+              <p className="text-xs text-muted-foreground">{t.history.completedLabel}</p>
               <p className="text-xs">{formatDateTime(run.completed_at)}</p>
             </div>
             {run.parent_run_id && (
               <div className="col-span-2">
-                <p className="text-xs text-muted-foreground">Parent run</p>
+                <p className="text-xs text-muted-foreground">{t.history.parentRunLabel}</p>
                 <p className="font-mono text-xs">{run.parent_run_id}</p>
               </div>
             )}
@@ -74,15 +76,10 @@ function RunDetailRow({ run, onDelete }: { run: RunRecord; onDelete: (id: string
 
           {run.artifacts.length > 0 && (
             <div>
-              <p className="text-xs text-muted-foreground mb-1.5">Artifacts</p>
+              <p className="text-xs text-muted-foreground mb-1.5">{t.history.artifactsLabel}</p>
               <div className="flex flex-wrap gap-1.5">
                 {run.artifacts.map((a) => (
-                  <Badge
-                    key={a.name}
-                    variant={a.exists ? "default" : "secondary"}
-                    className="text-xs"
-                    data-testid={`artifact-badge-${a.name}`}
-                  >
+                  <Badge key={a.name} variant={a.exists ? "default" : "secondary"} className="text-xs" data-testid={`artifact-badge-${a.name}`}>
                     {a.name}
                   </Badge>
                 ))}
@@ -109,7 +106,7 @@ function RunDetailRow({ run, onDelete }: { run: RunRecord; onDelete: (id: string
             data-testid={`button-delete-run-${run.run_id}`}
           >
             <Trash2 className="h-3.5 w-3.5 mr-1.5" />
-            Delete output
+            {t.history.deleteOutput}
           </Button>
         </div>
       )}
@@ -118,6 +115,7 @@ function RunDetailRow({ run, onDelete }: { run: RunRecord; onDelete: (id: string
 }
 
 export default function HistoryPage() {
+  const { t } = useLanguage();
   const { toast } = useToast();
   const queryClient = useQueryClient();
   const [filter, setFilter] = useState<FilterCategory>("all");
@@ -133,18 +131,18 @@ export default function HistoryPage() {
     mutationFn: (runId: string) => api.deleteRunOutput(runId),
     onSuccess: (_, runId) => {
       queryClient.invalidateQueries({ queryKey: ["runs"] });
-      toast({ title: "Output deleted", description: runId });
+      toast({ title: t.history.deleteSuccess, description: runId });
     },
     onError: (err: Error) => {
-      toast({ title: "Delete failed", description: err.message, variant: "destructive" });
+      toast({ title: t.history.deleteFailed, description: err.message, variant: "destructive" });
     },
   });
 
   const filters: { value: FilterCategory; label: string }[] = [
-    { value: "all", label: "All" },
-    { value: "baseline", label: "Baseline" },
-    { value: "deliverable", label: "Deliverable" },
-    { value: "failed", label: "Failed" },
+    { value: "all", label: t.history.all },
+    { value: "baseline", label: t.history.baseline },
+    { value: "deliverable", label: t.history.deliverable },
+    { value: "failed", label: t.history.failed },
   ];
 
   const filtered = (runs ?? []).filter((r) => {
@@ -167,8 +165,8 @@ export default function HistoryPage() {
   return (
     <div className="space-y-6">
       <div>
-        <h1 className="text-2xl font-bold">History</h1>
-        <p className="text-muted-foreground mt-1">Review past runs, filter by type, and manage outputs.</p>
+        <h1 className="text-2xl font-bold">{t.history.title}</h1>
+        <p className="text-muted-foreground mt-1">{t.history.subtitle}</p>
       </div>
 
       {/* Stats row */}
@@ -180,9 +178,7 @@ export default function HistoryPage() {
             onClick={() => setFilter(f.value)}
             className={cn(
               "rounded-lg border p-3 text-left transition-colors",
-              filter === f.value
-                ? "border-primary bg-accent/60"
-                : "bg-card hover:bg-muted/50"
+              filter === f.value ? "border-primary bg-accent/60" : "bg-card hover:bg-muted/50"
             )}
             data-testid={`filter-btn-${f.value}`}
           >
@@ -196,7 +192,7 @@ export default function HistoryPage() {
       <div className="relative">
         <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground pointer-events-none" />
         <Input
-          placeholder="Search runs by ID, config, or video…"
+          placeholder={t.history.searchPlaceholder}
           value={search}
           onChange={(e) => setSearch(e.target.value)}
           className="pl-9"
@@ -207,29 +203,23 @@ export default function HistoryPage() {
       {/* List */}
       <Card>
         <CardHeader className="pb-3">
-          <CardTitle className="text-base">
-            {filtered.length} run{filtered.length !== 1 ? "s" : ""}
-          </CardTitle>
+          <CardTitle className="text-base">{t.history.runs(filtered.length)}</CardTitle>
         </CardHeader>
         <CardContent>
           {isLoading ? (
             <div className="flex items-center gap-2 text-muted-foreground text-sm py-4">
               <Loader2 className="h-4 w-4 animate-spin" />
-              Loading runs…
+              {t.history.loadingRuns}
             </div>
           ) : !filtered.length ? (
             <div className="text-center py-8 text-muted-foreground">
-              <p className="font-medium">No runs found</p>
-              <p className="text-sm mt-1">Try adjusting the filter or search query.</p>
+              <p className="font-medium">{t.history.noRuns}</p>
+              <p className="text-sm mt-1">{t.history.noRunsHint}</p>
             </div>
           ) : (
             <div className="space-y-2">
               {filtered.map((run) => (
-                <RunDetailRow
-                  key={run.run_id}
-                  run={run}
-                  onDelete={(id) => deleteOutput.mutate(id)}
-                />
+                <RunDetailRow key={run.run_id} run={run} onDelete={(id) => deleteOutput.mutate(id)} />
               ))}
             </div>
           )}
