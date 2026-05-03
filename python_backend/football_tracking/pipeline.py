@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+from concurrent.futures import CancelledError
 import logging
 import math
+import time
 from dataclasses import dataclass
+from typing import Any, Callable
 
 import cv2
 import torch
@@ -80,9 +83,21 @@ class BallTrackingPipeline:
         )
         return logging.getLogger("football_tracking")
 
-    def run(self) -> None:
+    def run(
+        self,
+        progress_callback: Callable[[dict[str, Any]], None] | None = None,
+        should_cancel: Callable[[], bool] | None = None,
+    ) -> None:
         """执行完整视频处理流程。"""
         capture, width, height, fps = self._open_frame_source()
+        total_frames = self._estimate_total_frames(capture)
+
+        def cancel_requested() -> bool:
+            return bool(should_cancel and should_cancel())
+
+        def raise_if_cancelled() -> None:
+            if cancel_requested():
+                raise CancelledError("Run cancelled by user.")
 
         exporter = TrackingExporter(
             output_dir=self.config.output_dir,
@@ -102,10 +117,30 @@ class BallTrackingPipeline:
         processed_frames = 0
         start_frame = self.config.runtime.start_frame
         max_frames = self.config.runtime.max_frames
+        last_progress_at = 0.0
+
+        def emit_progress(stage: str, current_frame: int | None, total_frame_count: int | None, *, force: bool = False) -> None:
+            nonlocal last_progress_at
+            if progress_callback is None:
+                return
+            now = time.monotonic()
+            if not force and now - last_progress_at < 1.0:
+                return
+            last_progress_at = now
+            progress_callback(
+                {
+                    "stage": stage,
+                    "current_frame": current_frame,
+                    "total_frames": total_frame_count,
+                }
+            )
+
         if start_frame > 0:
             self.logger.info("Starting from frame=%s", start_frame)
         try:
+            emit_progress("tracking", 0, total_frames, force=True)
             while True:
+                raise_if_cancelled()
                 if max_frames is not None and processed_frames >= max_frames:
                     self.logger.info("Reached max_frames=%s, stopping early.", max_frames)
                     break
@@ -116,6 +151,7 @@ class BallTrackingPipeline:
 
                 frame_index += 1
                 processed_frames += 1
+                raise_if_cancelled()
                 track_result = self._process_frame(frame, frame_index)
                 try:
                     annotated_frame = self.renderer.render(frame, track_result)
@@ -131,6 +167,7 @@ class BallTrackingPipeline:
                     self.logger.exception("第 %s 帧输出异常，将继续处理后续帧: %s", frame_index, exc)
                     continue
 
+                emit_progress("tracking", processed_frames, total_frames, force=processed_frames == total_frames)
                 if frame_index % 50 == 0:
                     self.logger.info(
                         "已处理到第 %s 帧 | status=%s | state=%s | lost_frames=%s",
@@ -142,14 +179,37 @@ class BallTrackingPipeline:
         finally:
             capture.release()
             exporter.close()
-            if not self.config.mock.enabled:
+            if not self.config.mock.enabled and not cancel_requested():
+                emit_progress("tracking", processed_frames, total_frames, force=True)
                 if self.config.postprocess.enabled:
                     self.logger.info("Starting postprocess cleanup...")
+                    emit_progress("postprocess", 0, 1, force=True)
+                    raise_if_cancelled()
                     TrackPostprocessor(self.config).run()
+                    emit_progress("postprocess", 1, 1, force=True)
                 if self.config.follow_cam.enabled:
                     self.logger.info("Starting follow-cam rendering...")
-                    FollowCamGenerator(self.config).run()
+                    raise_if_cancelled()
+                    FollowCamGenerator(self.config).run(
+                        progress_callback=progress_callback,
+                        should_cancel=should_cancel,
+                    )
             self.logger.info("处理完成，输出目录: %s", self.config.output_dir)
+
+    def _estimate_total_frames(self, capture) -> int | None:
+        max_frames = self.config.runtime.max_frames
+        total_frames: int | None = None
+        if self.config.mock.enabled:
+            total_frames = int(getattr(capture, "frame_count", self.config.mock.frame_count))
+        else:
+            capture_frame_count = int(capture.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+            if capture_frame_count > 0:
+                total_frames = max(0, capture_frame_count - self.config.runtime.start_frame)
+        if max_frames is not None:
+            total_frames = max_frames if total_frames is None else min(total_frames, max_frames)
+        if total_frames is None or total_frames <= 0:
+            return None
+        return total_frames
 
     def _open_frame_source(self):
         """统一打开真实视频源或 mock 假帧源。"""

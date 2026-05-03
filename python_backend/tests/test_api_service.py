@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import json
+import threading
 import tempfile
 import unittest
 from pathlib import Path
@@ -516,6 +517,44 @@ class ApiServiceSmokeTests(unittest.TestCase):
 
         with self.assertRaises(RuntimeError):
             self.service.delete_input_video("input.mp4")
+
+    def test_cancel_run_requests_active_thread_stop(self) -> None:
+        active_input = (self.repo_root / "data" / "input.mp4").resolve()
+        active_config = (self.repo_root / "config" / "default.yaml").resolve()
+        cancel_event = threading.Event()
+        self.service._cancel_events["active_demo"] = cancel_event
+        self.service._write_registry(
+            {
+                "runs": [
+                    {
+                        "run_id": "active_demo",
+                        "source": "api",
+                        "status": "running",
+                        "created_at": "2026-01-01T00:00:00+00:00",
+                        "started_at": "2026-01-01T00:00:00+00:00",
+                        "completed_at": None,
+                        "config_name": "default.yaml",
+                        "config_path": str(active_config),
+                        "input_video": str(active_input),
+                        "parent_run_id": None,
+                        "output_dir": str((self.repo_root / "outputs" / "active_demo").resolve()),
+                        "modules_enabled": {"postprocess": True, "follow_cam": False},
+                        "artifacts": [],
+                        "stats": {},
+                        "progress": {"stage": "tracking", "percent": 42.0},
+                        "notes": None,
+                        "error": None,
+                    }
+                ]
+            }
+        )
+
+        updated = self.service.cancel_run("active_demo")
+
+        self.assertTrue(cancel_event.is_set())
+        self.assertEqual("running", updated["status"])
+        self.assertEqual("cancelling", updated["progress"]["stage"])
+        self.assertEqual(42.0, updated["progress"]["percent"])
 
     def test_delete_config_and_input_video_remove_files(self) -> None:
         deleted_video = self.service.delete_input_video("clip.mov")

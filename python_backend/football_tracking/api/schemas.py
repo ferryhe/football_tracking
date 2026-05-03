@@ -4,7 +4,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
-RunStatus = Literal["queued", "running", "completed", "failed"]
+RunStatus = Literal["queued", "running", "completed", "failed", "cancelled"]
 AIResponseLanguage = Literal["en", "zh"]
 
 
@@ -115,6 +115,16 @@ class ArtifactSummary(BaseModel):
     content_type: str | None = None
 
 
+class RunProgress(BaseModel):
+    stage: str
+    current_frame: int | None = None
+    total_frames: int | None = None
+    percent: float = 0.0
+    eta_seconds: float | None = None
+    elapsed_seconds: float | None = None
+    updated_at: str | None = None
+
+
 class RunRecord(BaseModel):
     run_id: str
     source: str
@@ -130,6 +140,7 @@ class RunRecord(BaseModel):
     modules_enabled: dict[str, bool] = Field(default_factory=dict)
     artifacts: list[ArtifactSummary] = Field(default_factory=list)
     stats: dict[str, Any] = Field(default_factory=dict)
+    progress: RunProgress | None = None
     notes: str | None = None
     error: str | None = None
 

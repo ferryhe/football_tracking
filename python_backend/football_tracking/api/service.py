@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import base64
+from concurrent.futures import CancelledError
 import csv
+import inspect
 import json
 import mimetypes
 import re
@@ -292,6 +294,17 @@ def _normalize_iso_timestamp(value: Any) -> str | None:
     return parsed.astimezone(timezone.utc).isoformat()
 
 
+def _seconds_since_iso(value: Any) -> float | None:
+    normalized = _normalize_iso_timestamp(value)
+    if normalized is None:
+        return None
+    try:
+        started_at = datetime.fromisoformat(normalized)
+    except ValueError:
+        return None
+    return max(0.0, (datetime.now(timezone.utc) - started_at).total_seconds())
+
+
 def _localized_run_status(language: str, status: str) -> str:
     labels = {
         "en": {
@@ -299,12 +312,14 @@ def _localized_run_status(language: str, status: str) -> str:
             "running": "running",
             "completed": "completed",
             "failed": "failed",
+            "cancelled": "cancelled",
         },
         "zh": {
             "queued": "\u6392\u961f\u4e2d",
             "running": "\u8fd0\u884c\u4e2d",
             "completed": "\u5df2\u5b8c\u6210",
             "failed": "\u5931\u8d25",
+            "cancelled": "\u5df2\u505c\u6b62",
         },
     }
     return labels[language].get(status, status)
@@ -321,6 +336,7 @@ class ApiService:
         self.generated_config_dir = self.config_dir / "generated"
         self._lock = threading.Lock()
         self._active_threads: dict[str, threading.Thread] = {}
+        self._cancel_events: dict[str, threading.Event] = {}
         self.provider_settings = load_provider_settings(repo_root)
         self.ai_client = OpenAIResponsesClient(self.provider_settings)
         self._ensure_registry_file()
@@ -1252,6 +1268,7 @@ class ApiService:
             },
             "artifacts": [],
             "stats": {},
+            "progress": self._initial_progress(),
             "notes": request.get("notes"),
             "error": None,
         }
@@ -1262,13 +1279,15 @@ class ApiService:
             registry["runs"] = [run for run in registry["runs"] if run["run_id"] != run_id]
             registry["runs"].append(run_record)
             self._write_registry(registry)
+            cancel_event = threading.Event()
             thread = threading.Thread(
                 target=self._execute_run,
-                args=(run_id, config),
+                args=(run_id, config, cancel_event),
                 name=f"football-tracking-run-{run_id}",
                 daemon=True,
             )
             self._active_threads[run_id] = thread
+            self._cancel_events[run_id] = cancel_event
         thread.start()
         return run_record
 
@@ -1330,6 +1349,7 @@ class ApiService:
             },
             "artifacts": self._collect_artifacts(config.output_dir),
             "stats": self._collect_stats(config.output_dir),
+            "progress": self._initial_progress(),
             "notes": render_notes,
             "error": None,
         }
@@ -1340,20 +1360,69 @@ class ApiService:
             registry["runs"] = [run for run in registry["runs"] if run["run_id"] != run_id]
             registry["runs"].append(run_record)
             self._write_registry(registry)
+            cancel_event = threading.Event()
             thread = threading.Thread(
                 target=self._execute_follow_cam_render,
-                args=(run_id, config, source_run_id),
+                args=(run_id, config, source_run_id, cancel_event),
                 name=f"football-tracking-render-{run_id}",
                 daemon=True,
             )
             self._active_threads[run_id] = thread
+            self._cancel_events[run_id] = cancel_event
         thread.start()
         return run_record
 
-    def _execute_run(self, run_id: str, config: AppConfig) -> None:
-        self._update_run(run_id, {"status": "running", "started_at": _utc_now_iso(), "error": None})
+    def cancel_run(self, run_id: str) -> dict[str, Any]:
+        with self._lock:
+            registry = self._read_registry()
+            for run in registry["runs"]:
+                if run["run_id"] != run_id:
+                    continue
+                status = run.get("status")
+                if status not in {"queued", "running"}:
+                    raise RuntimeError(f"Run is not active: {run_id}")
+                cancel_event = self._cancel_events.get(run_id)
+                if cancel_event is not None:
+                    cancel_event.set()
+                    run["progress"] = self._cancelling_progress(run.get("progress"), run.get("started_at"))
+                else:
+                    run.update(
+                        {
+                            "status": "cancelled",
+                            "completed_at": _utc_now_iso(),
+                            "progress": self._cancelled_progress(run.get("progress"), run.get("started_at")),
+                        }
+                    )
+                self._write_registry(registry)
+                return run
+        raise KeyError(run_id)
+
+    def _execute_run(self, run_id: str, config: AppConfig, cancel_event: threading.Event) -> None:
+        progress_plan = self._progress_stage_plan(
+            tracking=True,
+            postprocess=bool(config.postprocess.enabled),
+            render=bool(config.follow_cam.enabled),
+        )
+        started_at = _utc_now_iso()
+        self._update_run(
+            run_id,
+            {
+                "status": "running",
+                "started_at": started_at,
+                "error": None,
+                "progress": self._build_progress_payload(
+                    {"stage": "tracking", "current_frame": 0, "total_frames": None},
+                    progress_plan,
+                    started_at=started_at,
+                ),
+            },
+        )
         try:
-            BallTrackingPipeline(config).run()
+            self._run_with_optional_progress(
+                BallTrackingPipeline(config).run,
+                lambda update: self._update_run_progress(run_id, update, progress_plan),
+                cancel_event.is_set,
+            )
             existing = self.get_run(run_id)
             updated = self._build_run_snapshot(
                 run_id=run_id,
@@ -1372,9 +1441,24 @@ class ApiService:
                 notes=existing.get("notes"),
                 started_at=existing.get("started_at"),
                 completed_at=_utc_now_iso(),
+                progress=self._completed_progress(existing.get("progress"), existing.get("started_at")),
             )
             self._replace_run(run_id, updated)
+        except CancelledError:
+            existing = self.get_run(run_id)
+            self._update_run(
+                run_id,
+                {
+                    "status": "cancelled",
+                    "completed_at": _utc_now_iso(),
+                    "error": None,
+                    "artifacts": self._collect_artifacts(config.output_dir),
+                    "stats": self._collect_stats(config.output_dir),
+                    "progress": self._cancelled_progress(existing.get("progress"), existing.get("started_at")),
+                },
+            )
         except Exception as exc:
+            existing = self.get_run(run_id)
             self._update_run(
                 run_id,
                 {
@@ -1383,16 +1467,42 @@ class ApiService:
                     "error": str(exc),
                     "artifacts": self._collect_artifacts(config.output_dir),
                     "stats": self._collect_stats(config.output_dir),
+                    "progress": self._failed_progress(existing.get("progress"), existing.get("started_at")),
                 },
             )
         finally:
             with self._lock:
                 self._active_threads.pop(run_id, None)
+                self._cancel_events.pop(run_id, None)
 
-    def _execute_follow_cam_render(self, run_id: str, config: AppConfig, parent_run_id: str) -> None:
-        self._update_run(run_id, {"status": "running", "started_at": _utc_now_iso(), "error": None})
+    def _execute_follow_cam_render(
+        self,
+        run_id: str,
+        config: AppConfig,
+        parent_run_id: str,
+        cancel_event: threading.Event,
+    ) -> None:
+        progress_plan = self._progress_stage_plan(tracking=False, postprocess=False, render=True)
+        started_at = _utc_now_iso()
+        self._update_run(
+            run_id,
+            {
+                "status": "running",
+                "started_at": started_at,
+                "error": None,
+                "progress": self._build_progress_payload(
+                    {"stage": "render", "current_frame": 0, "total_frames": None},
+                    progress_plan,
+                    started_at=started_at,
+                ),
+            },
+        )
         try:
-            FollowCamGenerator(config).run()
+            self._run_with_optional_progress(
+                FollowCamGenerator(config).run,
+                lambda update: self._update_run_progress(run_id, update, progress_plan),
+                cancel_event.is_set,
+            )
             existing = self.get_run(run_id)
             updated = self._build_run_snapshot(
                 run_id=run_id,
@@ -1408,9 +1518,24 @@ class ApiService:
                 notes=existing.get("notes"),
                 started_at=existing.get("started_at"),
                 completed_at=_utc_now_iso(),
+                progress=self._completed_progress(existing.get("progress"), existing.get("started_at")),
             )
             self._replace_run(run_id, updated)
+        except CancelledError:
+            existing = self.get_run(run_id)
+            self._update_run(
+                run_id,
+                {
+                    "status": "cancelled",
+                    "completed_at": _utc_now_iso(),
+                    "error": None,
+                    "artifacts": self._collect_artifacts(config.output_dir),
+                    "stats": self._collect_stats(config.output_dir),
+                    "progress": self._cancelled_progress(existing.get("progress"), existing.get("started_at")),
+                },
+            )
         except Exception as exc:
+            existing = self.get_run(run_id)
             self._update_run(
                 run_id,
                 {
@@ -1419,16 +1544,27 @@ class ApiService:
                     "error": str(exc),
                     "artifacts": self._collect_artifacts(config.output_dir),
                     "stats": self._collect_stats(config.output_dir),
+                    "progress": self._failed_progress(existing.get("progress"), existing.get("started_at")),
                 },
             )
         finally:
             with self._lock:
                 self._active_threads.pop(run_id, None)
+                self._cancel_events.pop(run_id, None)
 
     def _assert_no_active_run_locked(self) -> None:
         running = [run_id for run_id, thread in self._active_threads.items() if thread.is_alive()]
         if running:
             raise RuntimeError(f"Another run is already active: {running[0]}")
+
+    def _run_with_optional_progress(self, runner, progress_callback, should_cancel) -> None:
+        parameters = inspect.signature(runner).parameters
+        kwargs: dict[str, Any] = {}
+        if "progress_callback" in parameters:
+            kwargs["progress_callback"] = progress_callback
+        if "should_cancel" in parameters:
+            kwargs["should_cancel"] = should_cancel
+        runner(**kwargs)
 
     def _update_run(self, run_id: str, patch: dict[str, Any]) -> None:
         with self._lock:
@@ -1439,6 +1575,148 @@ class ApiService:
                     self._write_registry(registry)
                     return
         raise KeyError(run_id)
+
+    def _update_run_progress(self, run_id: str, update: dict[str, Any], progress_plan: dict[str, tuple[float, float]]) -> None:
+        with self._lock:
+            registry = self._read_registry()
+            for run in registry["runs"]:
+                if run["run_id"] == run_id:
+                    run["progress"] = self._build_progress_payload(
+                        update,
+                        progress_plan,
+                        started_at=run.get("started_at"),
+                    )
+                    self._write_registry(registry)
+                    return
+        raise KeyError(run_id)
+
+    def _progress_stage_plan(self, *, tracking: bool, postprocess: bool, render: bool) -> dict[str, tuple[float, float]]:
+        weights: list[tuple[str, float]] = []
+        if tracking:
+            weights.append(("tracking", 1.0))
+        if postprocess:
+            weights.append(("postprocess", 0.12))
+        if render:
+            weights.append(("render", 0.45))
+        if not weights:
+            weights.append(("tracking", 1.0))
+        total_weight = sum(weight for _, weight in weights)
+        cursor = 0.0
+        plan: dict[str, tuple[float, float]] = {}
+        for stage, weight in weights:
+            start = cursor / total_weight
+            cursor += weight
+            plan[stage] = (start, cursor / total_weight)
+        return plan
+
+    def _initial_progress(self) -> dict[str, Any]:
+        return {
+            "stage": "queued",
+            "current_frame": None,
+            "total_frames": None,
+            "percent": 0.0,
+            "eta_seconds": None,
+            "elapsed_seconds": None,
+            "updated_at": _utc_now_iso(),
+        }
+
+    def _build_progress_payload(
+        self,
+        update: dict[str, Any],
+        progress_plan: dict[str, tuple[float, float]],
+        *,
+        started_at: str | None,
+    ) -> dict[str, Any]:
+        stage = str(update.get("stage") or "tracking")
+        current_frame = self._optional_int(update.get("current_frame"))
+        total_frames = self._optional_int(update.get("total_frames"))
+        if total_frames is not None and total_frames <= 0:
+            total_frames = None
+        if current_frame is not None and total_frames is not None:
+            current_frame = max(0, min(current_frame, total_frames))
+
+        stage_percent = 0.0
+        if current_frame is not None and total_frames:
+            stage_percent = min(100.0, max(0.0, (current_frame / total_frames) * 100.0))
+        elif isinstance(update.get("percent"), (int, float)):
+            stage_percent = min(100.0, max(0.0, float(update["percent"])))
+
+        stage_start, stage_end = progress_plan.get(stage, (0.0, 1.0))
+        percent = min(99.0, max(0.0, (stage_start + (stage_end - stage_start) * (stage_percent / 100.0)) * 100.0))
+        elapsed_seconds = _seconds_since_iso(started_at)
+        eta_seconds = None
+        if elapsed_seconds is not None and percent > 0.5:
+            eta_seconds = max(0.0, elapsed_seconds * ((100.0 - percent) / percent))
+        return {
+            "stage": stage,
+            "current_frame": current_frame,
+            "total_frames": total_frames,
+            "percent": round(percent, 2),
+            "eta_seconds": None if eta_seconds is None else round(eta_seconds, 1),
+            "elapsed_seconds": None if elapsed_seconds is None else round(elapsed_seconds, 1),
+            "updated_at": _utc_now_iso(),
+        }
+
+    def _completed_progress(self, current: Any, started_at: str | None) -> dict[str, Any]:
+        payload = dict(current) if isinstance(current, dict) else self._initial_progress()
+        elapsed_seconds = _seconds_since_iso(started_at)
+        payload.update(
+            {
+                "stage": "completed",
+                "percent": 100.0,
+                "eta_seconds": 0.0,
+                "elapsed_seconds": None if elapsed_seconds is None else round(elapsed_seconds, 1),
+                "updated_at": _utc_now_iso(),
+            }
+        )
+        return payload
+
+    def _failed_progress(self, current: Any, started_at: str | None) -> dict[str, Any]:
+        payload = dict(current) if isinstance(current, dict) else self._initial_progress()
+        elapsed_seconds = _seconds_since_iso(started_at)
+        payload.update(
+            {
+                "stage": "failed",
+                "eta_seconds": None,
+                "elapsed_seconds": None if elapsed_seconds is None else round(elapsed_seconds, 1),
+                "updated_at": _utc_now_iso(),
+            }
+        )
+        return payload
+
+    def _cancelling_progress(self, current: Any, started_at: str | None) -> dict[str, Any]:
+        payload = dict(current) if isinstance(current, dict) else self._initial_progress()
+        elapsed_seconds = _seconds_since_iso(started_at)
+        payload.update(
+            {
+                "stage": "cancelling",
+                "eta_seconds": None,
+                "elapsed_seconds": None if elapsed_seconds is None else round(elapsed_seconds, 1),
+                "updated_at": _utc_now_iso(),
+            }
+        )
+        return payload
+
+    def _cancelled_progress(self, current: Any, started_at: str | None) -> dict[str, Any]:
+        payload = dict(current) if isinstance(current, dict) else self._initial_progress()
+        elapsed_seconds = _seconds_since_iso(started_at)
+        payload.update(
+            {
+                "stage": "cancelled",
+                "eta_seconds": None,
+                "elapsed_seconds": None if elapsed_seconds is None else round(elapsed_seconds, 1),
+                "updated_at": _utc_now_iso(),
+            }
+        )
+        return payload
+
+    def _optional_int(self, value: Any) -> int | None:
+        if value is None or value == "":
+            return None
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
 
     def _replace_run(self, run_id: str, replacement: dict[str, Any]) -> None:
         with self._lock:
@@ -1522,7 +1800,7 @@ class ApiService:
             status = run.get("status")
             if status == "running" and not run.get("started_at"):
                 run["started_at"] = created_at or output_mtime or _utc_now_iso()
-            if status in {"completed", "failed"} and not run.get("completed_at"):
+            if status in {"completed", "failed", "cancelled"} and not run.get("completed_at"):
                 run["completed_at"] = output_mtime or started_at or created_at or _utc_now_iso()
             if status == "completed" and not run.get("started_at"):
                 run["started_at"] = created_at or run.get("completed_at")
@@ -1543,11 +1821,12 @@ class ApiService:
         notes: str | None,
         started_at: str | None = None,
         completed_at: str | None = None,
+        progress: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         normalized_created_at = _normalize_iso_timestamp(created_at) or created_at
         normalized_started_at = _normalize_iso_timestamp(started_at) if started_at else None
         normalized_completed_at = _normalize_iso_timestamp(completed_at) if completed_at else None
-        if status in {"completed", "failed"} and normalized_completed_at is None:
+        if status in {"completed", "failed", "cancelled"} and normalized_completed_at is None:
             normalized_completed_at = normalized_started_at or normalized_created_at
         return {
             "run_id": run_id,
@@ -1564,6 +1843,7 @@ class ApiService:
             "modules_enabled": modules_enabled,
             "artifacts": self._collect_artifacts(output_dir),
             "stats": self._collect_stats(output_dir),
+            "progress": progress,
             "notes": notes,
             "error": None,
         }

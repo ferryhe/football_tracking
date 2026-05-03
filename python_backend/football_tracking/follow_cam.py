@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+from concurrent.futures import CancelledError
 import csv
 import json
 import math
+import time
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any, Callable
 
 import cv2
 
@@ -46,7 +49,11 @@ class FollowCamGenerator:
         self.app_config = app_config
         self.config = app_config.follow_cam
 
-    def run(self) -> None:
+    def run(
+        self,
+        progress_callback: Callable[[dict[str, Any]], None] | None = None,
+        should_cancel: Callable[[], bool] | None = None,
+    ) -> None:
         if not self.config.enabled:
             return
 
@@ -76,6 +83,8 @@ class FollowCamGenerator:
                 frames=frames,
                 source_width=source_width,
                 source_height=source_height,
+                progress_callback=progress_callback,
+                should_cancel=should_cancel,
             )
         finally:
             writer.release()
@@ -149,6 +158,8 @@ class FollowCamGenerator:
         frames: list[FollowCamFrame],
         source_width: int,
         source_height: int,
+        progress_callback: Callable[[dict[str, Any]], None] | None = None,
+        should_cancel: Callable[[], bool] | None = None,
     ) -> list[CameraPathEntry]:
         cfg = self.config
         aspect = cfg.target_width / cfg.target_height
@@ -171,8 +182,32 @@ class FollowCamGenerator:
         lost_streak = 0
         pan_mode = "glide"
         path_entries: list[CameraPathEntry] = []
+        total_frames = len(frames)
+        last_progress_at = 0.0
 
-        for frame_info in frames:
+        def emit_progress(current_frame: int, *, force: bool = False) -> None:
+            nonlocal last_progress_at
+            if progress_callback is None:
+                return
+            now = time.monotonic()
+            if not force and now - last_progress_at < 1.0:
+                return
+            last_progress_at = now
+            progress_callback(
+                {
+                    "stage": "render",
+                    "current_frame": current_frame,
+                    "total_frames": total_frames,
+                }
+            )
+
+        def raise_if_cancelled() -> None:
+            if should_cancel and should_cancel():
+                raise CancelledError("Run cancelled by user.")
+
+        emit_progress(0, force=True)
+        for index, frame_info in enumerate(frames, start=1):
+            raise_if_cancelled()
             ok, frame = capture.read()
             if not ok:
                 break
@@ -300,7 +335,9 @@ class FollowCamGenerator:
                     pan_mode=pan_mode,
                 )
             )
+            emit_progress(index, force=index == total_frames)
 
+        emit_progress(len(path_entries), force=True)
         return path_entries
 
     def _desired_crop_height(

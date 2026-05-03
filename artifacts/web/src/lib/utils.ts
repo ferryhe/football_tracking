@@ -29,6 +29,17 @@ export function formatBytes(bytes: number | null | undefined): string {
   return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`;
 }
 
+export function formatDuration(seconds: number | null | undefined): string {
+  if (seconds == null || Number.isNaN(seconds)) return "—";
+  const totalSeconds = Math.max(0, Math.round(seconds));
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const remainingSeconds = totalSeconds % 60;
+  if (hours > 0) return `${hours}h ${minutes}m`;
+  if (minutes > 0) return `${minutes}m ${remainingSeconds}s`;
+  return `${remainingSeconds}s`;
+}
+
 export function runMoment(run: RunRecord): string | null {
   return run.completed_at ?? run.started_at ?? run.created_at ?? null;
 }
@@ -43,6 +54,8 @@ export function statusColor(status: RunStatus): string {
       return "text-emerald-600 dark:text-emerald-400";
     case "failed":
       return "text-destructive";
+    case "cancelled":
+      return "text-amber-600 dark:text-amber-400";
   }
 }
 
@@ -56,6 +69,8 @@ export function statusBadgeClass(status: RunStatus): string {
       return "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300";
     case "failed":
       return "bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-300";
+    case "cancelled":
+      return "bg-amber-100 text-amber-800 dark:bg-amber-900/40 dark:text-amber-300";
   }
 }
 
@@ -63,9 +78,10 @@ export function isDeliverable(run: RunRecord): boolean {
   return run.source === "follow_cam_render" || run.modules_enabled.follow_cam === true;
 }
 
-export type HistoryCategory = "baseline" | "deliverable" | "failed";
+export type HistoryCategory = "baseline" | "deliverable" | "failed" | "cancelled";
 
 export function historyCategory(run: RunRecord): HistoryCategory {
+  if (run.status === "cancelled") return "cancelled";
   if (run.status === "failed") return "failed";
   if (isDeliverable(run)) return "deliverable";
   return "baseline";

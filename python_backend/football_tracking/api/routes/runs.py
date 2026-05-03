@@ -55,6 +55,16 @@ def create_run(request: CreateRunRequest, service: ApiService = Depends(get_serv
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
+@router.post("/runs/{run_id}/cancel", response_model=RunRecord)
+def cancel_run(run_id: str, service: ApiService = Depends(get_service)) -> RunRecord:
+    try:
+        return RunRecord(**service.cancel_run(run_id))
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=f"Run not found: {run_id}") from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
 @router.post("/runs/{run_id}/follow-cam-render", response_model=RunRecord, status_code=202)
 def create_follow_cam_render(
     run_id: str,

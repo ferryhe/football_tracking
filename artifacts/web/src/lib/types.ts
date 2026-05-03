@@ -1,4 +1,4 @@
-export type RunStatus = "queued" | "running" | "completed" | "failed";
+export type RunStatus = "queued" | "running" | "completed" | "failed" | "cancelled";
 
 export interface HealthResponse {
   status: string;
@@ -59,6 +59,16 @@ export interface ArtifactSummary {
   content_type: string | null;
 }
 
+export interface RunProgress {
+  stage: string;
+  current_frame: number | null;
+  total_frames: number | null;
+  percent: number;
+  eta_seconds: number | null;
+  elapsed_seconds: number | null;
+  updated_at: string | null;
+}
+
 export interface RunRecord {
   run_id: string;
   source: string;
@@ -74,6 +84,7 @@ export interface RunRecord {
   modules_enabled: Record<string, boolean>;
   artifacts: ArtifactSummary[];
   stats: Record<string, unknown>;
+  progress?: RunProgress | null;
   notes: string | null;
   error: string | null;
 }

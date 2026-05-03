@@ -52,6 +52,8 @@ export const api = {
       method: "POST",
       body: JSON.stringify(body),
     }),
+  cancelRun: (runId: string) =>
+    request<RunRecord>(`/runs/${encodeURIComponent(runId)}/cancel`, { method: "POST" }),
   deleteRunOutput: (runId: string) =>
     request<{ name: string; path: string; deleted: boolean }>(`/runs?run_id=${encodeURIComponent(runId)}`, { method: "DELETE" }),
   deleteConfig: (name: string) =>

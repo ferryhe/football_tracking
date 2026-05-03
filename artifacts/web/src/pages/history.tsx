@@ -1,25 +1,75 @@
 import { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/lib/api";
-import { formatDateTime, runMoment, historyCategory, isDeliverable } from "@/lib/utils";
+import { formatDateTime, formatDuration, runMoment, historyCategory, isDeliverable } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Alert, AlertDescription } from "@/components/ui/alert";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+  AlertDialogTrigger,
+} from "@/components/ui/alert-dialog";
 import { Input } from "@/components/ui/input";
+import { Progress } from "@/components/ui/progress";
 import { StatusBadge } from "@/components/StatusBadge";
-import { Loader2, AlertCircle, Trash2, Film, Crosshair, ChevronDown, ChevronRight, Search } from "lucide-react";
+import { Loader2, AlertCircle, Trash2, Film, Crosshair, ChevronDown, ChevronRight, Search, Square } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useToast } from "@/hooks/use-toast";
 import type { RunRecord } from "@/lib/types";
 import { useLanguage } from "@/contexts/LanguageContext";
 
-type FilterCategory = "all" | "baseline" | "deliverable" | "failed";
+type FilterCategory = "all" | "baseline" | "deliverable" | "failed" | "cancelled";
 
-function RunDetailRow({ run, onDelete }: { run: RunRecord; onDelete: (id: string) => void }) {
+function RunProgressView({ run }: { run: RunRecord }) {
+  const { t } = useLanguage();
+  const progress = run.progress;
+  if (!progress) return null;
+  const percent = Math.max(0, Math.min(100, progress.percent ?? 0));
+  const hasFrameCount = progress.current_frame != null && progress.total_frames != null;
+  const etaText =
+    run.status === "running" && progress.eta_seconds != null
+      ? `${t.history.etaLabel} ${formatDuration(progress.eta_seconds)}`
+      : null;
+
+  return (
+    <div className="mt-2 space-y-1.5" data-testid={`run-progress-${run.run_id}`}>
+      <div className="flex items-center justify-between gap-3 text-xs text-muted-foreground">
+        <span className="truncate">
+          {t.history.progressStage(progress.stage)}
+          {hasFrameCount ? ` · ${t.history.frameProgress(progress.current_frame!, progress.total_frames!)}` : ""}
+        </span>
+        <span className="shrink-0 font-medium tabular-nums text-foreground">{Math.round(percent)}%</span>
+      </div>
+      <Progress value={percent} />
+      <div className="flex items-center justify-between gap-3 text-xs text-muted-foreground">
+        <span>{etaText ?? `${t.history.elapsedLabel} ${formatDuration(progress.elapsed_seconds)}`}</span>
+        {etaText && <span>{t.history.elapsedLabel} {formatDuration(progress.elapsed_seconds)}</span>}
+      </div>
+    </div>
+  );
+}
+
+function RunDetailRow({
+  run,
+  onCancel,
+  onDelete,
+}: {
+  run: RunRecord;
+  onCancel: (id: string) => void;
+  onDelete: (id: string) => void;
+}) {
   const { t } = useLanguage();
   const [open, setOpen] = useState(false);
   const cat = historyCategory(run);
+  const isActive = run.status === "queued" || run.status === "running";
 
   return (
     <div className="border rounded-lg overflow-hidden" data-testid={`run-detail-${run.run_id}`}>
@@ -38,6 +88,7 @@ function RunDetailRow({ run, onDelete }: { run: RunRecord; onDelete: (id: string
         <div className="flex-1 min-w-0">
           <p className="text-sm font-medium font-mono truncate">{run.run_id}</p>
           <p className="text-xs text-muted-foreground truncate">{run.config_name ?? t.common.notAvailable}</p>
+          {isActive && <RunProgressView run={run} />}
         </div>
         <div className="shrink-0 flex items-center gap-2">
           <StatusBadge status={run.status} />
@@ -87,6 +138,10 @@ function RunDetailRow({ run, onDelete }: { run: RunRecord; onDelete: (id: string
             </div>
           )}
 
+          {run.progress && !isActive && (
+            <RunProgressView run={run} />
+          )}
+
           {run.error && (
             <Alert variant="destructive" className="py-2">
               <AlertCircle className="h-3 w-3" />
@@ -98,16 +153,47 @@ function RunDetailRow({ run, onDelete }: { run: RunRecord; onDelete: (id: string
             <p className="text-xs text-muted-foreground italic">{run.notes}</p>
           )}
 
-          <Button
-            variant="destructive"
-            size="sm"
-            onClick={() => onDelete(run.run_id)}
-            disabled={run.status === "queued" || run.status === "running"}
-            data-testid={`button-delete-run-${run.run_id}`}
-          >
-            <Trash2 className="h-3.5 w-3.5 mr-1.5" />
-            {t.history.deleteOutput}
-          </Button>
+          <div className="flex flex-wrap gap-2">
+            {isActive && (
+              <AlertDialog>
+                <AlertDialogTrigger asChild>
+                  <Button variant="destructive" size="sm" data-testid={`button-cancel-run-${run.run_id}`}>
+                    <Square className="h-3.5 w-3.5 mr-1.5" />
+                    {t.history.cancelRun}
+                  </Button>
+                </AlertDialogTrigger>
+                <AlertDialogContent>
+                  <AlertDialogHeader>
+                    <AlertDialogTitle>{t.history.cancelRunTitle}</AlertDialogTitle>
+                    <AlertDialogDescription>
+                      {t.history.cancelRunDesc}
+                      <span className="mt-2 block font-mono text-xs text-foreground">{run.run_id}</span>
+                    </AlertDialogDescription>
+                  </AlertDialogHeader>
+                  <AlertDialogFooter>
+                    <AlertDialogCancel>{t.common.cancel}</AlertDialogCancel>
+                    <AlertDialogAction
+                      className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+                      onClick={() => onCancel(run.run_id)}
+                      data-testid={`button-confirm-cancel-run-${run.run_id}`}
+                    >
+                      {t.history.cancelRunConfirm}
+                    </AlertDialogAction>
+                  </AlertDialogFooter>
+                </AlertDialogContent>
+              </AlertDialog>
+            )}
+            <Button
+              variant="destructive"
+              size="sm"
+              onClick={() => onDelete(run.run_id)}
+              disabled={isActive}
+              data-testid={`button-delete-run-${run.run_id}`}
+            >
+              <Trash2 className="h-3.5 w-3.5 mr-1.5" />
+              {t.history.deleteOutput}
+            </Button>
+          </div>
         </div>
       )}
     </div>
@@ -138,11 +224,24 @@ export default function HistoryPage() {
     },
   });
 
+  const cancelRun = useMutation({
+    mutationFn: (runId: string) => api.cancelRun(runId),
+    onSuccess: (run) => {
+      queryClient.invalidateQueries({ queryKey: ["runs"] });
+      queryClient.invalidateQueries({ queryKey: ["health"] });
+      toast({ title: t.history.cancelRunSuccess, description: run.run_id });
+    },
+    onError: (err: Error) => {
+      toast({ title: t.history.cancelRunFailed, description: err.message, variant: "destructive" });
+    },
+  });
+
   const filters: { value: FilterCategory; label: string }[] = [
     { value: "all", label: t.history.all },
     { value: "baseline", label: t.history.baseline },
     { value: "deliverable", label: t.history.deliverable },
     { value: "failed", label: t.history.failed },
+    { value: "cancelled", label: t.history.cancelled },
   ];
 
   const filtered = (runs ?? []).filter((r) => {
@@ -160,6 +259,7 @@ export default function HistoryPage() {
     baseline: (runs ?? []).filter((r) => historyCategory(r) === "baseline").length,
     deliverable: (runs ?? []).filter((r) => isDeliverable(r)).length,
     failed: (runs ?? []).filter((r) => r.status === "failed").length,
+    cancelled: (runs ?? []).filter((r) => r.status === "cancelled").length,
   };
 
   return (
@@ -219,7 +319,12 @@ export default function HistoryPage() {
           ) : (
             <div className="space-y-2">
               {filtered.map((run) => (
-                <RunDetailRow key={run.run_id} run={run} onDelete={(id) => deleteOutput.mutate(id)} />
+                <RunDetailRow
+                  key={run.run_id}
+                  run={run}
+                  onCancel={(id) => cancelRun.mutate(id)}
+                  onDelete={(id) => deleteOutput.mutate(id)}
+                />
               ))}
             </div>
           )}

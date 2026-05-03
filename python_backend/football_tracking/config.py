@@ -722,7 +722,7 @@ def load_config(config_path: Path) -> AppConfig:
         frame_dir=str(output_raw.get("frame_dir", "frames")),
         csv_name=str(output_raw.get("csv_name", "ball_track.csv")),
         debug_jsonl_name=str(output_raw.get("debug_jsonl_name", "debug.jsonl")),
-        video_codec=str(output_raw.get("video_codec", "mp4v")),
+        video_codec=str(output_raw.get("video_codec", "avc1")),
         frame_image_ext=str(output_raw.get("frame_image_ext", ".jpg")),
         save_video=bool(output_raw.get("save_video", True)),
         save_frames=bool(output_raw.get("save_frames", True)),
