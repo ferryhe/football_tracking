@@ -1,405 +1,235 @@
-# High-Resolution Football Ball Tracking
+# Football Tracking Workspace
 
-English | [中文](#中文说明)
+[English](#english) | [中文](#中文)
 
-This repository tracks a single in-play football from high-resolution fisheye-style match video and provides a local workspace UI for baseline runs, AI-assisted tuning, deliverable rendering, and history management.
+A responsive React/Vite workspace UI for the **football video tracking** pipeline, running on Replit. The Python tracking pipeline is preserved as-is from the upstream project; this repo replaces the original Windows desktop UI with a path-routed multi-artifact web workspace, reverse-proxied through a Node.js API server.
+
+> Upstream pipeline: [`github.com/ferryhe/football_tracking`](https://github.com/ferryhe/football_tracking) — see [`python_backend/README.md`](./python_backend/README.md) for the original docs (configs, detector weights, output formats).
 
 ## English
 
-### What This Repo Includes
+### Architecture
 
-- Python tracking pipeline for raw tracking, cleanup, and follow-cam rendering
-- Local FastAPI backend for configs, runs, artifacts, AI suggestions, and asset management
-- Local React/Vite workspace UI with 4 main tabs:
-  - `Baseline`
-  - `AI analysis`
-  - `Deliverable task`
-  - `History`
-- Managed Windows launcher scripts for one-click local startup
-
-### Recommended Starting Configs
-
-- `config/real_first_run.yaml`
-  - Best for short probe runs and first-pass tuning
-- `config/real_best_full.yaml`
-  - Best current full-video raw tracking config
-- `config/real_v24_full_postclean.yaml`
-  - Best current full-video delivery config with cleanup and follow-cam enabled
-
-### Environment
-
-- Windows 10 / 11
-- Python 3.10 or 3.11
-- NVIDIA GPU recommended
-- CUDA and cuDNN installed correctly
-- Node.js and `npm` available in PATH
-
-### Detector Weights
-
-This is critical for the first successful run.
-
-- All shipped YAML configs default to:
-  - `detector.model_path: "./weights/football_ball_yolo.pt"`
-- That path is resolved relative to the repo root.
-- The default expected file is:
-  - `weights/football_ball_yolo.pt`
-- The `.pt` file must be an Ultralytics YOLO detection checkpoint.
-  - Good: detect model weights exported for Ultralytics YOLO
-  - Not suitable: classification, segmentation, pose, or OBB checkpoints
-- The filename does not have to stay `football_ball_yolo.pt` if you update `detector.model_path` in the YAML.
-- Default configs accept labels `sports ball` and `ball`, so your model should emit one of those labels or you should update `detector.allowed_labels`.
-- If you run on CPU only, set:
-  - `detector.device: "cpu"`
-  - `detector.use_half: false`
-
-If the weight file is missing, the baseline run will fail before detection starts.
-
-### Quick Start
-
-1. Create and activate a virtual environment.
-2. Install Python dependencies.
-3. Install frontend dependencies.
-4. Start the managed local UI.
-
-```powershell
-python -m venv .venv
-.\.venv\Scripts\activate
-python -m pip install --upgrade pip
-pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124
-pip install -r requirements.txt
-
-cd frontend
-npm install
-cd ..
-
-.\start_ui.cmd
+```
+Browser
+  │
+  ▼  HTTPS via $REPLIT_DOMAINS
+[ shared Replit proxy (port 80) ]
+  │
+  ├─ /        → artifacts/web         (React + Vite + shadcn/ui frontend)
+  └─ /api/*   → artifacts/api-server  (Node.js Express reverse proxy)
+                  │
+                  ▼  pathRewrite ^/ → /api/v1/
+                python_backend          (FastAPI tracking service, port 8000)
 ```
 
-If you want the steadiest backend startup on Windows:
+- The **Node API server** proxies `/api/*` to the Python FastAPI service. It uses `fixRequestBody` so JSON request bodies survive the round-trip through `express.json()`.
+- The **Python backend** lives in `python_backend/` and is **not** part of the pnpm workspace; it's a standalone Python project with its own `pyproject.toml`. Its endpoints are preserved unchanged from upstream.
+- All paths are routed by the shared Replit proxy — never call service ports directly.
 
-```powershell
-.\start_ui.cmd --no-reload
+### Repository layout
+
+```
+.
+├── artifacts/
+│   ├── web/                 React frontend (5 pages, shadcn/ui, i18n, dark mode)
+│   ├── api-server/          Express reverse proxy to Python backend
+│   └── mockup-sandbox/      Component preview sandbox (unused for this app)
+├── python_backend/          FastAPI tracking pipeline (standalone Python project)
+│   ├── football_tracking/   Pipeline + API code
+│   ├── config/              YAML tracking configs
+│   ├── data/                Source videos (drop your videos here)
+│   ├── outputs/             Run artifacts and rendered videos
+│   └── weights/             Detector model checkpoints (.pt)
+├── lib/                     Shared TS libs (workspace)
+├── scripts/                 Workspace utility scripts
+├── pnpm-workspace.yaml
+└── replit.md                Project context for the Replit Agent
 ```
 
-To stop managed UI processes:
+### Frontend pages (artifacts/web)
 
-```powershell
-.\stop_ui.cmd
-```
+| Path          | Page         | Purpose                                                                                                  |
+| ------------- | ------------ | -------------------------------------------------------------------------------------------------------- |
+| `/`           | Dashboard    | System status (backend / configs / runs), recent runs, available configs                                 |
+| `/baseline`   | Baseline     | Pick video + config, **preview field & accept AI field setup**, set frame range, launch baseline run     |
+| `/ai`         | AI Analysis  | For any finished run (completed or failed), request AI tracking improvement suggestions with overlays    |
+| `/deliverable`| Deliverable  | Render a follow-cam 16:9 deliverable from a completed run                                                |
+| `/history`    | History      | Filter & search past runs, delete outputs                                                                |
 
-### Workspace Flow
+Highlights of the new Baseline page:
 
-1. `Baseline`
-   - Pick a source video from `data/`
-   - Pick a baseline config
-   - Capture a preview frame
-   - Load field setup from config or ask AI for a suggestion
-   - Accept the field setup
-   - Start a baseline run
-2. `AI analysis`
-   - Select a finished run tied to the current source clip
-   - Trigger AI explanation manually
-   - Review the suggested config
-   - Run the next task if the suggestion looks right
-3. `Deliverable task`
-   - Pick a completed source run
-   - Render a clean `16:9` deliverable without rerunning the full baseline pipeline
-4. `History`
-   - Review past runs
-   - Filter `baseline / deliverable / failed`
-   - Manage source videos, configs, and output folders grouped by source clip
+- **Field Setup card** — captures a sample frame from the chosen video, requests an AI suggestion that marks the playing field, and forwards the accepted `config_patch` to the run. Suggestion is auto-invalidated when the source video or config changes.
+- **Frame Range** — optional `start_frame` and `max_frames` inputs let you do quick partial-clip tests (leave both empty to process the full video).
+- **Auto-redirect** — after a run is queued, the user is sent to `/history` to watch progress.
 
-### Current Storage Model
+### Workflows (managed automatically on Replit)
 
-- Source videos live under `data/`
-- Configs live under `config/`
-- Generated configs live under `config/generated/`
-- New runs are written to:
-
-```text
-outputs/runs/<input_slug>/<run_id>/
-```
-
-- History scanning is backward-compatible and still reads:
-  - `outputs/*`
-  - `outputs/api_runs/*`
-  - `outputs/runs/<input_slug>/<run_id>`
-
-### Common Commands
-
-Short probe run:
-
-```powershell
-.\.venv\Scripts\python.exe main.py --config config/real_first_run.yaml
-```
-
-Full raw run:
-
-```powershell
-.\.venv\Scripts\python.exe main.py --config config/real_best_full.yaml
-```
-
-Full cleaned delivery run:
-
-```powershell
-.\.venv\Scripts\python.exe main.py --config config/real_v24_full_postclean.yaml
-```
-
-Run backend only:
-
-```powershell
-.\.venv\Scripts\python.exe -m uvicorn football_tracking.api.app:app --reload
-```
-
-### Main Outputs
-
-Raw tracking usually writes:
-
-- `annotated.mp4`
-- `ball_track.csv`
-- `debug.jsonl`
-
-Cleanup adds:
-
-- `annotated.cleaned.mp4`
-- `ball_track.cleaned.csv`
-- `debug.cleaned.jsonl`
-- `cleanup_report.json`
-
-Follow-cam adds:
-
-- `follow_cam.mp4`
-- `camera_path.csv`
-- `follow_cam_report.json`
-
-### Docs
-
-- English operation guide: [docs/operation-guide.en.md](docs/operation-guide.en.md)
-- 中文操作指南: [docs/operation-guide.zh.md](docs/operation-guide.zh.md)
-- Frontend planning notes:
-  - `docs/plans/2026-03-21-ai-native-frontend-plan.md`
-  - `docs/plans/2026-03-21-frontend-phase1-execution-plan.md`
+| Workflow                                       | Command                                                                          |
+| ---------------------------------------------- | -------------------------------------------------------------------------------- |
+| `Python FastAPI Backend`                       | `python -m uvicorn football_tracking.api.app:app --host 0.0.0.0 --port 8000 --reload` |
+| `artifacts/api-server: API Server`             | `pnpm --filter @workspace/api-server run dev`                                    |
+| `artifacts/web: web`                           | `pnpm --filter @workspace/web run dev`                                           |
+| `artifacts/mockup-sandbox: Component Preview`  | `pnpm --filter @workspace/mockup-sandbox run dev`                                |
 
 ### Verification
 
-Frontend:
+```bash
+# Type-check the whole monorepo (libs + leaf packages)
+pnpm run typecheck
 
-```powershell
-cd frontend
-npm run lint
-npm run typecheck
-npm test
-npm run build
+# Type-check just the frontend or api-server
+pnpm --filter @workspace/web run typecheck
+pnpm --filter @workspace/api-server run typecheck
+
+# Quick proxy smoke-tests
+curl -s localhost:80/api/healthz                              # Node-side health
+curl -s localhost:80/api/health                               # Python-side health
+curl -s localhost:80/api/inputs                               # List source videos
+curl -s -X POST -H "Content-Type: application/json" \
+     -d '{}' localhost:80/api/inputs/field-suggestion         # Should return 422 (validation)
 ```
 
-Backend:
+### Environment variables
 
-```powershell
-.\.venv\Scripts\python.exe -m pip install -r requirements-dev.txt
-.\.venv\Scripts\python.exe -m ruff check .
-.\.venv\Scripts\python.exe -m pyright
-.\.venv\Scripts\python.exe -m unittest discover -s tests -p "test_*.py"
-```
+| Name                      | Required | Purpose                                                                       |
+| ------------------------- | -------- | ----------------------------------------------------------------------------- |
+| `SESSION_SECRET`          | yes      | Express session secret                                                        |
+| `PYTHON_API_URL`          | no       | Python backend URL — defaults to `http://localhost:8000`                      |
+| `PROVIDER_OPENAI_API_KEY` | no       | OpenAI key for richer AI recommendations; if unset, local heuristics are used |
+| `PROVIDER_OPENAI_BASE_URL`| no       | Override OpenAI-compatible base URL                                           |
+| `PROVIDER_OPENAI_CHAT_MODEL` | no    | Override chat model name                                                      |
 
-Type-check scope note / 类型检查范围说明：`pyright` 当前先覆盖 `pyrightconfig.json` 里配置的稳定入口面：API schema/provider 和本地启动脚本。依赖 OpenCV 的跟踪主流水线还没有完成全量类型化。
+These are stored as Replit Secrets. **Do not** create `.env` files for them.
+
+### Drop-in usage
+
+1. Put one or more `.mp4` videos under `python_backend/data/`.
+2. Make sure a YOLO detector checkpoint is available at `python_backend/weights/football_ball_yolo.pt` (or update `detector.model_path` in your YAML).
+3. Open the web preview, go to **Baseline**, pick a video & config, optionally request an AI field suggestion, set a frame range for a quick test, then **Start Baseline Run**.
+4. Watch progress in **History**.
+5. After a run completes, visit **Deliverable** to render a 16:9 follow-cam video, or **AI Analysis** to ask for tuning suggestions.
+
+### What changed vs. upstream
+
+- The original React/Vite UI in `python_backend/frontend/` has been **replaced** by `artifacts/web/`; the archived copy was removed to keep this repo layout minimal.
+- A Node.js Express **reverse proxy** sits in front of FastAPI to fit Replit's path-routed proxy and to simplify local dev URLs.
+- The frontend gained: 5 pages with sidebar nav, Dashboard overview, dark/light mode, EN/中文 i18n, mobile responsive layout.
+- Frame-range partial-clip runs (`start_frame` / `max_frames`) were added to the baseline UI; the backend already accepted these fields.
 
 ---
 
-## 中文说明
+## 中文
 
-这个仓库用于从高分辨率鱼眼比赛视频中跟踪单个比赛用球，并提供本地 workspace 界面来完成基线运行、AI 调参、成品导出和历史管理。
+一个跑在 Replit 上的足球视频追踪 Workspace UI。Python 追踪流水线沿用上游项目；本仓库把原来的 Windows 桌面 UI 替换成了一套路径路由的多 artifact 网页工作台，前面挂着一个 Node.js API 反向代理。
 
-### 仓库包含什么
+> 上游：[`github.com/ferryhe/football_tracking`](https://github.com/ferryhe/football_tracking) — 配置、检测权重、输出格式等原始文档见 [`python_backend/README.md`](./python_backend/README.md)。
 
-- Python 跟踪主流程：原始跟踪、清洗、跟随裁剪
-- 本地 FastAPI 后端：配置、任务、产物、AI 建议、资源管理
-- 本地 React/Vite workspace 界面，当前有 4 个主标签：
-  - `跑基线`
-  - `AI 分析`
-  - `成品任务`
-  - `历史`
-- Windows 一键启动脚本，负责本地 UI 的托管启动和停止
+### 架构
 
-### 建议优先使用的配置
-
-- `config/real_first_run.yaml`
-  - 适合短探测和首轮调参
-- `config/real_best_full.yaml`
-  - 当前较好的全量原始跟踪配置
-- `config/real_v24_full_postclean.yaml`
-  - 当前较好的全量交付配置，已启用清洗和 follow-cam
-
-### 环境要求
-
-- Windows 10 / 11
-- Python 3.10 或 3.11
-- 建议使用 NVIDIA GPU
-- 正确安装 CUDA 和 cuDNN
-- PATH 中可用 `npm`
-
-### 检测权重
-
-这一步很关键，第一次跑不起来多数就是这里没放对。
-
-- 仓库里自带的 YAML 默认都指向：
-  - `detector.model_path: "./weights/football_ball_yolo.pt"`
-- 这个相对路径是按仓库根目录解析的。
-- 默认应放在这里：
-  - `weights/football_ball_yolo.pt`
-- 这个 `.pt` 必须是 Ultralytics YOLO 的检测模型权重。
-  - 可以：`detect` 类型的 YOLO `.pt`
-  - 不适合：`classification`、`segmentation`、`pose`、`OBB` 这类权重
-- 文件名不一定非要叫 `football_ball_yolo.pt`，但如果你改了文件名或放到别处，就要同步修改 YAML 里的 `detector.model_path`
-- 当前默认配置接受的类别名是 `sports ball` 和 `ball`，如果你的模型输出别的类别名，要同步修改 `detector.allowed_labels`
-- 如果只用 CPU，建议改成：
-  - `detector.device: "cpu"`
-  - `detector.use_half: false`
-
-如果权重文件不存在，基线任务会在检测开始前直接失败。
-
-### 快速开始
-
-1. 创建并激活虚拟环境
-2. 安装 Python 依赖
-3. 安装前端依赖
-4. 启动本地托管 UI
-
-```powershell
-python -m venv .venv
-.\.venv\Scripts\activate
-python -m pip install --upgrade pip
-pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124
-pip install -r requirements.txt
-
-cd frontend
-npm install
-cd ..
-
-.\start_ui.cmd
+```
+浏览器
+  │
+  ▼  HTTPS（$REPLIT_DOMAINS）
+[ Replit 共享代理（80 端口） ]
+  │
+  ├─ /        → artifacts/web         （React + Vite + shadcn/ui 前端）
+  └─ /api/*   → artifacts/api-server  （Node.js Express 反向代理）
+                  │
+                  ▼  路径重写 ^/ → /api/v1/
+                python_backend          （FastAPI 追踪服务，8000 端口）
 ```
 
-如果你想要更稳的后端启动方式：
+- **Node API server** 把 `/api/*` 转发到 FastAPI；通过 `fixRequestBody` 让 JSON 请求体能完整穿过 `express.json()`。
+- **Python 后端** 是独立 Python 项目，**不在** pnpm workspace 里；接口与上游完全一致，没动过。
+- 所有访问都走 Replit 共享代理，**别直接打服务端口**。
 
-```powershell
-.\start_ui.cmd --no-reload
+### 目录结构
+
+```
+.
+├── artifacts/
+│   ├── web/                 React 前端（5 个页面、shadcn/ui、国际化、暗黑模式）
+│   ├── api-server/          Express 反向代理
+│   └── mockup-sandbox/      组件预览沙箱（本项目暂未使用）
+├── python_backend/          FastAPI 追踪流水线（独立 Python 项目）
+│   ├── football_tracking/   流水线与 API 代码
+│   ├── config/              YAML 追踪配置
+│   ├── data/                源视频（把你的视频放这里）
+│   ├── outputs/             任务产物与渲染视频
+│   └── weights/             检测器权重（.pt）
+├── lib/                     共享 TS 库（workspace）
+├── scripts/                 Workspace 工具脚本
+├── pnpm-workspace.yaml
+└── replit.md                给 Replit Agent 的项目说明
 ```
 
-停止托管的 UI 进程：
+### 前端页面（artifacts/web）
 
-```powershell
-.\stop_ui.cmd
-```
+| 路径           | 页面     | 用途                                                                                |
+| -------------- | -------- | ----------------------------------------------------------------------------------- |
+| `/`            | 概览     | 系统状态（后端 / 配置 / 任务）、近期任务、可用配置                                  |
+| `/baseline`    | 跑基线   | 选视频 + 配置，**预览球场并接受 AI 球场设置**，设置帧范围，启动基线任务             |
+| `/ai`          | AI 分析  | 针对任意已结束（完成或失败）的任务，向 AI 请求改进建议，并叠加可视化标注           |
+| `/deliverable` | 成品任务 | 基于已完成的基线任务渲染干净的 16:9 跟随裁剪视频                                    |
+| `/history`     | 历史     | 过滤 / 搜索过往任务、删除输出                                                       |
 
-### 当前 Workspace 流程
+新版「跑基线」页要点：
 
-1. `跑基线`
-   - 从 `data/` 里选择原视频
-   - 选择一个基线配置
-   - 截取预览帧
-   - 从配置读取球场设置，或者让 AI 给建议
-   - 接受球场设置
-   - 启动一次基线任务
-2. `AI 分析`
-   - 选择与当前原视频关联的已完成 run
-   - 人工触发 AI 解释
-   - 查看建议的新配置
-   - 如果建议合理，直接启动下一次任务
-3. `成品任务`
-   - 选择一个已完成 run
-   - 单独导出干净的 `16:9` 成品，不需要重新跑完整基线
-4. `历史`
-   - 查看过往 run
-   - 按 `baseline / deliverable / failed` 过滤
-   - 按原视频分组管理源视频、配置和输出目录
+- **球场设置卡片** —— 抽取一帧预览，让 AI 自动识别球场区域；接受后建议的 `config_patch` 会随任务提交。源视频或配置变更时建议自动失效。
+- **帧范围** —— 可选 `start_frame` / `max_frames`，便于快速试跑一小段（留空则处理整段）。
+- **自动跳转** —— 任务排队后自动跳到「历史」页让你看进度。
 
-### 当前存储结构
+### Replit 工作流（自动管理）
 
-- 原视频在 `data/`
-- 配置文件在 `config/`
-- 派生配置在 `config/generated/`
-- 新任务输出会写到：
-
-```text
-outputs/runs/<input_slug>/<run_id>/
-```
-
-- 历史扫描仍兼容旧目录：
-  - `outputs/*`
-  - `outputs/api_runs/*`
-  - `outputs/runs/<input_slug>/<run_id>`
-
-### 常用命令
-
-短探测运行：
-
-```powershell
-.\.venv\Scripts\python.exe main.py --config config/real_first_run.yaml
-```
-
-全量原始跟踪：
-
-```powershell
-.\.venv\Scripts\python.exe main.py --config config/real_best_full.yaml
-```
-
-全量清洗交付：
-
-```powershell
-.\.venv\Scripts\python.exe main.py --config config/real_v24_full_postclean.yaml
-```
-
-只启动后端：
-
-```powershell
-.\.venv\Scripts\python.exe -m uvicorn football_tracking.api.app:app --reload
-```
-
-### 主要输出文件
-
-原始跟踪通常会输出：
-
-- `annotated.mp4`
-- `ball_track.csv`
-- `debug.jsonl`
-
-启用清洗后还会输出：
-
-- `annotated.cleaned.mp4`
-- `ball_track.cleaned.csv`
-- `debug.cleaned.jsonl`
-- `cleanup_report.json`
-
-启用 follow-cam 后还会输出：
-
-- `follow_cam.mp4`
-- `camera_path.csv`
-- `follow_cam_report.json`
-
-### 文档入口
-
-- English operation guide: [docs/operation-guide.en.md](docs/operation-guide.en.md)
-- 中文操作指南: [docs/operation-guide.zh.md](docs/operation-guide.zh.md)
-- 前端规划文档：
-  - `docs/plans/2026-03-21-ai-native-frontend-plan.md`
-  - `docs/plans/2026-03-21-frontend-phase1-execution-plan.md`
+| 工作流                                     | 命令                                                                                |
+| ------------------------------------------ | ----------------------------------------------------------------------------------- |
+| `Python FastAPI Backend`                   | `python -m uvicorn football_tracking.api.app:app --host 0.0.0.0 --port 8000 --reload` |
+| `artifacts/api-server: API Server`         | `pnpm --filter @workspace/api-server run dev`                                       |
+| `artifacts/web: web`                       | `pnpm --filter @workspace/web run dev`                                              |
+| `artifacts/mockup-sandbox: Component Preview` | `pnpm --filter @workspace/mockup-sandbox run dev`                                |
 
 ### 验证命令
 
-前端：
+```bash
+# 类型检查整库
+pnpm run typecheck
 
-```powershell
-cd frontend
-npm run lint
-npm run typecheck
-npm test
-npm run build
+# 单独检查前端或代理
+pnpm --filter @workspace/web run typecheck
+pnpm --filter @workspace/api-server run typecheck
+
+# 代理冒烟测试
+curl -s localhost:80/api/healthz                              # Node 自身健康
+curl -s localhost:80/api/health                               # Python 端健康
+curl -s localhost:80/api/inputs                               # 列源视频
+curl -s -X POST -H "Content-Type: application/json" \
+     -d '{}' localhost:80/api/inputs/field-suggestion         # 应当返回 422（校验失败）
 ```
 
-后端：
+### 环境变量
 
-```powershell
-.\.venv\Scripts\python.exe -m pip install -r requirements-dev.txt
-.\.venv\Scripts\python.exe -m ruff check .
-.\.venv\Scripts\python.exe -m pyright
-.\.venv\Scripts\python.exe -m unittest discover -s tests -p "test_*.py"
-```
+| 名称                       | 必需 | 用途                                                                |
+| -------------------------- | ---- | ------------------------------------------------------------------- |
+| `SESSION_SECRET`           | 是   | Express session 密钥                                                |
+| `PYTHON_API_URL`           | 否   | Python 后端地址，默认 `http://localhost:8000`                       |
+| `PROVIDER_OPENAI_API_KEY`  | 否   | OpenAI key；不设则使用本地启发式建议                                |
+| `PROVIDER_OPENAI_BASE_URL` | 否   | 自定义 OpenAI 兼容 base URL                                         |
+| `PROVIDER_OPENAI_CHAT_MODEL` | 否 | 自定义对话模型名                                                    |
+
+这些都通过 Replit Secrets 配置，**不要**写到 `.env` 里。
+
+### 上手流程
+
+1. 把你的 `.mp4` 视频放进 `python_backend/data/`。
+2. 确认 `python_backend/weights/football_ball_yolo.pt` 存在（或在 YAML 里改 `detector.model_path`）。
+3. 打开网页预览，进入「跑基线」，选视频和配置，可以让 AI 给球场建议，可以填一个帧范围先试跑一小段，然后点「启动基线任务」。
+4. 在「历史」页看进度。
+5. 完成后到「成品任务」渲染 16:9 跟随视频，或到「AI 分析」获取调参建议。
+
+### 与上游的差异
+
+- 上游 `python_backend/frontend/` 的旧 UI 已被 `artifacts/web/` 取代；归档副本已移除，以保持仓库目录精简。
+- 在 FastAPI 前面加了一个 Node.js Express **反向代理**，匹配 Replit 的路径路由模型，也方便本地调用。
+- 前端新增了：5 个页面 + 侧边栏、概览页、暗黑/明亮主题、中英切换、移动端响应式布局。
+- 「跑基线」UI 增加了 `start_frame` / `max_frames` 帧范围（后端早已支持，只是 UI 没暴露）。
