@@ -60,7 +60,7 @@ export function statusBadgeClass(status: RunStatus): string {
 }
 
 export function isDeliverable(run: RunRecord): boolean {
-  return run.source === "follow_cam_render";
+  return run.source === "follow_cam_render" || run.modules_enabled.follow_cam === true;
 }
 
 export type HistoryCategory = "baseline" | "deliverable" | "failed";

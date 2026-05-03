@@ -2,17 +2,24 @@ import type {
   AIExplainResponse,
   AISuggestion,
   AssetGroup,
+  ConfigDetail,
   ConfigListItem,
   CreateRunRequest,
+  DeriveConfigRequest,
   FieldPreviewResponse,
   FieldSuggestionResponse,
   FollowCamRenderRequest,
   HealthResponse,
   InputCatalogResponse,
   RunRecord,
+  UpdateConfigRequest,
 } from "./types";
 
 const BASE = "/api";
+
+function encodePathSegmented(path: string): string {
+  return path.split("/").map((segment) => encodeURIComponent(segment)).join("/");
+}
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`${BASE}${path}`, {
@@ -29,6 +36,11 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 export const api = {
   health: () => request<HealthResponse>("/healthz"),
   listConfigs: () => request<ConfigListItem[]>("/configs"),
+  getConfig: (name: string) => request<ConfigDetail>(`/configs/${encodePathSegmented(name)}`),
+  updateConfig: (name: string, body: UpdateConfigRequest) =>
+    request<ConfigDetail>(`/configs/${encodePathSegmented(name)}`, { method: "PUT", body: JSON.stringify(body) }),
+  deriveConfig: (body: DeriveConfigRequest) =>
+    request<ConfigDetail>("/configs/derive", { method: "POST", body: JSON.stringify({ patch: {}, ...body }) }),
   listInputs: () => request<InputCatalogResponse>("/inputs"),
   listRuns: () => request<RunRecord[]>("/runs"),
   getRun: (id: string) => request<RunRecord>(`/runs/${id}`),
@@ -41,11 +53,11 @@ export const api = {
       body: JSON.stringify(body),
     }),
   deleteRunOutput: (runId: string) =>
-    request(`/runs?run_id=${encodeURIComponent(runId)}`, { method: "DELETE" }),
+    request<{ name: string; path: string; deleted: boolean }>(`/runs?run_id=${encodeURIComponent(runId)}`, { method: "DELETE" }),
   deleteConfig: (name: string) =>
-    request(`/configs?name=${encodeURIComponent(name)}`, { method: "DELETE" }),
+    request<{ name: string; path: string; deleted: boolean }>(`/configs?name=${encodeURIComponent(name)}`, { method: "DELETE" }),
   deleteInputVideo: (name: string) =>
-    request(`/inputs?name=${encodeURIComponent(name)}`, { method: "DELETE" }),
+    request<{ name: string; path: string; deleted: boolean }>(`/inputs?name=${encodeURIComponent(name)}`, { method: "DELETE" }),
   captureFieldPreview: (input_video: string, sample_index?: number) =>
     request<FieldPreviewResponse>("/inputs/field-preview", {
       method: "POST",

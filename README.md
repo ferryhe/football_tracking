@@ -41,8 +41,6 @@ Browser
 │   ├── data/                Source videos (drop your videos here)
 │   ├── outputs/             Run artifacts and rendered videos
 │   └── weights/             Detector model checkpoints (.pt)
-├── archive/
-│   └── python_backend_frontend/   The original upstream UI (replaced by artifacts/web)
 ├── lib/                     Shared TS libs (workspace)
 ├── scripts/                 Workspace utility scripts
 ├── pnpm-workspace.yaml
@@ -114,7 +112,7 @@ These are stored as Replit Secrets. **Do not** create `.env` files for them.
 
 ### What changed vs. upstream
 
-- The original React/Vite UI in `python_backend/frontend/` has been **replaced** by `artifacts/web/` (preserved under `archive/python_backend_frontend/` for reference).
+- The original React/Vite UI in `python_backend/frontend/` has been **replaced** by `artifacts/web/`; the archived copy was removed to keep this repo layout minimal.
 - A Node.js Express **reverse proxy** sits in front of FastAPI to fit Replit's path-routed proxy and to simplify local dev URLs.
 - The frontend gained: 5 pages with sidebar nav, Dashboard overview, dark/light mode, EN/中文 i18n, mobile responsive layout.
 - Frame-range partial-clip runs (`start_frame` / `max_frames`) were added to the baseline UI; the backend already accepted these fields.
@@ -160,8 +158,6 @@ These are stored as Replit Secrets. **Do not** create `.env` files for them.
 │   ├── data/                源视频（把你的视频放这里）
 │   ├── outputs/             任务产物与渲染视频
 │   └── weights/             检测器权重（.pt）
-├── archive/
-│   └── python_backend_frontend/   上游原始前端（已被 artifacts/web 取代）
 ├── lib/                     共享 TS 库（workspace）
 ├── scripts/                 Workspace 工具脚本
 ├── pnpm-workspace.yaml
@@ -233,7 +229,7 @@ curl -s -X POST -H "Content-Type: application/json" \
 
 ### 与上游的差异
 
-- 上游 `python_backend/frontend/` 的旧 UI 已被 `artifacts/web/` 取代（旧代码保留在 `archive/python_backend_frontend/` 仅供参考）。
+- 上游 `python_backend/frontend/` 的旧 UI 已被 `artifacts/web/` 取代；归档副本已移除，以保持仓库目录精简。
 - 在 FastAPI 前面加了一个 Node.js Express **反向代理**，匹配 Replit 的路径路由模型，也方便本地调用。
 - 前端新增了：5 个页面 + 侧边栏、概览页、暗黑/明亮主题、中英切换、移动端响应式布局。
 - 「跑基线」UI 增加了 `start_frame` / `max_frames` 帧范围（后端早已支持，只是 UI 没暴露）。

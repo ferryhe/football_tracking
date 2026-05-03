@@ -266,7 +266,7 @@ class OutputConfig:
     frame_dir: str = "frames"
     csv_name: str = "ball_track.csv"
     debug_jsonl_name: str = "debug.jsonl"
-    video_codec: str = "mp4v"
+    video_codec: str = "avc1"
     frame_image_ext: str = ".jpg"
     save_video: bool = True
     save_frames: bool = True

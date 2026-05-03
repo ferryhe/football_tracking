@@ -78,8 +78,6 @@ artifacts/
   web/                  React frontend (5 pages, i18n, shadcn/ui)
   mockup-sandbox/       Component preview (unused for this app)
 python_backend/         FastAPI tracking service (standalone Python project)
-archive/                Decommissioned code kept for reference
-  python_backend_frontend/  Original UI shipped with the Python repo (replaced by artifacts/web)
 lib/                    Shared TS libs (workspace)
 scripts/                Workspace utility scripts
 ```

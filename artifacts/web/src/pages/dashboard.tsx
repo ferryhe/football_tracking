@@ -1,19 +1,51 @@
-import { useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useState, type FormEvent } from "react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/lib/api";
-import { formatDateTime, runMoment, historyCategory } from "@/lib/utils";
+import { formatDateTime, historyCategory } from "@/lib/utils";
 import { StatCard } from "@/components/StatCard";
 import { RunRow } from "@/components/RunRow";
 import { StatusBadge } from "@/components/StatusBadge";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
-import { Loader2, Activity, CheckCircle2, AlertCircle } from "lucide-react";
-import type { RunRecord } from "@/lib/types";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { Alert, AlertDescription } from "@/components/ui/alert";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
+import { Loader2, Activity, CheckCircle2, AlertCircle, CopyPlus, Eye, Plus, Trash2 } from "lucide-react";
+import type { ConfigListItem, RunRecord } from "@/lib/types";
 import { useLanguage } from "@/contexts/LanguageContext";
+import { useToast } from "@/hooks/use-toast";
 
 export default function DashboardPage() {
   const { t } = useLanguage();
+  const { toast } = useToast();
+  const queryClient = useQueryClient();
   const [selectedRun, setSelectedRun] = useState<RunRecord | null>(null);
+  const [viewConfigOpen, setViewConfigOpen] = useState(false);
+  const [viewConfigName, setViewConfigName] = useState<string | null>(null);
+  const [createConfigOpen, setCreateConfigOpen] = useState(false);
+  const [baseConfigName, setBaseConfigName] = useState("");
+  const [outputConfigName, setOutputConfigName] = useState("");
+  const [configToDelete, setConfigToDelete] = useState<ConfigListItem | null>(null);
 
   const { data: health } = useQuery({
     queryKey: ["health"],
@@ -27,6 +59,16 @@ export default function DashboardPage() {
     refetchInterval: 30_000,
   });
 
+  const {
+    data: configDetail,
+    error: configDetailError,
+    isLoading: configDetailLoading,
+  } = useQuery({
+    queryKey: ["config", viewConfigName],
+    queryFn: () => api.getConfig(viewConfigName ?? ""),
+    enabled: viewConfigOpen && !!viewConfigName,
+  });
+
   const { data: runs, isLoading: runsLoading } = useQuery({
     queryKey: ["runs"],
     queryFn: api.listRuns,
@@ -35,6 +77,60 @@ export default function DashboardPage() {
 
   const recentRuns = (runs ?? []).slice(0, 8);
   const activeRun = runs?.find((r) => r.status === "running" || r.status === "queued") ?? null;
+
+  function refreshConfigQueries() {
+    void queryClient.invalidateQueries({ queryKey: ["configs"] });
+    void queryClient.invalidateQueries({ queryKey: ["health"] });
+  }
+
+  const deriveConfig = useMutation({
+    mutationFn: api.deriveConfig,
+    onSuccess: (detail) => {
+      toast({ title: t.dashboard.configCreated, description: detail.name });
+      setCreateConfigOpen(false);
+      setOutputConfigName("");
+      refreshConfigQueries();
+    },
+    onError: (err: Error) => {
+      toast({ title: t.dashboard.configCreateFailed, description: err.message, variant: "destructive" });
+    },
+  });
+
+  const deleteConfig = useMutation({
+    mutationFn: api.deleteConfig,
+    onSuccess: (result) => {
+      toast({ title: t.dashboard.configDeleted, description: result.name });
+      if (viewConfigName === result.name) setViewConfigOpen(false);
+      setConfigToDelete(null);
+      refreshConfigQueries();
+    },
+    onError: (err: Error) => {
+      toast({ title: t.dashboard.configDeleteFailed, description: err.message, variant: "destructive" });
+    },
+  });
+
+  function openCreateConfig(baseName?: string) {
+    setBaseConfigName(baseName ?? configs?.[0]?.name ?? "");
+    setOutputConfigName("");
+    setCreateConfigOpen(true);
+  }
+
+  function openViewConfig(name: string) {
+    setViewConfigName(name);
+    setViewConfigOpen(true);
+  }
+
+  function handleCreateConfig(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const baseName = baseConfigName.trim();
+    const outputName = outputConfigName.trim();
+    if (!baseName || !outputName) return;
+    deriveConfig.mutate({
+      base_config_name: baseName,
+      output_name: outputName,
+      patch: {},
+    });
+  }
 
   return (
     <div className="space-y-6">
@@ -115,8 +211,23 @@ export default function DashboardPage() {
         {/* Configs */}
         <Card>
           <CardHeader className="pb-3">
-            <CardTitle className="text-base">{t.dashboard.availableConfigs}</CardTitle>
-            <CardDescription>{t.dashboard.availableConfigsDesc}</CardDescription>
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <CardTitle className="text-base">{t.dashboard.availableConfigs}</CardTitle>
+                <CardDescription>{t.dashboard.availableConfigsDesc}</CardDescription>
+              </div>
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={() => openCreateConfig()}
+                disabled={!configs?.length}
+                data-testid="button-new-config"
+              >
+                <Plus className="h-4 w-4 mr-2" />
+                {t.dashboard.newConfig}
+              </Button>
+            </div>
           </CardHeader>
           <CardContent>
             {configsLoading ? (
@@ -138,14 +249,55 @@ export default function DashboardPage() {
                       {cfg.created_at && (
                         <p className="text-xs text-muted-foreground">{formatDateTime(cfg.created_at)}</p>
                       )}
+                      <p className="text-xs font-mono text-muted-foreground truncate">{cfg.path}</p>
                     </div>
-                    <div className="shrink-0 flex gap-1.5">
-                      <Badge variant={cfg.postprocess_enabled ? "default" : "secondary"} className="text-xs">
-                        {cfg.postprocess_enabled ? t.baseline.cleanupOn : t.baseline.cleanupOff}
-                      </Badge>
-                      <Badge variant={cfg.follow_cam_enabled ? "default" : "secondary"} className="text-xs">
-                        {cfg.follow_cam_enabled ? t.baseline.followCamOn : t.baseline.followCamOff}
-                      </Badge>
+                    <div className="shrink-0 flex flex-col items-end gap-2">
+                      <div className="flex flex-wrap justify-end gap-1.5">
+                        <Badge variant={cfg.postprocess_enabled ? "default" : "secondary"} className="text-xs">
+                          {cfg.postprocess_enabled ? t.baseline.cleanupOn : t.baseline.cleanupOff}
+                        </Badge>
+                        <Badge variant={cfg.follow_cam_enabled ? "default" : "secondary"} className="text-xs">
+                          {cfg.follow_cam_enabled ? t.baseline.followCamOn : t.baseline.followCamOff}
+                        </Badge>
+                      </div>
+                      <div className="flex gap-1">
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="icon"
+                          className="h-8 w-8"
+                          title={t.dashboard.viewConfig}
+                          onClick={() => openViewConfig(cfg.name)}
+                          data-testid={`button-view-config-${cfg.name}`}
+                        >
+                          <Eye className="h-4 w-4" />
+                          <span className="sr-only">{t.dashboard.viewConfig}</span>
+                        </Button>
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="icon"
+                          className="h-8 w-8"
+                          title={t.dashboard.duplicateConfig}
+                          onClick={() => openCreateConfig(cfg.name)}
+                          data-testid={`button-duplicate-config-${cfg.name}`}
+                        >
+                          <CopyPlus className="h-4 w-4" />
+                          <span className="sr-only">{t.dashboard.duplicateConfig}</span>
+                        </Button>
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="icon"
+                          className="h-8 w-8 text-destructive hover:text-destructive"
+                          title={t.dashboard.deleteConfig}
+                          onClick={() => setConfigToDelete(cfg)}
+                          data-testid={`button-delete-config-${cfg.name}`}
+                        >
+                          <Trash2 className="h-4 w-4" />
+                          <span className="sr-only">{t.dashboard.deleteConfig}</span>
+                        </Button>
+                      </div>
                     </div>
                   </div>
                 ))}
@@ -212,6 +364,126 @@ export default function DashboardPage() {
           </CardContent>
         </Card>
       )}
+
+      <Dialog open={viewConfigOpen} onOpenChange={setViewConfigOpen}>
+        <DialogContent className="max-h-[85vh] max-w-4xl overflow-hidden">
+          <DialogHeader>
+            <DialogTitle>{viewConfigName ?? t.dashboard.viewConfig}</DialogTitle>
+            {configDetail?.path && (
+              <DialogDescription>
+                {t.dashboard.configPath}: <span className="font-mono">{configDetail.path}</span>
+              </DialogDescription>
+            )}
+          </DialogHeader>
+          {configDetailLoading ? (
+            <div className="flex items-center gap-2 text-sm text-muted-foreground">
+              <Loader2 className="h-4 w-4 animate-spin" />
+              {t.dashboard.loadingConfig}
+            </div>
+          ) : configDetailError ? (
+            <Alert variant="destructive">
+              <AlertCircle className="h-4 w-4" />
+              <AlertDescription>
+                {configDetailError instanceof Error ? configDetailError.message : String(configDetailError)}
+              </AlertDescription>
+            </Alert>
+          ) : configDetail ? (
+            <div className="grid min-h-0 gap-3 overflow-y-auto pr-1 lg:grid-cols-2">
+              <div className="min-w-0 space-y-2">
+                <p className="text-sm font-medium">{t.dashboard.rawConfig}</p>
+                <pre className="max-h-[56vh] overflow-auto rounded-md bg-muted p-3 text-xs">
+                  {JSON.stringify(configDetail.raw, null, 2)}
+                </pre>
+              </div>
+              <div className="min-w-0 space-y-2">
+                <p className="text-sm font-medium">{t.dashboard.resolvedConfig}</p>
+                <pre className="max-h-[56vh] overflow-auto rounded-md bg-muted p-3 text-xs">
+                  {JSON.stringify(configDetail.resolved, null, 2)}
+                </pre>
+              </div>
+            </div>
+          ) : null}
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={createConfigOpen} onOpenChange={setCreateConfigOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>{t.dashboard.newConfig}</DialogTitle>
+            <DialogDescription>{t.dashboard.availableConfigsDesc}</DialogDescription>
+          </DialogHeader>
+          <form className="space-y-4" onSubmit={handleCreateConfig}>
+            <div className="space-y-2">
+              <Label htmlFor="select-base-config">{t.dashboard.baseConfig}</Label>
+              <Select value={baseConfigName} onValueChange={setBaseConfigName}>
+                <SelectTrigger id="select-base-config" data-testid="select-base-config">
+                  <SelectValue placeholder={t.dashboard.baseConfig} />
+                </SelectTrigger>
+                <SelectContent>
+                  {(configs ?? []).map((cfg) => (
+                    <SelectItem key={cfg.name} value={cfg.name}>
+                      {cfg.name}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="input-output-config-name">{t.dashboard.outputConfigName}</Label>
+              <Input
+                id="input-output-config-name"
+                value={outputConfigName}
+                onChange={(event) => setOutputConfigName(event.target.value)}
+                placeholder={t.dashboard.outputConfigPlaceholder}
+                data-testid="input-output-config-name"
+              />
+            </div>
+            <DialogFooter>
+              <Button
+                type="submit"
+                disabled={!baseConfigName || !outputConfigName.trim() || deriveConfig.isPending}
+                data-testid="button-create-config"
+              >
+                {deriveConfig.isPending ? (
+                  <>
+                    <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                    {t.dashboard.creatingConfig}
+                  </>
+                ) : (
+                  <>
+                    <CopyPlus className="h-4 w-4 mr-2" />
+                    {t.dashboard.createConfig}
+                  </>
+                )}
+              </Button>
+            </DialogFooter>
+          </form>
+        </DialogContent>
+      </Dialog>
+
+      <AlertDialog open={!!configToDelete} onOpenChange={(open) => !open && setConfigToDelete(null)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>{t.dashboard.deleteConfigTitle}</AlertDialogTitle>
+            <AlertDialogDescription>
+              {configToDelete ? t.dashboard.deleteConfigDesc(configToDelete.name) : ""}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={deleteConfig.isPending}>{t.common.cancel}</AlertDialogCancel>
+            <AlertDialogAction
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+              disabled={deleteConfig.isPending}
+              onClick={() => {
+                if (configToDelete) deleteConfig.mutate(configToDelete.name);
+              }}
+              data-testid="button-confirm-delete-config"
+            >
+              {deleteConfig.isPending ? t.dashboard.deletingConfig : t.dashboard.deleteConfig}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   );
 }

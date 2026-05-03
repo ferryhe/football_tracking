@@ -90,9 +90,14 @@ class FieldSuggestionResponse(BaseModel):
 class ConfigDetail(BaseModel):
     name: str
     path: str
+    text: str
     raw: dict[str, Any]
     resolved: dict[str, Any]
     summary: ConfigListItem
+
+
+class UpdateConfigRequest(BaseModel):
+    content: str
 
 
 class DeriveConfigRequest(BaseModel):

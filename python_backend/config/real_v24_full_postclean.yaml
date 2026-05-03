@@ -154,7 +154,7 @@ output:
   frame_dir: "frames"
   csv_name: "ball_track.csv"
   debug_jsonl_name: "debug.jsonl"
-  video_codec: "mp4v"
+  video_codec: "avc1"
   frame_image_ext: ".jpg"
   save_video: false
   save_frames: false

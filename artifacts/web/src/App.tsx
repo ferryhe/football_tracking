@@ -16,7 +16,7 @@ import HistoryPage from "@/pages/history";
 import {
   LayoutDashboard,
   Play,
-  Sparkles,
+  SlidersHorizontal,
   Film,
   Clock,
   Menu,
@@ -37,7 +37,7 @@ function NavItems() {
   return [
     { path: "/", label: t.nav.dashboard, icon: LayoutDashboard },
     { path: "/baseline", label: t.nav.baseline, icon: Play },
-    { path: "/ai", label: t.nav.aiAnalysis, icon: Sparkles },
+    { path: "/ai", label: t.nav.aiAnalysis, icon: SlidersHorizontal },
     { path: "/deliverable", label: t.nav.deliverable, icon: Film },
     { path: "/history", label: t.nav.history, icon: Clock },
   ];

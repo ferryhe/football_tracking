@@ -15,11 +15,143 @@ import { Label } from "@/components/ui/label";
 import { Input } from "@/components/ui/input";
 import {
   Play, Video, Layers, AlertCircle, CheckCircle2, Loader2,
-  Map, Sparkles, X, ArrowRight,
+  Map, Sparkles, X, ArrowRight, Minimize2, Maximize2, ArrowUp, ArrowDown,
 } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 import { useLanguage } from "@/contexts/LanguageContext";
 import { FieldPreviewCanvas } from "@/components/FieldPreviewCanvas";
+
+type FieldPoint = [number, number];
+
+function polygonBounds(points: FieldPoint[]): [number, number, number, number] {
+  const xs = points.map((point) => point[0]);
+  const ys = points.map((point) => point[1]);
+  return [Math.min(...xs), Math.min(...ys), Math.max(...xs), Math.max(...ys)];
+}
+
+function clampPoint(point: FieldPoint, frameWidth: number, frameHeight: number): FieldPoint {
+  return [
+    Math.max(0, Math.min(frameWidth, Math.round(point[0]))),
+    Math.max(0, Math.min(frameHeight, Math.round(point[1]))),
+  ];
+}
+
+function scalePolygon(
+  points: FieldPoint[],
+  frameWidth: number,
+  frameHeight: number,
+  scaleX: number,
+  scaleY: number,
+): FieldPoint[] {
+  const [x1, y1, x2, y2] = polygonBounds(points);
+  const centerX = (x1 + x2) / 2;
+  const centerY = (y1 + y2) / 2;
+  return points.map((point) =>
+    clampPoint(
+      [centerX + (point[0] - centerX) * scaleX, centerY + (point[1] - centerY) * scaleY],
+      frameWidth,
+      frameHeight,
+    ),
+  );
+}
+
+function nudgeTop(points: FieldPoint[], frameWidth: number, frameHeight: number, deltaY: number): FieldPoint[] {
+  const [, y1, , y2] = polygonBounds(points);
+  const centerY = (y1 + y2) / 2;
+  return points.map((point) =>
+    point[1] <= centerY ? clampPoint([point[0], point[1] + deltaY], frameWidth, frameHeight) : point,
+  );
+}
+
+function deriveExpandedPolygon(points: FieldPoint[], frameWidth: number, frameHeight: number): FieldPoint[] {
+  return scalePolygon(points, frameWidth, frameHeight, 1.08, 1.1);
+}
+
+function buildConfigPatch(fieldPolygon: FieldPoint[], expandedPolygon: FieldPoint[]) {
+  const expandedRoi = polygonBounds(expandedPolygon);
+  const expandedWidth = Math.max(1, expandedRoi[2] - expandedRoi[0]);
+  const expandedHeight = Math.max(1, expandedRoi[3] - expandedRoi[1]);
+  return {
+    filtering: {
+      roi: expandedRoi,
+    },
+    scene_bias: {
+      enabled: true,
+      ground_zones: [
+        {
+          name: "field_core",
+          points: fieldPolygon.map((point) => [...point]),
+        },
+      ],
+      positive_rois: [
+        {
+          name: "field_buffer",
+          points: expandedPolygon.map((point) => [...point]),
+        },
+      ],
+      dynamic_air_recovery: {
+        enabled: true,
+        edge_reentry_expand_x: expandedWidth,
+        edge_reentry_expand_y: expandedHeight,
+      },
+    },
+  };
+}
+
+function updateSuggestionShape(
+  current: FieldSuggestionResponse,
+  nextFieldPolygon: FieldPoint[],
+  nextExpandedPolygon?: FieldPoint[],
+): FieldSuggestionResponse {
+  const fieldPolygon = nextFieldPolygon.map((point) => clampPoint(point, current.frame_width, current.frame_height));
+  const expandedPolygon = (
+    nextExpandedPolygon ?? deriveExpandedPolygon(fieldPolygon, current.frame_width, current.frame_height)
+  ).map((point) => clampPoint(point, current.frame_width, current.frame_height));
+  const fieldRoi = polygonBounds(fieldPolygon);
+  const expandedRoi = polygonBounds(expandedPolygon);
+  return {
+    ...current,
+    field_polygon: fieldPolygon,
+    expanded_polygon: expandedPolygon,
+    field_roi: fieldRoi,
+    expanded_roi: expandedRoi,
+    config_patch: buildConfigPatch(fieldPolygon, expandedPolygon),
+  };
+}
+
+function adjustExpandedGap(current: FieldSuggestionResponse, factor: number): FieldSuggestionResponse {
+  const baseExpandedPolygon =
+    current.expanded_polygon.length === current.field_polygon.length
+      ? current.expanded_polygon
+      : deriveExpandedPolygon(current.field_polygon, current.frame_width, current.frame_height);
+
+  const nextExpandedPolygon = baseExpandedPolygon.map((point, index) => {
+    const fieldPoint = current.field_polygon[Math.min(index, current.field_polygon.length - 1)];
+    return clampPoint(
+      [
+        fieldPoint[0] + (point[0] - fieldPoint[0]) * factor,
+        fieldPoint[1] + (point[1] - fieldPoint[1]) * factor,
+      ],
+      current.frame_width,
+      current.frame_height,
+    );
+  });
+
+  return updateSuggestionShape(current, current.field_polygon, nextExpandedPolygon);
+}
+
+function formatPointList(points: FieldPoint[]) {
+  return points.map((point) => `${point[0]},${point[1]}`).join(" | ");
+}
+
+function parsePointList(input: string): FieldPoint[] | null {
+  const trimmed = input.trim();
+  if (!trimmed) return null;
+  const matches = [...trimmed.matchAll(/(-?\d+)\s*,\s*(-?\d+)/g)];
+  const remainder = trimmed.replace(/-?\d+\s*,\s*-?\d+/g, "").replace(/[|\s;]+/g, "");
+  if (remainder.length > 0 || matches.length < 4) return null;
+  return matches.map((match) => [Number(match[1]), Number(match[2])] as FieldPoint);
+}
 
 export default function BaselinePage() {
   const { t } = useLanguage();
@@ -32,11 +164,14 @@ export default function BaselinePage() {
   const [enablePostprocess, setEnablePostprocess] = useState(true);
   const [enableFollowCam, setEnableFollowCam] = useState(false);
   const [startFrame, setStartFrame] = useState<string>("");
-  const [maxFrames, setMaxFrames] = useState<string>("");
+  const [maxFrames, setMaxFrames] = useState<string>("200");
 
   const [fieldPreview, setFieldPreview] = useState<FieldPreviewResponse | null>(null);
   const [suggestion, setSuggestion] = useState<FieldSuggestionResponse | null>(null);
   const [accepted, setAccepted] = useState(false);
+  const [fieldInput, setFieldInput] = useState("");
+  const [expandedInput, setExpandedInput] = useState("");
+  const [manualError, setManualError] = useState<string | null>(null);
 
   // Reset field preview state when input video changes
   useEffect(() => {
@@ -51,6 +186,18 @@ export default function BaselinePage() {
     setSuggestion(null);
     setAccepted(false);
   }, [selectedConfig]);
+
+  useEffect(() => {
+    if (!suggestion) {
+      setFieldInput("");
+      setExpandedInput("");
+      setManualError(null);
+      return;
+    }
+    setFieldInput(formatPointList(suggestion.field_polygon));
+    setExpandedInput(formatPointList(suggestion.expanded_polygon));
+    setManualError(null);
+  }, [suggestion]);
 
   const { data: inputCatalog, isLoading: inputsLoading } = useQuery({
     queryKey: ["inputs"],
@@ -120,6 +267,32 @@ export default function BaselinePage() {
           ? `Baseline run · field setup applied (${suggestion.confidence})`
           : undefined,
     });
+  }
+
+  function applySuggestionUpdate(nextSuggestion: FieldSuggestionResponse) {
+    setSuggestion(nextSuggestion);
+    setAccepted(false);
+    setManualError(null);
+  }
+
+  function applyFieldInput() {
+    if (!suggestion) return;
+    const parsed = parsePointList(fieldInput);
+    if (!parsed) {
+      setManualError(t.baseline.fieldInputError);
+      return;
+    }
+    applySuggestionUpdate(updateSuggestionShape(suggestion, parsed));
+  }
+
+  function applyExpandedInput() {
+    if (!suggestion) return;
+    const parsed = parsePointList(expandedInput);
+    if (!parsed) {
+      setManualError(t.baseline.fieldInputError);
+      return;
+    }
+    applySuggestionUpdate(updateSuggestionShape(suggestion, suggestion.field_polygon, parsed));
   }
 
   const confidenceLabel = (c?: string) =>
@@ -314,6 +487,151 @@ export default function BaselinePage() {
                   </div>
                 )}
               </div>
+
+              {suggestion && (
+                <div className="rounded-md border bg-muted/20 p-3 space-y-3" data-testid="field-adjustments">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="text-xs font-medium text-muted-foreground mr-1">
+                      {t.baseline.fieldAdjust}
+                    </span>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() =>
+                        applySuggestionUpdate(
+                          updateSuggestionShape(
+                            suggestion,
+                            scalePolygon(suggestion.field_polygon, suggestion.frame_width, suggestion.frame_height, 0.96, 0.98),
+                          ),
+                        )
+                      }
+                      data-testid="button-field-tighter"
+                    >
+                      <Minimize2 className="h-3.5 w-3.5 mr-1.5" />
+                      {t.baseline.fieldTighter}
+                    </Button>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() =>
+                        applySuggestionUpdate(
+                          updateSuggestionShape(
+                            suggestion,
+                            scalePolygon(suggestion.field_polygon, suggestion.frame_width, suggestion.frame_height, 1.04, 1.02),
+                          ),
+                        )
+                      }
+                      data-testid="button-field-wider"
+                    >
+                      <Maximize2 className="h-3.5 w-3.5 mr-1.5" />
+                      {t.baseline.fieldWider}
+                    </Button>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() =>
+                        applySuggestionUpdate(
+                          updateSuggestionShape(
+                            suggestion,
+                            nudgeTop(
+                              suggestion.field_polygon,
+                              suggestion.frame_width,
+                              suggestion.frame_height,
+                              -Math.max(6, suggestion.frame_height * 0.02),
+                            ),
+                          ),
+                        )
+                      }
+                      data-testid="button-field-raise"
+                    >
+                      <ArrowUp className="h-3.5 w-3.5 mr-1.5" />
+                      {t.baseline.fieldRaiseTop}
+                    </Button>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() =>
+                        applySuggestionUpdate(
+                          updateSuggestionShape(
+                            suggestion,
+                            nudgeTop(
+                              suggestion.field_polygon,
+                              suggestion.frame_width,
+                              suggestion.frame_height,
+                              Math.max(6, suggestion.frame_height * 0.02),
+                            ),
+                          ),
+                        )
+                      }
+                      data-testid="button-field-lower"
+                    >
+                      <ArrowDown className="h-3.5 w-3.5 mr-1.5" />
+                      {t.baseline.fieldLowerTop}
+                    </Button>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => applySuggestionUpdate(adjustExpandedGap(suggestion, 0.9))}
+                      data-testid="button-field-buffer-in"
+                    >
+                      <Minimize2 className="h-3.5 w-3.5 mr-1.5" />
+                      {t.baseline.fieldBufferIn}
+                    </Button>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => applySuggestionUpdate(adjustExpandedGap(suggestion, 1.12))}
+                      data-testid="button-field-buffer-out"
+                    >
+                      <Maximize2 className="h-3.5 w-3.5 mr-1.5" />
+                      {t.baseline.fieldBufferOut}
+                    </Button>
+                  </div>
+
+                  <div className="grid gap-3 md:grid-cols-2">
+                    <div>
+                      <Label htmlFor="input-field-polygon" className="text-xs text-muted-foreground">
+                        {t.baseline.fieldPolygon}
+                      </Label>
+                      <Input
+                        id="input-field-polygon"
+                        value={fieldInput}
+                        onChange={(e) => setFieldInput(e.target.value)}
+                        onBlur={applyFieldInput}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter") {
+                            e.preventDefault();
+                            applyFieldInput();
+                          }
+                        }}
+                        className="mt-1 font-mono text-xs"
+                        data-testid="input-field-polygon"
+                      />
+                    </div>
+                    <div>
+                      <Label htmlFor="input-expanded-polygon" className="text-xs text-muted-foreground">
+                        {t.baseline.expandedPolygon}
+                      </Label>
+                      <Input
+                        id="input-expanded-polygon"
+                        value={expandedInput}
+                        onChange={(e) => setExpandedInput(e.target.value)}
+                        onBlur={applyExpandedInput}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter") {
+                            e.preventDefault();
+                            applyExpandedInput();
+                          }
+                        }}
+                        className="mt-1 font-mono text-xs"
+                        data-testid="input-expanded-polygon"
+                      />
+                    </div>
+                  </div>
+
+                  {manualError && <p className="text-xs text-destructive">{manualError}</p>}
+                </div>
+              )}
 
               {suggestion && (
                 <Alert

@@ -171,7 +171,9 @@ export function FieldPreviewCanvas({
       const activePatch = patch ?? suggestion?.patch ?? null;
       if (activePatch && Object.keys(activePatch).length > 0) {
         const layers = parsePatchAnnotations(activePatch);
-        drawAnnotations(ctx, layers, 1, 1);
+        const scaleX = canvas.width / preview.frame_width;
+        const scaleY = canvas.height / preview.frame_height;
+        drawAnnotations(ctx, layers, scaleX, scaleY);
       }
     };
     img.src = preview.preview_data_url;

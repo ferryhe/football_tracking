@@ -19,6 +19,25 @@ export interface ConfigListItem {
   exists: Record<string, boolean>;
 }
 
+export interface ConfigDetail {
+  name: string;
+  path: string;
+  text: string;
+  raw: Record<string, unknown>;
+  resolved: Record<string, unknown>;
+  summary: ConfigListItem;
+}
+
+export interface UpdateConfigRequest {
+  content: string;
+}
+
+export interface DeriveConfigRequest {
+  base_config_name: string;
+  output_name: string;
+  patch?: Record<string, unknown>;
+}
+
 export interface InputVideoItem {
   name: string;
   path: string;

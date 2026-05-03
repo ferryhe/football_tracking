@@ -4,6 +4,7 @@ import base64
 import csv
 import json
 import mimetypes
+import re
 import shutil
 import threading
 import unicodedata
@@ -58,6 +59,213 @@ def _flatten_patch_lines(patch: dict[str, Any], prefix: str = "") -> list[str]:
             lines.extend(_flatten_patch_lines(value, current_key))
         else:
             lines.append(f"{current_key}: {value}")
+    return lines
+
+
+def _normalize_config_explain_path(path: str) -> str:
+    return re.sub(r"\[\d+\]", "[]", path)
+
+
+def _is_point_pair(value: Any) -> bool:
+    return (
+        isinstance(value, (list, tuple))
+        and len(value) == 2
+        and all(isinstance(item, (int, float)) for item in value)
+    )
+
+
+def _is_point_list(value: Any) -> bool:
+    return isinstance(value, list) and bool(value) and all(_is_point_pair(item) for item in value)
+
+
+def _format_config_explain_value(value: Any) -> str:
+    if _is_point_list(value):
+        return f"{len(value)} points"
+    if isinstance(value, list):
+        if not value:
+            return "[]"
+        if len(value) <= 8 and all(not isinstance(item, (dict, list, tuple)) for item in value):
+            return json.dumps(value, ensure_ascii=False)
+        return f"{len(value)} items"
+    if isinstance(value, dict):
+        return "{}" if not value else f"{len(value)} keys"
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    return str(value)
+
+
+def _flatten_config_explain_items(value: Any, prefix: str = "") -> list[tuple[str, Any]]:
+    if isinstance(value, dict):
+        if not value and prefix:
+            return [(prefix, value)]
+        items: list[tuple[str, Any]] = []
+        for key, child in value.items():
+            path = f"{prefix}.{key}" if prefix else str(key)
+            items.extend(_flatten_config_explain_items(child, path))
+        return items
+    if isinstance(value, list):
+        if not value or _is_point_list(value) or not all(isinstance(item, dict) for item in value):
+            return [(prefix, value)]
+        items = []
+        for index, child in enumerate(value):
+            items.extend(_flatten_config_explain_items(child, f"{prefix}[{index}]"))
+        return items
+    return [(prefix, value)]
+
+
+_CONFIG_EXPLAIN_DESCRIPTIONS_EN: dict[str, str] = {
+    "input_video": "Source video read by the tracker.",
+    "output_dir": "Directory where videos, CSV tracks, and debug files are written.",
+    "logging.level": "Log verbosity for the pipeline.",
+    "logging.save_debug_jsonl": "Whether to save per-frame debug records.",
+    "detector.model_path": "YOLO ball detector weight file.",
+    "detector.device": "Compute device used for inference.",
+    "detector.confidence_threshold": "Minimum detector confidence before a box is considered.",
+    "detector.image_size": "Detector inference image size. Larger can improve small-ball recall but costs speed.",
+    "detector.use_half": "Whether to use half precision on GPU.",
+    "detector.allowed_labels": "Detector classes accepted as ball candidates.",
+    "sahi.slice_height": "Height of each tiled detection slice.",
+    "sahi.slice_width": "Width of each tiled detection slice.",
+    "sahi.overlap_height_ratio": "Vertical overlap between slices.",
+    "sahi.overlap_width_ratio": "Horizontal overlap between slices.",
+    "sahi.perform_standard_pred": "Whether to also run full-frame detection besides tiled detection.",
+    "sahi.postprocess_type": "Method used to merge duplicate slice detections.",
+    "sahi.postprocess_match_metric": "Metric used when matching duplicate boxes.",
+    "sahi.postprocess_match_threshold": "Threshold for merging duplicate boxes.",
+    "filtering.min_confidence": "Minimum confidence after detector output filtering.",
+    "filtering.roi": "Region where detections are allowed. Null means full frame.",
+    "scene_bias.enabled": "Whether field and zone priors affect candidate scoring.",
+    "scene_bias.ground_zones[].points": "Polygon for the playable ground area.",
+    "scene_bias.negative_rois[].points": "Polygon for areas that should be penalized as likely false positives.",
+    "scene_bias.positive_rois[].points": "Polygon for areas that should receive a selection bonus.",
+    "scene_bias.dynamic_air_recovery.enabled": "Whether recovery mode relaxes filters while the ball is predicted or lost.",
+    "scene_bias.dynamic_air_recovery.reacquire_confidence_threshold": "Minimum confidence for reacquiring a lost ball.",
+    "scene_bias.dynamic_air_recovery.reacquire_image_size": "Image size used for reacquire detection.",
+    "selection.min_accept_score": "Minimum final score required to accept a candidate.",
+    "selection.stable_history_length": "Number of historical frames used to judge stable motion.",
+    "tracking.max_lost_frames": "Frames to keep predicting before declaring the ball lost too long.",
+    "tracking.match_distance": "Distance gate for matching a detection to the current track.",
+    "tracking.max_speed": "Maximum allowed ball speed between frames.",
+    "tracking.max_acceleration": "Maximum allowed acceleration before penalizing a candidate.",
+    "tracking.prediction_mode": "Motion model used when detection is missing.",
+    "tracking.predicted_confidence_decay": "How fast confidence decays while predicting.",
+    "output.video_name": "Annotated tracking video file name.",
+    "output.csv_name": "Raw ball track CSV file name.",
+    "output.debug_jsonl_name": "Per-frame debug JSONL file name.",
+    "output.save_video": "Whether to render annotated output video.",
+    "output.save_csv": "Whether to save track CSV.",
+    "output.draw_radius": "Radius of the drawn ball marker.",
+    "runtime.use_gpu_if_available": "Whether to prefer GPU when available.",
+    "runtime.start_frame": "First frame to process.",
+    "runtime.max_frames": "Maximum number of frames to process. Null means full video.",
+    "postprocess.enabled": "Whether to clean bad track segments after raw tracking.",
+    "follow_cam.enabled": "Whether to render a 16:9 follow-cam output after tracking.",
+    "follow_cam.target_width": "Final follow-cam video width.",
+    "follow_cam.target_height": "Final follow-cam video height.",
+    "follow_cam.pan_smoothing": "How smoothly the crop center follows the ball.",
+    "follow_cam.zoom_smoothing": "How smoothly crop zoom changes.",
+}
+
+
+def _describe_config_path(path: str, value: Any, language: str) -> str:
+    normalized = _normalize_config_explain_path(path)
+    if language != "zh":
+        if normalized in _CONFIG_EXPLAIN_DESCRIPTIONS_EN:
+            return _CONFIG_EXPLAIN_DESCRIPTIONS_EN[normalized]
+        if ".weights." in normalized:
+            return "Selection scoring weight; higher values make this factor more important."
+        if normalized.endswith(".points"):
+            return "Polygon points used as a spatial prior."
+        if normalized.endswith(".name"):
+            return "Human-readable name for this zone or artifact."
+        if normalized.startswith("detector."):
+            return "Detector setting that affects ball detection quality or speed."
+        if normalized.startswith("sahi."):
+            return "Tiled detection setting for finding small balls in large frames."
+        if normalized.startswith("filtering."):
+            return "Candidate filtering rule applied after detection."
+        if normalized.startswith("scene_bias."):
+            return "Scene prior that biases candidate scoring by field location and recovery state."
+        if normalized.startswith("selection."):
+            return "Candidate scoring and acceptance rule."
+        if normalized.startswith("tracking."):
+            return "Temporal tracking and prediction rule."
+        if normalized.startswith("output."):
+            return "Output artifact or drawing option."
+        if normalized.startswith("runtime."):
+            return "Runtime control for frame range, hardware, or video IO."
+        if normalized.startswith("postprocess."):
+            return "Postprocess cleanup option for raw tracks."
+        if normalized.startswith("follow_cam."):
+            return "Final follow-cam render option."
+        return "Config value used by the tracking pipeline."
+
+    if normalized in {
+        "input_video",
+        "output_dir",
+        "detector.model_path",
+        "detector.device",
+        "detector.confidence_threshold",
+        "detector.image_size",
+        "filtering.roi",
+        "runtime.start_frame",
+        "runtime.max_frames",
+        "postprocess.enabled",
+        "follow_cam.enabled",
+    }:
+        exact = {
+            "input_video": "\u8ffd\u8e2a\u5668\u8bfb\u53d6\u7684\u6e90\u89c6\u9891\u8def\u5f84\u3002",
+            "output_dir": "\u8f93\u51fa\u89c6\u9891\u3001\u8f68\u8ff9 CSV \u548c\u8c03\u8bd5\u6587\u4ef6\u7684\u76ee\u5f55\u3002",
+            "detector.model_path": "YOLO \u7403\u68c0\u6d4b\u6a21\u578b\u6743\u91cd\u6587\u4ef6\u3002",
+            "detector.device": "\u63a8\u7406\u4f7f\u7528\u7684\u8ba1\u7b97\u8bbe\u5907\u3002",
+            "detector.confidence_threshold": "\u68c0\u6d4b\u6846\u8fdb\u5165\u5019\u9009\u524d\u9700\u8981\u8fbe\u5230\u7684\u6700\u4f4e\u7f6e\u4fe1\u5ea6\u3002",
+            "detector.image_size": "\u68c0\u6d4b\u63a8\u7406\u56fe\u50cf\u5c3a\u5bf8\uff0c\u8d8a\u5927\u8d8a\u53ef\u80fd\u627e\u5230\u5c0f\u7403\uff0c\u4f46\u901f\u5ea6\u66f4\u6162\u3002",
+            "filtering.roi": "\u5141\u8bb8\u68c0\u6d4b\u7684\u753b\u9762\u533a\u57df\uff0cnull \u8868\u793a\u6574\u5e27\u3002",
+            "runtime.start_frame": "\u5f00\u59cb\u5904\u7406\u7684\u7b2c\u4e00\u5e27\u3002",
+            "runtime.max_frames": "\u6700\u591a\u5904\u7406\u7684\u5e27\u6570\uff0cnull \u8868\u793a\u6574\u6bb5\u89c6\u9891\u3002",
+            "postprocess.enabled": "\u662f\u5426\u5728\u539f\u59cb\u8ffd\u8e2a\u540e\u6e05\u6d17\u5f02\u5e38\u8f68\u8ff9\u6bb5\u3002",
+            "follow_cam.enabled": "\u662f\u5426\u5728\u8ffd\u8e2a\u540e\u6e32\u67d3 16:9 \u8ddf\u968f\u955c\u5934\u6210\u54c1\u3002",
+        }
+        return exact[normalized]
+    if ".weights." in normalized:
+        return "\u5019\u9009\u70b9\u7efc\u5408\u8bc4\u5206\u6743\u91cd\uff0c\u6570\u503c\u8d8a\u5927\u8fd9\u4e2a\u56e0\u7d20\u8d8a\u91cd\u8981\u3002"
+    if normalized.endswith(".points"):
+        return "\u7528\u4f5c\u7a7a\u95f4\u5148\u9a8c\u7684\u591a\u8fb9\u5f62\u70b9\u4f4d\u3002"
+    if normalized.endswith(".name"):
+        return "\u8fd9\u4e2a\u533a\u57df\u6216\u4ea7\u7269\u7684\u540d\u79f0\u3002"
+    if normalized.startswith("detector."):
+        return "\u68c0\u6d4b\u5668\u53c2\u6570\uff0c\u5f71\u54cd\u627e\u7403\u8d28\u91cf\u6216\u63a8\u7406\u901f\u5ea6\u3002"
+    if normalized.startswith("sahi."):
+        return "\u5207\u7247\u68c0\u6d4b\u53c2\u6570\uff0c\u7528\u6765\u5728\u5927\u753b\u9762\u91cc\u627e\u5c0f\u7403\u3002"
+    if normalized.startswith("filtering."):
+        return "\u68c0\u6d4b\u540e\u7684\u5019\u9009\u8fc7\u6ee4\u89c4\u5219\u3002"
+    if normalized.startswith("scene_bias."):
+        return "\u573a\u666f\u5148\u9a8c\uff0c\u6309\u7403\u573a\u4f4d\u7f6e\u548c\u627e\u56de\u72b6\u6001\u5f71\u54cd\u5019\u9009\u8bc4\u5206\u3002"
+    if normalized.startswith("selection."):
+        return "\u5019\u9009\u70b9\u8bc4\u5206\u548c\u63a5\u53d7\u89c4\u5219\u3002"
+    if normalized.startswith("tracking."):
+        return "\u8de8\u5e27\u8ffd\u8e2a\u3001\u5339\u914d\u548c\u9884\u6d4b\u89c4\u5219\u3002"
+    if normalized.startswith("output."):
+        return "\u8f93\u51fa\u6587\u4ef6\u6216\u753b\u9762\u6807\u6ce8\u9009\u9879\u3002"
+    if normalized.startswith("runtime."):
+        return "\u8fd0\u884c\u65f6\u53c2\u6570\uff0c\u63a7\u5236\u5e27\u8303\u56f4\u3001\u786c\u4ef6\u6216\u89c6\u9891 IO\u3002"
+    if normalized.startswith("postprocess."):
+        return "\u539f\u59cb\u8f68\u8ff9\u7684\u540e\u5904\u7406\u6e05\u6d17\u9009\u9879\u3002"
+    if normalized.startswith("follow_cam."):
+        return "\u6700\u7ec8\u8ddf\u968f\u955c\u5934\u6e32\u67d3\u9009\u9879\u3002"
+    return "\u8ffd\u8e2a\u6d41\u6c34\u7ebf\u4f7f\u7528\u7684\u914d\u7f6e\u503c\u3002"
+
+
+def _build_config_line_explanations(raw: dict[str, Any], language: str) -> list[str]:
+    lines: list[str] = []
+    for path, value in _flatten_config_explain_items(raw):
+        if not path:
+            continue
+        current_value = _format_config_explain_value(value)
+        description = _describe_config_path(path, value, language)
+        lines.append(f"{path} = {current_value} - {description}")
     return lines
 
 
@@ -287,15 +495,37 @@ class ApiService:
 
     def get_config(self, name: str) -> dict[str, Any]:
         config_path, relative_name = self._resolve_config_path(name)
+        text = config_path.read_text(encoding="utf-8")
         raw = self._load_raw_yaml(config_path)
         resolved = load_config(config_path)
         return {
             "name": relative_name,
             "path": str(config_path),
+            "text": text,
             "raw": raw,
             "resolved": _jsonable(resolved),
             "summary": self._build_config_summary(config_path, relative_name),
         }
+
+    def update_config(self, name: str, content: str) -> dict[str, Any]:
+        config_path, relative_name = self._resolve_config_path(name)
+        loaded = yaml.safe_load(content) or {}
+        if not isinstance(loaded, dict):
+            raise ValueError(f"Invalid config root in {relative_name}")
+
+        tmp_path = config_path.with_name(f".{config_path.name}.{uuid4().hex[:8]}.tmp.yaml")
+        try:
+            tmp_path.write_text(content, encoding="utf-8")
+            load_config(tmp_path)
+        finally:
+            if tmp_path.exists():
+                tmp_path.unlink()
+
+        with self._lock:
+            self._assert_path_not_used_by_active_run_locked(config_path=config_path)
+
+        config_path.write_text(content, encoding="utf-8")
+        return self.get_config(relative_name)
 
     def delete_config(self, name: str) -> dict[str, Any]:
         config_path, relative_name = self._resolve_config_path(name)
@@ -605,34 +835,23 @@ class ApiService:
         if config_name:
             config = self.get_config(config_name)
             resolved = config["resolved"]
+            config_lines = _build_config_line_explanations(config["raw"], language)
             summary_parts.append(
                 _localized_text(
                     language,
                     en=(
-                        f"Config {config_name} has postprocess={resolved.get('postprocess', {}).get('enabled')} "
-                        f"and follow_cam={resolved.get('follow_cam', {}).get('enabled')}."
+                        f"Config {config_name} has {len(config_lines)} explicit YAML entries. "
+                        f"postprocess={resolved.get('postprocess', {}).get('enabled')}, "
+                        f"follow_cam={resolved.get('follow_cam', {}).get('enabled')}."
                     ),
                     zh=(
-                        f"\u914d\u7f6e {config_name} \u4e2d postprocess="
-                        f"{resolved.get('postprocess', {}).get('enabled')} \uff0cfollow_cam="
-                        f"{resolved.get('follow_cam', {}).get('enabled')}\u3002"
+                        f"\u914d\u7f6e {config_name} \u6709 {len(config_lines)} \u4e2a\u663e\u5f0f YAML \u914d\u7f6e\u9879\u3002"
+                        f"postprocess={resolved.get('postprocess', {}).get('enabled')}\uff0c"
+                        f"follow_cam={resolved.get('follow_cam', {}).get('enabled')}\u3002"
                     ),
                 )
             )
-            evidence.extend(
-                [
-                    _localized_text(
-                        language,
-                        en=f"Config output={config['summary']['output_dir']}",
-                        zh=f"\u914d\u7f6e\u8f93\u51fa\u76ee\u5f55={config['summary']['output_dir']}",
-                    ),
-                    _localized_text(
-                        language,
-                        en=f"Config input={config['summary']['input_video']}",
-                        zh=f"\u914d\u7f6e\u8f93\u5165\u89c6\u9891={config['summary']['input_video']}",
-                    ),
-                ]
-            )
+            evidence.extend(config_lines)
 
         if focus:
             summary_parts.append(
@@ -857,6 +1076,8 @@ class ApiService:
         instructions = (
             "You are helping operate a football tracking system. "
             "Return strict JSON with keys: summary (string), evidence (array of short strings). "
+            "When a config is present, evidence must explain config entries path-by-path in the form "
+            "'path = value - meaning and operational impact'. Cover the supplied raw config entries, not just a summary. "
             "Ground every sentence in the provided evidence. "
             "Do not invent artifacts, files, or metrics. "
             f"{language_instruction}"
@@ -942,6 +1163,7 @@ class ApiService:
             context["config"] = {
                 "name": config["name"],
                 "summary": config["summary"],
+                "raw": config["raw"],
                 "resolved": {
                     "postprocess": config["resolved"].get("postprocess", {}),
                     "follow_cam": config["resolved"].get("follow_cam", {}),
