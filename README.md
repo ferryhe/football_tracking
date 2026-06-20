@@ -1,5 +1,7 @@
 # Football Tracking Workspace
 
+[![CI](https://github.com/ferryhe/football_tracking/actions/workflows/ci.yml/badge.svg)](https://github.com/ferryhe/football_tracking/actions/workflows/ci.yml)
+
 [English](#english) | [中文](#中文)
 
 A responsive React/Vite workspace UI for the **football video tracking** pipeline, running on Replit. The Python tracking pipeline is preserved as-is from the upstream project; this repo replaces the original Windows desktop UI with a path-routed multi-artifact web workspace, reverse-proxied through a Node.js API server.

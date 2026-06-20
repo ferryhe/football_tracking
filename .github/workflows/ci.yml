@@ -1,0 +1,63 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+jobs:
+  node:
+    name: Node
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.33.2
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Type-check workspace
+        run: pnpm run typecheck
+
+      - name: Build workspace
+        run: pnpm run build
+
+  python:
+    name: Python
+    runs-on: ubuntu-latest
+    env:
+      PYTHONPATH: python_backend
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: |
+            python_backend/requirements.txt
+            python_backend/requirements-dev.txt
+            scripts/ci-python-constraints.txt
+
+      - name: Install dependencies
+        run: python -m pip install -r python_backend/requirements-dev.txt -c scripts/ci-python-constraints.txt
+
+      - name: Run backend tests
+        run: python -m unittest discover -s python_backend/tests
