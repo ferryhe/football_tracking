@@ -11,6 +11,7 @@ jobs:
     name: Node
     runs-on: ubuntu-latest
     env:
+      BASE_PATH: "/"
       PORT: "5173"
 
     steps:
