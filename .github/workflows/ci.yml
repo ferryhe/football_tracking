@@ -10,6 +10,8 @@ jobs:
   node:
     name: Node
     runs-on: ubuntu-latest
+    env:
+      PORT: "5173"
 
     steps:
       - name: Check out repository
