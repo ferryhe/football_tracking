@@ -25,7 +25,7 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: 24
           cache: pnpm
           cache-dependency-path: pnpm-lock.yaml
 
@@ -36,7 +36,7 @@ jobs:
         run: pnpm run typecheck
 
       - name: Build workspace
-        run: pnpm run build
+        run: pnpm -r --if-present run build
 
   python:
     name: Python
@@ -62,4 +62,4 @@ jobs:
         run: python -m pip install -r python_backend/requirements-dev.txt -c scripts/ci-python-constraints.txt
 
       - name: Run backend tests
-        run: python -m unittest discover -s python_backend/tests
+        run: python -m unittest discover -s python_backend/tests -p "test_*.py"
