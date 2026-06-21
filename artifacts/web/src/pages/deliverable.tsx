@@ -1,8 +1,8 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useLocation } from "wouter";
 import { api } from "@/lib/api";
-import type { CreateRunRequest } from "@/lib/types";
+import type { CreateRunRequest, EventCandidate, RunRecord } from "@/lib/types";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
@@ -11,9 +11,16 @@ import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Separator } from "@/components/ui/separator";
 import { Switch } from "@/components/ui/switch";
 import { Label } from "@/components/ui/label";
-import { Film, Clapperboard, AlertCircle, Loader2, CheckCircle2, Settings2, ArrowRight } from "lucide-react";
+import { Film, Clapperboard, AlertCircle, Loader2, CheckCircle2, Settings2, ArrowRight, Scissors, Target } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 import { useLanguage } from "@/contexts/LanguageContext";
+
+function hasEventCandidateReport(run: RunRecord): boolean {
+  return (
+    run.artifacts.some((artifact) => artifact.exists && artifact.name === "event_candidates.json") ||
+    (run.stats.event_candidates !== null && typeof run.stats.event_candidates === "object")
+  );
+}
 
 export default function DeliverablePage() {
   const { t } = useLanguage();
@@ -27,6 +34,7 @@ export default function DeliverablePage() {
   const [renderFinal, setRenderFinal] = useState(true);
   const [drawBallMarker, setDrawBallMarker] = useState(false);
   const [drawFrameText, setDrawFrameText] = useState(false);
+  const [selectedHighlightRunId, setSelectedHighlightRunId] = useState("");
 
   const { data: inputCatalog, isLoading: inputsLoading } = useQuery({
     queryKey: ["inputs"],
@@ -40,15 +48,51 @@ export default function DeliverablePage() {
     refetchInterval: 30_000,
   });
 
+  const { data: runs, isLoading: runsLoading } = useQuery({
+    queryKey: ["runs"],
+    queryFn: api.listRuns,
+    refetchInterval: 5_000,
+  });
+
+  const highlightSourceRuns = useMemo(
+    () =>
+      (runs ?? []).filter(
+        (run) => run.status === "completed" && run.source !== "highlight_render" && hasEventCandidateReport(run)
+      ),
+    [runs]
+  );
   const selectedVideo = inputCatalog?.videos.find((video) => video.path === selectedInput) ?? null;
   const selectedCfg = configs?.find((config) => config.name === selectedConfig) ?? null;
+  const selectedHighlightRun = highlightSourceRuns.find((run) => run.run_id === selectedHighlightRunId) ?? null;
   const canSubmit = !!selectedInput && !!selectedConfig;
+
+  const eventCandidates = useQuery({
+    queryKey: ["event-candidates", selectedHighlightRunId],
+    queryFn: () => api.getEventCandidates(selectedHighlightRunId),
+    enabled: !!selectedHighlightRunId,
+    retry: false,
+  });
+
+  const candidates = useMemo(
+    () => [...(eventCandidates.data?.candidates ?? [])].sort((a, b) => b.score - a.score).slice(0, 8),
+    [eventCandidates.data?.candidates]
+  );
 
   useEffect(() => {
     if (!selectedConfig || selectedInput) return;
     const config = configs?.find((item) => item.name === selectedConfig);
     if (config?.input_video) setSelectedInput(config.input_video);
   }, [configs, selectedConfig, selectedInput]);
+
+  useEffect(() => {
+    if (!highlightSourceRuns.length) {
+      if (selectedHighlightRunId) setSelectedHighlightRunId("");
+      return;
+    }
+    if (!selectedHighlightRunId || !highlightSourceRuns.some((run) => run.run_id === selectedHighlightRunId)) {
+      setSelectedHighlightRunId(highlightSourceRuns[0].run_id);
+    }
+  }, [highlightSourceRuns, selectedHighlightRunId]);
 
   const createFullDeliverable = useMutation({
     mutationFn: () => {
@@ -80,6 +124,22 @@ export default function DeliverablePage() {
     },
     onError: (err: Error) => {
       toast({ title: t.deliverable.renderFailed, description: err.message, variant: "destructive" });
+    },
+  });
+
+  const renderHighlight = useMutation({
+    mutationFn: ({ runId, candidate }: { runId: string; candidate: EventCandidate }) =>
+      api.createHighlightRender(runId, {
+        candidate_id: candidate.id,
+        notes: `Highlight clip from ${runId} | ${candidate.id}`,
+      }),
+    onSuccess: (run) => {
+      void queryClient.invalidateQueries({ queryKey: ["runs"] });
+      void queryClient.invalidateQueries({ queryKey: ["health"] });
+      toast({ title: t.deliverable.highlightQueued, description: run.run_id });
+    },
+    onError: (err: Error) => {
+      toast({ title: t.deliverable.highlightFailed, description: err.message, variant: "destructive" });
     },
   });
 
@@ -270,6 +330,145 @@ export default function DeliverablePage() {
                 <p className="font-mono text-sm font-medium">1080px</p>
               </div>
             </div>
+          </CardContent>
+        </Card>
+      </div>
+
+      <div>
+        <h2 className="text-lg font-semibold flex items-center gap-2">
+          <Scissors className="h-4 w-4 text-primary" />
+          {t.deliverable.highlightClips}
+        </h2>
+        <p className="text-sm text-muted-foreground mt-1">{t.deliverable.highlightClipsDesc}</p>
+      </div>
+
+      <div className="grid gap-4 lg:grid-cols-[minmax(0,0.9fr)_minmax(0,1.1fr)]">
+        <Card>
+          <CardHeader className="pb-3">
+            <CardTitle className="flex items-center gap-2 text-base">
+              <Clapperboard className="h-4 w-4 text-primary" />
+              {t.deliverable.highlightSourceRun}
+            </CardTitle>
+            <CardDescription>{t.deliverable.highlightSourceRunDesc}</CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            {runsLoading ? (
+              <div className="flex items-center gap-2 text-muted-foreground text-sm">
+                <Loader2 className="h-4 w-4 animate-spin" />
+                {t.deliverable.loadingRuns}
+              </div>
+            ) : !highlightSourceRuns.length ? (
+              <Alert>
+                <AlertCircle className="h-4 w-4" />
+                <AlertDescription>{t.deliverable.noRuns}</AlertDescription>
+              </Alert>
+            ) : (
+              <Select
+                value={selectedHighlightRunId}
+                onValueChange={setSelectedHighlightRunId}
+                data-testid="select-highlight-run"
+              >
+                <SelectTrigger data-testid="trigger-highlight-run">
+                  <SelectValue placeholder={t.deliverable.selectRunPlaceholder} />
+                </SelectTrigger>
+                <SelectContent>
+                  {highlightSourceRuns.map((run) => (
+                    <SelectItem key={run.run_id} value={run.run_id} data-testid={`option-highlight-run-${run.run_id}`}>
+                      {run.run_id}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            )}
+
+            {selectedHighlightRun && (
+              <div className="rounded-md bg-muted/50 p-3 space-y-1">
+                <p className="text-xs font-mono truncate">{selectedHighlightRun.run_id}</p>
+                <p className="text-xs text-muted-foreground truncate">{selectedHighlightRun.input_video ?? selectedHighlightRun.output_dir}</p>
+              </div>
+            )}
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader className="pb-3">
+            <CardTitle className="flex items-center justify-between gap-3 text-base">
+              <span className="flex min-w-0 items-center gap-2">
+                <Target className="h-4 w-4 shrink-0 text-primary" />
+                <span className="truncate">{t.deliverable.eventCandidates}</span>
+              </span>
+              {eventCandidates.data && (
+                <Badge variant="secondary" className="shrink-0">
+                  {t.deliverable.candidateCount(eventCandidates.data.summary.candidate_count)}
+                </Badge>
+              )}
+            </CardTitle>
+            <CardDescription>{t.deliverable.eventCandidatesDesc}</CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            {!selectedHighlightRunId ? (
+              <Alert>
+                <AlertCircle className="h-4 w-4" />
+                <AlertDescription>{t.deliverable.noRuns}</AlertDescription>
+              </Alert>
+            ) : eventCandidates.isLoading ? (
+              <div className="flex items-center gap-2 text-muted-foreground text-sm">
+                <Loader2 className="h-4 w-4 animate-spin" />
+                {t.deliverable.loadingCandidates}
+              </div>
+            ) : eventCandidates.isError ? (
+              <Alert>
+                <AlertCircle className="h-4 w-4" />
+                <AlertDescription>{t.deliverable.candidatesUnavailable}</AlertDescription>
+              </Alert>
+            ) : !candidates.length ? (
+              <Alert>
+                <AlertCircle className="h-4 w-4" />
+                <AlertDescription>{t.deliverable.noCandidates}</AlertDescription>
+              </Alert>
+            ) : (
+              <div className="space-y-2">
+                {candidates.map((candidate) => {
+                  const isRendering = renderHighlight.isPending && renderHighlight.variables?.candidate.id === candidate.id;
+                  return (
+                    <div
+                      key={candidate.id}
+                      className="flex flex-col gap-3 rounded-md border p-3 sm:flex-row sm:items-center sm:justify-between"
+                      data-testid={`event-candidate-${candidate.id}`}
+                    >
+                      <div className="min-w-0 space-y-1">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <Badge variant={candidate.type === "goal_candidate" ? "default" : "secondary"} className="text-xs">
+                            {candidate.type.replace("_", " ")}
+                          </Badge>
+                          <span className="text-xs text-muted-foreground">
+                            {t.deliverable.candidateFrames(candidate.start_frame, candidate.end_frame)}
+                          </span>
+                          <span className="text-xs font-medium tabular-nums">
+                            {t.deliverable.candidateScore} {candidate.score.toFixed(2)}
+                          </span>
+                        </div>
+                        <p className="text-xs text-muted-foreground line-clamp-2">{candidate.reason}</p>
+                      </div>
+                      <Button
+                        size="sm"
+                        className="shrink-0"
+                        onClick={() => renderHighlight.mutate({ runId: selectedHighlightRunId, candidate })}
+                        disabled={renderHighlight.isPending}
+                        data-testid={`button-render-highlight-${candidate.id}`}
+                      >
+                        {isRendering ? (
+                          <Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" />
+                        ) : (
+                          <Scissors className="h-3.5 w-3.5 mr-1.5" />
+                        )}
+                        {t.deliverable.renderClip}
+                      </Button>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
           </CardContent>
         </Card>
       </div>

@@ -2,7 +2,7 @@
 
 English | [中文](#中文说明)
 
-> **Replit deployment note**: This README is the original upstream README and describes a self-contained Windows-based workflow with the legacy `frontend/` desktop UI. On Replit, **the frontend in this folder has been replaced** by [`artifacts/web/`](../artifacts/web/) (a React/Vite app served via a Node.js reverse proxy). For Replit-specific setup, architecture, and run instructions, see the **[root README](../README.md)**. The Python pipeline, configs, weights, and outputs described below are unchanged.
+> **Replit deployment note**: This README is the original upstream README and describes a self-contained Windows-based workflow with the legacy `frontend/` desktop UI. On Replit, **the frontend in this folder has been replaced** by [`artifacts/web/`](../artifacts/web/) (a React/Vite app served via a Node.js reverse proxy). For Replit-specific setup, architecture, and run instructions, see the **[root README](../README.md)**. The Python tracking pipeline remains compatible with the original flow, while this workspace adds API reports, review artifacts, and render jobs.
 
 ---
 
@@ -14,7 +14,8 @@ This repository tracks a single in-play football from high-resolution fisheye-st
 
 - Python tracking pipeline for raw tracking, cleanup, and follow-cam rendering
 - Local FastAPI backend for configs, runs, artifacts, AI suggestions, and asset management
-- Local React/Vite workspace UI with 4 main tabs:
+- Local React/Vite workspace UI with 5 main tabs:
+  - `Dashboard`
   - `Baseline`
   - `AI analysis`
   - `Deliverable task`
@@ -108,9 +109,10 @@ To stop managed UI processes:
 3. `Deliverable task`
    - Pick a completed source run
    - Render a clean `16:9` deliverable without rerunning the full baseline pipeline
+   - Render short highlight clips from shot/goal candidates when `event_candidates.json` is available
 4. `History`
    - Review past runs
-   - Filter `baseline / deliverable / failed`
+   - Filter `baseline / deliverable / highlight / failed`
    - Manage source videos, configs, and output folders grouped by source clip
 
 ### Current Storage Model
@@ -176,6 +178,15 @@ Follow-cam adds:
 - `camera_path.csv`
 - `follow_cam_report.json`
 
+Review and highlight artifacts add:
+
+- `ball_audit.json`
+- `ai_review_triggers.json`
+- `player_tracks.json`
+- `event_candidates.json`
+- `highlight.mp4`
+- `highlight_report.json`
+
 ### Docs
 
 - English operation guide: [docs/operation-guide.en.md](docs/operation-guide.en.md)
@@ -217,7 +228,8 @@ Type-check scope note / 类型检查范围说明：`pyright` 当前先覆盖 `py
 
 - Python 跟踪主流程：原始跟踪、清洗、跟随裁剪
 - 本地 FastAPI 后端：配置、任务、产物、AI 建议、资源管理
-- 本地 React/Vite workspace 界面，当前有 4 个主标签：
+- 本地 React/Vite workspace 界面，当前有 5 个主标签：
+  - `概览`
   - `跑基线`
   - `AI 分析`
   - `成品任务`
@@ -311,9 +323,10 @@ cd ..
 3. `成品任务`
    - 选择一个已完成 run
    - 单独导出干净的 `16:9` 成品，不需要重新跑完整基线
+   - 有 `event_candidates.json` 时，可以从射门/进球候选渲染集锦短片
 4. `历史`
    - 查看过往 run
-   - 按 `baseline / deliverable / failed` 过滤
+   - 按 `baseline / deliverable / highlight / failed` 过滤
    - 按原视频分组管理源视频、配置和输出目录
 
 ### 当前存储结构
@@ -378,6 +391,15 @@ outputs/runs/<input_slug>/<run_id>/
 - `follow_cam.mp4`
 - `camera_path.csv`
 - `follow_cam_report.json`
+
+审核与集锦相关输出还包括：
+
+- `ball_audit.json`
+- `ai_review_triggers.json`
+- `player_tracks.json`
+- `event_candidates.json`
+- `highlight.mp4`
+- `highlight_report.json`
 
 ### 文档入口
 

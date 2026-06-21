@@ -42,6 +42,10 @@ For steadier Windows startup:
 
 ## 2. What Each Tab Does
 
+### Dashboard
+
+Use this tab to check backend health, recent runs, and available configs.
+
 ### Baseline
 
 Use this tab to prepare the source clip and start the first run.
@@ -67,13 +71,15 @@ Main actions:
 
 ### Deliverable Task
 
-Use this tab when you want a clean `16:9` output from an existing run without rerunning the full baseline pipeline.
+Use this tab when you want either a clean `16:9` output or a short highlight clip from an existing completed run.
 
 Main actions:
 
-1. Pick a completed source run
+1. Pick a source video and config for a full deliverable run
 2. Choose deliverable switches
-3. Start the render
+3. Start the full run or render
+4. Pick a completed source run with event candidates
+5. Render a short highlight clip from a candidate
 
 ### History
 
@@ -81,7 +87,7 @@ Use this tab to inspect old runs and manage assets.
 
 Main actions:
 
-1. Filter history by `baseline / deliverable / failed`
+1. Filter history by `baseline / deliverable / highlight / failed`
 2. Open an asset group by source video
 3. Manage source files, configs, and outputs
 
@@ -161,13 +167,16 @@ Important behavior:
 
 ## 5. Deliverable Task Workflow
 
-Use this when you already trust the track and only need a final video.
+Use this when you already trust the track and need either a final video or a short review clip.
+
+### Full Follow-Cam Output
 
 Recommended order:
 
-1. Pick a completed source run
-2. Leave deliverable options off unless you explicitly want overlays
-3. Click `Start 16:9 deliverable render`
+1. Pick the source video
+2. Pick the tuned config
+3. Leave deliverable options off unless you explicitly want overlays
+4. Click `Start Full Run + Render`
 
 Options:
 
@@ -184,6 +193,23 @@ Default recommendation:
 - keep frame text off
 - prefer cleaned track on
 
+### Candidate Highlight Clips
+
+Completed runs now write `event_candidates.json` when track data is available. The candidates are review hints for likely shots or goals; they are not confirmed match events.
+
+Recommended order:
+
+1. Pick a completed source run under `Candidate Highlights`
+2. Review the candidate type, score, and frame window
+3. Click `Render clip`
+4. Open `History` and filter by `Highlight`
+
+The highlight child run writes:
+
+- `highlight.mp4`
+- `highlight_report.json`
+- copied source track files needed for traceability
+
 ## 6. History and Asset Management
 
 ### History List
@@ -192,6 +218,7 @@ The top section shows all past runs, filtered by:
 
 - `Baseline`
 - `Deliverable`
+- `Highlight`
 - `Failed`
 
 ### Asset Groups
@@ -236,6 +263,7 @@ Current logical model:
 - one config can be reused by many runs
 - one run maps to one output directory
 - a deliverable run may point back to a baseline run through `parent_run_id`
+- a highlight run also points back to its source run through `parent_run_id`
 
 The app still scans legacy output folders so older experiments stay visible.
 

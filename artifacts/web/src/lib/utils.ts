@@ -78,11 +78,16 @@ export function isDeliverable(run: RunRecord): boolean {
   return run.source === "follow_cam_render" || run.modules_enabled.follow_cam === true;
 }
 
-export type HistoryCategory = "baseline" | "deliverable" | "failed" | "cancelled";
+export function isHighlight(run: RunRecord): boolean {
+  return run.source === "highlight_render";
+}
+
+export type HistoryCategory = "baseline" | "deliverable" | "highlight" | "failed" | "cancelled";
 
 export function historyCategory(run: RunRecord): HistoryCategory {
   if (run.status === "cancelled") return "cancelled";
   if (run.status === "failed") return "failed";
+  if (isHighlight(run)) return "highlight";
   if (isDeliverable(run)) return "deliverable";
   return "baseline";
 }
