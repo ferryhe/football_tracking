@@ -26,12 +26,17 @@ def stitch_chunk_outputs(
     config = output_config or OutputConfig()
     selected_csv_rows: dict[int, list[str]] = {}
     selected_debug_items: dict[int, dict[str, Any]] = {}
+    boundary_events: list[dict[str, Any]] = []
 
-    for chunk, chunk_dir in zip(chunks, chunk_dirs):
+    final_chunk_position = len(chunks) - 1
+    for chunk_position, (chunk, chunk_dir) in enumerate(zip(chunks, chunk_dirs)):
         csv_rows = _read_csv_rows(chunk_dir / config.csv_name)
         debug_items = _read_debug_items(chunk_dir / config.debug_jsonl_name)
+        core_end_frame = chunk.core_end_frame
+        if chunk_position == final_chunk_position:
+            core_end_frame = _select_final_core_end_frame(chunk, csv_rows, debug_items, boundary_events)
 
-        for frame in range(chunk.core_start_frame, chunk.core_end_frame + 1):
+        for frame in range(chunk.core_start_frame, core_end_frame + 1):
             if frame in selected_csv_rows:
                 raise ValueError(f"Duplicate selected frame {frame}")
             if frame not in csv_rows:
@@ -46,7 +51,7 @@ def stitch_chunk_outputs(
     _write_csv_rows(output_dir / config.csv_name, ordered_frames, selected_csv_rows)
     _write_debug_items(output_dir / config.debug_jsonl_name, ordered_frames, selected_debug_items)
 
-    report = _build_report(chunks, frame_count=len(ordered_frames))
+    report = _build_report(chunks, frame_count=len(ordered_frames), boundary_events=boundary_events)
     with (output_dir / "temporal_chunks_report.json").open("w", encoding="utf-8") as report_file:
         json.dump(report, report_file, ensure_ascii=False, indent=2)
     return report
@@ -97,7 +102,53 @@ def _write_debug_items(path: Path, frames: list[int], items: dict[int, dict[str,
             debug_file.write(json.dumps(items[frame], ensure_ascii=False) + "\n")
 
 
-def _build_report(chunks: list[TemporalChunk], *, frame_count: int) -> dict[str, Any]:
+def _select_final_core_end_frame(
+    chunk: TemporalChunk,
+    csv_rows: dict[int, list[str]],
+    debug_items: dict[int, dict[str, Any]],
+    boundary_events: list[dict[str, Any]],
+) -> int:
+    core_frames = range(chunk.core_start_frame, chunk.core_end_frame + 1)
+    missing_csv_frames = {frame for frame in core_frames if frame not in csv_rows}
+    missing_debug_frames = {frame for frame in core_frames if frame not in debug_items}
+    if not missing_csv_frames and not missing_debug_frames:
+        return chunk.core_end_frame
+
+    if missing_csv_frames != missing_debug_frames:
+        csv_only_missing = missing_csv_frames - missing_debug_frames
+        if csv_only_missing:
+            raise ValueError(f"Missing CSV frame {min(csv_only_missing)} in {chunk.output_dir_name}")
+        debug_only_missing = missing_debug_frames - missing_csv_frames
+        raise ValueError(f"Missing debug frame {min(debug_only_missing)} in {chunk.output_dir_name}")
+
+    first_missing_frame = min(missing_csv_frames)
+    if missing_csv_frames != set(range(first_missing_frame, chunk.core_end_frame + 1)):
+        raise ValueError(f"Missing CSV frame {first_missing_frame} in {chunk.output_dir_name}")
+    if first_missing_frame == chunk.core_start_frame:
+        raise ValueError(f"Missing CSV frame {first_missing_frame} in {chunk.output_dir_name}")
+
+    stitched_core_end_frame = first_missing_frame - 1
+    boundary_events.append(
+        {
+            "type": "truncated_final_tail",
+            "chunk_index": chunk.index,
+            "chunk_name": chunk.output_dir_name,
+            "first_missing_frame": first_missing_frame,
+            "last_missing_frame": chunk.core_end_frame,
+            "missing_frame_count": chunk.core_end_frame - first_missing_frame + 1,
+            "planned_core_end_frame": chunk.core_end_frame,
+            "stitched_core_end_frame": stitched_core_end_frame,
+        }
+    )
+    return stitched_core_end_frame
+
+
+def _build_report(
+    chunks: list[TemporalChunk],
+    *,
+    frame_count: int,
+    boundary_events: list[dict[str, Any]],
+) -> dict[str, Any]:
     return {
         "chunk_count": len(chunks),
         "frame_count": frame_count,
@@ -114,5 +165,5 @@ def _build_report(chunks: list[TemporalChunk], *, frame_count: int) -> dict[str,
             }
             for chunk in chunks
         ],
-        "boundary_events": [],
+        "boundary_events": boundary_events,
     }
