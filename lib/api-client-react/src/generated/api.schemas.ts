@@ -179,6 +179,8 @@ export interface RunProgress {
   stage: string;
   current_frame?: number | null;
   total_frames?: number | null;
+  chunk_index?: number | null;
+  chunk_count?: number | null;
   percent?: number;
   eta_seconds?: number | null;
   elapsed_seconds?: number | null;

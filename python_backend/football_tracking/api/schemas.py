@@ -360,6 +360,8 @@ class RunProgress(BaseModel):
     stage: str
     current_frame: int | None = None
     total_frames: int | None = None
+    chunk_index: int | None = None
+    chunk_count: int | None = None
     percent: float = 0.0
     eta_seconds: float | None = None
     elapsed_seconds: float | None = None

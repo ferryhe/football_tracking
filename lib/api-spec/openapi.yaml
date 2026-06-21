@@ -2539,6 +2539,16 @@ components:
           - type: integer
           - type: 'null'
           title: Total Frames
+        chunk_index:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          title: Chunk Index
+        chunk_count:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          title: Chunk Count
         percent:
           type: number
           title: Percent

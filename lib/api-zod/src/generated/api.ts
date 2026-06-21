@@ -396,6 +396,8 @@ export const ListRunsResponseItem = zod.object({
         stage: zod.string(),
         current_frame: zod.union([zod.number(), zod.null()]).optional(),
         total_frames: zod.union([zod.number(), zod.null()]).optional(),
+        chunk_index: zod.union([zod.number(), zod.null()]).optional(),
+        chunk_count: zod.union([zod.number(), zod.null()]).optional(),
         percent: zod
           .number()
           .default(listRunsResponseProgressOnePercentDefault),
@@ -510,6 +512,8 @@ export const ListAssetGroupsResponseItem = zod.object({
               stage: zod.string(),
               current_frame: zod.union([zod.number(), zod.null()]).optional(),
               total_frames: zod.union([zod.number(), zod.null()]).optional(),
+              chunk_index: zod.union([zod.number(), zod.null()]).optional(),
+              chunk_count: zod.union([zod.number(), zod.null()]).optional(),
               percent: zod
                 .number()
                 .default(
@@ -582,6 +586,8 @@ export const ListAssetGroupsResponseItem = zod.object({
               stage: zod.string(),
               current_frame: zod.union([zod.number(), zod.null()]).optional(),
               total_frames: zod.union([zod.number(), zod.null()]).optional(),
+              chunk_index: zod.union([zod.number(), zod.null()]).optional(),
+              chunk_count: zod.union([zod.number(), zod.null()]).optional(),
               percent: zod
                 .number()
                 .default(
@@ -644,6 +650,8 @@ export const GetRunResponse = zod.object({
         stage: zod.string(),
         current_frame: zod.union([zod.number(), zod.null()]).optional(),
         total_frames: zod.union([zod.number(), zod.null()]).optional(),
+        chunk_index: zod.union([zod.number(), zod.null()]).optional(),
+        chunk_count: zod.union([zod.number(), zod.null()]).optional(),
         percent: zod.number().default(getRunResponseProgressOnePercentDefault),
         eta_seconds: zod.union([zod.number(), zod.null()]).optional(),
         elapsed_seconds: zod.union([zod.number(), zod.null()]).optional(),
@@ -873,6 +881,8 @@ export const CancelRunResponse = zod.object({
         stage: zod.string(),
         current_frame: zod.union([zod.number(), zod.null()]).optional(),
         total_frames: zod.union([zod.number(), zod.null()]).optional(),
+        chunk_index: zod.union([zod.number(), zod.null()]).optional(),
+        chunk_count: zod.union([zod.number(), zod.null()]).optional(),
         percent: zod
           .number()
           .default(cancelRunResponseProgressOnePercentDefault),

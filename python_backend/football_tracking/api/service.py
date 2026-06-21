@@ -25,6 +25,7 @@ from football_tracking.ai_review_triggers import compact_ai_review_trigger_summa
 from football_tracking.api.ai_provider import OpenAIResponsesClient, load_provider_settings
 from football_tracking.ball_audit import compact_ball_audit_summary
 from football_tracking.calibration import build_pitch_calibration_from_field_polygon
+from football_tracking.chunk_runner import run_temporal_chunks
 from football_tracking.config import AppConfig, load_config
 from football_tracking.events import compact_event_candidate_summary
 from football_tracking.follow_cam import FollowCamGenerator
@@ -1363,6 +1364,7 @@ class ApiService:
             "modules_enabled": {
                 "postprocess": bool(config.postprocess.enabled),
                 "follow_cam": bool(config.follow_cam.enabled),
+                "temporal_chunks": bool(config.temporal_chunks.enabled),
             },
             "artifacts": [],
             "stats": {},
@@ -1603,8 +1605,9 @@ class ApiService:
             },
         )
         try:
+            runner = self._tracking_runner(config)
             self._run_with_optional_progress(
-                BallTrackingPipeline(config).run,
+                runner,
                 lambda update: self._update_run_progress(run_id, update, progress_plan),
                 cancel_event.is_set,
             )
@@ -1622,6 +1625,7 @@ class ApiService:
                 modules_enabled={
                     "postprocess": bool(config.postprocess.enabled),
                     "follow_cam": bool(config.follow_cam.enabled),
+                    "temporal_chunks": bool(config.temporal_chunks.enabled),
                 },
                 notes=existing.get("notes"),
                 started_at=existing.get("started_at"),
@@ -1902,6 +1906,15 @@ class ApiService:
             kwargs["should_cancel"] = should_cancel
         runner(**kwargs)
 
+    def _tracking_runner(self, config: AppConfig):
+        if config.temporal_chunks.enabled:
+            return lambda progress_callback=None, should_cancel=None: run_temporal_chunks(
+                config,
+                progress_callback=progress_callback,
+                should_cancel=should_cancel,
+            )
+        return BallTrackingPipeline(config).run
+
     def _update_run(self, run_id: str, patch: dict[str, Any]) -> None:
         with self._lock:
             registry = self._read_registry()
@@ -1943,6 +1956,9 @@ class ApiService:
             start = cursor / total_weight
             cursor += weight
             plan[stage] = (start, cursor / total_weight)
+        if tracking and "tracking" in plan:
+            plan["temporal_chunks"] = plan["tracking"]
+            plan["stitch"] = plan["tracking"]
         return plan
 
     def _initial_progress(self) -> dict[str, Any]:
@@ -1988,6 +2004,8 @@ class ApiService:
             "current_frame": current_frame,
             "total_frames": total_frames,
             "percent": round(percent, 2),
+            "chunk_index": self._optional_int(update.get("chunk_index")),
+            "chunk_count": self._optional_int(update.get("chunk_count")),
             "eta_seconds": None if eta_seconds is None else round(eta_seconds, 1),
             "elapsed_seconds": None if elapsed_seconds is None else round(elapsed_seconds, 1),
             "updated_at": _utc_now_iso(),
@@ -3017,42 +3035,107 @@ class ApiService:
             return {
                 "postprocess": bool(config_meta.get("postprocess_enabled", False)),
                 "follow_cam": bool(config_meta.get("follow_cam_enabled", False)),
+                "temporal_chunks": (output_dir / "temporal_chunks_report.json").exists(),
             }
         return {
             "postprocess": (output_dir / "cleanup_report.json").exists(),
             "follow_cam": (output_dir / "follow_cam_report.json").exists(),
+            "temporal_chunks": (output_dir / "temporal_chunks_report.json").exists(),
         }
 
     def _collect_artifacts(self, output_dir: Path) -> list[dict[str, Any]]:
         if not output_dir.exists():
             return []
         artifacts: list[dict[str, Any]] = []
-        for artifact_path in sorted(output_dir.iterdir(), key=lambda item: item.name):
+        for artifact_path in self._iter_artifact_paths(output_dir):
             if not artifact_path.is_file():
                 continue
+            relative_name = artifact_path.relative_to(output_dir).as_posix()
             content_type, _ = mimetypes.guess_type(str(artifact_path))
-            suffix = artifact_path.suffix.lower()
-            if suffix == ".mp4":
-                kind = "video"
-            elif suffix == ".csv":
-                kind = "csv"
-            elif suffix == ".jsonl":
-                kind = "jsonl"
-            elif suffix == ".json":
-                kind = "json"
-            else:
-                kind = "file"
             artifacts.append(
                 {
-                    "name": artifact_path.name,
+                    "name": relative_name,
                     "path": str(artifact_path.resolve()),
-                    "kind": kind,
+                    "kind": self._artifact_kind(artifact_path),
                     "exists": artifact_path.exists(),
                     "size_bytes": artifact_path.stat().st_size,
                     "content_type": content_type,
                 }
             )
         return artifacts
+
+    def _iter_artifact_paths(self, output_dir: Path) -> list[Path]:
+        artifact_paths = [item for item in output_dir.iterdir() if item.is_file()]
+        for chunk_root in self._temporal_chunk_artifact_roots(output_dir):
+            artifact_paths.extend(
+                item
+                for chunk_dir in sorted((item for item in chunk_root.iterdir() if item.is_dir()), key=lambda item: item.name)
+                for item in chunk_dir.iterdir()
+                if self._is_temporal_chunk_artifact(chunk_root, item)
+            )
+        return sorted(artifact_paths, key=lambda item: item.relative_to(output_dir).as_posix())
+
+    def _temporal_chunk_artifact_roots(self, output_dir: Path) -> list[Path]:
+        roots: list[Path] = []
+        default_chunks_dir = output_dir / "chunks"
+        if default_chunks_dir.exists() and default_chunks_dir.is_dir():
+            roots.append(default_chunks_dir)
+
+        chunk_names = self._temporal_chunk_names(output_dir)
+        if chunk_names:
+            for candidate_root in output_dir.iterdir():
+                if not candidate_root.is_dir() or candidate_root == default_chunks_dir:
+                    continue
+                if any((candidate_root / chunk_name).is_dir() for chunk_name in chunk_names):
+                    roots.append(candidate_root)
+
+        deduped: dict[Path, Path] = {}
+        for root in roots:
+            deduped[root.resolve()] = root
+        return sorted(deduped.values(), key=lambda item: item.relative_to(output_dir).as_posix())
+
+    def _temporal_chunk_names(self, output_dir: Path) -> set[str]:
+        report = self._read_optional_json(output_dir / "temporal_chunks_report.json")
+        if report is None:
+            return set()
+        names: set[str] = set()
+        chunks = report.get("chunks")
+        if isinstance(chunks, list):
+            for chunk in chunks:
+                if isinstance(chunk, dict) and isinstance(chunk.get("name"), str):
+                    names.add(chunk["name"])
+        source_chunk_names = report.get("source_chunk_names")
+        if isinstance(source_chunk_names, list):
+            names.update(name for name in source_chunk_names if isinstance(name, str))
+        return names
+
+    def _is_temporal_chunk_artifact(self, chunk_root: Path, artifact_path: Path) -> bool:
+        if not artifact_path.is_file():
+            return False
+        try:
+            relative = artifact_path.relative_to(chunk_root)
+        except ValueError:
+            return False
+        if len(relative.parts) != 2:
+            return False
+        chunk_name = relative.parts[0]
+        if not chunk_name.startswith("chunk_"):
+            return False
+        if artifact_path.suffix.lower() in {".csv", ".jsonl"}:
+            return True
+        return artifact_path.name in {"chunk_config.yaml", "worker.stdout.log", "worker.stderr.log"}
+
+    def _artifact_kind(self, artifact_path: Path) -> str:
+        suffix = artifact_path.suffix.lower()
+        if suffix == ".mp4":
+            return "video"
+        if suffix == ".csv":
+            return "csv"
+        if suffix == ".jsonl":
+            return "jsonl"
+        if suffix == ".json":
+            return "json"
+        return "file"
 
     def _collect_stats(self, output_dir: Path) -> dict[str, Any]:
         metrics_report = self._read_optional_json(output_dir / "metrics_report.json")

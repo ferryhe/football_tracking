@@ -18,6 +18,7 @@ from pydantic import ValidationError
 from football_tracking.api.app import create_app
 from football_tracking.api.routes import inputs as input_routes
 from football_tracking.api.routes import runs as run_routes
+from football_tracking.api.routes.artifacts import get_artifact
 from football_tracking.api.schemas import HighlightRenderRequest
 from football_tracking.api.service import ApiService
 from football_tracking.config import load_config
@@ -409,6 +410,60 @@ class ApiServiceSmokeTests(unittest.TestCase):
             + "\n",
         )
         return output_dir
+
+    def write_temporal_chunk_artifacts(self, folder_name: str) -> None:
+        self.write_json(
+            f"outputs/{folder_name}/temporal_chunks_report.json",
+            {
+                "chunk_count": 2,
+                "frame_count": 3,
+                "chunks": [
+                    {
+                        "index": 0,
+                        "name": "chunk_0000",
+                        "start_frame": 0,
+                        "end_frame": 2,
+                        "core_start_frame": 0,
+                        "core_end_frame": 1,
+                    },
+                    {
+                        "index": 1,
+                        "name": "chunk_0001",
+                        "start_frame": 1,
+                        "end_frame": 3,
+                        "core_start_frame": 2,
+                        "core_end_frame": 2,
+                    },
+                ],
+                "boundary_events": [{"frame": 1}],
+                "execution": {
+                    "status": "succeeded",
+                    "mode": "subprocess",
+                    "requested_workers": 2,
+                    "effective_workers": 2,
+                },
+                "stitch": {"status": "succeeded"},
+            },
+        )
+        self.write_csv(
+            f"outputs/{folder_name}/chunks/chunk_0000/ball_track.csv",
+            [
+                {"Frame": 0, "X": 10, "Y": 20, "Confidence": "0.9000", "Status": "Detected"},
+                {"Frame": 1, "X": 11, "Y": 20, "Confidence": "0.9000", "Status": "Detected"},
+            ],
+        )
+        self.write_text(
+            f"outputs/{folder_name}/chunks/chunk_0000/debug.jsonl",
+            json.dumps({"frame": 0, "candidates": []}) + "\n",
+        )
+        self.write_text(
+            f"outputs/{folder_name}/chunks/chunk_0000/worker.stdout.log",
+            "chunk complete\n",
+        )
+        self.write_text(
+            f"outputs/{folder_name}/chunks/chunk_0000/frames/frame_000001.jpg",
+            "frame image placeholder",
+        )
 
     def test_list_input_videos_filters_supported_suffixes(self) -> None:
         catalog = self.service.list_input_videos()
@@ -813,6 +868,109 @@ class ApiServiceSmokeTests(unittest.TestCase):
         self.assertEqual("cleaned", run["stats"]["event_candidates"]["source_name"])
         self.assertIn("player_tracks.json", artifact_names)
         self.assertEqual(1, run["stats"]["player_tracks"]["track_count"])
+
+    def test_list_runs_exposes_temporal_chunk_report_and_nested_artifacts(self) -> None:
+        output_dir = self.create_output_bundle("chunked_baseline")
+        self.write_temporal_chunk_artifacts("chunked_baseline")
+        write_run_artifacts(
+            output_dir=output_dir,
+            run={
+                "run_id": "scan_chunked_baseline",
+                "source": "scan",
+                "status": "completed",
+                "created_at": "2026-01-01T00:00:00+00:00",
+                "started_at": "2026-01-01T00:00:00+00:00",
+                "completed_at": "2026-01-01T00:00:01+00:00",
+                "config_name": "default.yaml",
+                "config_path": str((self.repo_root / "config" / "default.yaml").resolve()),
+                "input_video": str((self.repo_root / "data" / "input.mp4").resolve()),
+                "output_dir": str(output_dir),
+                "modules_enabled": {"postprocess": True, "follow_cam": True, "temporal_chunks": True},
+                "notes": None,
+            },
+        )
+
+        run = self.service.list_runs()[0]
+
+        artifact_by_name = {artifact["name"]: artifact for artifact in run["artifacts"]}
+        self.assertEqual("json", artifact_by_name["temporal_chunks_report.json"]["kind"])
+        self.assertEqual("csv", artifact_by_name["chunks/chunk_0000/ball_track.csv"]["kind"])
+        self.assertEqual("jsonl", artifact_by_name["chunks/chunk_0000/debug.jsonl"]["kind"])
+        self.assertEqual("file", artifact_by_name["chunks/chunk_0000/worker.stdout.log"]["kind"])
+        self.assertNotIn("chunks/chunk_0000/frames/frame_000001.jpg", artifact_by_name)
+        self.assertEqual(2, run["stats"]["temporal_chunks"]["chunk_count"])
+        self.assertEqual(2, run["stats"]["temporal_chunks"]["effective_workers"])
+        nested_artifact = self.service.get_artifact_path(run["run_id"], "chunks/chunk_0000/debug.jsonl")
+        self.assertEqual((output_dir / "chunks" / "chunk_0000" / "debug.jsonl").resolve(), nested_artifact)
+
+    def test_download_nested_temporal_chunk_artifact_uses_relative_artifact_metadata(self) -> None:
+        output_dir = self.create_output_bundle("chunked_download")
+        self.write_temporal_chunk_artifacts("chunked_download")
+        write_run_artifacts(
+            output_dir=output_dir,
+            run={
+                "run_id": "scan_chunked_download",
+                "source": "scan",
+                "status": "completed",
+                "created_at": "2026-01-01T00:00:00+00:00",
+                "config_name": "default.yaml",
+                "config_path": str((self.repo_root / "config" / "default.yaml").resolve()),
+                "input_video": str((self.repo_root / "data" / "input.mp4").resolve()),
+                "output_dir": str(output_dir),
+                "modules_enabled": {"temporal_chunks": True},
+            },
+        )
+        run = self.service.list_runs()[0]
+
+        response = get_artifact(run["run_id"], "chunks/chunk_0000/ball_track.csv", service=self.service)
+        expected_content_type = next(
+            artifact["content_type"]
+            for artifact in self.service.list_artifacts(run["run_id"])
+            if artifact["name"] == "chunks/chunk_0000/ball_track.csv"
+        )
+
+        self.assertTrue(str(response.path).endswith("chunks\\chunk_0000\\ball_track.csv") or str(response.path).endswith("chunks/chunk_0000/ball_track.csv"))
+        self.assertEqual(expected_content_type, response.media_type)
+        self.assertEqual("ball_track.csv", response.filename)
+
+    def test_list_runs_exposes_custom_temporal_chunk_artifact_root(self) -> None:
+        output_dir = self.create_output_bundle("custom_chunk_root")
+        self.write_json(
+            "outputs/custom_chunk_root/temporal_chunks_report.json",
+            {
+                "chunk_count": 1,
+                "frame_count": 2,
+                "chunks": [{"index": 0, "name": "chunk_0000"}],
+                "execution": {"status": "succeeded", "effective_workers": 1},
+                "stitch": {"status": "succeeded"},
+            },
+        )
+        self.write_csv(
+            "outputs/custom_chunk_root/segments/chunk_0000/ball_track.csv",
+            [
+                {"Frame": 0, "X": 10, "Y": 20, "Confidence": "0.9000", "Status": "Detected"},
+                {"Frame": 1, "X": 11, "Y": 20, "Confidence": "0.9000", "Status": "Detected"},
+            ],
+        )
+        write_run_artifacts(
+            output_dir=output_dir,
+            run={
+                "run_id": "scan_custom_chunk_root",
+                "source": "scan",
+                "status": "completed",
+                "created_at": "2026-01-01T00:00:00+00:00",
+                "config_name": "default.yaml",
+                "config_path": str((self.repo_root / "config" / "default.yaml").resolve()),
+                "input_video": str((self.repo_root / "data" / "input.mp4").resolve()),
+                "output_dir": str(output_dir),
+                "modules_enabled": {"temporal_chunks": True},
+            },
+        )
+
+        run = self.service.list_runs()[0]
+
+        artifact_names = {artifact["name"] for artifact in run["artifacts"]}
+        self.assertIn("segments/chunk_0000/ball_track.csv", artifact_names)
 
     def test_get_ball_audit_report_loads_json_artifact(self) -> None:
         self.create_output_bundle("kept_baseline")
@@ -1376,6 +1534,97 @@ class ApiServiceSmokeTests(unittest.TestCase):
         self.assertTrue((output_dir / "run_manifest.json").exists())
         self.assertTrue((output_dir / "metrics_report.json").exists())
         self.assertEqual(1, failed_run["stats"]["raw"]["frame_count"])
+
+    def test_execute_run_dispatches_temporal_chunks_when_enabled(self) -> None:
+        active_input = (self.repo_root / "data" / "input.mp4").resolve()
+        active_config = (self.repo_root / "config" / "default.yaml").resolve()
+        output_dir = self.repo_root / "outputs" / "chunked_api_demo"
+        self.service._write_registry(
+            {
+                "runs": [
+                    {
+                        "run_id": "chunked_api_demo",
+                        "source": "api",
+                        "status": "queued",
+                        "created_at": "2026-01-01T00:00:00+00:00",
+                        "started_at": None,
+                        "completed_at": None,
+                        "config_name": "default.yaml",
+                        "config_path": str(active_config),
+                        "input_video": str(active_input),
+                        "parent_run_id": None,
+                        "output_dir": str(output_dir.resolve()),
+                        "modules_enabled": {"postprocess": True, "follow_cam": False, "temporal_chunks": True},
+                        "artifacts": [],
+                        "stats": {},
+                        "progress": {"stage": "queued", "percent": 0.0},
+                        "notes": None,
+                        "error": None,
+                    }
+                ]
+            }
+        )
+        calls: list[dict[str, object]] = []
+
+        def fake_run_temporal_chunks(app_config, progress_callback=None, should_cancel=None) -> None:
+            calls.append({"output_dir": app_config.output_dir, "should_cancel": should_cancel})
+            self.assertFalse(should_cancel())
+            if progress_callback is not None:
+                progress_callback(
+                    {
+                        "stage": "temporal_chunks",
+                        "chunk_index": 0,
+                        "chunk_count": 2,
+                        "current_frame": 1,
+                        "total_frames": 3,
+                    }
+                )
+                progress_snapshot = self.service.get_run("chunked_api_demo")["progress"]
+                self.assertEqual("temporal_chunks", progress_snapshot["stage"])
+                self.assertEqual(0, progress_snapshot["chunk_index"])
+                self.assertEqual(2, progress_snapshot["chunk_count"])
+            app_config.output_dir.mkdir(parents=True, exist_ok=True)
+            (app_config.output_dir / "ball_track.csv").write_text(
+                "Frame,X,Y,Confidence,Status\n0,10,20,0.9000,Detected\n",
+                encoding="utf-8",
+            )
+            (app_config.output_dir / "temporal_chunks_report.json").write_text(
+                json.dumps(
+                    {
+                        "chunk_count": 2,
+                        "frame_count": 1,
+                        "chunks": [{"index": 0, "name": "chunk_0000"}],
+                        "boundary_events": [],
+                        "execution": {"status": "succeeded", "mode": "in_process", "effective_workers": 1},
+                        "stitch": {"status": "succeeded"},
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+        class ForbiddenPipeline:
+            def __init__(self, app_config) -> None:
+                self.app_config = app_config
+
+            def run(self, *args, **kwargs) -> None:
+                raise AssertionError("BallTrackingPipeline should not run when temporal chunks are enabled.")
+
+        config = load_config(active_config)
+        config.output_dir = output_dir
+        config.temporal_chunks.enabled = True
+        config.follow_cam.enabled = False
+        with mock.patch("football_tracking.api.service.run_temporal_chunks", side_effect=fake_run_temporal_chunks, create=True), mock.patch(
+            "football_tracking.api.service.BallTrackingPipeline",
+            ForbiddenPipeline,
+        ):
+            self.service._execute_run("chunked_api_demo", config, threading.Event())
+
+        completed_run = self.service.get_run("chunked_api_demo")
+        self.assertEqual("completed", completed_run["status"])
+        self.assertEqual(output_dir.resolve(), calls[0]["output_dir"])
+        self.assertTrue(completed_run["modules_enabled"]["temporal_chunks"])
+        self.assertEqual(2, completed_run["stats"]["temporal_chunks"]["chunk_count"])
+        self.assertIn("temporal_chunks_report.json", {artifact["name"] for artifact in completed_run["artifacts"]})
 
     def test_delete_config_and_input_video_remove_files(self) -> None:
         deleted_video = self.service.delete_input_video("clip.mov")

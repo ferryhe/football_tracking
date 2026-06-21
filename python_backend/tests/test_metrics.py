@@ -306,6 +306,82 @@ class MetricsTests(unittest.TestCase):
         self.assertEqual({"highlight_worthy": 1, "needs_ai_review": 2}, report["review_packets"]["counts_by_label"])
         self.assertEqual(report["review_packets"], stats["review_packets"])
 
+    def test_build_metrics_report_includes_compact_temporal_chunk_summary(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            (output_dir / "temporal_chunks_report.json").write_text(
+                json.dumps(
+                    {
+                        "chunk_count": 5,
+                        "frame_count": 5192,
+                        "chunks": [
+                            {
+                                "index": 0,
+                                "name": "chunk_0000",
+                                "start_frame": 0,
+                                "end_frame": 1279,
+                                "core_start_frame": 0,
+                                "core_end_frame": 1199,
+                            },
+                            {
+                                "index": 1,
+                                "name": "chunk_0001",
+                                "start_frame": 1120,
+                                "end_frame": 2479,
+                                "core_start_frame": 1200,
+                                "core_end_frame": 2399,
+                            },
+                        ],
+                        "boundary_events": [{"frame": 1199}, {"frame": 2399}],
+                        "execution": {
+                            "status": "succeeded",
+                            "mode": "subprocess",
+                            "requested_workers": 4,
+                            "effective_workers": 2,
+                        },
+                        "stitch": {"status": "succeeded"},
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            report = build_metrics_report(output_dir)
+            stats = stats_from_metrics_report(report)
+
+        expected = {
+            "enabled": True,
+            "chunk_count": 5,
+            "effective_workers": 2,
+            "requested_workers": 4,
+            "execution_mode": "subprocess",
+            "execution_status": "succeeded",
+            "stitch_status": "succeeded",
+            "merged_frame_count": 5192,
+            "overlap_frames": 80,
+            "boundary_review_event_count": 2,
+        }
+        self.assertEqual(expected, report["temporal_chunks"])
+        self.assertEqual(expected, stats["temporal_chunks"])
+
+    def test_build_metrics_report_handles_sparse_temporal_chunk_report(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            (output_dir / "temporal_chunks_report.json").write_text(
+                json.dumps({"execution": {"status": "failed"}, "stitch": {"status": "failed"}}),
+                encoding="utf-8",
+            )
+
+            report = build_metrics_report(output_dir)
+
+        self.assertEqual(
+            {
+                "enabled": True,
+                "execution_status": "failed",
+                "stitch_status": "failed",
+            },
+            report["temporal_chunks"],
+        )
+
     def test_write_run_artifacts_preserves_manifest_when_ai_review_triggers_fail(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:
             output_dir = Path(temp_name)

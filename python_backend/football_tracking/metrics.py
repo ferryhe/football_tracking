@@ -130,6 +130,11 @@ def build_metrics_report(output_dir: Path) -> dict[str, Any]:
         review_packets_summary = compact_review_packet_summary(review_packets_report)
         if review_packets_summary is not None:
             report["review_packets"] = review_packets_summary
+    temporal_chunks_report = _read_optional_json(output_dir / "temporal_chunks_report.json")
+    if temporal_chunks_report is not None:
+        temporal_chunks_summary = compact_temporal_chunk_summary(temporal_chunks_report)
+        if temporal_chunks_summary is not None:
+            report["temporal_chunks"] = temporal_chunks_summary
     return report
 
 
@@ -221,11 +226,58 @@ def stats_from_metrics_report(report: dict[str, Any]) -> dict[str, Any]:
     review_packets = report.get("review_packets")
     if isinstance(review_packets, dict):
         stats["review_packets"] = review_packets
+    temporal_chunks = report.get("temporal_chunks")
+    if isinstance(temporal_chunks, dict):
+        stats["temporal_chunks"] = temporal_chunks
     stats["metrics_report"] = {
         "schema_version": report.get("schema_version"),
         "generated_at": report.get("generated_at"),
     }
     return stats
+
+
+def compact_temporal_chunk_summary(report: dict[str, Any]) -> dict[str, Any] | None:
+    if not isinstance(report, dict):
+        return None
+
+    summary: dict[str, Any] = {"enabled": True}
+    chunks = report.get("chunks")
+    chunk_count = _coerce_int(report.get("chunk_count"))
+    if chunk_count is None and isinstance(chunks, list):
+        chunk_count = len(chunks)
+    if chunk_count is not None:
+        summary["chunk_count"] = chunk_count
+
+    execution = report.get("execution")
+    if isinstance(execution, dict):
+        requested_workers = _coerce_int(execution.get("requested_workers"))
+        effective_workers = _coerce_int(execution.get("effective_workers"))
+        if effective_workers is not None:
+            summary["effective_workers"] = effective_workers
+        if requested_workers is not None:
+            summary["requested_workers"] = requested_workers
+        if isinstance(execution.get("mode"), str):
+            summary["execution_mode"] = execution["mode"]
+        if isinstance(execution.get("status"), str):
+            summary["execution_status"] = execution["status"]
+
+    stitch = report.get("stitch")
+    if isinstance(stitch, dict) and isinstance(stitch.get("status"), str):
+        summary["stitch_status"] = stitch["status"]
+
+    merged_frame_count = _coerce_int(report.get("frame_count"))
+    if merged_frame_count is not None:
+        summary["merged_frame_count"] = merged_frame_count
+
+    overlap_frames = _temporal_overlap_frames(report)
+    if overlap_frames is not None:
+        summary["overlap_frames"] = overlap_frames
+
+    boundary_events = report.get("boundary_events")
+    if isinstance(boundary_events, list):
+        summary["boundary_review_event_count"] = len(boundary_events)
+
+    return summary
 
 
 def _parse_int(value: str | None) -> int | None:
@@ -244,6 +296,39 @@ def _parse_point(x_value: str | None, y_value: str | None) -> tuple[float, float
         return float(x_value), float(y_value)
     except ValueError:
         return None
+
+
+def _coerce_int(value: Any) -> int | None:
+    if value in (None, ""):
+        return None
+    try:
+        return int(float(value))
+    except (TypeError, ValueError):
+        return None
+
+
+def _temporal_overlap_frames(report: dict[str, Any]) -> int | None:
+    explicit = _coerce_int(report.get("overlap_frames"))
+    if explicit is not None:
+        return explicit
+
+    chunks = report.get("chunks")
+    if not isinstance(chunks, list):
+        return None
+
+    overlaps: list[int] = []
+    for chunk in chunks:
+        if not isinstance(chunk, dict):
+            continue
+        start_frame = _coerce_int(chunk.get("start_frame"))
+        end_frame = _coerce_int(chunk.get("end_frame"))
+        core_start_frame = _coerce_int(chunk.get("core_start_frame"))
+        core_end_frame = _coerce_int(chunk.get("core_end_frame"))
+        if start_frame is not None and core_start_frame is not None and core_start_frame > start_frame:
+            overlaps.append(core_start_frame - start_frame)
+        if end_frame is not None and core_end_frame is not None and end_frame > core_end_frame:
+            overlaps.append(end_frame - core_end_frame)
+    return max(overlaps) if overlaps else None
 
 
 def _status_segments(statuses: list[str]) -> list[dict[str, Any]]:

@@ -178,6 +178,13 @@ Follow-cam adds:
 - `camera_path.csv`
 - `follow_cam_report.json`
 
+Temporal chunk runs add:
+
+- `temporal_chunks_report.json`
+- `chunks/<chunk_name>/ball_track.csv`
+- `chunks/<chunk_name>/debug.jsonl`
+- `metrics_report.json` with `stats.temporal_chunks` in API run history
+
 Review and highlight artifacts add:
 
 - `ball_audit.json`
@@ -391,6 +398,13 @@ outputs/runs/<input_slug>/<run_id>/
 - `follow_cam.mp4`
 - `camera_path.csv`
 - `follow_cam_report.json`
+
+启用时间分块后还会输出：
+
+- `temporal_chunks_report.json`
+- `chunks/<chunk_name>/ball_track.csv`
+- `chunks/<chunk_name>/debug.jsonl`
+- API 历史里的 `metrics_report.json` 会包含 `stats.temporal_chunks` 摘要
 
 审核与集锦相关输出还包括：
 

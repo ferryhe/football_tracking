@@ -554,15 +554,15 @@ ruff check chunk_runner/test_chunk_runner: OK
 
 API run execution must call `run_temporal_chunks(config, progress_callback, should_cancel)` when `config.temporal_chunks.enabled` is true. Progress should include chunk index/current frame when available, and cancellation should stop pending chunk workers.
 
-- [ ] **Step 1: Write failing metrics test**
+- [x] **Step 1: Write failing metrics test**
 
 Create temp `temporal_chunks_report.json`, call `build_metrics_report`, assert compact summary is present.
 
-- [ ] **Step 2: Implement compact metrics summary**
+- [x] **Step 2: Implement compact metrics summary**
 
 Add `compact_temporal_chunk_summary(report: dict[str, Any])`.
 
-- [ ] **Step 3: Add API execution and artifact visibility**
+- [x] **Step 3: Add API execution and artifact visibility**
 
 Expose:
 
@@ -572,7 +572,7 @@ chunks/<chunk_name>/ball_track.csv
 chunks/<chunk_name>/debug.jsonl
 ```
 
-- [ ] **Step 4: Run validation**
+- [x] **Step 4: Run validation**
 
 Run:
 
@@ -582,6 +582,17 @@ $env:PYTHONPATH='python_backend'; .\.venv\Scripts\python.exe -m unittest discove
 ```
 
 Expected: all tests pass.
+
+Actual:
+
+```text
+python_backend.tests.test_metrics + python_backend.tests.test_api_service + python_backend.tests.test_export_openapi: Ran 69 tests, OK
+unittest discover python_backend\tests: Ran 184 tests, OK
+export_openapi.py --check: OK
+ruff check PR5 changed Python files: OK
+generated RunProgress clients updated for chunk_index/chunk_count
+local api-spec codegen attempt blocked by missing esbuild optional platform package; remote Node CI remains the generator consistency gate
+```
 
 ### PR6: Triggered High-Recall Window Execution And Merge Back
 
