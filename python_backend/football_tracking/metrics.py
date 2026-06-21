@@ -8,10 +8,17 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from football_tracking.accepted_highlights import (
+    REPORT_FILE_NAME as ACCEPTED_HIGHLIGHTS_REPORT_FILE_NAME,
+)
+from football_tracking.accepted_highlights import (
+    compact_accepted_highlights_summary,
+)
 from football_tracking.ai_review_triggers import (
     compact_ai_review_trigger_summary,
     write_ai_review_trigger_report,
 )
+from football_tracking.ai_visual_review import compact_ai_visual_review_summary
 from football_tracking.ball_audit import compact_ball_audit_summary, write_ball_audit_report
 from football_tracking.events import compact_event_candidate_summary, write_event_candidate_report
 from football_tracking.player_tracks import (
@@ -130,6 +137,16 @@ def build_metrics_report(output_dir: Path) -> dict[str, Any]:
         review_packets_summary = compact_review_packet_summary(review_packets_report)
         if review_packets_summary is not None:
             report["review_packets"] = review_packets_summary
+    ai_visual_review_report = _read_optional_json(output_dir / "ai_visual_review.json")
+    if ai_visual_review_report is not None:
+        ai_visual_review_summary = compact_ai_visual_review_summary(ai_visual_review_report)
+        if ai_visual_review_summary is not None:
+            report["ai_visual_review"] = ai_visual_review_summary
+    accepted_highlights_report = _read_optional_json(_accepted_highlights_report_path(output_dir))
+    if accepted_highlights_report is not None:
+        accepted_highlights_summary = compact_accepted_highlights_summary(accepted_highlights_report)
+        if accepted_highlights_summary is not None:
+            report["accepted_highlights"] = accepted_highlights_summary
     temporal_chunks_report = _read_optional_json(output_dir / "temporal_chunks_report.json")
     if temporal_chunks_report is not None:
         temporal_chunks_summary = compact_temporal_chunk_summary(temporal_chunks_report)
@@ -226,6 +243,12 @@ def stats_from_metrics_report(report: dict[str, Any]) -> dict[str, Any]:
     review_packets = report.get("review_packets")
     if isinstance(review_packets, dict):
         stats["review_packets"] = review_packets
+    ai_visual_review = report.get("ai_visual_review")
+    if isinstance(ai_visual_review, dict):
+        stats["ai_visual_review"] = ai_visual_review
+    accepted_highlights = report.get("accepted_highlights")
+    if isinstance(accepted_highlights, dict):
+        stats["accepted_highlights"] = accepted_highlights
     temporal_chunks = report.get("temporal_chunks")
     if isinstance(temporal_chunks, dict):
         stats["temporal_chunks"] = temporal_chunks
@@ -402,6 +425,20 @@ def _read_optional_json(path: Path) -> dict[str, Any] | None:
     except (json.JSONDecodeError, UnicodeDecodeError):
         return None
     return loaded if isinstance(loaded, dict) else None
+
+
+def _accepted_highlights_report_path(output_dir: Path) -> Path:
+    default_path = output_dir / "highlights_ai_accepted" / ACCEPTED_HIGHLIGHTS_REPORT_FILE_NAME
+    if default_path.exists():
+        return default_path
+    if output_dir.exists():
+        for child in sorted(output_dir.iterdir(), key=lambda item: item.name):
+            if not child.is_dir():
+                continue
+            candidate = child / ACCEPTED_HIGHLIGHTS_REPORT_FILE_NAME
+            if candidate.exists():
+                return candidate
+    return default_path
 
 
 def _write_json(path: Path, payload: dict[str, Any]) -> None:

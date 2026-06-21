@@ -1,15 +1,18 @@
 from __future__ import annotations
 
+import io
+import json
 import os
 import tempfile
 import unittest
+import urllib.error
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import yaml
 
-from football_tracking.api.ai_provider import load_provider_settings
+from football_tracking.api.ai_provider import OpenAIProviderSettings, OpenAIResponsesClient, load_provider_settings
 from football_tracking.config import DetectorConfig, SahiConfig, load_config
 from football_tracking.detector import YOLOSahiBallDetector
 
@@ -288,6 +291,102 @@ class ConfigAndProviderTests(unittest.TestCase):
         self.assertEqual("env-key", settings.api_key)
         self.assertEqual("https://override.invalid/v1", settings.base_url)
         self.assertEqual("gpt-env", settings.chat_model)
+
+    def test_create_json_vision_response_uses_structured_output_schema(self) -> None:
+        captured: dict[str, object] = {}
+
+        class FakeHTTPResponse:
+            def __enter__(self) -> "FakeHTTPResponse":
+                return self
+
+            def __exit__(self, *args: object) -> None:
+                return None
+
+            def read(self) -> bytes:
+                return json.dumps({"output_text": json.dumps({"verdict": "needs_human_review"})}).encode("utf-8")
+
+        def fake_urlopen(request: object, timeout: int) -> FakeHTTPResponse:
+            captured["timeout"] = timeout
+            captured["payload"] = json.loads(request.data.decode("utf-8"))
+            captured["auth"] = request.headers.get("Authorization")
+            return FakeHTTPResponse()
+
+        client = OpenAIResponsesClient(OpenAIProviderSettings(api_key="secret", chat_model="gpt-test"))
+
+        with patch("urllib.request.urlopen", side_effect=fake_urlopen):
+            result = client.create_json_vision_response(
+                instructions="Return JSON.",
+                prompt="review packet",
+                images=[{"label": "contact", "data_url": "data:image/jpeg;base64,abc"}],
+                json_schema={
+                    "type": "object",
+                    "properties": {"verdict": {"type": "string"}},
+                    "required": ["verdict"],
+                    "additionalProperties": False,
+                },
+            )
+
+        payload = captured["payload"]
+        self.assertEqual({"verdict": "needs_human_review"}, result)
+        self.assertEqual("gpt-test", payload["model"])
+        self.assertEqual("json_schema", payload["text"]["format"]["type"])
+        self.assertTrue(payload["text"]["format"]["strict"])
+        self.assertEqual("ai_visual_review", payload["text"]["format"]["name"])
+        self.assertEqual("input_image", payload["input"][0]["content"][2]["type"])
+        self.assertEqual("Bearer secret", captured["auth"])
+
+    def test_create_json_response_keeps_text_only_payload_shape(self) -> None:
+        captured: dict[str, object] = {}
+
+        class FakeHTTPResponse:
+            def __enter__(self) -> "FakeHTTPResponse":
+                return self
+
+            def __exit__(self, *args: object) -> None:
+                return None
+
+            def read(self) -> bytes:
+                return json.dumps({"output_text": json.dumps({"ok": True})}).encode("utf-8")
+
+        def fake_urlopen(request: object, timeout: int) -> FakeHTTPResponse:
+            captured["timeout"] = timeout
+            captured["payload"] = json.loads(request.data.decode("utf-8"))
+            return FakeHTTPResponse()
+
+        client = OpenAIResponsesClient(OpenAIProviderSettings(api_key="secret", chat_model="gpt-test"))
+
+        with patch("urllib.request.urlopen", side_effect=fake_urlopen):
+            result = client.create_json_response(instructions="Return JSON.", prompt="plain prompt")
+
+        payload = captured["payload"]
+        self.assertEqual({"ok": True}, result)
+        self.assertEqual("plain prompt", payload["input"])
+        self.assertEqual("json_object", payload["text"]["format"]["type"])
+        self.assertNotIsInstance(payload["input"], list)
+
+    def test_provider_http_errors_are_redacted(self) -> None:
+        def fake_urlopen(request: object, timeout: int) -> object:
+            raise urllib.error.HTTPError(
+                url="https://api.openai.com/v1/responses",
+                code=400,
+                msg="bad request",
+                hdrs={},
+                fp=io.BytesIO(
+                    b'{"error":"plain-secret Bearer sk-secret-token data:image/jpeg;base64,abcdef"}'
+                ),
+            )
+
+        client = OpenAIResponsesClient(OpenAIProviderSettings(api_key="plain-secret", chat_model="gpt-test"))
+
+        with patch("urllib.request.urlopen", side_effect=fake_urlopen):
+            with self.assertRaises(RuntimeError) as context:
+                client.create_json_response(instructions="Return JSON.", prompt="plain prompt")
+
+        message = str(context.exception)
+        self.assertNotIn("plain-secret", message)
+        self.assertNotIn("sk-secret-token", message)
+        self.assertNotIn("abcdef", message)
+        self.assertIn("<redacted", message)
 
 
 class YOLOSahiBallDetectorModeTests(unittest.TestCase):

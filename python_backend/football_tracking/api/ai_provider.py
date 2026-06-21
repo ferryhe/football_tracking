@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
@@ -23,8 +24,14 @@ class OpenAIProviderSettings:
 def load_provider_settings(repo_root: Path) -> OpenAIProviderSettings:
     env_values = _read_dotenv(repo_root / ".env")
     api_key = os.environ.get("PROVIDER_OPENAI_API_KEY", env_values.get("PROVIDER_OPENAI_API_KEY", "")).strip()
-    base_url = os.environ.get("PROVIDER_OPENAI_BASE_URL", env_values.get("PROVIDER_OPENAI_BASE_URL", "https://api.openai.com/v1")).strip()
-    chat_model = os.environ.get("PROVIDER_OPENAI_CHAT_MODEL", env_values.get("PROVIDER_OPENAI_CHAT_MODEL", "gpt-4o-mini")).strip()
+    base_url = os.environ.get(
+        "PROVIDER_OPENAI_BASE_URL",
+        env_values.get("PROVIDER_OPENAI_BASE_URL", "https://api.openai.com/v1"),
+    ).strip()
+    chat_model = os.environ.get(
+        "PROVIDER_OPENAI_CHAT_MODEL",
+        env_values.get("PROVIDER_OPENAI_CHAT_MODEL", "gpt-4o-mini"),
+    ).strip()
     return OpenAIProviderSettings(
         api_key=api_key,
         base_url=base_url.rstrip("/"),
@@ -73,7 +80,59 @@ class OpenAIResponsesClient:
                 }
             },
         }
+        return self._post_json_payload(payload)
 
+    def create_json_vision_response(
+        self,
+        *,
+        instructions: str,
+        prompt: str,
+        images: list[dict[str, str]],
+        model: str | None = None,
+        json_schema: dict[str, Any] | None = None,
+        temperature: float = 0.0,
+    ) -> dict[str, Any]:
+        if not self.settings.enabled:
+            raise RuntimeError("OpenAI provider is not configured.")
+
+        content: list[dict[str, str]] = [{"type": "input_text", "text": prompt}]
+        for image in images:
+            label = image.get("label")
+            data_url = image.get("data_url")
+            if not data_url:
+                continue
+            if label:
+                content.append({"type": "input_text", "text": f"Image: {label}"})
+            content.append({"type": "input_image", "image_url": data_url})
+
+        text_format: dict[str, Any]
+        if json_schema is not None:
+            text_format = {
+                "type": "json_schema",
+                "name": "ai_visual_review",
+                "schema": json_schema,
+                "strict": True,
+            }
+        else:
+            text_format = {"type": "json_object"}
+
+        payload = {
+            "model": model or self.settings.chat_model,
+            "instructions": instructions,
+            "input": [
+                {
+                    "role": "user",
+                    "content": content,
+                }
+            ],
+            "temperature": temperature,
+            "text": {
+                "format": text_format,
+            },
+        }
+        return self._post_json_payload(payload)
+
+    def _post_json_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
         request = urllib.request.Request(
             url=f"{self.settings.base_url}/responses",
             method="POST",
@@ -89,9 +148,13 @@ class OpenAIResponsesClient:
                 raw = response.read().decode("utf-8")
         except urllib.error.HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="replace")
-            raise RuntimeError(f"OpenAI API HTTP {exc.code}: {detail}") from exc
+            raise RuntimeError(
+                f"OpenAI API HTTP {exc.code}: {_redact_provider_error(detail, self.settings.api_key)}"
+            ) from exc
         except urllib.error.URLError as exc:
-            raise RuntimeError(f"OpenAI API request failed: {exc}") from exc
+            raise RuntimeError(
+                f"OpenAI API request failed: {_redact_provider_error(str(exc), self.settings.api_key)}"
+            ) from exc
 
         parsed = json.loads(raw)
         output_text = parsed.get("output_text") or self._extract_output_text(parsed)
@@ -110,3 +173,12 @@ class OpenAIResponsesClient:
                 if content.get("type") == "output_text":
                     return str(content.get("text", ""))
         return ""
+
+
+def _redact_provider_error(message: str, api_key: str = "") -> str:
+    redacted = re.sub(r"data:[^\s\"']*;base64,[^\s\"']+", "data:<redacted-base64>", message)
+    redacted = re.sub(r"Bearer\s+[^\s\"']+", "Bearer <redacted>", redacted, flags=re.IGNORECASE)
+    redacted = re.sub(r"sk-[A-Za-z0-9_-]+", "sk-<redacted>", redacted)
+    if api_key:
+        redacted = redacted.replace(api_key, "<redacted-api-key>")
+    return redacted
