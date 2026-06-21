@@ -152,6 +152,7 @@ class PostprocessConfig:
 @dataclass(slots=True)
 class FollowCamConfig:
     enabled: bool = False
+    profile: str = "custom"
     prefer_cleaned_track: bool = True
     output_video_name: str = "follow_cam.mp4"
     camera_path_name: str = "camera_path.csv"
@@ -204,6 +205,82 @@ class FollowCamConfig:
     recenter_smoothing: float = 0.08
     draw_ball_marker: bool = True
     draw_frame_text: bool = True
+    action_center_enabled: bool = False
+    action_center_player_tracks_path: Path | None = None
+    action_center_player_weight: float = 0.35
+
+    def __post_init__(self) -> None:
+        normalized_profile = str(self.profile or "custom").strip().lower()
+        if normalized_profile not in FOLLOW_CAM_PROFILE_PRESETS:
+            raise ValueError(f"Unknown follow_cam profile: {self.profile}")
+        self.profile = normalized_profile
+        self.action_center_player_weight = max(0.0, min(1.0, float(self.action_center_player_weight)))
+
+
+FOLLOW_CAM_PROFILE_PRESETS: dict[str, dict[str, int | float]] = {
+    "custom": {},
+    "broadcast": {
+        "min_crop_height": 780,
+        "max_crop_height": 1080,
+        "dead_zone_ratio_x": 0.10,
+        "dead_zone_ratio_y": 0.08,
+        "glide_pan_smoothing": 0.16,
+        "glide_max_pan_per_frame_x": 42.0,
+        "glide_max_pan_per_frame_y": 24.0,
+        "catch_up_pan_smoothing": 0.30,
+        "catch_up_max_pan_per_frame_x": 84.0,
+        "catch_up_max_pan_per_frame_y": 48.0,
+        "catch_up_trigger_ratio_x": 0.22,
+        "catch_up_trigger_ratio_y": 0.18,
+        "catch_up_release_ratio_x": 0.16,
+        "catch_up_release_ratio_y": 0.12,
+        "zoom_in_smoothing": 0.08,
+        "zoom_out_smoothing": 0.12,
+        "max_zoom_in_per_frame": 16.0,
+        "max_zoom_out_per_frame": 26.0,
+        "zoom_deadband_height": 55.0,
+        "zoom_out_confirm_frames": 3,
+        "zoom_in_confirm_frames": 5,
+        "zoom_reverse_confirm_frames": 10,
+        "zoom_hold_frames_after_change": 6,
+        "velocity_smoothing": 0.42,
+        "look_ahead_gain": 0.24,
+        "speed_zoom_out_start": 28.0,
+        "speed_zoom_out_end": 105.0,
+        "predicted_pan_decay": 0.85,
+    },
+    "tactical": {
+        "min_crop_height": 1100,
+        "max_crop_height": 1600,
+        "dead_zone_ratio_x": 0.18,
+        "dead_zone_ratio_y": 0.14,
+        "glide_pan_smoothing": 0.07,
+        "glide_max_pan_per_frame_x": 22.0,
+        "glide_max_pan_per_frame_y": 12.0,
+        "catch_up_pan_smoothing": 0.16,
+        "catch_up_max_pan_per_frame_x": 46.0,
+        "catch_up_max_pan_per_frame_y": 26.0,
+        "catch_up_trigger_ratio_x": 0.34,
+        "catch_up_trigger_ratio_y": 0.28,
+        "catch_up_release_ratio_x": 0.24,
+        "catch_up_release_ratio_y": 0.20,
+        "zoom_in_smoothing": 0.03,
+        "zoom_out_smoothing": 0.04,
+        "max_zoom_in_per_frame": 5.0,
+        "max_zoom_out_per_frame": 10.0,
+        "zoom_deadband_height": 140.0,
+        "zoom_out_confirm_frames": 8,
+        "zoom_in_confirm_frames": 14,
+        "zoom_reverse_confirm_frames": 20,
+        "zoom_hold_frames_after_change": 18,
+        "velocity_smoothing": 0.22,
+        "look_ahead_gain": 0.12,
+        "look_ahead_max_px": 120.0,
+        "speed_zoom_out_start": 18.0,
+        "speed_zoom_out_end": 70.0,
+        "predicted_pan_decay": 0.55,
+    },
+}
 
 
 @dataclass(slots=True)
@@ -567,75 +644,131 @@ def _to_postprocess(raw_postprocess: Any) -> PostprocessConfig:
     )
 
 
-def _to_follow_cam(raw_follow_cam: Any) -> FollowCamConfig:
+def _to_follow_cam_action_center(raw_follow_cam: dict[str, Any], base_dir: Path) -> tuple[bool, Path | None, float]:
+    raw_action_center = raw_follow_cam.get("action_center", {})
+    if raw_action_center in (None, "", []):
+        raw_action_center = {}
+    if not isinstance(raw_action_center, dict):
+        raise ValueError("follow_cam.action_center must be a dict or null")
+
+    raw_player_tracks_path = raw_action_center.get(
+        "player_tracks_path",
+        raw_follow_cam.get("action_center_player_tracks_path"),
+    )
+    player_tracks_path = (
+        None
+        if raw_player_tracks_path in (None, "")
+        else _resolve_path(base_dir, str(raw_player_tracks_path))
+    )
+    return (
+        bool(raw_action_center.get("enabled", raw_follow_cam.get("action_center_enabled", False))),
+        player_tracks_path,
+        float(raw_action_center.get("player_weight", raw_follow_cam.get("action_center_player_weight", 0.35))),
+    )
+
+
+def _follow_cam_profile(raw_profile: Any) -> str:
+    profile = str(raw_profile or "custom").strip().lower()
+    if profile not in FOLLOW_CAM_PROFILE_PRESETS:
+        raise ValueError(f"Unknown follow_cam profile: {raw_profile}")
+    return profile
+
+
+def _follow_cam_value(
+    raw_follow_cam: dict[str, Any],
+    profile: str,
+    field_name: str,
+    legacy_default: int | float,
+    *fallback_keys: str,
+) -> Any:
+    for key in (field_name, *fallback_keys):
+        if key in raw_follow_cam:
+            return raw_follow_cam[key]
+    return FOLLOW_CAM_PROFILE_PRESETS[profile].get(field_name, legacy_default)
+
+
+def _to_follow_cam(raw_follow_cam: Any, base_dir: Path) -> FollowCamConfig:
     if raw_follow_cam in (None, "", []):
         return FollowCamConfig()
     if not isinstance(raw_follow_cam, dict):
-        raise ValueError("follow_cam 蹇呴』涓?dict 鎴?null")
+        raise ValueError("follow_cam must be a dict or null")
+    action_center_enabled, action_center_player_tracks_path, action_center_player_weight = _to_follow_cam_action_center(
+        raw_follow_cam,
+        base_dir,
+    )
+    profile = _follow_cam_profile(raw_follow_cam.get("profile", "custom"))
     return FollowCamConfig(
         enabled=bool(raw_follow_cam.get("enabled", False)),
+        profile=profile,
         prefer_cleaned_track=bool(raw_follow_cam.get("prefer_cleaned_track", True)),
         output_video_name=str(raw_follow_cam.get("output_video_name", "follow_cam.mp4")),
         camera_path_name=str(raw_follow_cam.get("camera_path_name", "camera_path.csv")),
         report_name=str(raw_follow_cam.get("report_name", "follow_cam_report.json")),
         target_width=int(raw_follow_cam.get("target_width", 1920)),
         target_height=int(raw_follow_cam.get("target_height", 1080)),
-        min_crop_height=int(raw_follow_cam.get("min_crop_height", 900)),
-        max_crop_height=int(raw_follow_cam.get("max_crop_height", 1260)),
+        min_crop_height=int(_follow_cam_value(raw_follow_cam, profile, "min_crop_height", 900)),
+        max_crop_height=int(_follow_cam_value(raw_follow_cam, profile, "max_crop_height", 1260)),
         home_center_x_ratio=float(raw_follow_cam.get("home_center_x_ratio", 0.50)),
         home_center_y_ratio=float(raw_follow_cam.get("home_center_y_ratio", 0.66)),
         ball_screen_x_ratio=float(raw_follow_cam.get("ball_screen_x_ratio", 0.50)),
         ball_screen_y_ratio=float(raw_follow_cam.get("ball_screen_y_ratio", 0.58)),
-        dead_zone_ratio_x=float(raw_follow_cam.get("dead_zone_ratio_x", 0.12)),
-        dead_zone_ratio_y=float(raw_follow_cam.get("dead_zone_ratio_y", 0.10)),
+        dead_zone_ratio_x=float(_follow_cam_value(raw_follow_cam, profile, "dead_zone_ratio_x", 0.12)),
+        dead_zone_ratio_y=float(_follow_cam_value(raw_follow_cam, profile, "dead_zone_ratio_y", 0.10)),
         pan_smoothing=float(raw_follow_cam.get("pan_smoothing", 0.35)),
-        glide_pan_smoothing=float(raw_follow_cam.get("glide_pan_smoothing", raw_follow_cam.get("pan_smoothing", 0.12))),
+        glide_pan_smoothing=float(
+            _follow_cam_value(raw_follow_cam, profile, "glide_pan_smoothing", 0.12, "pan_smoothing")
+        ),
         glide_max_pan_per_frame_x=float(
-            raw_follow_cam.get("glide_max_pan_per_frame_x", raw_follow_cam.get("max_pan_per_frame_x", 32.0))
+            _follow_cam_value(raw_follow_cam, profile, "glide_max_pan_per_frame_x", 32.0, "max_pan_per_frame_x")
         ),
         glide_max_pan_per_frame_y=float(
-            raw_follow_cam.get("glide_max_pan_per_frame_y", raw_follow_cam.get("max_pan_per_frame_y", 18.0))
+            _follow_cam_value(raw_follow_cam, profile, "glide_max_pan_per_frame_y", 18.0, "max_pan_per_frame_y")
         ),
         catch_up_pan_smoothing=float(
-            raw_follow_cam.get("catch_up_pan_smoothing", raw_follow_cam.get("pan_smoothing", 0.24))
+            _follow_cam_value(raw_follow_cam, profile, "catch_up_pan_smoothing", 0.24, "pan_smoothing")
         ),
         catch_up_max_pan_per_frame_x=float(
-            raw_follow_cam.get("catch_up_max_pan_per_frame_x", raw_follow_cam.get("max_pan_per_frame_x", 64.0))
+            _follow_cam_value(raw_follow_cam, profile, "catch_up_max_pan_per_frame_x", 64.0, "max_pan_per_frame_x")
         ),
         catch_up_max_pan_per_frame_y=float(
-            raw_follow_cam.get("catch_up_max_pan_per_frame_y", raw_follow_cam.get("max_pan_per_frame_y", 36.0))
+            _follow_cam_value(raw_follow_cam, profile, "catch_up_max_pan_per_frame_y", 36.0, "max_pan_per_frame_y")
         ),
-        catch_up_trigger_ratio_x=float(raw_follow_cam.get("catch_up_trigger_ratio_x", 0.26)),
-        catch_up_trigger_ratio_y=float(raw_follow_cam.get("catch_up_trigger_ratio_y", 0.22)),
-        catch_up_release_ratio_x=float(raw_follow_cam.get("catch_up_release_ratio_x", 0.18)),
-        catch_up_release_ratio_y=float(raw_follow_cam.get("catch_up_release_ratio_y", 0.15)),
+        catch_up_trigger_ratio_x=float(_follow_cam_value(raw_follow_cam, profile, "catch_up_trigger_ratio_x", 0.26)),
+        catch_up_trigger_ratio_y=float(_follow_cam_value(raw_follow_cam, profile, "catch_up_trigger_ratio_y", 0.22)),
+        catch_up_release_ratio_x=float(_follow_cam_value(raw_follow_cam, profile, "catch_up_release_ratio_x", 0.18)),
+        catch_up_release_ratio_y=float(_follow_cam_value(raw_follow_cam, profile, "catch_up_release_ratio_y", 0.15)),
         zoom_smoothing=float(raw_follow_cam.get("zoom_smoothing", 0.20)),
-        zoom_in_smoothing=float(raw_follow_cam.get("zoom_in_smoothing", raw_follow_cam.get("zoom_smoothing", 0.05))),
-        zoom_out_smoothing=float(raw_follow_cam.get("zoom_out_smoothing", raw_follow_cam.get("zoom_smoothing", 0.08))),
-        max_zoom_in_per_frame=float(raw_follow_cam.get("max_zoom_in_per_frame", 10.0)),
-        max_zoom_out_per_frame=float(raw_follow_cam.get("max_zoom_out_per_frame", 18.0)),
-        zoom_deadband_height=float(raw_follow_cam.get("zoom_deadband_height", 80.0)),
-        zoom_out_confirm_frames=int(raw_follow_cam.get("zoom_out_confirm_frames", 4)),
-        zoom_in_confirm_frames=int(raw_follow_cam.get("zoom_in_confirm_frames", 8)),
-        zoom_reverse_confirm_frames=int(raw_follow_cam.get("zoom_reverse_confirm_frames", 14)),
-        zoom_hold_frames_after_change=int(raw_follow_cam.get("zoom_hold_frames_after_change", 10)),
-        velocity_smoothing=float(raw_follow_cam.get("velocity_smoothing", 0.35)),
+        zoom_in_smoothing=float(_follow_cam_value(raw_follow_cam, profile, "zoom_in_smoothing", 0.05, "zoom_smoothing")),
+        zoom_out_smoothing=float(
+            _follow_cam_value(raw_follow_cam, profile, "zoom_out_smoothing", 0.08, "zoom_smoothing")
+        ),
+        max_zoom_in_per_frame=float(_follow_cam_value(raw_follow_cam, profile, "max_zoom_in_per_frame", 10.0)),
+        max_zoom_out_per_frame=float(_follow_cam_value(raw_follow_cam, profile, "max_zoom_out_per_frame", 18.0)),
+        zoom_deadband_height=float(_follow_cam_value(raw_follow_cam, profile, "zoom_deadband_height", 80.0)),
+        zoom_out_confirm_frames=int(_follow_cam_value(raw_follow_cam, profile, "zoom_out_confirm_frames", 4)),
+        zoom_in_confirm_frames=int(_follow_cam_value(raw_follow_cam, profile, "zoom_in_confirm_frames", 8)),
+        zoom_reverse_confirm_frames=int(_follow_cam_value(raw_follow_cam, profile, "zoom_reverse_confirm_frames", 14)),
+        zoom_hold_frames_after_change=int(_follow_cam_value(raw_follow_cam, profile, "zoom_hold_frames_after_change", 10)),
+        velocity_smoothing=float(_follow_cam_value(raw_follow_cam, profile, "velocity_smoothing", 0.35)),
         max_pan_per_frame_x=float(raw_follow_cam.get("max_pan_per_frame_x", 90.0)),
         max_pan_per_frame_y=float(raw_follow_cam.get("max_pan_per_frame_y", 55.0)),
-        look_ahead_gain=float(raw_follow_cam.get("look_ahead_gain", 0.20)),
-        look_ahead_max_px=float(raw_follow_cam.get("look_ahead_max_px", 180.0)),
-        speed_zoom_out_start=float(raw_follow_cam.get("speed_zoom_out_start", 22.0)),
-        speed_zoom_out_end=float(raw_follow_cam.get("speed_zoom_out_end", 85.0)),
+        look_ahead_gain=float(_follow_cam_value(raw_follow_cam, profile, "look_ahead_gain", 0.20)),
+        look_ahead_max_px=float(_follow_cam_value(raw_follow_cam, profile, "look_ahead_max_px", 180.0)),
+        speed_zoom_out_start=float(_follow_cam_value(raw_follow_cam, profile, "speed_zoom_out_start", 22.0)),
+        speed_zoom_out_end=float(_follow_cam_value(raw_follow_cam, profile, "speed_zoom_out_end", 85.0)),
         predicted_zoom_out_bonus=float(raw_follow_cam.get("predicted_zoom_out_bonus", 0.12)),
         lost_zoom_out_bonus=float(raw_follow_cam.get("lost_zoom_out_bonus", 0.30)),
         low_confidence_zoom_out_start=float(raw_follow_cam.get("low_confidence_zoom_out_start", 0.40)),
         low_confidence_zoom_out_end=float(raw_follow_cam.get("low_confidence_zoom_out_end", 0.18)),
-        predicted_pan_decay=float(raw_follow_cam.get("predicted_pan_decay", 0.75)),
+        predicted_pan_decay=float(_follow_cam_value(raw_follow_cam, profile, "predicted_pan_decay", 0.75)),
         lost_hold_frames=int(raw_follow_cam.get("lost_hold_frames", 10)),
         lost_recenter_frames=int(raw_follow_cam.get("lost_recenter_frames", 28)),
         recenter_smoothing=float(raw_follow_cam.get("recenter_smoothing", 0.08)),
         draw_ball_marker=bool(raw_follow_cam.get("draw_ball_marker", True)),
         draw_frame_text=bool(raw_follow_cam.get("draw_frame_text", True)),
+        action_center_enabled=action_center_enabled,
+        action_center_player_tracks_path=action_center_player_tracks_path,
+        action_center_player_weight=action_center_player_weight,
     )
 
 
@@ -771,7 +904,7 @@ def load_config(config_path: Path) -> AppConfig:
     )
 
     postprocess = _to_postprocess(raw.get("postprocess"))
-    follow_cam = _to_follow_cam(raw.get("follow_cam"))
+    follow_cam = _to_follow_cam(raw.get("follow_cam"), base_dir)
 
     runtime_raw = raw.get("runtime", {})
     raw_start_frame = runtime_raw.get("start_frame", 0)
