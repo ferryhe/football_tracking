@@ -280,6 +280,41 @@ export const SuggestFieldSetupResponse = zod.object({
   confidence: zod.enum(["config", "detected", "fallback"]),
   source: zod.string(),
   field_coverage: zod.number(),
+  calibration: zod
+    .union([
+      zod.object({
+        image_points: zod.tuple([
+          zod.tuple([zod.number(), zod.number()]),
+          zod.tuple([zod.number(), zod.number()]),
+          zod.tuple([zod.number(), zod.number()]),
+          zod.tuple([zod.number(), zod.number()]),
+        ]),
+        pitch_points: zod.tuple([
+          zod.tuple([zod.number(), zod.number()]),
+          zod.tuple([zod.number(), zod.number()]),
+          zod.tuple([zod.number(), zod.number()]),
+          zod.tuple([zod.number(), zod.number()]),
+        ]),
+        image_to_pitch_matrix: zod.tuple([
+          zod.tuple([zod.number(), zod.number(), zod.number()]),
+          zod.tuple([zod.number(), zod.number(), zod.number()]),
+          zod.tuple([zod.number(), zod.number(), zod.number()]),
+        ]),
+        pitch_to_image_matrix: zod.tuple([
+          zod.tuple([zod.number(), zod.number(), zod.number()]),
+          zod.tuple([zod.number(), zod.number(), zod.number()]),
+          zod.tuple([zod.number(), zod.number(), zod.number()]),
+        ]),
+        pitch_dimensions: zod.object({
+          length_m: zod.number(),
+          width_m: zod.number(),
+        }),
+        confidence: zod.enum(["config", "estimated", "low"]),
+        source: zod.string(),
+      }),
+      zod.null(),
+    ])
+    .optional(),
   config_patch: zod.record(zod.string(), zod.unknown()).optional(),
 });
 

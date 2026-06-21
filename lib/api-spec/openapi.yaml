@@ -1054,6 +1054,144 @@ components:
       - base_config_name
       - output_name
       title: DeriveConfigRequest
+    FieldCalibrationPayload:
+      properties:
+        image_points:
+          prefixItems:
+          - prefixItems:
+            - type: number
+            - type: number
+            type: array
+            maxItems: 2
+            minItems: 2
+          - prefixItems:
+            - type: number
+            - type: number
+            type: array
+            maxItems: 2
+            minItems: 2
+          - prefixItems:
+            - type: number
+            - type: number
+            type: array
+            maxItems: 2
+            minItems: 2
+          - prefixItems:
+            - type: number
+            - type: number
+            type: array
+            maxItems: 2
+            minItems: 2
+          type: array
+          maxItems: 4
+          minItems: 4
+          title: Image Points
+        pitch_points:
+          prefixItems:
+          - prefixItems:
+            - type: number
+            - type: number
+            type: array
+            maxItems: 2
+            minItems: 2
+          - prefixItems:
+            - type: number
+            - type: number
+            type: array
+            maxItems: 2
+            minItems: 2
+          - prefixItems:
+            - type: number
+            - type: number
+            type: array
+            maxItems: 2
+            minItems: 2
+          - prefixItems:
+            - type: number
+            - type: number
+            type: array
+            maxItems: 2
+            minItems: 2
+          type: array
+          maxItems: 4
+          minItems: 4
+          title: Pitch Points
+        image_to_pitch_matrix:
+          prefixItems:
+          - prefixItems:
+            - type: number
+            - type: number
+            - type: number
+            type: array
+            maxItems: 3
+            minItems: 3
+          - prefixItems:
+            - type: number
+            - type: number
+            - type: number
+            type: array
+            maxItems: 3
+            minItems: 3
+          - prefixItems:
+            - type: number
+            - type: number
+            - type: number
+            type: array
+            maxItems: 3
+            minItems: 3
+          type: array
+          maxItems: 3
+          minItems: 3
+          title: Image To Pitch Matrix
+        pitch_to_image_matrix:
+          prefixItems:
+          - prefixItems:
+            - type: number
+            - type: number
+            - type: number
+            type: array
+            maxItems: 3
+            minItems: 3
+          - prefixItems:
+            - type: number
+            - type: number
+            - type: number
+            type: array
+            maxItems: 3
+            minItems: 3
+          - prefixItems:
+            - type: number
+            - type: number
+            - type: number
+            type: array
+            maxItems: 3
+            minItems: 3
+          type: array
+          maxItems: 3
+          minItems: 3
+          title: Pitch To Image Matrix
+        pitch_dimensions:
+          $ref: '#/components/schemas/PitchDimensionsPayload'
+        confidence:
+          type: string
+          enum:
+          - config
+          - estimated
+          - low
+          title: Confidence
+        source:
+          type: string
+          title: Source
+      type: object
+      required:
+      - image_points
+      - pitch_points
+      - image_to_pitch_matrix
+      - pitch_to_image_matrix
+      - pitch_dimensions
+      - confidence
+      - source
+      title: FieldCalibrationPayload
     FieldPreviewRequest:
       properties:
         input_video:
@@ -1213,6 +1351,10 @@ components:
         field_coverage:
           type: number
           title: Field Coverage
+        calibration:
+          anyOf:
+          - $ref: '#/components/schemas/FieldCalibrationPayload'
+          - type: 'null'
         config_patch:
           additionalProperties: true
           type: object
@@ -1339,6 +1481,19 @@ components:
       - size_bytes
       - modified_at
       title: InputVideoItem
+    PitchDimensionsPayload:
+      properties:
+        length_m:
+          type: number
+          title: Length M
+        width_m:
+          type: number
+          title: Width M
+      type: object
+      required:
+      - length_m
+      - width_m
+      title: PitchDimensionsPayload
     RunProgress:
       properties:
         stage:

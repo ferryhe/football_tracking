@@ -6,6 +6,10 @@ from pydantic import BaseModel, Field
 
 RunStatus = Literal["queued", "running", "completed", "failed", "cancelled"]
 AIResponseLanguage = Literal["en", "zh"]
+Point2DPayload = tuple[float, float]
+QuadPointsPayload = tuple[Point2DPayload, Point2DPayload, Point2DPayload, Point2DPayload]
+MatrixRowPayload = tuple[float, float, float]
+Matrix3x3Payload = tuple[MatrixRowPayload, MatrixRowPayload, MatrixRowPayload]
 
 
 class HealthResponse(BaseModel):
@@ -67,6 +71,21 @@ class FieldSuggestionRequest(BaseModel):
     frame_index: int | None = None
 
 
+class PitchDimensionsPayload(BaseModel):
+    length_m: float
+    width_m: float
+
+
+class FieldCalibrationPayload(BaseModel):
+    image_points: QuadPointsPayload
+    pitch_points: QuadPointsPayload
+    image_to_pitch_matrix: Matrix3x3Payload
+    pitch_to_image_matrix: Matrix3x3Payload
+    pitch_dimensions: PitchDimensionsPayload
+    confidence: Literal["config", "estimated", "low"]
+    source: str
+
+
 class FieldSuggestionResponse(BaseModel):
     input_video: str
     preview_data_url: str
@@ -84,6 +103,7 @@ class FieldSuggestionResponse(BaseModel):
     confidence: Literal["config", "detected", "fallback"]
     source: str
     field_coverage: float
+    calibration: FieldCalibrationPayload | None = None
     config_patch: dict[str, Any] = Field(default_factory=dict)
 
 
