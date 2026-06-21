@@ -165,6 +165,51 @@ class ChunkStitcherTests(unittest.TestCase):
             self.assertTrue((temp_dir / "merged" / "custom_track.csv").exists())
             self.assertTrue((temp_dir / "merged" / "custom_debug.jsonl").exists())
 
+    def test_stitch_chunk_outputs_tolerates_matching_missing_tail_in_final_chunk(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            temp_dir = Path(temp_name)
+            chunks = [
+                make_chunk(0, decode_start_frame=0, start_frame=0, end_frame=6, core_start_frame=0, core_end_frame=4),
+                make_chunk(1, decode_start_frame=3, start_frame=3, end_frame=9, core_start_frame=5, core_end_frame=9),
+            ]
+            chunk_dirs = [temp_dir / chunk.output_dir_name for chunk in chunks]
+            write_chunk_outputs(chunk_dirs[0], frame_start=0, frame_end=6)
+            write_chunk_outputs(
+                chunk_dirs[1],
+                frame_start=3,
+                frame_end=9,
+                missing_csv_frames={8, 9},
+                missing_debug_frames={8, 9},
+            )
+            output_dir = temp_dir / "merged"
+
+            report = stitch_chunk_outputs(chunks, chunk_dirs, output_dir)
+
+            with (output_dir / "ball_track.csv").open("r", newline="", encoding="utf-8-sig") as csv_file:
+                rows = list(csv.reader(csv_file))
+            self.assertEqual(list(range(8)), [int(row[0]) for row in rows[1:]])
+
+            debug_lines = (output_dir / "debug.jsonl").read_text(encoding="utf-8").splitlines()
+            debug_items = [json.loads(line) for line in debug_lines]
+            self.assertEqual(list(range(8)), [int(item["frame"]) for item in debug_items])
+
+            self.assertEqual(8, report["frame_count"])
+            self.assertEqual(
+                [
+                    {
+                        "type": "truncated_final_tail",
+                        "chunk_index": 1,
+                        "chunk_name": "chunk_0001",
+                        "first_missing_frame": 8,
+                        "last_missing_frame": 9,
+                        "missing_frame_count": 2,
+                        "planned_core_end_frame": 9,
+                        "stitched_core_end_frame": 7,
+                    }
+                ],
+                report["boundary_events"],
+            )
+
     def test_stitch_chunk_outputs_rejects_empty_chunk_list(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:
             with self.assertRaisesRegex(ValueError, "No temporal chunks"):
@@ -184,10 +229,56 @@ class ChunkStitcherTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "Duplicate selected frame"):
                 stitch_chunk_outputs(chunks, chunk_dirs, temp_dir / "merged")
 
+    def test_stitch_chunk_outputs_rejects_matching_missing_tail_in_non_final_chunk(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            temp_dir = Path(temp_name)
+            chunks = [
+                make_chunk(0, decode_start_frame=0, start_frame=0, end_frame=6, core_start_frame=0, core_end_frame=4),
+                make_chunk(1, decode_start_frame=3, start_frame=3, end_frame=9, core_start_frame=5, core_end_frame=9),
+            ]
+            chunk_dirs = [temp_dir / chunk.output_dir_name for chunk in chunks]
+            write_chunk_outputs(
+                chunk_dirs[0],
+                frame_start=0,
+                frame_end=6,
+                missing_csv_frames={3, 4},
+                missing_debug_frames={3, 4},
+            )
+            write_chunk_outputs(chunk_dirs[1], frame_start=3, frame_end=9)
+
+            with self.assertRaisesRegex(ValueError, "Missing CSV frame 3 in chunk_0000"):
+                stitch_chunk_outputs(chunks, chunk_dirs, temp_dir / "merged")
+
+    def test_stitch_chunk_outputs_rejects_whole_missing_final_core(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            temp_dir = Path(temp_name)
+            chunk = make_chunk(
+                0,
+                decode_start_frame=0,
+                start_frame=0,
+                end_frame=2,
+                core_start_frame=0,
+                core_end_frame=2,
+            )
+            chunk_dir = temp_dir / chunk.output_dir_name
+            write_chunk_outputs(
+                chunk_dir,
+                frame_start=0,
+                frame_end=2,
+                missing_csv_frames={0, 1, 2},
+                missing_debug_frames={0, 1, 2},
+            )
+
+            with self.assertRaisesRegex(ValueError, "Missing CSV frame 0 in chunk_0000"):
+                stitch_chunk_outputs([chunk], [chunk_dir], temp_dir / "merged")
+
     def test_stitch_chunk_outputs_rejects_missing_selected_csv_or_debug_frame(self) -> None:
         cases = [
             ("csv", {1}, set(), "Missing CSV frame"),
             ("debug", set(), {1}, "Missing debug frame"),
+            ("both_interior", {1}, {1}, "Missing CSV frame"),
+            ("tail_csv_only", {2}, set(), "Missing CSV frame"),
+            ("tail_debug_only", set(), {2}, "Missing debug frame"),
         ]
         for _name, missing_csv_frames, missing_debug_frames, expected_message in cases:
             with self.subTest(expected_message=expected_message), tempfile.TemporaryDirectory() as temp_name:
