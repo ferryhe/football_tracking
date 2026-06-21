@@ -52,6 +52,7 @@ class ConfigAndProviderTests(unittest.TestCase):
         self.assertEqual((self.repo_root / "weights" / "model.pt").resolve(), config.detector.model_path)
         self.assertEqual(0, config.runtime.start_frame)
         self.assertIsNone(config.runtime.max_frames)
+        self.assertTrue(config.selection.priors.enabled)
 
     def test_load_config_rejects_invalid_filter_roi(self) -> None:
         config_path = self.write_yaml(
@@ -70,6 +71,39 @@ class ConfigAndProviderTests(unittest.TestCase):
 
         with self.assertRaises(ValueError):
             load_config(config_path)
+
+    def test_load_config_parses_selection_priors(self) -> None:
+        config_path = self.write_yaml(
+            "config/selection_priors.yaml",
+            {
+                "input_video": "./data/input.mp4",
+                "output_dir": "./outputs/run_a",
+                "detector": {
+                    "model_path": "./weights/model.pt",
+                },
+                "selection": {
+                    "priors": {
+                        "enabled": False,
+                        "player_foot_radius_px": 42.0,
+                        "player_foot_bonus": 0.07,
+                        "recent_player_frame_window": 3,
+                        "pitch_boundary_penalty": -0.18,
+                        "pitch_boundary_margin_m": 1.5,
+                        "player_tracks_path": "./outputs/player_tracks.json",
+                    }
+                },
+            },
+        )
+
+        config = load_config(config_path)
+
+        self.assertFalse(config.selection.priors.enabled)
+        self.assertEqual(42.0, config.selection.priors.player_foot_radius_px)
+        self.assertEqual(0.07, config.selection.priors.player_foot_bonus)
+        self.assertEqual(3, config.selection.priors.recent_player_frame_window)
+        self.assertEqual(-0.18, config.selection.priors.pitch_boundary_penalty)
+        self.assertEqual(1.5, config.selection.priors.pitch_boundary_margin_m)
+        self.assertEqual((self.repo_root / "outputs" / "player_tracks.json").resolve(), config.selection.priors.player_tracks_path)
 
     def test_load_provider_settings_reads_dotenv_defaults(self) -> None:
         dotenv_path = self.repo_root / ".env"

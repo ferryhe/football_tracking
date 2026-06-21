@@ -217,10 +217,22 @@ class SelectionWeights:
 
 
 @dataclass(slots=True)
+class SelectionPriorsConfig:
+    enabled: bool = True
+    player_foot_radius_px: float = 60.0
+    player_foot_bonus: float = 0.08
+    recent_player_frame_window: int = 2
+    pitch_boundary_penalty: float = -0.12
+    pitch_boundary_margin_m: float = 1.0
+    player_tracks_path: Path | None = None
+
+
+@dataclass(slots=True)
 class SelectionConfig:
     min_accept_score: float = 0.18
     stable_history_length: int = 12
     weights: SelectionWeights = field(default_factory=SelectionWeights)
+    priors: SelectionPriorsConfig = field(default_factory=SelectionPriorsConfig)
 
 
 @dataclass(slots=True)
@@ -374,6 +386,27 @@ def _to_frame_ranges(raw_frame_ranges: Any) -> list[tuple[int, int]]:
     if not isinstance(raw_frame_ranges, list):
         raise ValueError("protected_ranges 必须为 [[start, end], ...] 列表或 null")
     return [_to_frame_range(raw_frame_range) for raw_frame_range in raw_frame_ranges]
+
+
+def _to_selection_priors(raw_priors: Any, base_dir: Path) -> SelectionPriorsConfig:
+    if raw_priors in (None, "", []):
+        return SelectionPriorsConfig()
+    if not isinstance(raw_priors, dict):
+        raise ValueError("selection.priors 必须为 dict 或 null")
+    raw_player_tracks_path = raw_priors.get("player_tracks_path")
+    return SelectionPriorsConfig(
+        enabled=bool(raw_priors.get("enabled", True)),
+        player_foot_radius_px=float(raw_priors.get("player_foot_radius_px", 60.0)),
+        player_foot_bonus=float(raw_priors.get("player_foot_bonus", 0.08)),
+        recent_player_frame_window=max(0, int(raw_priors.get("recent_player_frame_window", 2))),
+        pitch_boundary_penalty=float(raw_priors.get("pitch_boundary_penalty", -0.12)),
+        pitch_boundary_margin_m=max(0.0, float(raw_priors.get("pitch_boundary_margin_m", 1.0))),
+        player_tracks_path=(
+            None
+            if raw_player_tracks_path in (None, "")
+            else _resolve_path(base_dir, str(raw_player_tracks_path))
+        ),
+    )
 
 
 def _to_relaxed_filtering(raw_relaxed_filtering: Any) -> RelaxedFilteringConfig:
@@ -665,10 +698,11 @@ def load_config(config_path: Path) -> AppConfig:
         dynamic_air_recovery=_to_dynamic_air_recovery(scene_bias_raw.get("dynamic_air_recovery")),
     )
 
-    weights_raw = raw.get("selection", {}).get("weights", {})
+    selection_raw = raw.get("selection", {})
+    weights_raw = selection_raw.get("weights", {})
     selection = SelectionConfig(
-        min_accept_score=float(raw.get("selection", {}).get("min_accept_score", 0.18)),
-        stable_history_length=int(raw.get("selection", {}).get("stable_history_length", 12)),
+        min_accept_score=float(selection_raw.get("min_accept_score", 0.18)),
+        stable_history_length=int(selection_raw.get("stable_history_length", 12)),
         weights=SelectionWeights(
             distance_score=float(weights_raw.get("distance_score", 0.32)),
             direction_score=float(weights_raw.get("direction_score", 0.20)),
@@ -677,6 +711,7 @@ def load_config(config_path: Path) -> AppConfig:
             trajectory_length_bonus=float(weights_raw.get("trajectory_length_bonus", 0.10)),
             confidence=float(weights_raw.get("confidence", 0.06)),
         ),
+        priors=_to_selection_priors(selection_raw.get("priors"), base_dir),
     )
 
     tracking_raw = raw.get("tracking", {})
