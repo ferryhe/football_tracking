@@ -553,8 +553,11 @@ def _parse_int(value: Any) -> int | None:
     if value in (None, ""):
         return None
     try:
-        return int(float(value))
-    except (TypeError, ValueError):
+        parsed = float(value)
+        if not math.isfinite(parsed):
+            return None
+        return int(parsed)
+    except (OverflowError, TypeError, ValueError):
         return None
 
 

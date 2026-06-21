@@ -197,14 +197,14 @@ class ReviewPacketTests(unittest.TestCase):
 
     def test_compact_review_packet_summary_tolerates_malformed_counts(self) -> None:
         summary = compact_review_packet_summary(
-            {
-                "schema_version": "1.0",
-                "summary": {
-                    "packet_count": "not-a-number",
-                    "media_packet_count": None,
-                    "counts_by_label": {"needs_ai_review": 1},
-                },
-            }
+                    {
+                        "schema_version": "1.0",
+                        "summary": {
+                            "packet_count": "inf",
+                            "media_packet_count": "not-a-number",
+                            "counts_by_label": {"needs_ai_review": 1},
+                        },
+                    }
         )
 
         self.assertEqual(0, summary["packet_count"])
