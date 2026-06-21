@@ -428,6 +428,16 @@ class ApiServiceSmokeTests(unittest.TestCase):
         self.assertEqual(1, run["stats"]["cleanup"]["scrubbed_frame_count"])
         self.assertEqual("cleaned", run["stats"]["follow_cam"]["track_source"])
 
+    def test_list_runs_falls_back_when_metrics_report_is_not_an_object(self) -> None:
+        output_dir = self.create_output_bundle("kept_baseline")
+        (output_dir / "metrics_report.json").write_text("[]", encoding="utf-8")
+
+        run = self.service.list_runs()[0]
+
+        self.assertNotIn("metrics_report", run["stats"])
+        self.assertEqual(3, run["stats"]["raw"]["frame_count"])
+        self.assertEqual(2, run["stats"]["cleaned"]["detected"])
+
     def test_list_asset_groups_groups_by_input_and_keeps_unbound_legacy(self) -> None:
         self.create_output_bundle("kept_baseline")
         self.create_output_bundle("legacy_only")

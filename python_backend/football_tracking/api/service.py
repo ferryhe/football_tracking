@@ -1882,8 +1882,8 @@ class ApiService:
             "parent_run_id": parent_run_id,
             "output_dir": str(output_dir.resolve()),
             "modules_enabled": modules_enabled,
-            "artifacts": self._collect_artifacts(output_dir),
-            "stats": self._collect_stats(output_dir),
+            "artifacts": [] if write_artifacts else self._collect_artifacts(output_dir),
+            "stats": {} if write_artifacts else self._collect_stats(output_dir),
             "progress": progress,
             "notes": notes,
             "error": None,
@@ -2672,7 +2672,11 @@ class ApiService:
         if not path.exists():
             return None
         with path.open("r", encoding="utf-8") as handle:
-            return json.load(handle)
+            try:
+                loaded = json.load(handle)
+            except json.JSONDecodeError:
+                return None
+        return loaded if isinstance(loaded, dict) else None
 
     def _slugify(self, text: str) -> str:
         normalized = unicodedata.normalize("NFKD", text.strip()).encode("ascii", "ignore").decode("ascii")
