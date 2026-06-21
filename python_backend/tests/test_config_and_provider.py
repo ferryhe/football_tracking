@@ -4,12 +4,44 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
 import yaml
 
 from football_tracking.api.ai_provider import load_provider_settings
-from football_tracking.config import load_config
+from football_tracking.config import DetectorConfig, SahiConfig, load_config
+from football_tracking.detector import YOLOSahiBallDetector
+
+
+class _TensorList:
+    def __init__(self, values: list) -> None:
+        self.values = values
+
+    def cpu(self) -> "_TensorList":
+        return self
+
+    def tolist(self) -> list:
+        return self.values
+
+
+class _FakeDirectModel:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, object]] = []
+
+    def predict(self, frame, **kwargs):
+        self.calls.append({"frame": frame, **kwargs})
+        boxes = SimpleNamespace(
+            xyxy=_TensorList([[1.0, 2.0, 9.0, 10.0]]),
+            conf=_TensorList([0.91]),
+            cls=_TensorList([0]),
+        )
+        return [SimpleNamespace(boxes=boxes, names={0: "ball"})]
+
+
+class _FakeSahiBox:
+    def to_xyxy(self) -> list[float]:
+        return [3.0, 4.0, 11.0, 12.0]
 
 
 class ConfigAndProviderTests(unittest.TestCase):
@@ -53,6 +85,96 @@ class ConfigAndProviderTests(unittest.TestCase):
         self.assertEqual(0, config.runtime.start_frame)
         self.assertIsNone(config.runtime.max_frames)
         self.assertFalse(config.selection.priors.enabled)
+        self.assertEqual("sahi", config.detector.inference_mode)
+        self.assertFalse(config.temporal_chunks.enabled)
+        self.assertEqual(1200, config.temporal_chunks.chunk_frames)
+        self.assertEqual(80, config.temporal_chunks.overlap_frames)
+        self.assertEqual(1, config.temporal_chunks.max_workers)
+        self.assertFalse(config.temporal_chunks.allow_gpu_oversubscription)
+        self.assertEqual((), config.temporal_chunks.devices)
+        self.assertEqual(120, config.temporal_chunks.decode_preroll_frames)
+        self.assertEqual("chunks", config.temporal_chunks.output_dir_name)
+        self.assertEqual("overlap_quality", config.temporal_chunks.merge_strategy)
+
+    def test_load_config_parses_detector_inference_mode_and_temporal_chunks(self) -> None:
+        config_path = self.write_yaml(
+            "config/direct.yaml",
+            {
+                "input_video": "./data/input.mp4",
+                "output_dir": "./outputs/run_a",
+                "detector": {
+                    "model_path": "./weights/model.pt",
+                    "inference_mode": "direct_full_frame",
+                },
+                "temporal_chunks": {
+                    "enabled": True,
+                    "chunk_frames": 600,
+                    "overlap_frames": 40,
+                    "max_workers": 2,
+                    "allow_gpu_oversubscription": True,
+                    "devices": ["cuda:0", "cuda:1"],
+                    "decode_preroll_frames": 24,
+                    "output_dir_name": "temporal_parts",
+                    "merge_strategy": "overlap_quality",
+                },
+            },
+        )
+
+        config = load_config(config_path)
+
+        self.assertEqual("direct_full_frame", config.detector.inference_mode)
+        self.assertTrue(config.temporal_chunks.enabled)
+        self.assertEqual(600, config.temporal_chunks.chunk_frames)
+        self.assertEqual(40, config.temporal_chunks.overlap_frames)
+        self.assertEqual(2, config.temporal_chunks.max_workers)
+        self.assertTrue(config.temporal_chunks.allow_gpu_oversubscription)
+        self.assertEqual(("cuda:0", "cuda:1"), config.temporal_chunks.devices)
+        self.assertEqual(24, config.temporal_chunks.decode_preroll_frames)
+        self.assertEqual("temporal_parts", config.temporal_chunks.output_dir_name)
+        self.assertEqual("overlap_quality", config.temporal_chunks.merge_strategy)
+
+    def test_load_config_rejects_unknown_detector_inference_mode(self) -> None:
+        config_path = self.write_yaml(
+            "config/unknown_detector_mode.yaml",
+            {
+                "input_video": "./data/input.mp4",
+                "output_dir": "./outputs/run_a",
+                "detector": {
+                    "model_path": "./weights/model.pt",
+                    "inference_mode": "pyramid",
+                },
+            },
+        )
+
+        with self.assertRaises(ValueError):
+            load_config(config_path)
+
+    def test_load_config_rejects_invalid_temporal_chunk_settings(self) -> None:
+        invalid_settings = [
+            {"chunk_frames": 0},
+            {"chunk_frames": 100, "overlap_frames": 100},
+            {"max_workers": 0},
+            {"decode_preroll_frames": -1},
+            {"output_dir_name": "../chunks"},
+            {"merge_strategy": "latest_wins"},
+        ]
+
+        for index, temporal_chunks in enumerate(invalid_settings):
+            with self.subTest(temporal_chunks=temporal_chunks):
+                config_path = self.write_yaml(
+                    f"config/invalid_temporal_chunks_{index}.yaml",
+                    {
+                        "input_video": "./data/input.mp4",
+                        "output_dir": "./outputs/run_a",
+                        "detector": {
+                            "model_path": "./weights/model.pt",
+                        },
+                        "temporal_chunks": temporal_chunks,
+                    },
+                )
+
+                with self.assertRaises(ValueError):
+                    load_config(config_path)
 
     def test_load_config_rejects_invalid_filter_roi(self) -> None:
         config_path = self.write_yaml(
@@ -166,6 +288,104 @@ class ConfigAndProviderTests(unittest.TestCase):
         self.assertEqual("env-key", settings.api_key)
         self.assertEqual("https://override.invalid/v1", settings.base_url)
         self.assertEqual("gpt-env", settings.chat_model)
+
+
+class YOLOSahiBallDetectorModeTests(unittest.TestCase):
+    def make_config(self, inference_mode: str) -> DetectorConfig:
+        return DetectorConfig(
+            model_path=Path("model.pt"),
+            device="cpu",
+            use_half=False,
+            allowed_labels=["ball"],
+            inference_mode=inference_mode,
+        )
+
+    def make_detector(self, inference_mode: str) -> YOLOSahiBallDetector:
+        detector = YOLOSahiBallDetector.__new__(YOLOSahiBallDetector)
+        detector.detector_config = self.make_config(inference_mode)
+        detector.sahi_config = SahiConfig()
+        detector.model = object()
+        detector.direct_model = None
+        return detector
+
+    def test_direct_full_frame_init_does_not_load_sahi_dependencies(self) -> None:
+        with (
+            patch.object(YOLOSahiBallDetector, "_build_model", side_effect=AssertionError("SAHI model should not load")),
+            patch.object(
+                YOLOSahiBallDetector,
+                "_load_sahi_predictor",
+                side_effect=AssertionError("SAHI predictor should not load"),
+            ),
+        ):
+            detector = YOLOSahiBallDetector(self.make_config("direct_full_frame"), SahiConfig())
+
+        self.assertIsNone(detector.model)
+        self.assertIsNone(detector.get_sliced_prediction)
+        self.assertIsNone(detector.direct_model)
+
+    def test_sahi_init_loads_sahi_dependencies(self) -> None:
+        with (
+            patch.object(YOLOSahiBallDetector, "_build_model", return_value="sahi-model") as build_model,
+            patch.object(
+                YOLOSahiBallDetector,
+                "_load_sahi_predictor",
+                return_value="sahi-predictor",
+            ) as load_sahi_predictor,
+        ):
+            detector = YOLOSahiBallDetector(self.make_config("sahi"), SahiConfig())
+
+        build_model.assert_called_once()
+        load_sahi_predictor.assert_called_once()
+        self.assertEqual("sahi-model", detector.model)
+        self.assertEqual("sahi-predictor", detector.get_sliced_prediction)
+
+    def test_detect_uses_sahi_slicing_for_sahi_mode(self) -> None:
+        detector = self.make_detector("sahi")
+        prediction = SimpleNamespace(
+            category=SimpleNamespace(name="ball"),
+            bbox=_FakeSahiBox(),
+            score=SimpleNamespace(value=0.82),
+        )
+        detector.get_sliced_prediction = Mock(
+            return_value=SimpleNamespace(object_prediction_list=[prediction]),
+        )
+        detector._get_direct_model = Mock(side_effect=AssertionError("direct model should not be used"))
+
+        candidates = detector.detect(frame=object(), frame_index=7)
+
+        detector.get_sliced_prediction.assert_called_once()
+        self.assertEqual(1, len(candidates))
+        self.assertEqual(7, candidates[0].frame_index)
+        self.assertEqual("yolo_sahi", candidates[0].source)
+        self.assertEqual(
+            (3.0, 4.0, 11.0, 12.0),
+            (candidates[0].x1, candidates[0].y1, candidates[0].x2, candidates[0].y2),
+        )
+
+    def test_detect_uses_direct_full_frame_model_without_sahi_slicing(self) -> None:
+        detector = self.make_detector("direct_full_frame")
+        fake_model = _FakeDirectModel()
+        frame = object()
+        detector.get_sliced_prediction = Mock(side_effect=AssertionError("SAHI slicing should not be called"))
+        detector._get_direct_model = Mock(return_value=fake_model)
+
+        candidates = detector.detect(frame=frame, frame_index=11)
+
+        detector.get_sliced_prediction.assert_not_called()
+        detector._get_direct_model.assert_called_once()
+        self.assertEqual(1, len(fake_model.calls))
+        self.assertIs(frame, fake_model.calls[0]["frame"])
+        self.assertEqual(0.15, fake_model.calls[0]["conf"])
+        self.assertEqual(1280, fake_model.calls[0]["imgsz"])
+        self.assertEqual("cpu", fake_model.calls[0]["device"])
+        self.assertFalse(fake_model.calls[0]["half"])
+        self.assertEqual(1, len(candidates))
+        self.assertEqual(11, candidates[0].frame_index)
+        self.assertEqual("yolo_direct", candidates[0].source)
+        self.assertEqual(
+            (1.0, 2.0, 9.0, 10.0),
+            (candidates[0].x1, candidates[0].y1, candidates[0].x2, candidates[0].y2),
+        )
 
 
 if __name__ == "__main__":

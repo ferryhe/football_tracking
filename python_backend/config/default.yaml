@@ -11,6 +11,7 @@ logging:
 detector:
   model_path: "./weights/football_ball_yolo.pt"
   device: "cuda:0"
+  inference_mode: "sahi"
   confidence_threshold: 0.15
   image_size: 1280
   use_half: true
@@ -102,3 +103,15 @@ runtime:
   capture_backend: "CAP_FFMPEG"
   start_frame: 0
   max_frames: null
+
+# 时间段切块规划配置
+temporal_chunks:
+  enabled: false
+  chunk_frames: 1200
+  overlap_frames: 80
+  max_workers: 1
+  allow_gpu_oversubscription: false
+  devices: []
+  decode_preroll_frames: 120
+  output_dir_name: "chunks"
+  merge_strategy: "overlap_quality"
