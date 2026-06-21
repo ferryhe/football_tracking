@@ -253,13 +253,21 @@ Expected: all tests pass.
 - Create: `python_backend/football_tracking/chunk_runner.py`
 - Create: `python_backend/football_tracking/chunk_worker.py`
 - Create: `python_backend/tests/test_chunk_runner.py`
-- Modify: `python_backend/main.py`
+- Modify: `python_backend/main.py` only if PR2 exposes the worker through the primary entrypoint. Current PR2 keeps `main.py` unchanged because PR3 owns the `temporal_chunks.enabled` orchestration switch.
 
 **Core API:**
 
 ```python
 def build_chunk_config(config: AppConfig, chunk: TemporalChunk, chunk_output_dir: Path) -> AppConfig:
     """Copy AppConfig for one raw-only chunk."""
+
+
+def write_chunk_config(config: AppConfig, chunk: TemporalChunk, chunks_root: Path) -> Path:
+    """Write <chunks_root>/<chunk.output_dir_name>/chunk_config.yaml."""
+
+
+def enforce_raw_chunk_config(config: AppConfig) -> AppConfig:
+    """Apply raw-only guarantees before any chunk worker pipeline run."""
 
 
 def run_chunk(config_path: Path) -> int:
@@ -272,6 +280,7 @@ Raw-only guarantees:
 chunk_config.postprocess.enabled = False
 chunk_config.follow_cam.enabled = False
 chunk_config.detector.inference_mode = "direct_full_frame"
+chunk_config.temporal_chunks.enabled = False
 ```
 
 CLI module:
@@ -280,7 +289,7 @@ CLI module:
 $env:PYTHONPATH='python_backend'; .\.venv\Scripts\python.exe -m football_tracking.chunk_worker --config <chunk_config.yaml>
 ```
 
-- [ ] **Step 1: Write failing raw-only config tests**
+- [x] **Step 1: Write failing raw-only config tests**
 
 Test:
 
@@ -290,19 +299,21 @@ def test_build_chunk_config_disables_global_outputs_inside_chunk(self) -> None:
     self.assertFalse(chunk_config.postprocess.enabled)
     self.assertFalse(chunk_config.follow_cam.enabled)
     self.assertEqual("direct_full_frame", chunk_config.detector.inference_mode)
-    self.assertEqual(chunk.start_frame, chunk_config.runtime.start_frame)
-    self.assertEqual(chunk.end_frame - chunk.start_frame + 1, chunk_config.runtime.max_frames)
+    self.assertEqual(chunk.decode_start_frame, chunk_config.runtime.start_frame)
+    self.assertEqual(chunk.end_frame - chunk.decode_start_frame + 1, chunk_config.runtime.max_frames)
 ```
 
-- [ ] **Step 2: Implement chunk worker**
+- [x] **Step 2: Implement chunk worker**
 
 Implementation rules:
-- Write chunk configs under `chunks/chunk_###/chunk_config.yaml`.
+- Write chunk configs under `<chunks_root>/<chunk.output_dir_name>/chunk_config.yaml`.
+- Generated chunk configs must set `temporal_chunks.enabled = false` to avoid recursive orchestration if they are ever passed to the primary entrypoint.
+- `run_chunk()` must reapply raw-only guarantees after `load_config()` before constructing `BallTrackingPipeline`.
 - Chunk worker returns non-zero on exception.
 - Chunk output includes raw `ball_track.csv` and `debug.jsonl` when normal output settings request them.
 - Chunk worker does not write cleaned CSV, follow-cam, review packets, or highlights.
 
-- [ ] **Step 3: Run validation**
+- [x] **Step 3: Run validation**
 
 Run:
 
