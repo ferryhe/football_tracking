@@ -684,6 +684,75 @@ export const GetArtifactParams = zod.object({
 export const GetArtifactResponse = zod.unknown();
 
 /**
+ * @summary Get Ball Audit Report
+ */
+export const GetBallAuditReportParams = zod.object({
+  run_id: zod.coerce.string(),
+});
+
+export const GetBallAuditReportResponse = zod.object({
+  schema_version: zod.string(),
+  generated_at: zod.string(),
+  summary: zod.object({
+    frame_count: zod.number(),
+    source_count: zod.number(),
+    tracklet_count: zod.number(),
+    suspicious_tracklet_count: zod.number(),
+    review_event_count: zod.number(),
+    lost_gap_count: zod.number(),
+    max_step_px: zod.union([zod.number(), zod.null()]).optional(),
+  }),
+  sources: zod
+    .array(
+      zod.object({
+        name: zod.string(),
+        path: zod.string(),
+        row_count: zod.number(),
+        tracklet_count: zod.number(),
+      }),
+    )
+    .optional(),
+  tracklets: zod
+    .array(
+      zod.object({
+        id: zod.string(),
+        source: zod.string(),
+        start_frame: zod.union([zod.number(), zod.null()]).optional(),
+        end_frame: zod.union([zod.number(), zod.null()]).optional(),
+        length: zod.number(),
+        status_counts: zod.record(zod.string(), zod.number()),
+        mean_confidence: zod.union([zod.number(), zod.null()]).optional(),
+        start_point: zod.object({
+          x: zod.number(),
+          y: zod.number(),
+        }),
+        end_point: zod.object({
+          x: zod.number(),
+          y: zod.number(),
+        }),
+        max_step_px: zod.union([zod.number(), zod.null()]).optional(),
+        flags: zod.array(zod.string()).optional(),
+        suspicion_score: zod.number(),
+      }),
+    )
+    .optional(),
+  review_events: zod
+    .array(
+      zod.object({
+        source: zod.string(),
+        type: zod.string(),
+        severity: zod.enum(["info", "warn", "fail"]),
+        start_frame: zod.union([zod.number(), zod.null()]).optional(),
+        end_frame: zod.union([zod.number(), zod.null()]).optional(),
+        frame_count: zod.number(),
+        reason: zod.string(),
+        evidence: zod.record(zod.string(), zod.unknown()).optional(),
+      }),
+    )
+    .optional(),
+});
+
+/**
  * @summary Get Camera Path
  */
 export const GetCameraPathParams = zod.object({

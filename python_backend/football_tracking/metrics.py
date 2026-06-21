@@ -8,6 +8,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from football_tracking.ball_audit import compact_ball_audit_summary, write_ball_audit_report
+
 
 SCHEMA_VERSION = "1.0"
 FALSE_POSITIVE_ISLAND_MAX_LENGTH = 2
@@ -94,6 +96,11 @@ def build_metrics_report(output_dir: Path) -> dict[str, Any]:
     follow_cam_report = _read_optional_json(output_dir / "follow_cam_report.json")
     if follow_cam_report is not None:
         report["follow_cam"] = follow_cam_report
+    ball_audit_report = _read_optional_json(output_dir / "ball_audit.json")
+    if ball_audit_report is not None:
+        ball_audit_summary = compact_ball_audit_summary(ball_audit_report)
+        if ball_audit_summary is not None:
+            report["ball_audit"] = ball_audit_summary
     return report
 
 
@@ -120,7 +127,14 @@ def build_run_manifest(output_dir: Path, run: dict[str, Any]) -> dict[str, Any]:
 def write_run_artifacts(output_dir: Path, run: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
     output_dir.mkdir(parents=True, exist_ok=True)
     manifest = build_run_manifest(output_dir, run)
+    ball_audit_error: str | None = None
+    try:
+        write_ball_audit_report(output_dir)
+    except Exception as exc:
+        ball_audit_error = f"Failed to write ball_audit.json: {exc}"
     report = build_metrics_report(output_dir)
+    if ball_audit_error is not None:
+        report["ball_audit_error"] = ball_audit_error
     _write_json(output_dir / "run_manifest.json", manifest)
     _write_json(output_dir / "metrics_report.json", report)
     return manifest, report
@@ -141,6 +155,9 @@ def stats_from_metrics_report(report: dict[str, Any]) -> dict[str, Any]:
     follow_cam = report.get("follow_cam")
     if isinstance(follow_cam, dict):
         stats["follow_cam"] = follow_cam
+    ball_audit = report.get("ball_audit")
+    if isinstance(ball_audit, dict):
+        stats["ball_audit"] = ball_audit
     stats["metrics_report"] = {
         "schema_version": report.get("schema_version"),
         "generated_at": report.get("generated_at"),
@@ -231,8 +248,11 @@ def _mean(values: list[float]) -> float | None:
 def _read_optional_json(path: Path) -> dict[str, Any] | None:
     if not path.exists():
         return None
-    with path.open("r", encoding="utf-8") as handle:
-        loaded = json.load(handle)
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            loaded = json.load(handle)
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return None
     return loaded if isinstance(loaded, dict) else None
 
 

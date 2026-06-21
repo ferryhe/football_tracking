@@ -166,6 +166,63 @@ class ArtifactSummary(BaseModel):
     content_type: str | None = None
 
 
+class BallAuditSummary(BaseModel):
+    frame_count: int
+    source_count: int
+    tracklet_count: int
+    suspicious_tracklet_count: int
+    review_event_count: int
+    lost_gap_count: int
+    max_step_px: float | None = None
+
+
+class BallAuditSource(BaseModel):
+    name: str
+    path: str
+    row_count: int
+    tracklet_count: int
+
+
+class BallAuditPoint(BaseModel):
+    x: float
+    y: float
+
+
+class BallAuditTracklet(BaseModel):
+    id: str
+    source: str
+    start_frame: int | None = None
+    end_frame: int | None = None
+    length: int
+    status_counts: dict[str, int]
+    mean_confidence: float | None = None
+    start_point: BallAuditPoint
+    end_point: BallAuditPoint
+    max_step_px: float | None = None
+    flags: list[str] = Field(default_factory=list)
+    suspicion_score: float
+
+
+class BallAuditReviewEvent(BaseModel):
+    source: str
+    type: str
+    severity: Literal["info", "warn", "fail"]
+    start_frame: int | None = None
+    end_frame: int | None = None
+    frame_count: int
+    reason: str
+    evidence: dict[str, Any] = Field(default_factory=dict)
+
+
+class BallAuditReport(BaseModel):
+    schema_version: str
+    generated_at: str
+    summary: BallAuditSummary
+    sources: list[BallAuditSource] = Field(default_factory=list)
+    tracklets: list[BallAuditTracklet] = Field(default_factory=list)
+    review_events: list[BallAuditReviewEvent] = Field(default_factory=list)
+
+
 class RunProgress(BaseModel):
     stage: str
     current_frame: int | None = None

@@ -25,6 +25,7 @@ import type {
   ApiErrorResponse,
   ArtifactSummary,
   AssetGroup,
+  BallAuditReport,
   CameraPathResponse,
   ConfigDetail,
   ConfigListItem,
@@ -1814,6 +1815,96 @@ export function useGetArtifact<
   },
 ): UseQueryResult<TData, TError> & { queryKey: QueryKey } {
   const queryOptions = getGetArtifactQueryOptions(runId, artifactName, options);
+
+  const query = useQuery(queryOptions) as UseQueryResult<TData, TError> & {
+    queryKey: QueryKey;
+  };
+
+  return { ...query, queryKey: queryOptions.queryKey };
+}
+
+/**
+ * @summary Get Ball Audit Report
+ */
+export const getGetBallAuditReportUrl = (runId: string) => {
+  return `/api/runs/${encodePathSegmented(runId)}/ball-audit`;
+};
+
+export const getBallAuditReport = async (
+  runId: string,
+  options?: RequestInit,
+): Promise<BallAuditReport> => {
+  return customFetch<BallAuditReport>(getGetBallAuditReportUrl(runId), {
+    ...options,
+    method: "GET",
+  });
+};
+
+export const getGetBallAuditReportQueryKey = (runId: string) => {
+  return [`/api/runs/${encodePathSegmented(runId)}/ball-audit`] as const;
+};
+
+export const getGetBallAuditReportQueryOptions = <
+  TData = Awaited<ReturnType<typeof getBallAuditReport>>,
+  TError = ErrorType<ApiErrorResponse | HTTPValidationError>,
+>(
+  runId: string,
+  options?: {
+    query?: UseQueryOptions<
+      Awaited<ReturnType<typeof getBallAuditReport>>,
+      TError,
+      TData
+    >;
+    request?: SecondParameter<typeof customFetch>;
+  },
+) => {
+  const { query: queryOptions, request: requestOptions } = options ?? {};
+
+  const queryKey =
+    queryOptions?.queryKey ?? getGetBallAuditReportQueryKey(runId);
+
+  const queryFn: QueryFunction<
+    Awaited<ReturnType<typeof getBallAuditReport>>
+  > = ({ signal }) => getBallAuditReport(runId, { signal, ...requestOptions });
+
+  return {
+    queryKey,
+    queryFn,
+    enabled: !!runId,
+    ...queryOptions,
+  } as UseQueryOptions<
+    Awaited<ReturnType<typeof getBallAuditReport>>,
+    TError,
+    TData
+  > & { queryKey: QueryKey };
+};
+
+export type GetBallAuditReportQueryResult = NonNullable<
+  Awaited<ReturnType<typeof getBallAuditReport>>
+>;
+export type GetBallAuditReportQueryError = ErrorType<
+  ApiErrorResponse | HTTPValidationError
+>;
+
+/**
+ * @summary Get Ball Audit Report
+ */
+
+export function useGetBallAuditReport<
+  TData = Awaited<ReturnType<typeof getBallAuditReport>>,
+  TError = ErrorType<ApiErrorResponse | HTTPValidationError>,
+>(
+  runId: string,
+  options?: {
+    query?: UseQueryOptions<
+      Awaited<ReturnType<typeof getBallAuditReport>>,
+      TError,
+      TData
+    >;
+    request?: SecondParameter<typeof customFetch>;
+  },
+): UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+  const queryOptions = getGetBallAuditReportQueryOptions(runId, options);
 
   const query = useQuery(queryOptions) as UseQueryResult<TData, TError> & {
     queryKey: QueryKey;
