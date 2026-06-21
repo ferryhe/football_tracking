@@ -15,9 +15,14 @@ class YOLOSahiBallDetector:
     def __init__(self, detector_config: DetectorConfig, sahi_config: SahiConfig) -> None:
         self.detector_config = detector_config
         self.sahi_config = sahi_config
-        self.model = self._build_model()
-        self.get_sliced_prediction = self._load_sahi_predictor()
+        self.model = None
+        self.get_sliced_prediction = None
         self.direct_model = None
+        if self.detector_config.inference_mode == "sahi":
+            self.model = self._build_model()
+            self.get_sliced_prediction = self._load_sahi_predictor()
+        elif self.detector_config.inference_mode != "direct_full_frame":
+            raise ValueError(f"Unknown detector inference_mode: {self.detector_config.inference_mode}")
 
     def _build_model(self):
         """只初始化一次检测模型，避免重复占用显存。"""
@@ -57,6 +62,12 @@ class YOLOSahiBallDetector:
 
     def detect(self, frame, frame_index: int) -> list[Candidate]:
         """检测当前帧中的候选球，返回原始候选列表。"""
+        if self.detector_config.inference_mode == "direct_full_frame":
+            return self.detect_direct(frame, frame_index)
+
+        if self.get_sliced_prediction is None or self.model is None:
+            raise RuntimeError("SAHI detector is not initialized")
+
         prediction_result = self.get_sliced_prediction(
             image=frame,
             detection_model=self.model,

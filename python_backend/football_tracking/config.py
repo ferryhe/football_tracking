@@ -6,6 +6,9 @@ from typing import Any
 
 import yaml
 
+DETECTOR_INFERENCE_MODES = {"sahi", "direct_full_frame"}
+TEMPORAL_CHUNK_MERGE_STRATEGIES = {"overlap_quality"}
+
 
 @dataclass(slots=True)
 class LoggingConfig:
@@ -17,10 +20,16 @@ class LoggingConfig:
 class DetectorConfig:
     model_path: Path
     device: str = "cuda:0"
+    inference_mode: str = "sahi"
     confidence_threshold: float = 0.15
     image_size: int = 1280
     use_half: bool = True
     allowed_labels: list[str] = field(default_factory=lambda: ["sports ball", "ball"])
+
+    def __post_init__(self) -> None:
+        self.inference_mode = str(self.inference_mode).strip().lower()
+        if self.inference_mode not in DETECTOR_INFERENCE_MODES:
+            raise ValueError(f"Unknown detector inference_mode: {self.inference_mode}")
 
 
 @dataclass(slots=True)
@@ -379,6 +388,37 @@ class RuntimeConfig:
 
 
 @dataclass(slots=True)
+class TemporalChunkConfig:
+    enabled: bool = False
+    chunk_frames: int = 1200
+    overlap_frames: int = 80
+    max_workers: int = 1
+    allow_gpu_oversubscription: bool = False
+    devices: tuple[str, ...] = ()
+    decode_preroll_frames: int = 120
+    output_dir_name: str = "chunks"
+    merge_strategy: str = "overlap_quality"
+
+    def __post_init__(self) -> None:
+        self.devices = tuple(str(device) for device in self.devices)
+        self.output_dir_name = str(self.output_dir_name).strip()
+        self.merge_strategy = str(self.merge_strategy).strip().lower()
+        if self.chunk_frames <= 0:
+            raise ValueError("temporal_chunks.chunk_frames must be greater than 0")
+        if self.overlap_frames < 0 or self.overlap_frames >= self.chunk_frames:
+            raise ValueError("temporal_chunks.overlap_frames must be >= 0 and less than chunk_frames")
+        if self.max_workers < 1:
+            raise ValueError("temporal_chunks.max_workers must be at least 1")
+        if self.decode_preroll_frames < 0:
+            raise ValueError("temporal_chunks.decode_preroll_frames must be greater than or equal to 0")
+        output_dir_path = Path(self.output_dir_name)
+        if not self.output_dir_name or output_dir_path.is_absolute() or output_dir_path.name != self.output_dir_name:
+            raise ValueError("temporal_chunks.output_dir_name must be a single directory name")
+        if self.merge_strategy not in TEMPORAL_CHUNK_MERGE_STRATEGIES:
+            raise ValueError(f"Unknown temporal_chunks merge_strategy: {self.merge_strategy}")
+
+
+@dataclass(slots=True)
 class MockConfig:
     enabled: bool = False
     scenario: str = "A"
@@ -406,6 +446,7 @@ class AppConfig:
     follow_cam: FollowCamConfig
     runtime: RuntimeConfig
     mock: MockConfig
+    temporal_chunks: TemporalChunkConfig = field(default_factory=TemporalChunkConfig)
 
 
 def _resolve_path(base_dir: Path, raw_path: str) -> Path:
@@ -772,6 +813,33 @@ def _to_follow_cam(raw_follow_cam: Any, base_dir: Path) -> FollowCamConfig:
     )
 
 
+def _to_temporal_chunks(raw_temporal_chunks: Any) -> TemporalChunkConfig:
+    if raw_temporal_chunks in (None, "", []):
+        return TemporalChunkConfig()
+    if not isinstance(raw_temporal_chunks, dict):
+        raise ValueError("temporal_chunks must be a dict or null")
+
+    raw_devices = raw_temporal_chunks.get("devices", ())
+    if raw_devices in (None, "", []):
+        devices: tuple[str, ...] = ()
+    elif isinstance(raw_devices, (list, tuple)):
+        devices = tuple(str(device) for device in raw_devices)
+    else:
+        raise ValueError("temporal_chunks.devices must be a list or null")
+
+    return TemporalChunkConfig(
+        enabled=bool(raw_temporal_chunks.get("enabled", False)),
+        chunk_frames=int(raw_temporal_chunks.get("chunk_frames", 1200)),
+        overlap_frames=int(raw_temporal_chunks.get("overlap_frames", 80)),
+        max_workers=int(raw_temporal_chunks.get("max_workers", 1)),
+        allow_gpu_oversubscription=bool(raw_temporal_chunks.get("allow_gpu_oversubscription", False)),
+        devices=devices,
+        decode_preroll_frames=int(raw_temporal_chunks.get("decode_preroll_frames", 120)),
+        output_dir_name=str(raw_temporal_chunks.get("output_dir_name", "chunks")),
+        merge_strategy=str(raw_temporal_chunks.get("merge_strategy", "overlap_quality")),
+    )
+
+
 def load_config(config_path: Path) -> AppConfig:
     """从 YAML 加载配置，并将相对路径解析为绝对路径。"""
     if not config_path.exists():
@@ -791,6 +859,7 @@ def load_config(config_path: Path) -> AppConfig:
     detector = DetectorConfig(
         model_path=_resolve_path(base_dir, detector_raw.get("model_path", "./weights/football_ball_yolo.pt")),
         device=detector_raw.get("device", "cuda:0"),
+        inference_mode=str(detector_raw.get("inference_mode", "sahi")),
         confidence_threshold=float(detector_raw.get("confidence_threshold", 0.15)),
         image_size=int(detector_raw.get("image_size", 1280)),
         use_half=bool(detector_raw.get("use_half", True)),
@@ -905,6 +974,7 @@ def load_config(config_path: Path) -> AppConfig:
 
     postprocess = _to_postprocess(raw.get("postprocess"))
     follow_cam = _to_follow_cam(raw.get("follow_cam"), base_dir)
+    temporal_chunks = _to_temporal_chunks(raw.get("temporal_chunks"))
 
     runtime_raw = raw.get("runtime", {})
     raw_start_frame = runtime_raw.get("start_frame", 0)
@@ -960,4 +1030,5 @@ def load_config(config_path: Path) -> AppConfig:
         follow_cam=follow_cam,
         runtime=runtime,
         mock=mock,
+        temporal_chunks=temporal_chunks,
     )
