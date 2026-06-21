@@ -340,7 +340,12 @@ Expected: all tests pass.
 **Core API:**
 
 ```python
-def stitch_chunk_outputs(chunks: list[TemporalChunk], chunk_dirs: list[Path], output_dir: Path) -> dict[str, Any]:
+def stitch_chunk_outputs(
+    chunks: list[TemporalChunk],
+    chunk_dirs: list[Path],
+    output_dir: Path,
+    output_config: OutputConfig | None = None,
+) -> dict[str, Any]:
     """Merge ball_track.csv and debug.jsonl into final output_dir."""
 
 
@@ -353,10 +358,10 @@ Merge rules:
 - Preserve only selected global frame rows.
 - Keep one row and one debug JSONL line per global frame.
 - Reject missing CSV/debug pairs.
-- Compute boundary quality: detected ratio, mean confidence, boundary jump distance, lost streak near boundary, velocity/acceleration spike.
-- If boundary quality is ambiguous, keep the core-frame default and write `boundary_review_event` into `temporal_chunks_report.json`.
+- PR3 keeps the deterministic core-frame default and writes a `boundary_events` report field.
+- Boundary quality scoring and `boundary_review_event` population are deferred to the metrics/review-trigger PRs.
 
-- [ ] **Step 1: Write failing stitcher tests**
+- [x] **Step 1: Write failing stitcher tests**
 
 Create fixture CSV and debug JSONL files:
 
@@ -382,15 +387,15 @@ $env:PYTHONPATH='python_backend'; .\.venv\Scripts\python.exe -m unittest python_
 
 Expected: fail until implementation exists.
 
-- [ ] **Step 2: Implement stitcher**
+- [x] **Step 2: Implement stitcher**
 
 Implementation rules:
 - Preserve CSV header: `Frame,X,Y,Confidence,Status`.
 - Sort merged output by frame.
 - Reject duplicate selected frames with a clear `ValueError`.
-- Write `temporal_chunks_report.json` with chunk count, frame count, source chunk names, and boundary events.
+- Write `temporal_chunks_report.json` with chunk count, frame count, source chunk names, chunk ranges, and a placeholder `boundary_events` list.
 
-- [ ] **Step 3: Write sequential runner tests using mock mode**
+- [x] **Step 3: Write sequential runner tests using mock mode**
 
 Use `MockConfig(enabled=True)` and `OutputConfig(save_video=False, save_frames=False, save_csv=True, save_debug_jsonl=True)`.
 
@@ -400,7 +405,7 @@ Expected:
 - merged `debug.jsonl` exists in final output dir.
 - report lists planned chunk ranges.
 
-- [ ] **Step 4: Integrate CLI entry**
+- [x] **Step 4: Integrate CLI entry**
 
 Modify `python_backend/main.py`:
 
@@ -412,7 +417,7 @@ else:
     pipeline.run()
 ```
 
-- [ ] **Step 5: Run validation**
+- [x] **Step 5: Run validation**
 
 Run:
 
