@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import FileResponse, JSONResponse
 
 from football_tracking.api.dependencies import get_service
-from football_tracking.api.schemas import ArtifactSummary, CameraPathResponse
+from football_tracking.api.schemas import ApiErrorResponse, ArtifactSummary, BallAuditReport, CameraPathResponse
 from football_tracking.api.service import ApiService
 
 router = APIRouter()
@@ -51,6 +51,20 @@ def get_follow_cam_report(run_id: str, service: ApiService = Depends(get_service
         raise HTTPException(status_code=404, detail=f"Run not found: {run_id}") from exc
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail="follow_cam_report.json not found") from exc
+
+
+@router.get(
+    "/runs/{run_id}/ball-audit",
+    response_model=BallAuditReport,
+    responses={404: {"model": ApiErrorResponse, "description": "Run or ball audit report not found"}},
+)
+def get_ball_audit_report(run_id: str, service: ApiService = Depends(get_service)) -> BallAuditReport:
+    try:
+        return BallAuditReport(**service.get_ball_audit_report(run_id))
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=f"Run not found: {run_id}") from exc
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="ball_audit.json not found") from exc
 
 
 @router.get("/runs/{run_id}/camera-path", response_model=CameraPathResponse)

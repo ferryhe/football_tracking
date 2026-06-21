@@ -506,6 +506,38 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/HTTPValidationError'
+  /runs/{run_id}/ball-audit:
+    get:
+      tags:
+      - artifacts
+      summary: Get Ball Audit Report
+      operationId: get_ball_audit_report
+      parameters:
+      - name: run_id
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Run Id
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BallAuditReport'
+        '404':
+          description: Run or ball audit report not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiErrorResponse'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
   /runs/{run_id}/camera-path:
     get:
       tags:
@@ -906,6 +938,206 @@ components:
       - group_id
       - title
       title: AssetGroup
+    BallAuditPoint:
+      properties:
+        x:
+          type: number
+          title: X
+        y:
+          type: number
+          title: Y
+      type: object
+      required:
+      - x
+      - y
+      title: BallAuditPoint
+    BallAuditReport:
+      properties:
+        schema_version:
+          type: string
+          title: Schema Version
+        generated_at:
+          type: string
+          title: Generated At
+        summary:
+          $ref: '#/components/schemas/BallAuditSummary'
+        sources:
+          items:
+            $ref: '#/components/schemas/BallAuditSource'
+          type: array
+          title: Sources
+        tracklets:
+          items:
+            $ref: '#/components/schemas/BallAuditTracklet'
+          type: array
+          title: Tracklets
+        review_events:
+          items:
+            $ref: '#/components/schemas/BallAuditReviewEvent'
+          type: array
+          title: Review Events
+      type: object
+      required:
+      - schema_version
+      - generated_at
+      - summary
+      title: BallAuditReport
+    BallAuditReviewEvent:
+      properties:
+        source:
+          type: string
+          title: Source
+        type:
+          type: string
+          title: Type
+        severity:
+          type: string
+          enum:
+          - info
+          - warn
+          - fail
+          title: Severity
+        start_frame:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          title: Start Frame
+        end_frame:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          title: End Frame
+        frame_count:
+          type: integer
+          title: Frame Count
+        reason:
+          type: string
+          title: Reason
+        evidence:
+          additionalProperties: true
+          type: object
+          title: Evidence
+      type: object
+      required:
+      - source
+      - type
+      - severity
+      - frame_count
+      - reason
+      title: BallAuditReviewEvent
+    BallAuditSource:
+      properties:
+        name:
+          type: string
+          title: Name
+        path:
+          type: string
+          title: Path
+        row_count:
+          type: integer
+          title: Row Count
+        tracklet_count:
+          type: integer
+          title: Tracklet Count
+      type: object
+      required:
+      - name
+      - path
+      - row_count
+      - tracklet_count
+      title: BallAuditSource
+    BallAuditSummary:
+      properties:
+        frame_count:
+          type: integer
+          title: Frame Count
+        source_count:
+          type: integer
+          title: Source Count
+        tracklet_count:
+          type: integer
+          title: Tracklet Count
+        suspicious_tracklet_count:
+          type: integer
+          title: Suspicious Tracklet Count
+        review_event_count:
+          type: integer
+          title: Review Event Count
+        lost_gap_count:
+          type: integer
+          title: Lost Gap Count
+        max_step_px:
+          anyOf:
+          - type: number
+          - type: 'null'
+          title: Max Step Px
+      type: object
+      required:
+      - frame_count
+      - source_count
+      - tracklet_count
+      - suspicious_tracklet_count
+      - review_event_count
+      - lost_gap_count
+      title: BallAuditSummary
+    BallAuditTracklet:
+      properties:
+        id:
+          type: string
+          title: Id
+        source:
+          type: string
+          title: Source
+        start_frame:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          title: Start Frame
+        end_frame:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          title: End Frame
+        length:
+          type: integer
+          title: Length
+        status_counts:
+          additionalProperties:
+            type: integer
+          type: object
+          title: Status Counts
+        mean_confidence:
+          anyOf:
+          - type: number
+          - type: 'null'
+          title: Mean Confidence
+        start_point:
+          $ref: '#/components/schemas/BallAuditPoint'
+        end_point:
+          $ref: '#/components/schemas/BallAuditPoint'
+        max_step_px:
+          anyOf:
+          - type: number
+          - type: 'null'
+          title: Max Step Px
+        flags:
+          items:
+            type: string
+          type: array
+          title: Flags
+        suspicion_score:
+          type: number
+          title: Suspicion Score
+      type: object
+      required:
+      - id
+      - source
+      - length
+      - status_counts
+      - start_point
+      - end_point
+      - suspicion_score
+      title: BallAuditTracklet
     CameraPathResponse:
       properties:
         columns:

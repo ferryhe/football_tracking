@@ -161,6 +161,76 @@ export interface AssetGroup {
   is_unbound?: boolean;
 }
 
+export interface BallAuditPoint {
+  x: number;
+  y: number;
+}
+
+export interface BallAuditSummary {
+  frame_count: number;
+  source_count: number;
+  tracklet_count: number;
+  suspicious_tracklet_count: number;
+  review_event_count: number;
+  lost_gap_count: number;
+  max_step_px?: number | null;
+}
+
+export interface BallAuditSource {
+  name: string;
+  path: string;
+  row_count: number;
+  tracklet_count: number;
+}
+
+export type BallAuditTrackletStatusCounts = { [key: string]: number };
+
+export interface BallAuditTracklet {
+  id: string;
+  source: string;
+  start_frame?: number | null;
+  end_frame?: number | null;
+  length: number;
+  status_counts: BallAuditTrackletStatusCounts;
+  mean_confidence?: number | null;
+  start_point: BallAuditPoint;
+  end_point: BallAuditPoint;
+  max_step_px?: number | null;
+  flags?: string[];
+  suspicion_score: number;
+}
+
+export type BallAuditReviewEventSeverity =
+  (typeof BallAuditReviewEventSeverity)[keyof typeof BallAuditReviewEventSeverity];
+
+export const BallAuditReviewEventSeverity = {
+  info: "info",
+  warn: "warn",
+  fail: "fail",
+} as const;
+
+export type BallAuditReviewEventEvidence = { [key: string]: unknown };
+
+export interface BallAuditReviewEvent {
+  source: string;
+  type: string;
+  severity: BallAuditReviewEventSeverity;
+  start_frame?: number | null;
+  end_frame?: number | null;
+  frame_count: number;
+  reason: string;
+  evidence?: BallAuditReviewEventEvidence;
+}
+
+export interface BallAuditReport {
+  schema_version: string;
+  generated_at: string;
+  summary: BallAuditSummary;
+  sources?: BallAuditSource[];
+  tracklets?: BallAuditTracklet[];
+  review_events?: BallAuditReviewEvent[];
+}
+
 export type CameraPathResponseRowsItem = { [key: string]: unknown };
 
 export interface CameraPathResponse {

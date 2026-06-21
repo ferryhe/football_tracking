@@ -22,6 +22,7 @@ import numpy as np
 import yaml
 
 from football_tracking.api.ai_provider import OpenAIResponsesClient, load_provider_settings
+from football_tracking.ball_audit import compact_ball_audit_summary
 from football_tracking.calibration import build_pitch_calibration_from_field_polygon
 from football_tracking.config import AppConfig, load_config
 from football_tracking.follow_cam import FollowCamGenerator
@@ -821,6 +822,9 @@ class ApiService:
 
     def get_follow_cam_report(self, run_id: str) -> dict[str, Any]:
         return self._load_optional_json_artifact(run_id, "follow_cam_report.json")
+
+    def get_ball_audit_report(self, run_id: str) -> dict[str, Any]:
+        return self._load_optional_json_artifact(run_id, "ball_audit.json")
 
     def get_camera_path(self, run_id: str, offset: int, limit: int) -> dict[str, Any]:
         camera_path = self.get_artifact_path(run_id, "camera_path.csv")
@@ -2716,6 +2720,7 @@ class ApiService:
         cleaned_summary = stats.get("cleaned") or self._summarize_track_csv(output_dir / "ball_track.cleaned.csv")
         cleanup_report = self._read_optional_json(output_dir / "cleanup_report.json")
         follow_cam_report = self._read_optional_json(output_dir / "follow_cam_report.json")
+        ball_audit_report = self._read_optional_json(output_dir / "ball_audit.json")
         if raw_summary is not None:
             stats["raw"] = raw_summary
         if cleaned_summary is not None:
@@ -2724,6 +2729,10 @@ class ApiService:
             stats["cleanup"] = cleanup_report
         if follow_cam_report is not None:
             stats["follow_cam"] = follow_cam_report
+        if ball_audit_report is not None and "ball_audit" not in stats:
+            ball_audit_summary = compact_ball_audit_summary(ball_audit_report)
+            if ball_audit_summary is not None:
+                stats["ball_audit"] = ball_audit_summary
         return stats
 
     def _summarize_track_csv(self, csv_path: Path) -> dict[str, Any] | None:

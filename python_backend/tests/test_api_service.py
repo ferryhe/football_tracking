@@ -203,17 +203,17 @@ class ApiServiceSmokeTests(unittest.TestCase):
         self.write_csv(
             f"outputs/{folder_name}/ball_track.csv",
             [
-                {"Frame": 0, "Status": "Detected"},
-                {"Frame": 1, "Status": "Predicted"},
-                {"Frame": 2, "Status": "Lost"},
+                {"Frame": 0, "X": 10, "Y": 20, "Confidence": "0.9000", "Status": "Detected"},
+                {"Frame": 1, "X": 15, "Y": 25, "Confidence": "0.5000", "Status": "Predicted"},
+                {"Frame": 2, "X": "", "Y": "", "Confidence": "0.0000", "Status": "Lost"},
             ],
         )
         self.write_csv(
             f"outputs/{folder_name}/ball_track.cleaned.csv",
             [
-                {"Frame": 0, "Status": "Detected"},
-                {"Frame": 1, "Status": "Detected"},
-                {"Frame": 2, "Status": "Lost"},
+                {"Frame": 0, "X": 10, "Y": 20, "Confidence": "0.9000", "Status": "Detected"},
+                {"Frame": 1, "X": 15, "Y": 25, "Confidence": "0.9000", "Status": "Detected"},
+                {"Frame": 2, "X": "", "Y": "", "Confidence": "0.0000", "Status": "Lost"},
             ],
         )
         self.write_csv(
@@ -238,6 +238,25 @@ class ApiServiceSmokeTests(unittest.TestCase):
                 "target_resolution": [1920, 1080],
                 "mean_crop_height": 1015.0,
                 "status_counts": {"Detected": 2, "Lost": 1},
+            },
+        )
+        self.write_json(
+            f"outputs/{folder_name}/ball_audit.json",
+            {
+                "schema_version": "1.0",
+                "generated_at": "2026-01-01T00:00:00+00:00",
+                "summary": {
+                    "frame_count": 3,
+                    "source_count": 2,
+                    "tracklet_count": 2,
+                    "suspicious_tracklet_count": 0,
+                    "review_event_count": 0,
+                    "lost_gap_count": 0,
+                    "max_step_px": None,
+                },
+                "sources": [],
+                "tracklets": [],
+                "review_events": [],
             },
         )
         return output_dir
@@ -596,6 +615,7 @@ class ApiServiceSmokeTests(unittest.TestCase):
         self.assertEqual(3, run["stats"]["raw"]["frame_count"])
         self.assertEqual(2, run["stats"]["cleaned"]["detected"])
         self.assertEqual("cleaned", run["stats"]["follow_cam"]["track_source"])
+        self.assertEqual(2, run["stats"]["ball_audit"]["tracklet_count"])
         self.assertIn("follow_cam.mp4", {artifact["name"] for artifact in run["artifacts"]})
         output_dir = self.repo_root / "outputs" / "kept_baseline"
         self.assertFalse((output_dir / "run_manifest.json").exists())
@@ -631,6 +651,17 @@ class ApiServiceSmokeTests(unittest.TestCase):
         self.assertEqual({"Detected": 1, "Predicted": 1, "Lost": 1}, run["stats"]["raw"]["status_counts"])
         self.assertEqual(1, run["stats"]["cleanup"]["scrubbed_frame_count"])
         self.assertEqual("cleaned", run["stats"]["follow_cam"]["track_source"])
+        self.assertIn("ball_audit.json", artifact_names)
+        self.assertEqual(2, run["stats"]["ball_audit"]["tracklet_count"])
+
+    def test_get_ball_audit_report_loads_json_artifact(self) -> None:
+        self.create_output_bundle("kept_baseline")
+        run = self.service.list_runs()[0]
+
+        report = self.service.get_ball_audit_report(run["run_id"])
+
+        self.assertEqual("1.0", report["schema_version"])
+        self.assertEqual(2, report["summary"]["tracklet_count"])
 
     def test_list_runs_falls_back_when_metrics_report_is_not_an_object(self) -> None:
         output_dir = self.create_output_bundle("kept_baseline")
@@ -989,6 +1020,7 @@ class ApiServiceSmokeTests(unittest.TestCase):
             "/api/v1/runs/{run_id}/artifacts/{artifact_name:path}",
             "/api/v1/runs/{run_id}/cleanup-report",
             "/api/v1/runs/{run_id}/follow-cam-report",
+            "/api/v1/runs/{run_id}/ball-audit",
             "/api/v1/runs/{run_id}/camera-path",
             "/api/v1/ai/explain",
             "/api/v1/ai/recommend",
@@ -1004,6 +1036,19 @@ class ApiServiceSmokeTests(unittest.TestCase):
         self.assertEqual("#/components/schemas/ApiErrorResponse", operation["responses"]["400"]["content"]["application/json"]["schema"]["$ref"])
         self.assertEqual("#/components/schemas/ApiErrorResponse", operation["responses"]["404"]["content"]["application/json"]["schema"]["$ref"])
         self.assertEqual("#/components/schemas/HTTPValidationError", operation["responses"]["422"]["content"]["application/json"]["schema"]["$ref"])
+
+    def test_create_app_documents_ball_audit_response_schema(self) -> None:
+        app = create_app(self.repo_root)
+        operation = app.openapi()["paths"]["/api/v1/runs/{run_id}/ball-audit"]["get"]
+
+        self.assertEqual(
+            "#/components/schemas/BallAuditReport",
+            operation["responses"]["200"]["content"]["application/json"]["schema"]["$ref"],
+        )
+        self.assertEqual(
+            "#/components/schemas/ApiErrorResponse",
+            operation["responses"]["404"]["content"]["application/json"]["schema"]["$ref"],
+        )
 
 
 if __name__ == "__main__":
