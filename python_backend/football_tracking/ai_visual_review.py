@@ -399,7 +399,11 @@ def _packet_media_path(output_dir: Path, packet: dict[str, Any], key: str) -> Pa
 
 def _resolve_packet_media_path(output_dir: Path, raw_path: Path) -> Path | None:
     output_root = output_dir.resolve()
-    candidates = [raw_path] if raw_path.is_absolute() else [output_dir / raw_path, _repo_root() / raw_path]
+    candidates = (
+        [raw_path]
+        if raw_path.is_absolute()
+        else [output_dir / raw_path, _python_backend_root() / raw_path, _repo_root() / raw_path]
+    )
     for candidate in candidates:
         resolved = candidate.resolve()
         if not resolved.exists() or not resolved.is_file():
@@ -441,6 +445,10 @@ def _build_default_client() -> OpenAIVisualReviewClient:
 
 def _repo_root() -> Path:
     return Path(__file__).resolve().parents[2]
+
+
+def _python_backend_root() -> Path:
+    return Path(__file__).resolve().parents[1]
 
 
 def _is_relative_to(path: Path, parent: Path) -> bool:

@@ -183,6 +183,25 @@ class AiVisualReviewTests(unittest.TestCase):
         self.assertEqual(1, report["summary"]["reviewed_count"])
         self.assertEqual(1, len(client.calls))
 
+    def test_media_paths_can_be_relative_to_python_backend_root(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            python_backend_root = Path(temp_name) / "python_backend"
+            output_dir = python_backend_root / "outputs" / "run_001"
+            _write_review_packets(
+                output_dir,
+                [("packet_001", "highlight_worthy")],
+                media_path_mode="python_backend",
+                python_backend_root=python_backend_root,
+            )
+            client = _FakeVisualReviewClient([_valid_review()])
+
+            with patch("football_tracking.ai_visual_review._python_backend_root", return_value=python_backend_root):
+                report = build_ai_visual_review_report(output_dir, client=client)
+
+        self.assertEqual(1, report["summary"]["reviewed_count"])
+        self.assertEqual(1, len(client.calls))
+        self.assertTrue(str(client.calls[0]["contact_sheet_data_url"]).startswith("data:image/jpeg;base64,"))
+
     def test_provider_errors_are_redacted_before_being_written(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:
             output_dir = Path(temp_name)
@@ -304,6 +323,7 @@ def _write_review_packets(
     packets: list[tuple[str, str]],
     *,
     media_path_mode: str = "absolute",
+    python_backend_root: Path | None = None,
 ) -> None:
     packet_payloads: list[dict[str, object]] = []
     for index, (packet_id, label) in enumerate(packets, start=1):
@@ -319,6 +339,10 @@ def _write_review_packets(
             repo_root = Path(__file__).resolve().parents[2]
             contact_media_path = contact_sheet.resolve().relative_to(repo_root.resolve())
             crop_media_path = crop_sheet.resolve().relative_to(repo_root.resolve())
+        elif media_path_mode == "python_backend":
+            backend_root = python_backend_root or Path(__file__).resolve().parents[1]
+            contact_media_path = contact_sheet.resolve().relative_to(backend_root.resolve())
+            crop_media_path = crop_sheet.resolve().relative_to(backend_root.resolve())
         elif media_path_mode == "output":
             contact_media_path = contact_sheet.relative_to(output_dir)
             crop_media_path = crop_sheet.relative_to(output_dir)
