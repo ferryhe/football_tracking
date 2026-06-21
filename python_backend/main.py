@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
+from football_tracking.chunk_runner import run_temporal_chunks
 from football_tracking.config import load_config
 from football_tracking.pipeline import BallTrackingPipeline
 
@@ -38,6 +39,9 @@ def main() -> None:
     if args.mock_scenario:
         config.mock.enabled = True
         config.mock.scenario = args.mock_scenario
+    if config.temporal_chunks.enabled:
+        run_temporal_chunks(config)
+        return
     pipeline = BallTrackingPipeline(config)
     pipeline.run()
 
