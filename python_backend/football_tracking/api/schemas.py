@@ -264,6 +264,58 @@ class AIReviewTriggerReport(BaseModel):
     summary: AIReviewSummary
 
 
+class PlayerTracksSource(BaseModel):
+    path: str
+    status: Literal["missing", "empty", "loaded"]
+    detection_count: int
+    malformed_line_count: int
+
+
+class PlayerTracksSummary(BaseModel):
+    frame_count: int
+    detection_count: int
+    track_count: int
+    active_track_count: int
+    mean_track_length: float
+    longest_track_length: int
+    teams: dict[str, int] = Field(default_factory=dict)
+
+
+class PlayerTrackPoint(BaseModel):
+    x: float
+    y: float
+
+
+class PlayerTrackSample(BaseModel):
+    frame: int
+    bbox: tuple[float, float, float, float]
+    foot_point: PlayerTrackPoint
+    confidence: float
+    label: str
+    team: str
+
+
+class PlayerTrack(BaseModel):
+    id: str
+    start_frame: int
+    end_frame: int
+    length: int
+    team: str
+    mean_confidence: float
+    first_foot_point: PlayerTrackPoint
+    last_foot_point: PlayerTrackPoint
+    max_step_px: float | None = None
+    samples: list[PlayerTrackSample] = Field(default_factory=list)
+
+
+class PlayerTracksReport(BaseModel):
+    schema_version: str
+    generated_at: str
+    source: PlayerTracksSource
+    summary: PlayerTracksSummary
+    tracks: list[PlayerTrack] = Field(default_factory=list)
+
+
 class RunProgress(BaseModel):
     stage: str
     current_frame: int | None = None

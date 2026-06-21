@@ -76,6 +76,32 @@ class MetricsTests(unittest.TestCase):
                 json.dumps({"track_source": "raw", "target_resolution": [1920, 1080]}),
                 encoding="utf-8",
             )
+            (output_dir / "player_detections.jsonl").write_text(
+                "\n".join(
+                    [
+                        json.dumps(
+                            {
+                                "frame": 0,
+                                "bbox": [0, 0, 20, 50],
+                                "confidence": 0.9,
+                                "label": "person",
+                                "team": "home",
+                            }
+                        ),
+                        json.dumps(
+                            {
+                                "frame": 1,
+                                "bbox": [2, 0, 22, 50],
+                                "confidence": 0.8,
+                                "label": "person",
+                                "team": "home",
+                            }
+                        ),
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
 
             manifest, report = write_run_artifacts(
                 output_dir=output_dir,
@@ -109,6 +135,10 @@ class MetricsTests(unittest.TestCase):
             self.assertIn("ai_review_triggers", report)
             self.assertTrue(report["ai_review_triggers"]["needs_ai_review"])
             self.assertGreaterEqual(report["ai_review_triggers"]["trigger_count"], 1)
+            self.assertTrue((output_dir / "player_tracks.json").exists())
+            self.assertTrue((output_dir / "player_tracks.csv").exists())
+            self.assertEqual(1, report["player_tracks"]["track_count"])
+            self.assertEqual({"home": 1}, report["player_tracks"]["teams"])
 
     def test_write_run_artifacts_preserves_manifest_when_ball_audit_fails(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:
@@ -177,6 +207,42 @@ class MetricsTests(unittest.TestCase):
         self.assertEqual(1, report["ai_review_triggers"]["recommended_window_count"])
         self.assertEqual(report["ai_review_triggers"], stats["ai_review_triggers"])
 
+    def test_build_metrics_report_includes_compact_player_tracks_summary(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            (output_dir / "player_tracks.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": "1.0",
+                        "generated_at": "2026-01-01T00:00:00+00:00",
+                        "source": {
+                            "path": "player_detections.jsonl",
+                            "status": "loaded",
+                            "detection_count": 2,
+                            "malformed_line_count": 0,
+                        },
+                        "summary": {
+                            "frame_count": 2,
+                            "detection_count": 2,
+                            "track_count": 1,
+                            "active_track_count": 1,
+                            "mean_track_length": 2.0,
+                            "longest_track_length": 2,
+                            "teams": {"home": 1},
+                        },
+                        "tracks": [],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            report = build_metrics_report(output_dir)
+            stats = stats_from_metrics_report(report)
+
+        self.assertEqual(1, report["player_tracks"]["track_count"])
+        self.assertEqual({"home": 1}, report["player_tracks"]["teams"])
+        self.assertEqual(report["player_tracks"], stats["player_tracks"])
+
     def test_write_run_artifacts_preserves_manifest_when_ai_review_triggers_fail(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:
             output_dir = Path(temp_name)
@@ -203,6 +269,32 @@ class MetricsTests(unittest.TestCase):
             self.assertTrue((output_dir / "metrics_report.json").exists())
             self.assertTrue((output_dir / "ball_audit.json").exists())
             self.assertIn("ai_review_triggers_error", report)
+
+    def test_write_run_artifacts_preserves_manifest_when_player_tracks_fail(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            (output_dir / "ball_track.csv").write_text(
+                "Frame,X,Y,Confidence,Status\n0,1,2,0.9000,Detected\n",
+                encoding="utf-8",
+            )
+
+            with mock.patch(
+                "football_tracking.metrics.write_player_tracks_artifacts",
+                side_effect=RuntimeError("player tracks failed"),
+            ):
+                manifest, report = write_run_artifacts(
+                    output_dir=output_dir,
+                    run={
+                        "run_id": "run_player_tracks_failure",
+                        "source": "api",
+                        "status": "completed",
+                    },
+                )
+
+            self.assertEqual("run_player_tracks_failure", manifest["run_id"])
+            self.assertTrue((output_dir / "run_manifest.json").exists())
+            self.assertTrue((output_dir / "metrics_report.json").exists())
+            self.assertIn("player_tracks_error", report)
 
 
 if __name__ == "__main__":

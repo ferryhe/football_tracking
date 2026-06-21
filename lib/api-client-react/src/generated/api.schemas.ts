@@ -572,6 +572,73 @@ export interface InputQualityResponse {
   recommendations: string[];
 }
 
+export interface PlayerTrackPoint {
+  x: number;
+  y: number;
+}
+
+export interface PlayerTrackSample {
+  frame: number;
+  /**
+   * @minItems 4
+   * @maxItems 4
+   */
+  bbox: [number, number, number, number];
+  foot_point: PlayerTrackPoint;
+  confidence: number;
+  label: string;
+  team: string;
+}
+
+export interface PlayerTrack {
+  id: string;
+  start_frame: number;
+  end_frame: number;
+  length: number;
+  team: string;
+  mean_confidence: number;
+  first_foot_point: PlayerTrackPoint;
+  last_foot_point: PlayerTrackPoint;
+  max_step_px?: number | null;
+  samples?: PlayerTrackSample[];
+}
+
+export type PlayerTracksSourceStatus =
+  (typeof PlayerTracksSourceStatus)[keyof typeof PlayerTracksSourceStatus];
+
+export const PlayerTracksSourceStatus = {
+  missing: "missing",
+  empty: "empty",
+  loaded: "loaded",
+} as const;
+
+export interface PlayerTracksSource {
+  path: string;
+  status: PlayerTracksSourceStatus;
+  detection_count: number;
+  malformed_line_count: number;
+}
+
+export type PlayerTracksSummaryTeams = { [key: string]: number };
+
+export interface PlayerTracksSummary {
+  frame_count: number;
+  detection_count: number;
+  track_count: number;
+  active_track_count: number;
+  mean_track_length: number;
+  longest_track_length: number;
+  teams?: PlayerTracksSummaryTeams;
+}
+
+export interface PlayerTracksReport {
+  schema_version: string;
+  generated_at: string;
+  source: PlayerTracksSource;
+  summary: PlayerTracksSummary;
+  tracks?: PlayerTrack[];
+}
+
 export interface UpdateConfigRequest {
   content: string;
 }

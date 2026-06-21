@@ -29,6 +29,7 @@ from football_tracking.config import AppConfig, load_config
 from football_tracking.follow_cam import FollowCamGenerator
 from football_tracking.metrics import compute_track_metrics, stats_from_metrics_report, write_run_artifacts
 from football_tracking.pipeline import BallTrackingPipeline
+from football_tracking.player_tracks import compact_player_tracks_summary
 from football_tracking.quality import assess_video_quality
 
 
@@ -829,6 +830,9 @@ class ApiService:
 
     def get_ai_review_triggers_report(self, run_id: str) -> dict[str, Any]:
         return self._load_optional_json_artifact(run_id, "ai_review_triggers.json")
+
+    def get_player_tracks_report(self, run_id: str) -> dict[str, Any]:
+        return self._load_optional_json_artifact(run_id, "player_tracks.json")
 
     def get_camera_path(self, run_id: str, offset: int, limit: int) -> dict[str, Any]:
         camera_path = self.get_artifact_path(run_id, "camera_path.csv")
@@ -2726,6 +2730,7 @@ class ApiService:
         follow_cam_report = self._read_optional_json(output_dir / "follow_cam_report.json")
         ball_audit_report = self._read_optional_json(output_dir / "ball_audit.json")
         ai_review_trigger_report = self._read_optional_json(output_dir / "ai_review_triggers.json")
+        player_tracks_report = self._read_optional_json(output_dir / "player_tracks.json")
         if raw_summary is not None:
             stats["raw"] = raw_summary
         if cleaned_summary is not None:
@@ -2742,6 +2747,10 @@ class ApiService:
             ai_review_trigger_summary = compact_ai_review_trigger_summary(ai_review_trigger_report)
             if ai_review_trigger_summary is not None:
                 stats["ai_review_triggers"] = ai_review_trigger_summary
+        if player_tracks_report is not None and "player_tracks" not in stats:
+            player_tracks_summary = compact_player_tracks_summary(player_tracks_report)
+            if player_tracks_summary is not None:
+                stats["player_tracks"] = player_tracks_summary
         return stats
 
     def _summarize_track_csv(self, csv_path: Path) -> dict[str, Any] | None:

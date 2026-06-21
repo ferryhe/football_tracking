@@ -13,6 +13,10 @@ from football_tracking.ai_review_triggers import (
     write_ai_review_trigger_report,
 )
 from football_tracking.ball_audit import compact_ball_audit_summary, write_ball_audit_report
+from football_tracking.player_tracks import (
+    compact_player_tracks_summary,
+    write_player_tracks_artifacts,
+)
 
 
 SCHEMA_VERSION = "1.0"
@@ -110,6 +114,11 @@ def build_metrics_report(output_dir: Path) -> dict[str, Any]:
         ai_review_trigger_summary = compact_ai_review_trigger_summary(ai_review_trigger_report)
         if ai_review_trigger_summary is not None:
             report["ai_review_triggers"] = ai_review_trigger_summary
+    player_tracks_report = _read_optional_json(output_dir / "player_tracks.json")
+    if player_tracks_report is not None:
+        player_tracks_summary = compact_player_tracks_summary(player_tracks_report)
+        if player_tracks_summary is not None:
+            report["player_tracks"] = player_tracks_summary
     return report
 
 
@@ -146,11 +155,18 @@ def write_run_artifacts(output_dir: Path, run: dict[str, Any]) -> tuple[dict[str
         write_ai_review_trigger_report(output_dir)
     except Exception as exc:
         ai_review_triggers_error = f"Failed to write ai_review_triggers.json: {exc}"
+    player_tracks_error: str | None = None
+    try:
+        write_player_tracks_artifacts(output_dir)
+    except Exception as exc:
+        player_tracks_error = f"Failed to write player_tracks.json: {exc}"
     report = build_metrics_report(output_dir)
     if ball_audit_error is not None:
         report["ball_audit_error"] = ball_audit_error
     if ai_review_triggers_error is not None:
         report["ai_review_triggers_error"] = ai_review_triggers_error
+    if player_tracks_error is not None:
+        report["player_tracks_error"] = player_tracks_error
     _write_json(output_dir / "run_manifest.json", manifest)
     _write_json(output_dir / "metrics_report.json", report)
     return manifest, report
@@ -177,6 +193,9 @@ def stats_from_metrics_report(report: dict[str, Any]) -> dict[str, Any]:
     ai_review_triggers = report.get("ai_review_triggers")
     if isinstance(ai_review_triggers, dict):
         stats["ai_review_triggers"] = ai_review_triggers
+    player_tracks = report.get("player_tracks")
+    if isinstance(player_tracks, dict):
+        stats["player_tracks"] = player_tracks
     stats["metrics_report"] = {
         "schema_version": report.get("schema_version"),
         "generated_at": report.get("generated_at"),
