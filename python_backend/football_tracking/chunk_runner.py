@@ -484,7 +484,7 @@ def _run_chunk_jobs_subprocess(
                 )
                 try:
                     running_process = _start_chunk_subprocess(job)
-                except BaseException as exc:
+                except Exception as exc:
                     results.extend(_terminate_running_processes(running))
                     error = f"Unable to start temporal chunk {job.chunk.output_dir_name}: {exc}"
                     execution = _execution_payload(
@@ -679,7 +679,7 @@ def _terminate_running_processes(running: list[_RunningChunkProcess]) -> list[di
         exit_code = getattr(process, "returncode", None)
         if exit_code is None:
             exit_code = process.poll()
-        results.append(_finalize_running_process(running_process, exit_code=int(exit_code or -1)))
+        results.append(_finalize_running_process(running_process, exit_code=-1 if exit_code is None else int(exit_code)))
         running.remove(running_process)
     return results
 

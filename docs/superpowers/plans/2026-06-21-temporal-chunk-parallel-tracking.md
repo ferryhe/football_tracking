@@ -520,8 +520,8 @@ Expected: all tests pass.
 Verified on 2026-06-21:
 
 ```text
-python_backend.tests.test_chunk_runner: Ran 29 tests, OK
-unittest discover python_backend\tests: Ran 177 tests, OK
+python_backend.tests.test_chunk_runner: Ran 30 tests, OK
+unittest discover python_backend\tests: Ran 178 tests, OK
 ruff check chunk_runner/test_chunk_runner: OK
 ```
 

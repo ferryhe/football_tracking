@@ -220,6 +220,35 @@ class FailingFirstChunkPopen:
         self.returncode = -9
 
 
+class FailingFirstCompletedSecondChunkPopen:
+    instances: list["FailingFirstCompletedSecondChunkPopen"] = []
+
+    def __init__(self, command: list[str], **kwargs: object) -> None:
+        self.command = list(command)
+        self.kwargs = kwargs
+        self.config_path = Path(self.command[self.command.index("--config") + 1])
+        self.returncode: int | None = None
+        self.terminated = False
+        self.is_failure = "chunk_0000" in self.config_path.parts
+        self.instances.append(self)
+
+    def poll(self) -> int | None:
+        self.returncode = 7 if self.is_failure else 0
+        return self.returncode
+
+    def terminate(self) -> None:
+        self.terminated = True
+        self.returncode = -15
+
+    def wait(self, timeout: float | None = None) -> int:
+        if self.returncode is None:
+            self.returncode = -15 if self.terminated else 0
+        return self.returncode
+
+    def kill(self) -> None:
+        self.returncode = -9
+
+
 class RunningChunkPopen:
     instances: list["RunningChunkPopen"] = []
 
@@ -925,6 +954,32 @@ class TemporalChunkSequentialRunnerTests(unittest.TestCase):
         self.assertEqual(2, len(report["execution"]["results"]))
         self.assertEqual(7, report["execution"]["results"][0]["exit_code"])
         self.assertIn("worker failed", report["execution"]["results"][0]["stderr"])
+
+    def test_run_temporal_chunks_preserves_zero_exit_code_when_cleaning_up_completed_companion(self) -> None:
+        FailingFirstCompletedSecondChunkPopen.instances = []
+        with tempfile.TemporaryDirectory() as temp_name:
+            base_dir = Path(temp_name)
+            config = make_app_config(base_dir)
+            config.detector.device = "cpu"
+            config.temporal_chunks.max_workers = 2
+            chunks = make_runner_chunks(2)
+
+            with (
+                patch("football_tracking.chunk_runner.plan_temporal_chunks", return_value=chunks),
+                patch("football_tracking.chunk_runner.subprocess.Popen", FailingFirstCompletedSecondChunkPopen),
+                patch("football_tracking.chunk_runner.time.sleep"),
+                patch("football_tracking.chunk_runner.stitch_chunk_outputs") as stitch,
+            ):
+                with self.assertRaisesRegex(RuntimeError, "chunk_0000"):
+                    run_temporal_chunks(config)
+            report = json.loads((config.output_dir / "temporal_chunks_report.json").read_text(encoding="utf-8"))
+
+        self.assertEqual(2, len(FailingFirstCompletedSecondChunkPopen.instances))
+        self.assertFalse(FailingFirstCompletedSecondChunkPopen.instances[1].terminated)
+        stitch.assert_not_called()
+        self.assertEqual("failed", report["execution"]["status"])
+        self.assertEqual(7, report["execution"]["results"][0]["exit_code"])
+        self.assertEqual(0, report["execution"]["results"][1]["exit_code"])
 
     def test_run_temporal_chunks_writes_failed_report_when_subprocess_cannot_start(self) -> None:
         StartFailingChunkPopen.instances = []
