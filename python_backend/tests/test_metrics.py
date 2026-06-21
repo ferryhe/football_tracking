@@ -112,9 +112,13 @@ class MetricsTests(unittest.TestCase):
                 encoding="utf-8",
             )
 
+            def fail_after_partial_audit_write(path: Path) -> None:
+                (path / "ball_audit.json").write_text("{", encoding="utf-8")
+                raise RuntimeError("partial audit write")
+
             with mock.patch(
                 "football_tracking.metrics.write_ball_audit_report",
-                side_effect=UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte"),
+                side_effect=fail_after_partial_audit_write,
             ):
                 manifest, report = write_run_artifacts(
                     output_dir=output_dir,
@@ -129,6 +133,7 @@ class MetricsTests(unittest.TestCase):
             self.assertTrue((output_dir / "run_manifest.json").exists())
             self.assertTrue((output_dir / "metrics_report.json").exists())
             self.assertIn("ball_audit_error", report)
+            self.assertNotIn("ball_audit", report)
 
 
 if __name__ == "__main__":

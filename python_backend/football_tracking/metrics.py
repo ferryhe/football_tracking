@@ -248,8 +248,11 @@ def _mean(values: list[float]) -> float | None:
 def _read_optional_json(path: Path) -> dict[str, Any] | None:
     if not path.exists():
         return None
-    with path.open("r", encoding="utf-8") as handle:
-        loaded = json.load(handle)
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            loaded = json.load(handle)
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return None
     return loaded if isinstance(loaded, dict) else None
 
 

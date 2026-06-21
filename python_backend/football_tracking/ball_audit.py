@@ -105,7 +105,14 @@ def _read_track_rows(csv_path: Path) -> list[dict[str, Any]]:
                     "status": row.get("Status") or "",
                 }
             )
-    return sorted(rows, key=lambda item: (item["frame"] is None, item["frame"] or item["order"], item["order"]))
+    return sorted(
+        rows,
+        key=lambda item: (
+            item["frame"] is None,
+            item["order"] if item["frame"] is None else item["frame"],
+            item["order"],
+        ),
+    )
 
 
 def _build_source_tracklets(source: str, rows: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:

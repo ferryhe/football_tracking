@@ -124,6 +124,24 @@ class BallAuditTests(unittest.TestCase):
         self.assertEqual(report["summary"], loaded["summary"])
         self.assertEqual("raw:0-0", loaded["tracklets"][0]["id"])
 
+    def test_frame_zero_sorting_keeps_out_of_order_rows_contiguous(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            write_csv(
+                output_dir / "ball_track.csv",
+                [
+                    {"Frame": 1, "X": 11, "Y": 11, "Confidence": 0.90, "Status": "Detected"},
+                    {"Frame": 0, "X": 10, "Y": 10, "Confidence": 0.90, "Status": "Detected"},
+                    {"Frame": 2, "X": 12, "Y": 12, "Confidence": 0.90, "Status": "Detected"},
+                ],
+            )
+
+            report = build_ball_audit_report(output_dir)
+
+        self.assertEqual(1, len(report["tracklets"]))
+        self.assertEqual("raw:0-2", report["tracklets"][0]["id"])
+        self.assertEqual(3, report["tracklets"][0]["length"])
+
 
 if __name__ == "__main__":
     unittest.main()
