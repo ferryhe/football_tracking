@@ -265,6 +265,36 @@ class ReviewPacketTests(unittest.TestCase):
         self.assertEqual(1, report["summary"]["packet_count"])
         self.assertEqual("high_recall_rejection", report["packets"][0]["source"]["kind"])
 
+    def test_build_review_packet_report_does_not_duplicate_embedded_and_standalone_reconcile(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            output_dir = Path(temp)
+            rows = ["Frame,X,Y,Confidence,Status"]
+            rows.extend(f"{frame},{frame},{frame},0.90,Detected" for frame in range(30))
+            (output_dir / "ball_track.csv").write_text("\n".join(rows) + "\n", encoding="utf-8")
+            report_dir = output_dir / "high_recall_windows"
+            report_dir.mkdir()
+            reconcile = {
+                "review_packet_clues": [
+                    {
+                        "start_frame": 8,
+                        "end_frame": 10,
+                        "reason": "lost_gap",
+                        "priority": "high",
+                        "rejection_reason": "jump_gate_failed",
+                    }
+                ]
+            }
+            (report_dir / "report.json").write_text(
+                json.dumps({"schema_version": "1.0", "windows": [], "reconcile": reconcile}),
+                encoding="utf-8",
+            )
+            (report_dir / "reconcile_report.json").write_text(json.dumps(reconcile), encoding="utf-8")
+
+            report = build_review_packet_report(output_dir, max_packets=4, include_media=False)
+
+        sources = [packet["source"] for packet in report["packets"] if packet["source"]["kind"] == "high_recall_rejection"]
+        self.assertEqual(1, len(sources))
+
     def test_write_review_packet_report_persists_packet_manifests(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             output_dir = Path(temp)

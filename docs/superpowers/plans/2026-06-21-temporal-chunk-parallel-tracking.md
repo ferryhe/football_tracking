@@ -676,8 +676,8 @@ Expected: all tests pass.
 Actual:
 
 ```text
-python_backend.tests.test_high_recall_windows + python_backend.tests.test_high_recall_reconcile + python_backend.tests.test_review_packets + python_backend.tests.test_chunk_runner + python_backend.tests.test_config_and_provider: Ran 72 tests, OK
-unittest discover python_backend\tests: Ran 206 tests, OK
+python_backend.tests.test_high_recall_windows + python_backend.tests.test_high_recall_reconcile + python_backend.tests.test_review_packets + python_backend.tests.test_chunk_runner + python_backend.tests.test_config_and_provider: Ran 73 tests, OK
+unittest discover python_backend\tests: Ran 207 tests, OK
 ruff check PR6 changed Python files and tests: OK
 git diff --check: OK
 spec-compliance reviewer: Go

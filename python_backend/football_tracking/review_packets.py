@@ -247,10 +247,12 @@ def _high_recall_rejection_sources(output_dir: Path) -> list[dict[str, Any]]:
     clues: list[dict[str, Any]] = []
     for report_root in _high_recall_report_roots(output_dir):
         wrapper = _read_optional_json(report_root / "report.json") or {}
-        reports = [_read_optional_json(report_root / "reconcile_report.json") or {}]
-        reconcile = wrapper.get("reconcile") if isinstance(wrapper, dict) else None
-        if isinstance(reconcile, dict):
-            reports.append(reconcile)
+        standalone_reconcile = _read_optional_json(report_root / "reconcile_report.json")
+        if isinstance(standalone_reconcile, dict):
+            reports = [standalone_reconcile]
+        else:
+            reconcile = wrapper.get("reconcile") if isinstance(wrapper, dict) else None
+            reports = [reconcile] if isinstance(reconcile, dict) else []
 
         rejected_windows = wrapper.get("rejected_windows") if isinstance(wrapper, dict) else None
         if isinstance(rejected_windows, list):
