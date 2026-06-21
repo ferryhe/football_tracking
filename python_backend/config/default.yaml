@@ -11,7 +11,7 @@ logging:
 detector:
   model_path: "./weights/football_ball_yolo.pt"
   device: "cuda:0"
-  inference_mode: "sahi"
+  inference_mode: "direct_full_frame"
   confidence_threshold: 0.15
   image_size: 1280
   use_half: true
@@ -115,3 +115,14 @@ temporal_chunks:
   decode_preroll_frames: 120
   output_dir_name: "chunks"
   merge_strategy: "overlap_quality"
+
+# 高召回二次识别窗口配置：默认关闭，避免全场 SAHI。
+high_recall_windows:
+  enabled: false
+  margin_frames: 12
+  merge_gap_frames: 30
+  max_total_frames: 1800
+  mode: "sahi"
+  output_dir_name: "high_recall_windows"
+  max_speed_px_per_frame: 180.0
+  max_jump_px: 260.0

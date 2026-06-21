@@ -8,6 +8,7 @@ import yaml
 
 DETECTOR_INFERENCE_MODES = {"sahi", "direct_full_frame"}
 TEMPORAL_CHUNK_MERGE_STRATEGIES = {"overlap_quality"}
+DEFAULT_HIGH_RECALL_MAX_TOTAL_FRAMES = 1800
 
 
 @dataclass(slots=True)
@@ -20,7 +21,7 @@ class LoggingConfig:
 class DetectorConfig:
     model_path: Path
     device: str = "cuda:0"
-    inference_mode: str = "sahi"
+    inference_mode: str = "direct_full_frame"
     confidence_threshold: float = 0.15
     image_size: int = 1280
     use_half: bool = True
@@ -419,6 +420,35 @@ class TemporalChunkConfig:
 
 
 @dataclass(slots=True)
+class HighRecallWindowConfig:
+    enabled: bool = False
+    margin_frames: int = 0
+    merge_gap_frames: int = 30
+    max_total_frames: int | None = DEFAULT_HIGH_RECALL_MAX_TOTAL_FRAMES
+    mode: str = "sahi"
+    output_dir_name: str = "high_recall_windows"
+    max_speed_px_per_frame: float = 180.0
+    max_jump_px: float = 260.0
+
+    def __post_init__(self) -> None:
+        self.margin_frames = max(0, int(self.margin_frames))
+        self.merge_gap_frames = min(30, max(0, int(self.merge_gap_frames)))
+        if self.max_total_frames is not None:
+            self.max_total_frames = int(float(self.max_total_frames))
+            if self.max_total_frames <= 0:
+                raise ValueError("high_recall_windows.max_total_frames must be greater than 0 or null")
+        self.mode = str(self.mode or "sahi").strip().lower()
+        if self.mode not in DETECTOR_INFERENCE_MODES:
+            raise ValueError(f"Unknown high_recall_windows mode: {self.mode}")
+        self.output_dir_name = str(self.output_dir_name).strip()
+        output_dir_path = Path(self.output_dir_name)
+        if not self.output_dir_name or output_dir_path.is_absolute() or output_dir_path.name != self.output_dir_name:
+            raise ValueError("high_recall_windows.output_dir_name must be a single directory name")
+        self.max_speed_px_per_frame = float(self.max_speed_px_per_frame)
+        self.max_jump_px = float(self.max_jump_px)
+
+
+@dataclass(slots=True)
 class MockConfig:
     enabled: bool = False
     scenario: str = "A"
@@ -447,6 +477,7 @@ class AppConfig:
     runtime: RuntimeConfig
     mock: MockConfig
     temporal_chunks: TemporalChunkConfig = field(default_factory=TemporalChunkConfig)
+    high_recall_windows: HighRecallWindowConfig = field(default_factory=HighRecallWindowConfig)
 
 
 def _resolve_path(base_dir: Path, raw_path: str) -> Path:
@@ -840,6 +871,26 @@ def _to_temporal_chunks(raw_temporal_chunks: Any) -> TemporalChunkConfig:
     )
 
 
+def _to_high_recall_windows(raw_high_recall_windows: Any) -> HighRecallWindowConfig:
+    if raw_high_recall_windows in (None, "", []):
+        return HighRecallWindowConfig()
+    if not isinstance(raw_high_recall_windows, dict):
+        raise ValueError("high_recall_windows must be a dict or null")
+    config_values: dict[str, Any] = {
+        "enabled": bool(raw_high_recall_windows.get("enabled", False)),
+        "margin_frames": int(raw_high_recall_windows.get("margin_frames", 0)),
+        "merge_gap_frames": int(raw_high_recall_windows.get("merge_gap_frames", 30)),
+        "mode": str(raw_high_recall_windows.get("mode", "sahi")),
+        "output_dir_name": str(raw_high_recall_windows.get("output_dir_name", "high_recall_windows")),
+        "max_speed_px_per_frame": float(raw_high_recall_windows.get("max_speed_px_per_frame", 180.0)),
+        "max_jump_px": float(raw_high_recall_windows.get("max_jump_px", 260.0)),
+    }
+    if "max_total_frames" in raw_high_recall_windows:
+        raw_max_total_frames = raw_high_recall_windows.get("max_total_frames")
+        config_values["max_total_frames"] = None if raw_max_total_frames in (None, "") else int(float(raw_max_total_frames))
+    return HighRecallWindowConfig(**config_values)
+
+
 def load_config(config_path: Path) -> AppConfig:
     """从 YAML 加载配置，并将相对路径解析为绝对路径。"""
     if not config_path.exists():
@@ -859,7 +910,7 @@ def load_config(config_path: Path) -> AppConfig:
     detector = DetectorConfig(
         model_path=_resolve_path(base_dir, detector_raw.get("model_path", "./weights/football_ball_yolo.pt")),
         device=detector_raw.get("device", "cuda:0"),
-        inference_mode=str(detector_raw.get("inference_mode", "sahi")),
+        inference_mode=str(detector_raw.get("inference_mode", "direct_full_frame")),
         confidence_threshold=float(detector_raw.get("confidence_threshold", 0.15)),
         image_size=int(detector_raw.get("image_size", 1280)),
         use_half=bool(detector_raw.get("use_half", True)),
@@ -975,6 +1026,7 @@ def load_config(config_path: Path) -> AppConfig:
     postprocess = _to_postprocess(raw.get("postprocess"))
     follow_cam = _to_follow_cam(raw.get("follow_cam"), base_dir)
     temporal_chunks = _to_temporal_chunks(raw.get("temporal_chunks"))
+    high_recall_windows = _to_high_recall_windows(raw.get("high_recall_windows"))
 
     runtime_raw = raw.get("runtime", {})
     raw_start_frame = runtime_raw.get("start_frame", 0)
@@ -1031,4 +1083,5 @@ def load_config(config_path: Path) -> AppConfig:
         runtime=runtime,
         mock=mock,
         temporal_chunks=temporal_chunks,
+        high_recall_windows=high_recall_windows,
     )

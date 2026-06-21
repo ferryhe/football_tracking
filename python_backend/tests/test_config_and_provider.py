@@ -85,7 +85,7 @@ class ConfigAndProviderTests(unittest.TestCase):
         self.assertEqual(0, config.runtime.start_frame)
         self.assertIsNone(config.runtime.max_frames)
         self.assertFalse(config.selection.priors.enabled)
-        self.assertEqual("sahi", config.detector.inference_mode)
+        self.assertEqual("direct_full_frame", config.detector.inference_mode)
         self.assertFalse(config.temporal_chunks.enabled)
         self.assertEqual(1200, config.temporal_chunks.chunk_frames)
         self.assertEqual(80, config.temporal_chunks.overlap_frames)

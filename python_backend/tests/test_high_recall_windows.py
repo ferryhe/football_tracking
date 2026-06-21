@@ -1,0 +1,510 @@
+from __future__ import annotations
+
+import json
+import tempfile
+import unittest
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
+
+from football_tracking.chunk_runner import run_high_recall_windows
+from football_tracking.config import load_config
+from football_tracking.high_recall_windows import (
+    build_high_recall_windows,
+    write_high_recall_window_report,
+)
+from football_tracking.review_packets import build_review_packet_report
+
+
+def _write_json(path: Path, payload: dict) -> None:
+    path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+
+
+class HighRecallWindowTests(unittest.TestCase):
+    def test_build_combines_sources_applies_margin_and_merges_close_windows(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_json(
+                output_dir / "ai_review_triggers.json",
+                {
+                    "decision": {
+                        "priority": "high",
+                        "recommended_review_windows": [
+                            {"start_frame": 10, "end_frame": 15, "reason": "large_jump"},
+                        ],
+                    },
+                },
+            )
+            _write_json(
+                output_dir / "ball_audit.json",
+                {
+                    "review_events": [
+                        {
+                            "type": "lost_gap",
+                            "severity": "warn",
+                            "start_frame": 18,
+                            "end_frame": 20,
+                            "reason": "lost gap",
+                        },
+                    ],
+                    "tracklets": [],
+                },
+            )
+            _write_json(
+                output_dir / "event_candidates.json",
+                {
+                    "candidates": [
+                        {
+                            "type": "shot_candidate",
+                            "score": 0.82,
+                            "start_frame": 70,
+                            "end_frame": 72,
+                            "render_window": {"start_frame": 60, "end_frame": 90},
+                            "reason": "speed burst",
+                        },
+                    ],
+                },
+            )
+
+            report = build_high_recall_windows(
+                output_dir,
+                margin_frames=2,
+                merge_gap_frames=10,
+                max_total_frames=200,
+                total_frames=120,
+                mode="sahi",
+            )
+
+        self.assertEqual("succeeded", report["summary"]["status"])
+        self.assertEqual(2, report["summary"]["selected_window_count"])
+        self.assertEqual(
+            [
+                {"start_frame": 8, "end_frame": 22, "mode": "sahi", "priority": "high"},
+                {"start_frame": 58, "end_frame": 92, "mode": "sahi", "priority": "high"},
+            ],
+            [
+                {
+                    "start_frame": window["start_frame"],
+                    "end_frame": window["end_frame"],
+                    "mode": window["mode"],
+                    "priority": window["priority"],
+                }
+                for window in report["windows"]
+            ],
+        )
+        self.assertIn("ai_review", report["windows"][0]["reason"])
+        self.assertIn("ball_audit", report["windows"][0]["reason"])
+        self.assertIn("event_candidates", report["windows"][1]["reason"])
+
+    def test_max_total_frames_keeps_higher_priority_window_and_records_rejection(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_json(
+                output_dir / "ai_review_triggers.json",
+                {
+                    "decision": {
+                        "priority": "medium",
+                        "recommended_review_windows": [
+                            {"start_frame": 0, "end_frame": 49, "reason": "wide medium review"},
+                        ],
+                    },
+                },
+            )
+            _write_json(
+                output_dir / "event_candidates.json",
+                {
+                    "candidates": [
+                        {
+                            "type": "goal_candidate",
+                            "score": 0.91,
+                            "start_frame": 80,
+                            "end_frame": 89,
+                            "reason": "short high-value candidate",
+                        },
+                    ],
+                },
+            )
+
+            report = build_high_recall_windows(
+                output_dir,
+                margin_frames=0,
+                merge_gap_frames=0,
+                max_total_frames=15,
+                mode="sahi",
+            )
+
+        self.assertEqual("capped", report["summary"]["status"])
+        self.assertEqual([(80, 89)], [(item["start_frame"], item["end_frame"]) for item in report["windows"]])
+        self.assertEqual(1, report["summary"]["rejected_count"])
+        self.assertEqual("max_total_frames_exceeded", report["rejected_windows"][0]["rejection_reason"])
+
+    def test_default_budget_caps_large_window_plans(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_json(
+                output_dir / "ai_review_triggers.json",
+                {
+                    "decision": {
+                        "priority": "high",
+                        "recommended_review_windows": [
+                            {"start_frame": 0, "end_frame": 1999, "reason": "wide review"},
+                        ],
+                    },
+                },
+            )
+
+            report = build_high_recall_windows(output_dir)
+
+        self.assertEqual("rejected", report["summary"]["status"])
+        self.assertEqual(0, report["summary"]["selected_window_count"])
+        self.assertEqual(1, report["summary"]["rejected_count"])
+        self.assertEqual(1800, report["settings"]["max_total_frames"])
+
+    def test_non_positive_budget_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+
+            with self.assertRaises(ValueError):
+                build_high_recall_windows(output_dir, max_total_frames=0)
+
+    def test_invalid_budget_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+
+            with self.assertRaises(ValueError):
+                build_high_recall_windows(output_dir, max_total_frames="inf")  # type: ignore[arg-type]
+
+    def test_three_input_sources_are_parsed_and_report_can_be_serialized(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_json(
+                output_dir / "ai_review_triggers.json",
+                {
+                    "triggers": [
+                        {
+                            "type": "large_jump",
+                            "priority": "high",
+                            "start_frame": 5,
+                            "end_frame": 6,
+                            "reason": "triggered jump",
+                        },
+                    ],
+                },
+            )
+            _write_json(
+                output_dir / "ball_audit.json",
+                {
+                    "review_events": [
+                        {
+                            "type": "candidate_ambiguity",
+                            "severity": "warn",
+                            "start_frame": 25,
+                            "end_frame": 25,
+                        },
+                    ],
+                    "tracklets": [
+                        {
+                            "id": "raw:50-52",
+                            "source": "raw",
+                            "start_frame": 50,
+                            "end_frame": 52,
+                            "flags": ["low_confidence"],
+                            "suspicion_score": 0.35,
+                        }
+                    ],
+                },
+            )
+            _write_json(
+                output_dir / "event_candidates.json",
+                {
+                    "candidates": [
+                        {
+                            "type": "shot_candidate",
+                            "score": 0.76,
+                            "start_frame": 75,
+                            "end_frame": 79,
+                        },
+                    ],
+                },
+            )
+
+            report = write_high_recall_window_report(
+                output_dir,
+                margin_frames=0,
+                merge_gap_frames=0,
+                max_total_frames=200,
+            )
+            saved = json.loads((output_dir / "high_recall_windows" / "report.json").read_text(encoding="utf-8"))
+
+        sources = [window["sources"][0] for window in report["windows"]]
+        self.assertEqual(["ai_review_triggers", "ball_audit", "ball_audit", "event_candidates"], sources)
+        self.assertEqual(report["windows"], saved["windows"])
+
+
+class HighRecallChunkRunnerHookTests(unittest.TestCase):
+    def test_runner_executes_only_selected_windows_and_reconciles_results(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            config = SimpleNamespace(
+                output_dir=output_dir,
+                output=SimpleNamespace(csv_name="ball_track.csv", debug_jsonl_name="debug.jsonl"),
+                detector=SimpleNamespace(inference_mode="direct_full_frame"),
+                runtime=SimpleNamespace(start_frame=0, max_frames=None),
+                high_recall_windows=SimpleNamespace(
+                    enabled=True,
+                    margin_frames=0,
+                    merge_gap_frames=0,
+                    max_total_frames=100,
+                    mode="sahi",
+                    output_dir_name="high_recall_windows",
+                    max_speed_px_per_frame=120.0,
+                    max_jump_px=180.0,
+                ),
+            )
+            window = {
+                "start_frame": 12,
+                "end_frame": 18,
+                "reason": "ai_review: lost_gap",
+                "mode": "sahi",
+                "priority": "high",
+            }
+            window_report = {"windows": [window], "summary": {"selected_window_count": 1}}
+
+            def fake_write_config(config_arg, window_arg, window_index, root_arg):
+                window_dir = root_arg / f"window_{window_index:03d}"
+                window_dir.mkdir(parents=True, exist_ok=True)
+                config_path = window_dir / "chunk_config.yaml"
+                config_path.write_text("mock: true\n", encoding="utf-8")
+                return config_path
+
+            with (
+                patch("football_tracking.chunk_runner.write_ball_audit_report") as write_audit,
+                patch("football_tracking.chunk_runner.write_ai_review_trigger_report") as write_ai_review,
+                patch("football_tracking.chunk_runner.write_event_candidate_report") as write_events,
+                patch(
+                    "football_tracking.chunk_runner.write_high_recall_window_report",
+                    return_value=window_report,
+                ) as write_windows,
+                patch(
+                    "football_tracking.chunk_runner.write_high_recall_window_config",
+                    side_effect=fake_write_config,
+                ) as write_config,
+                patch("football_tracking.chunk_runner.run_high_recall_chunk", return_value=0) as run_chunk_mock,
+                patch(
+                    "football_tracking.chunk_runner.reconcile_high_recall_outputs",
+                    return_value={"summary": {"accepted_count": 1}},
+                ) as reconcile,
+            ):
+                report = run_high_recall_windows(config, source_total_frames=200)
+
+        write_audit.assert_called_once_with(output_dir)
+        write_ai_review.assert_called_once_with(output_dir)
+        write_events.assert_called_once_with(output_dir)
+        write_windows.assert_called_once()
+        write_config.assert_called_once()
+        run_chunk_mock.assert_called_once()
+        reconcile.assert_called_once_with(
+            output_dir,
+            [window],
+            high_recall_root=output_dir / "high_recall_windows",
+            csv_name="ball_track.csv",
+            max_speed_px_per_frame=120.0,
+            max_jump_px=180.0,
+        )
+        self.assertEqual("succeeded", report["execution"]["status"])
+
+    def test_runner_clears_stale_reconcile_report_when_no_windows_are_selected(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            output_dir.mkdir(parents=True, exist_ok=True)
+            (output_dir / "ball_track.csv").write_text(
+                "Frame,X,Y,Confidence,Status\n10,10,10,0.90,Detected\n11,11,10,0.90,Detected\n",
+                encoding="utf-8",
+            )
+            stale_root = output_dir / "high_recall_windows"
+            stale_root.mkdir()
+            (stale_root / "window_000").mkdir()
+            (stale_root / "reconcile_report.json").write_text(
+                json.dumps(
+                    {
+                        "review_packet_clues": [
+                            {
+                                "start_frame": 10,
+                                "end_frame": 11,
+                                "reason": "stale",
+                                "priority": "high",
+                                "rejection_reason": "jump_gate_failed",
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            stale_custom_root = output_dir / "old_custom_windows"
+            stale_custom_root.mkdir()
+            (stale_custom_root / "window_000").mkdir()
+            (stale_custom_root / "report.json").write_text(
+                json.dumps(
+                    {
+                        "windows": [],
+                        "rejected_windows": [
+                            {
+                                "start_frame": 10,
+                                "end_frame": 11,
+                                "reason": "stale custom",
+                                "priority": "high",
+                                "rejection_reason": "max_total_frames_exceeded",
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            config = SimpleNamespace(
+                output_dir=output_dir,
+                output=SimpleNamespace(csv_name="ball_track.csv", debug_jsonl_name="debug.jsonl"),
+                detector=SimpleNamespace(inference_mode="direct_full_frame"),
+                runtime=SimpleNamespace(start_frame=0, max_frames=None),
+                high_recall_windows=SimpleNamespace(
+                    enabled=True,
+                    margin_frames=0,
+                    merge_gap_frames=0,
+                    max_total_frames=100,
+                    mode="sahi",
+                    output_dir_name="high_recall_windows",
+                    max_speed_px_per_frame=120.0,
+                    max_jump_px=180.0,
+                ),
+            )
+
+            with (
+                patch("football_tracking.chunk_runner.write_ball_audit_report", return_value={}),
+                patch("football_tracking.chunk_runner.write_ai_review_trigger_report", return_value={}),
+                patch("football_tracking.chunk_runner.write_event_candidate_report", return_value={}),
+                patch(
+                    "football_tracking.chunk_runner.write_high_recall_window_report",
+                    return_value={"windows": [], "summary": {"selected_window_count": 0}},
+                ),
+            ):
+                run_high_recall_windows(config, source_total_frames=20)
+
+            packet_report = build_review_packet_report(output_dir, max_packets=2, include_media=False)
+            self.assertFalse((stale_root / "reconcile_report.json").exists())
+            self.assertFalse((stale_root / "window_000").exists())
+            self.assertFalse((stale_custom_root / "report.json").exists())
+            self.assertFalse((stale_custom_root / "window_000").exists())
+            self.assertEqual(0, packet_report["summary"]["packet_count"])
+
+
+class HighRecallConfigTests(unittest.TestCase):
+    def test_load_config_parses_high_recall_windows_safely_disabled_by_default(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            repo_root = Path(temp_name)
+            config_dir = repo_root / "config"
+            config_dir.mkdir(parents=True)
+            config_path = config_dir / "high_recall.yaml"
+            config_path.write_text(
+                """
+input_video: ./data/input.mp4
+output_dir: ./outputs/run
+detector:
+  model_path: ./weights/model.pt
+high_recall_windows:
+  enabled: true
+  margin_frames: 12
+  merge_gap_frames: 44
+  max_total_frames: 300
+  mode: sahi
+  output_dir_name: high_recall_windows
+  max_speed_px_per_frame: 140.0
+  max_jump_px: 220.0
+""".strip()
+                + "\n",
+                encoding="utf-8",
+            )
+
+            config = load_config(config_path)
+
+        self.assertTrue(config.high_recall_windows.enabled)
+        self.assertEqual(12, config.high_recall_windows.margin_frames)
+        self.assertEqual(30, config.high_recall_windows.merge_gap_frames)
+        self.assertEqual(300, config.high_recall_windows.max_total_frames)
+        self.assertEqual("sahi", config.high_recall_windows.mode)
+        self.assertEqual("high_recall_windows", config.high_recall_windows.output_dir_name)
+        self.assertEqual(140.0, config.high_recall_windows.max_speed_px_per_frame)
+        self.assertEqual(220.0, config.high_recall_windows.max_jump_px)
+
+    def test_load_config_uses_safe_high_recall_budget_when_enabled_minimally(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            repo_root = Path(temp_name)
+            config_dir = repo_root / "config"
+            config_dir.mkdir(parents=True)
+            config_path = config_dir / "high_recall_minimal.yaml"
+            config_path.write_text(
+                """
+input_video: ./data/input.mp4
+output_dir: ./outputs/run
+detector:
+  model_path: ./weights/model.pt
+high_recall_windows:
+  enabled: true
+""".strip()
+                + "\n",
+                encoding="utf-8",
+            )
+
+            config = load_config(config_path)
+
+        self.assertTrue(config.high_recall_windows.enabled)
+        self.assertEqual(1800, config.high_recall_windows.max_total_frames)
+
+    def test_load_config_allows_explicit_unbounded_high_recall_budget(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            repo_root = Path(temp_name)
+            config_dir = repo_root / "config"
+            config_dir.mkdir(parents=True)
+            config_path = config_dir / "high_recall_unbounded.yaml"
+            config_path.write_text(
+                """
+input_video: ./data/input.mp4
+output_dir: ./outputs/run
+detector:
+  model_path: ./weights/model.pt
+high_recall_windows:
+  enabled: true
+  max_total_frames:
+""".strip()
+                + "\n",
+                encoding="utf-8",
+            )
+
+            config = load_config(config_path)
+
+        self.assertIsNone(config.high_recall_windows.max_total_frames)
+
+    def test_load_config_rejects_non_positive_high_recall_budget(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            repo_root = Path(temp_name)
+            config_dir = repo_root / "config"
+            config_dir.mkdir(parents=True)
+            config_path = config_dir / "high_recall_bad_budget.yaml"
+            config_path.write_text(
+                """
+input_video: ./data/input.mp4
+output_dir: ./outputs/run
+detector:
+  model_path: ./weights/model.pt
+high_recall_windows:
+  enabled: true
+  max_total_frames: 0
+""".strip()
+                + "\n",
+                encoding="utf-8",
+            )
+
+            with self.assertRaises(ValueError):
+                load_config(config_path)
+
+
+if __name__ == "__main__":
+    unittest.main()
