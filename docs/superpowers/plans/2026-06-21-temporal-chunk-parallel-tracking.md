@@ -590,6 +590,8 @@ python_backend.tests.test_metrics + python_backend.tests.test_api_service + pyth
 unittest discover python_backend\tests: Ran 184 tests, OK
 export_openapi.py --check: OK
 ruff check PR5 changed Python files: OK
+generated RunProgress clients updated for chunk_index/chunk_count
+local api-spec codegen attempt blocked by missing esbuild optional platform package; remote Node CI remains the generator consistency gate
 ```
 
 ### PR6: Triggered High-Recall Window Execution And Merge Back
