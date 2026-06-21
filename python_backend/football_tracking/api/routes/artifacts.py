@@ -31,7 +31,7 @@ def get_artifact(run_id: str, artifact_name: str, service: ApiService = Depends(
     try:
         path = service.get_artifact_path(run_id, artifact_name)
         media_type = next(
-            (item.get("content_type") for item in service.list_artifacts(run_id) if item.get("name") == path.name),
+            (item.get("content_type") for item in service.list_artifacts(run_id) if item.get("name") == artifact_name),
             None,
         )
         return FileResponse(path, media_type=media_type, filename=path.name)
