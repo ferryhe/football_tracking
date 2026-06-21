@@ -159,7 +159,7 @@ def write_run_artifacts(output_dir: Path, run: dict[str, Any]) -> tuple[dict[str
     try:
         write_player_tracks_artifacts(output_dir)
     except Exception as exc:
-        player_tracks_error = f"Failed to write player_tracks.json: {exc}"
+        player_tracks_error = f"Failed to write player track artifacts: {exc}"
     report = build_metrics_report(output_dir)
     if ball_audit_error is not None:
         report["ball_audit_error"] = ball_audit_error

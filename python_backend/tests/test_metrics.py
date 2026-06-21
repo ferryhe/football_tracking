@@ -295,6 +295,7 @@ class MetricsTests(unittest.TestCase):
             self.assertTrue((output_dir / "run_manifest.json").exists())
             self.assertTrue((output_dir / "metrics_report.json").exists())
             self.assertIn("player_tracks_error", report)
+            self.assertIn("player track artifacts", report["player_tracks_error"])
 
 
 if __name__ == "__main__":
