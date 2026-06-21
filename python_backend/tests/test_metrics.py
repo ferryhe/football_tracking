@@ -306,6 +306,60 @@ class MetricsTests(unittest.TestCase):
         self.assertEqual({"highlight_worthy": 1, "needs_ai_review": 2}, report["review_packets"]["counts_by_label"])
         self.assertEqual(report["review_packets"], stats["review_packets"])
 
+    def test_build_metrics_report_includes_ai_visual_review_and_accepted_highlights(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            (output_dir / "ai_visual_review.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": "1.0",
+                        "generated_at": "2026-01-01T00:00:00+00:00",
+                        "summary": {
+                            "packet_count": 4,
+                            "reviewed_count": 3,
+                            "error_count": 1,
+                            "counts_by_verdict": {"accept_highlight": 2, "needs_human_review": 1},
+                            "accepted_highlight_count": 2,
+                            "needs_human_review_count": 1,
+                            "reject_noise_count": 0,
+                        },
+                        "reviews": [],
+                        "errors": [{"packet_id": "packet_bad", "error": "bad model output"}],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            accepted_dir = output_dir / "highlights_ai_accepted"
+            accepted_dir.mkdir()
+            (accepted_dir / "ai_accepted_highlights_report.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": "1.0",
+                        "generated_at": "2026-01-01T00:00:01+00:00",
+                        "summary": {
+                            "qualified_count": 2,
+                            "copied_count": 1,
+                            "skipped_count": 1,
+                            "error_count": 0,
+                        },
+                        "copied": [{"packet_id": "packet_keep"}],
+                        "skipped": [{"packet_id": "packet_missing"}],
+                        "errors": [],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            report = build_metrics_report(output_dir)
+            stats = stats_from_metrics_report(report)
+
+        self.assertEqual(4, report["ai_visual_review"]["packet_count"])
+        self.assertEqual(2, report["ai_visual_review"]["accepted_highlight_count"])
+        self.assertEqual(1, report["accepted_highlights"]["copied_count"])
+        self.assertEqual(1, report["accepted_highlights"]["skipped_count"])
+        self.assertEqual(report["ai_visual_review"], stats["ai_visual_review"])
+        self.assertEqual(report["accepted_highlights"], stats["accepted_highlights"])
+
     def test_build_metrics_report_includes_compact_temporal_chunk_summary(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:
             output_dir = Path(temp_name)
