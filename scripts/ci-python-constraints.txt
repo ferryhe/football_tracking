@@ -1,0 +1,7 @@
+# CI-only constraints for backend unit tests.
+#
+# These pins mirror uv.lock and keep FastAPI's route/test behavior stable while
+# the backend still installs from requirements-dev.txt. They can be removed once
+# the Python dependency set is fully lockfile-driven in CI.
+fastapi==0.136.1
+starlette==1.0.0
