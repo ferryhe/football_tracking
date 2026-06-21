@@ -1,35 +1,1512 @@
 openapi: 3.1.0
 info:
-  # Do not change the title, if the title changes, the import paths will be broken
   title: Api
   version: 0.1.0
-  description: API specification
-servers:
-  - url: /api
-    description: Base API path
-tags:
-  - name: health
-    description: Health operations
 paths:
+  /ai/config-diff:
+    post:
+      tags:
+      - ai
+      summary: Config Diff
+      operationId: config_diff
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AIConfigDiffRequest'
+        required: true
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AIConfigDiffResponse'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /ai/explain:
+    post:
+      tags:
+      - ai
+      summary: Explain
+      operationId: explain
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AIExplainRequest'
+        required: true
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AIExplainResponse'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /ai/recommend:
+    post:
+      tags:
+      - ai
+      summary: Recommend
+      operationId: recommend
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AIRecommendRequest'
+        required: true
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AISuggestion'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /configs:
+    get:
+      tags:
+      - configs
+      summary: List Configs
+      operationId: list_configs
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/ConfigListItem'
+                title: Response List Configs Api V1 Configs Get
+    delete:
+      tags:
+      - configs
+      summary: Delete Config
+      operationId: delete_config
+      parameters:
+      - name: name
+        in: query
+        required: true
+        schema:
+          type: string
+          title: Name
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DeleteResourceResponse'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /configs/derive:
+    post:
+      tags:
+      - configs
+      summary: Derive Config
+      operationId: derive_config
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DeriveConfigRequest'
+        required: true
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ConfigDetail'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /configs/{name}:
+    get:
+      tags:
+      - configs
+      summary: Get Config
+      operationId: get_config
+      parameters:
+      - name: name
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Name
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ConfigDetail'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+    put:
+      tags:
+      - configs
+      summary: Update Config
+      operationId: update_config
+      parameters:
+      - name: name
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Name
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateConfigRequest'
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ConfigDetail'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /health:
+    get:
+      tags:
+      - health
+      summary: Get Health
+      operationId: get_health
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+  /inputs:
+    get:
+      tags:
+      - inputs
+      summary: List Input Videos
+      operationId: list_input_videos
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InputCatalogResponse'
+    delete:
+      tags:
+      - inputs
+      summary: Delete Input Video
+      operationId: delete_input_video
+      parameters:
+      - name: name
+        in: query
+        required: true
+        schema:
+          type: string
+          title: Name
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DeleteResourceResponse'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /inputs/field-preview:
+    post:
+      tags:
+      - inputs
+      summary: Capture Field Preview
+      operationId: capture_field_preview
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/FieldPreviewRequest'
+        required: true
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FieldPreviewResponse'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /inputs/field-suggestion:
+    post:
+      tags:
+      - inputs
+      summary: Suggest Field Setup
+      operationId: suggest_field_setup
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/FieldSuggestionRequest'
+        required: true
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FieldSuggestionResponse'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /runs:
+    get:
+      tags:
+      - runs
+      summary: List Runs
+      operationId: list_runs
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/RunRecord'
+                title: Response List Runs Api V1 Runs Get
+    delete:
+      tags:
+      - runs
+      summary: Delete Run Output
+      operationId: delete_run_output
+      parameters:
+      - name: run_id
+        in: query
+        required: true
+        schema:
+          type: string
+          title: Run Id
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DeleteResourceResponse'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+    post:
+      tags:
+      - runs
+      summary: Create Run
+      operationId: create_run
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateRunRequest'
+      responses:
+        '202':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RunRecord'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /runs/asset-groups:
+    get:
+      tags:
+      - runs
+      summary: List Asset Groups
+      operationId: list_asset_groups
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                items:
+                  $ref: '#/components/schemas/AssetGroup'
+                type: array
+                title: Response List Asset Groups Api V1 Runs Asset Groups Get
+  /runs/{run_id}:
+    get:
+      tags:
+      - runs
+      summary: Get Run
+      operationId: get_run
+      parameters:
+      - name: run_id
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Run Id
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RunRecord'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /runs/{run_id}/artifacts:
+    get:
+      tags:
+      - artifacts
+      summary: List Artifacts
+      operationId: list_artifacts
+      parameters:
+      - name: run_id
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Run Id
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/ArtifactSummary'
+                title: Response List Artifacts Api V1 Runs  Run Id  Artifacts Get
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /runs/{run_id}/artifacts/{artifact_name}:
+    get:
+      tags:
+      - artifacts
+      summary: Get Artifact
+      operationId: get_artifact
+      parameters:
+      - name: run_id
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Run Id
+      - name: artifact_name
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Artifact Name
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema: {}
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /runs/{run_id}/camera-path:
+    get:
+      tags:
+      - artifacts
+      summary: Get Camera Path
+      operationId: get_camera_path
+      parameters:
+      - name: run_id
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Run Id
+      - name: offset
+        in: query
+        required: false
+        schema:
+          type: integer
+          minimum: 0
+          default: 0
+          title: Offset
+      - name: limit
+        in: query
+        required: false
+        schema:
+          type: integer
+          maximum: 5000
+          minimum: 1
+          default: 500
+          title: Limit
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CameraPathResponse'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /runs/{run_id}/cancel:
+    post:
+      tags:
+      - runs
+      summary: Cancel Run
+      operationId: cancel_run
+      parameters:
+      - name: run_id
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Run Id
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RunRecord'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /runs/{run_id}/cleanup-report:
+    get:
+      tags:
+      - artifacts
+      summary: Get Cleanup Report
+      operationId: get_cleanup_report
+      parameters:
+      - name: run_id
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Run Id
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema: {}
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /runs/{run_id}/follow-cam-render:
+    post:
+      tags:
+      - runs
+      summary: Create Follow Cam Render
+      operationId: create_follow_cam_render
+      parameters:
+      - name: run_id
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Run Id
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/FollowCamRenderRequest'
+      responses:
+        '202':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RunRecord'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /runs/{run_id}/follow-cam-report:
+    get:
+      tags:
+      - artifacts
+      summary: Get Follow Cam Report
+      operationId: get_follow_cam_report
+      parameters:
+      - name: run_id
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Run Id
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema: {}
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
   /healthz:
     get:
-      operationId: healthCheck
-      tags: [health]
+      tags:
+      - health
       summary: Health check
-      description: Returns server health status
+      operationId: healthCheck
       responses:
-        "200":
+        '200':
           description: Healthy
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/HealthStatus"
+                $ref: '#/components/schemas/HealthStatus'
 components:
   schemas:
+    AIConfigDiffRequest:
+      properties:
+        base_config_name:
+          type: string
+          title: Base Config Name
+        patch:
+          additionalProperties: true
+          type: object
+          title: Patch
+        output_name:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Output Name
+      type: object
+      required:
+      - base_config_name
+      title: AIConfigDiffRequest
+    AIConfigDiffResponse:
+      properties:
+        base_config_name:
+          type: string
+          title: Base Config Name
+        output_name:
+          type: string
+          title: Output Name
+        patch:
+          additionalProperties: true
+          type: object
+          title: Patch
+        patch_preview:
+          items:
+            type: string
+          type: array
+          title: Patch Preview
+      type: object
+      required:
+      - base_config_name
+      - output_name
+      title: AIConfigDiffResponse
+    AIExplainRequest:
+      properties:
+        run_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Run Id
+        config_name:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Config Name
+        focus:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Focus
+        language:
+          type: string
+          enum:
+          - en
+          - zh
+          title: Language
+          default: en
+      type: object
+      title: AIExplainRequest
+    AIExplainResponse:
+      properties:
+        summary:
+          type: string
+          title: Summary
+        evidence:
+          items:
+            type: string
+          type: array
+          title: Evidence
+      type: object
+      required:
+      - summary
+      title: AIExplainResponse
+    AIRecommendRequest:
+      properties:
+        run_id:
+          type: string
+          title: Run Id
+        objective:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Objective
+        language:
+          type: string
+          enum:
+          - en
+          - zh
+          title: Language
+          default: en
+      type: object
+      required:
+      - run_id
+      title: AIRecommendRequest
+    AISuggestion:
+      properties:
+        title:
+          type: string
+          title: Title
+        diagnosis:
+          type: string
+          title: Diagnosis
+        recommendation:
+          type: string
+          title: Recommendation
+        expected_tradeoff:
+          type: string
+          title: Expected Tradeoff
+        patch:
+          additionalProperties: true
+          type: object
+          title: Patch
+        patch_preview:
+          items:
+            type: string
+          type: array
+          title: Patch Preview
+        evidence:
+          items:
+            type: string
+          type: array
+          title: Evidence
+        output_name_suggestion:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Output Name Suggestion
+      type: object
+      required:
+      - title
+      - diagnosis
+      - recommendation
+      - expected_tradeoff
+      title: AISuggestion
+    ArtifactSummary:
+      properties:
+        name:
+          type: string
+          title: Name
+        path:
+          type: string
+          title: Path
+        kind:
+          type: string
+          title: Kind
+        exists:
+          type: boolean
+          title: Exists
+        size_bytes:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          title: Size Bytes
+        content_type:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Content Type
+      type: object
+      required:
+      - name
+      - path
+      - kind
+      - exists
+      title: ArtifactSummary
+    AssetGroup:
+      properties:
+        group_id:
+          type: string
+          title: Group Id
+        title:
+          type: string
+          title: Title
+        input_video:
+          anyOf:
+          - $ref: '#/components/schemas/InputVideoItem'
+          - type: 'null'
+        last_activity_at:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Last Activity At
+        run_count:
+          type: integer
+          title: Run Count
+          default: 0
+        config_count:
+          type: integer
+          title: Config Count
+          default: 0
+        output_count:
+          type: integer
+          title: Output Count
+          default: 0
+        runs:
+          items:
+            $ref: '#/components/schemas/RunRecord'
+          type: array
+          title: Runs
+        configs:
+          items:
+            $ref: '#/components/schemas/ConfigListItem'
+          type: array
+          title: Configs
+        outputs:
+          items:
+            $ref: '#/components/schemas/RunRecord'
+          type: array
+          title: Outputs
+        is_unbound:
+          type: boolean
+          title: Is Unbound
+          default: false
+      type: object
+      required:
+      - group_id
+      - title
+      title: AssetGroup
+    CameraPathResponse:
+      properties:
+        columns:
+          items:
+            type: string
+          type: array
+          title: Columns
+        offset:
+          type: integer
+          title: Offset
+        limit:
+          type: integer
+          title: Limit
+        total_rows:
+          type: integer
+          title: Total Rows
+        rows:
+          items:
+            additionalProperties: true
+            type: object
+          type: array
+          title: Rows
+      type: object
+      required:
+      - columns
+      - offset
+      - limit
+      - total_rows
+      - rows
+      title: CameraPathResponse
+    ConfigDetail:
+      properties:
+        name:
+          type: string
+          title: Name
+        path:
+          type: string
+          title: Path
+        text:
+          type: string
+          title: Text
+        raw:
+          additionalProperties: true
+          type: object
+          title: Raw
+        resolved:
+          additionalProperties: true
+          type: object
+          title: Resolved
+        summary:
+          $ref: '#/components/schemas/ConfigListItem'
+      type: object
+      required:
+      - name
+      - path
+      - text
+      - raw
+      - resolved
+      - summary
+      title: ConfigDetail
+    ConfigListItem:
+      properties:
+        name:
+          type: string
+          title: Name
+        path:
+          type: string
+          title: Path
+        created_at:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Created At
+        input_video:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Input Video
+        output_dir:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Output Dir
+        detector_model_path:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Detector Model Path
+        postprocess_enabled:
+          type: boolean
+          title: Postprocess Enabled
+        follow_cam_enabled:
+          type: boolean
+          title: Follow Cam Enabled
+        exists:
+          additionalProperties:
+            type: boolean
+          type: object
+          title: Exists
+      type: object
+      required:
+      - name
+      - path
+      - postprocess_enabled
+      - follow_cam_enabled
+      - exists
+      title: ConfigListItem
+    CreateRunRequest:
+      properties:
+        config_name:
+          type: string
+          title: Config Name
+        input_video:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Input Video
+        parent_run_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Parent Run Id
+        output_dir_name:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Output Dir Name
+        config_patch:
+          additionalProperties: true
+          type: object
+          title: Config Patch
+        enable_postprocess:
+          anyOf:
+          - type: boolean
+          - type: 'null'
+          title: Enable Postprocess
+        enable_follow_cam:
+          anyOf:
+          - type: boolean
+          - type: 'null'
+          title: Enable Follow Cam
+        start_frame:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          title: Start Frame
+        max_frames:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          title: Max Frames
+        notes:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Notes
+      type: object
+      required:
+      - config_name
+      title: CreateRunRequest
+    DeleteResourceResponse:
+      properties:
+        name:
+          type: string
+          title: Name
+        path:
+          type: string
+          title: Path
+        deleted:
+          type: boolean
+          title: Deleted
+          default: true
+      type: object
+      required:
+      - name
+      - path
+      title: DeleteResourceResponse
+    DeriveConfigRequest:
+      properties:
+        base_config_name:
+          type: string
+          title: Base Config Name
+        output_name:
+          type: string
+          title: Output Name
+        patch:
+          additionalProperties: true
+          type: object
+          title: Patch
+      type: object
+      required:
+      - base_config_name
+      - output_name
+      title: DeriveConfigRequest
+    FieldPreviewRequest:
+      properties:
+        input_video:
+          type: string
+          title: Input Video
+        sample_index:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          title: Sample Index
+      type: object
+      required:
+      - input_video
+      title: FieldPreviewRequest
+    FieldPreviewResponse:
+      properties:
+        input_video:
+          type: string
+          title: Input Video
+        preview_data_url:
+          type: string
+          title: Preview Data Url
+        frame_width:
+          type: integer
+          title: Frame Width
+        frame_height:
+          type: integer
+          title: Frame Height
+        frame_index:
+          type: integer
+          title: Frame Index
+        frame_time_seconds:
+          type: number
+          title: Frame Time Seconds
+        sample_index:
+          type: integer
+          title: Sample Index
+        sample_count:
+          type: integer
+          title: Sample Count
+      type: object
+      required:
+      - input_video
+      - preview_data_url
+      - frame_width
+      - frame_height
+      - frame_index
+      - frame_time_seconds
+      - sample_index
+      - sample_count
+      title: FieldPreviewResponse
+    FieldSuggestionRequest:
+      properties:
+        input_video:
+          type: string
+          title: Input Video
+        config_name:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Config Name
+        frame_index:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          title: Frame Index
+      type: object
+      required:
+      - input_video
+      title: FieldSuggestionRequest
+    FieldSuggestionResponse:
+      properties:
+        input_video:
+          type: string
+          title: Input Video
+        preview_data_url:
+          type: string
+          title: Preview Data Url
+        preview_bounds:
+          prefixItems:
+          - type: integer
+          - type: integer
+          - type: integer
+          - type: integer
+          type: array
+          maxItems: 4
+          minItems: 4
+          title: Preview Bounds
+        frame_width:
+          type: integer
+          title: Frame Width
+        frame_height:
+          type: integer
+          title: Frame Height
+        frame_index:
+          type: integer
+          title: Frame Index
+        frame_time_seconds:
+          type: number
+          title: Frame Time Seconds
+        sample_index:
+          type: integer
+          title: Sample Index
+        sample_count:
+          type: integer
+          title: Sample Count
+        field_polygon:
+          items:
+            prefixItems:
+            - type: integer
+            - type: integer
+            type: array
+            maxItems: 2
+            minItems: 2
+          type: array
+          title: Field Polygon
+        expanded_polygon:
+          items:
+            prefixItems:
+            - type: integer
+            - type: integer
+            type: array
+            maxItems: 2
+            minItems: 2
+          type: array
+          title: Expanded Polygon
+        field_roi:
+          prefixItems:
+          - type: integer
+          - type: integer
+          - type: integer
+          - type: integer
+          type: array
+          maxItems: 4
+          minItems: 4
+          title: Field Roi
+        expanded_roi:
+          prefixItems:
+          - type: integer
+          - type: integer
+          - type: integer
+          - type: integer
+          type: array
+          maxItems: 4
+          minItems: 4
+          title: Expanded Roi
+        confidence:
+          type: string
+          enum:
+          - config
+          - detected
+          - fallback
+          title: Confidence
+        source:
+          type: string
+          title: Source
+        field_coverage:
+          type: number
+          title: Field Coverage
+        config_patch:
+          additionalProperties: true
+          type: object
+          title: Config Patch
+      type: object
+      required:
+      - input_video
+      - preview_data_url
+      - preview_bounds
+      - frame_width
+      - frame_height
+      - frame_index
+      - frame_time_seconds
+      - sample_index
+      - sample_count
+      - field_roi
+      - expanded_roi
+      - confidence
+      - source
+      - field_coverage
+      title: FieldSuggestionResponse
+    FollowCamRenderRequest:
+      properties:
+        output_dir_name:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Output Dir Name
+        output_video_name:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Output Video Name
+        prefer_cleaned_track:
+          type: boolean
+          title: Prefer Cleaned Track
+          default: true
+        draw_ball_marker:
+          type: boolean
+          title: Draw Ball Marker
+          default: false
+        draw_frame_text:
+          type: boolean
+          title: Draw Frame Text
+          default: false
+        target_width:
+          type: integer
+          title: Target Width
+          default: 1920
+        target_height:
+          type: integer
+          title: Target Height
+          default: 1080
+        notes:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Notes
+      type: object
+      title: FollowCamRenderRequest
+    HTTPValidationError:
+      properties:
+        detail:
+          items:
+            $ref: '#/components/schemas/ValidationError'
+          type: array
+          title: Detail
+      type: object
+      title: HTTPValidationError
+    HealthResponse:
+      properties:
+        status:
+          type: string
+          title: Status
+        active_run_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Active Run Id
+        config_count:
+          type: integer
+          title: Config Count
+        run_count:
+          type: integer
+          title: Run Count
+      type: object
+      required:
+      - status
+      - config_count
+      - run_count
+      title: HealthResponse
+    InputCatalogResponse:
+      properties:
+        root_dir:
+          type: string
+          title: Root Dir
+        videos:
+          items:
+            $ref: '#/components/schemas/InputVideoItem'
+          type: array
+          title: Videos
+      type: object
+      required:
+      - root_dir
+      title: InputCatalogResponse
+    InputVideoItem:
+      properties:
+        name:
+          type: string
+          title: Name
+        path:
+          type: string
+          title: Path
+        size_bytes:
+          type: integer
+          title: Size Bytes
+        modified_at:
+          type: string
+          title: Modified At
+      type: object
+      required:
+      - name
+      - path
+      - size_bytes
+      - modified_at
+      title: InputVideoItem
+    RunProgress:
+      properties:
+        stage:
+          type: string
+          title: Stage
+        current_frame:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          title: Current Frame
+        total_frames:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          title: Total Frames
+        percent:
+          type: number
+          title: Percent
+          default: 0.0
+        eta_seconds:
+          anyOf:
+          - type: number
+          - type: 'null'
+          title: Eta Seconds
+        elapsed_seconds:
+          anyOf:
+          - type: number
+          - type: 'null'
+          title: Elapsed Seconds
+        updated_at:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Updated At
+      type: object
+      required:
+      - stage
+      title: RunProgress
+    RunRecord:
+      properties:
+        run_id:
+          type: string
+          title: Run Id
+        source:
+          type: string
+          title: Source
+        status:
+          type: string
+          enum:
+          - queued
+          - running
+          - completed
+          - failed
+          - cancelled
+          title: Status
+        created_at:
+          type: string
+          title: Created At
+        started_at:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Started At
+        completed_at:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Completed At
+        config_name:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Config Name
+        config_path:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Config Path
+        input_video:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Input Video
+        parent_run_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Parent Run Id
+        output_dir:
+          type: string
+          title: Output Dir
+        modules_enabled:
+          additionalProperties:
+            type: boolean
+          type: object
+          title: Modules Enabled
+        artifacts:
+          items:
+            $ref: '#/components/schemas/ArtifactSummary'
+          type: array
+          title: Artifacts
+        stats:
+          additionalProperties: true
+          type: object
+          title: Stats
+        progress:
+          anyOf:
+          - $ref: '#/components/schemas/RunProgress'
+          - type: 'null'
+        notes:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Notes
+        error:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Error
+      type: object
+      required:
+      - run_id
+      - source
+      - status
+      - created_at
+      - output_dir
+      title: RunRecord
+    UpdateConfigRequest:
+      properties:
+        content:
+          type: string
+          title: Content
+      type: object
+      required:
+      - content
+      title: UpdateConfigRequest
+    ValidationError:
+      properties:
+        loc:
+          items:
+            anyOf:
+            - type: string
+            - type: integer
+          type: array
+          title: Location
+        msg:
+          type: string
+          title: Message
+        type:
+          type: string
+          title: Error Type
+        input:
+          title: Input
+        ctx:
+          type: object
+          title: Context
+      type: object
+      required:
+      - loc
+      - msg
+      - type
+      title: ValidationError
     HealthStatus:
       type: object
       properties:
         status:
           type: string
       required:
-        - status
+      - status
+servers:
+- url: /api
