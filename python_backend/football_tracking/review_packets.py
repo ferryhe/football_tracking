@@ -129,7 +129,7 @@ def _packet_sources(output_dir: Path, *, max_packets: int) -> list[dict[str, Any
     if max_packets <= 0:
         return []
     event_sources = _event_candidate_sources(output_dir)
-    trigger_sources = _trigger_sources(output_dir)
+    trigger_sources = [*_trigger_sources(output_dir), *_high_recall_rejection_sources(output_dir)]
     if not event_sources or not trigger_sources:
         return _dedupe_sources([*event_sources, *trigger_sources])[:max_packets]
 
@@ -243,6 +243,90 @@ def _trigger_sources(output_dir: Path) -> list[dict[str, Any]]:
     )
 
 
+def _high_recall_rejection_sources(output_dir: Path) -> list[dict[str, Any]]:
+    clues: list[dict[str, Any]] = []
+    for report_root in _high_recall_report_roots(output_dir):
+        wrapper = _read_optional_json(report_root / "report.json") or {}
+        reports = [_read_optional_json(report_root / "reconcile_report.json") or {}]
+        reconcile = wrapper.get("reconcile") if isinstance(wrapper, dict) else None
+        if isinstance(reconcile, dict):
+            reports.append(reconcile)
+
+        rejected_windows = wrapper.get("rejected_windows") if isinstance(wrapper, dict) else None
+        if isinstance(rejected_windows, list):
+            for window in rejected_windows:
+                if not isinstance(window, dict):
+                    continue
+                clue = dict(window)
+                clue.setdefault("rejection_reason", "planning_rejected")
+                clues.append(clue)
+
+        for report in reports:
+            report_clues = report.get("review_packet_clues") if isinstance(report, dict) else None
+            if isinstance(report_clues, list):
+                clues.extend(clue for clue in report_clues if isinstance(clue, dict))
+                continue
+            for result in report.get("windows", []) if isinstance(report, dict) else []:
+                if not isinstance(result, dict) or result.get("accepted"):
+                    continue
+                window = result.get("window") if isinstance(result.get("window"), dict) else {}
+                clue = dict(window)
+                clue["rejection_reason"] = result.get("reason")
+                clues.append(clue)
+
+    sources: list[dict[str, Any]] = []
+    for index, clue in enumerate(clues):
+        if not isinstance(clue, dict):
+            continue
+        start = _parse_int(clue.get("start_frame"))
+        end = _parse_int(clue.get("end_frame"))
+        if start is None or end is None:
+            continue
+        priority = str(clue.get("priority") or "medium")
+        rejection_reason = str(clue.get("rejection_reason") or "rejected")
+        sources.append(
+            {
+                "kind": "high_recall_rejection",
+                "id": f"high_recall_rejection:{index}:{start}-{end}",
+                "type": "high_recall_rejected",
+                "priority": priority,
+                "start_frame": start,
+                "end_frame": end,
+                "score": _priority_rank(priority),
+                "reason": f"High-recall window rejected: {rejection_reason}",
+                "evidence": {"rejection_reason": rejection_reason},
+            }
+        )
+    return sorted(
+        sources,
+        key=lambda item: (
+            -_priority_rank(str(item.get("priority") or "none")),
+            int(item["start_frame"]),
+        ),
+    )
+
+
+def _high_recall_report_roots(output_dir: Path) -> list[Path]:
+    roots: list[Path] = []
+    default_root = output_dir / "high_recall_windows"
+    if (default_root / "report.json").exists() or (default_root / "reconcile_report.json").exists():
+        roots.append(default_root)
+
+    if not output_dir.exists():
+        return roots
+    for child in output_dir.iterdir():
+        if child == default_root or not child.is_dir():
+            continue
+        wrapper = _read_optional_json(child / "report.json")
+        if isinstance(wrapper, dict) and (
+            "rejected_windows" in wrapper or "reconcile" in wrapper or "windows" in wrapper
+        ):
+            roots.append(child)
+        elif (child / "reconcile_report.json").exists():
+            roots.append(child)
+    return roots
+
+
 def _expanded_window(source: dict[str, Any], frame_bounds: tuple[int | None, int | None]) -> dict[str, int]:
     render_window = source.get("render_window") if isinstance(source.get("render_window"), dict) else {}
     start = _parse_int(render_window.get("start_frame"))
@@ -306,6 +390,8 @@ def _decision_for_source(source: dict[str, Any], track_summary: dict[str, Any]) 
         return _decision("reject_noise", 0.70, "Postprocess replaced this segment, so treat it as likely noise.")
     if source_type in {"large_jump", "candidate_ambiguity", "suspicious_tracklet"}:
         return _decision("needs_ai_review", 0.76, f"{source_type} trigger with max step {max_step:.2f}px.")
+    if source_kind == "high_recall_rejection":
+        return _decision("needs_ai_review", 0.78, str(source.get("reason") or "High-recall rerun rejected."))
     if detected_ratio >= 0.70 and max_step <= 180.0:
         return _decision("accept_track", 0.68, "Track is mostly detected with no large jumps in this window.")
     return _decision("manual_review", 0.55, "Mixed evidence; ask AI or a human to inspect the packet media.")

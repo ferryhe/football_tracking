@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -15,9 +16,14 @@ from typing import Any, Callable
 import cv2
 import yaml
 
+from football_tracking.ai_review_triggers import write_ai_review_trigger_report
+from football_tracking.ball_audit import write_ball_audit_report
 from football_tracking.chunk_stitcher import stitch_chunk_outputs
 from football_tracking.config import AppConfig, load_config
+from football_tracking.events import write_event_candidate_report
 from football_tracking.follow_cam import FollowCamGenerator
+from football_tracking.high_recall_reconcile import reconcile_high_recall_outputs
+from football_tracking.high_recall_windows import write_high_recall_window_report
 from football_tracking.pipeline import BallTrackingPipeline
 from football_tracking.postprocess import TrackPostprocessor
 from football_tracking.temporal_chunks import TemporalChunk, plan_temporal_chunks
@@ -43,6 +49,18 @@ class _RunningChunkProcess:
     stderr_path: Path
     stdout_file: Any
     stderr_file: Any
+
+
+@dataclass(frozen=True, slots=True)
+class _HighRecallSettings:
+    enabled: bool = False
+    margin_frames: int = 0
+    merge_gap_frames: int = 30
+    max_total_frames: int | None = 1800
+    mode: str = "sahi"
+    output_dir_name: str = "high_recall_windows"
+    max_speed_px_per_frame: float = 180.0
+    max_jump_px: float = 260.0
 
 
 def effective_worker_count(
@@ -86,10 +104,78 @@ def enforce_raw_chunk_config(config: AppConfig) -> AppConfig:
     config.follow_cam.enabled = False
     config.detector.inference_mode = "direct_full_frame"
     config.temporal_chunks.enabled = False
+    if hasattr(config, "high_recall_windows"):
+        config.high_recall_windows.enabled = False
     config.output.save_csv = True
     config.output.save_debug_jsonl = True
     config.logging.save_debug_jsonl = True
     return config
+
+
+def build_high_recall_window_config(
+    config: AppConfig,
+    window: dict[str, Any],
+    window_output_dir: Path,
+) -> AppConfig:
+    """Copy an AppConfig for one high-recall rerun window."""
+    settings = _high_recall_settings(config)
+    window_config = deepcopy(config)
+    start_frame = _coerce_int(window.get("start_frame"))
+    end_frame = _coerce_int(window.get("end_frame"))
+    if start_frame is None or end_frame is None:
+        raise ValueError(f"Invalid high-recall window frame range: {window}")
+    if end_frame < start_frame:
+        start_frame, end_frame = end_frame, start_frame
+    window_config.output_dir = window_output_dir.resolve()
+    window_config.runtime.start_frame = start_frame
+    window_config.runtime.max_frames = end_frame - start_frame + 1
+    window_config.detector.inference_mode = settings.mode
+    return enforce_high_recall_chunk_config(window_config)
+
+
+def enforce_high_recall_chunk_config(config: AppConfig) -> AppConfig:
+    """Apply raw-output guarantees while preserving high-recall detector mode."""
+    config.postprocess.enabled = False
+    config.follow_cam.enabled = False
+    config.temporal_chunks.enabled = False
+    if hasattr(config, "high_recall_windows"):
+        config.high_recall_windows.enabled = False
+    config.output.save_csv = True
+    config.output.save_debug_jsonl = True
+    config.logging.save_debug_jsonl = True
+    return config
+
+
+def write_high_recall_window_config(
+    config: AppConfig,
+    window: dict[str, Any],
+    window_index: int,
+    high_recall_root: Path,
+) -> Path:
+    window_output_dir = high_recall_root / f"window_{window_index:03d}"
+    window_config = build_high_recall_window_config(config, window, window_output_dir)
+    config_path = window_output_dir / "chunk_config.yaml"
+    window_output_dir.mkdir(parents=True, exist_ok=True)
+    with config_path.open("w", encoding="utf-8") as handle:
+        yaml.safe_dump(_yamlable(window_config), handle, sort_keys=False, allow_unicode=False)
+    return config_path
+
+
+def run_high_recall_chunk(
+    config_path: Path,
+    progress_callback: Callable[[dict[str, Any]], None] | None = None,
+    should_cancel: Callable[[], bool] | None = None,
+) -> int:
+    """Run one high-recall window while preserving the configured detector mode."""
+    try:
+        config = enforce_high_recall_chunk_config(load_config(config_path))
+        BallTrackingPipeline(config).run(progress_callback=progress_callback, should_cancel=should_cancel)
+        return 0
+    except CancelledError:
+        raise
+    except Exception:
+        logger.exception("High-recall window worker failed for config: %s", config_path)
+        return 1
 
 
 def _yamlable(value: Any) -> Any:
@@ -101,6 +187,8 @@ def _yamlable(value: Any) -> Any:
         return {str(key): _yamlable(item) for key, item in value.items()}
     if isinstance(value, (list, tuple)):
         return [_yamlable(item) for item in value]
+    if hasattr(value, "__dict__"):
+        return _yamlable(vars(value))
     return value
 
 
@@ -136,6 +224,118 @@ def run_chunk(
     except Exception:
         logger.exception("Chunk worker failed for config: %s", config_path)
         return 1
+
+
+def run_high_recall_windows(
+    config: AppConfig,
+    *,
+    source_total_frames: int | None = None,
+    progress_callback: Callable[[dict[str, Any]], None] | None = None,
+    should_cancel: Callable[[], bool] | None = None,
+) -> dict[str, Any]:
+    """Run high-recall detection only for selected suspicious windows."""
+    settings = _high_recall_settings(config)
+    high_recall_root = config.output_dir / settings.output_dir_name
+    _reset_stale_high_recall_outputs(config.output_dir, high_recall_root)
+    if not settings.enabled:
+        report = {
+            "windows": [],
+            "summary": {"status": "disabled", "selected_window_count": 0},
+            "execution": {"status": "skipped", "reason": "disabled", "results": []},
+        }
+        _write_high_recall_report(high_recall_root, report)
+        return report
+
+    _raise_if_cancelled(should_cancel)
+    _remove_stale_postprocess_artifacts(config)
+    write_ball_audit_report(config.output_dir)
+    write_ai_review_trigger_report(config.output_dir)
+    write_event_candidate_report(config.output_dir)
+    report = write_high_recall_window_report(
+        config.output_dir,
+        output_dir_name=settings.output_dir_name,
+        margin_frames=settings.margin_frames,
+        merge_gap_frames=settings.merge_gap_frames,
+        max_total_frames=settings.max_total_frames,
+        total_frames=source_total_frames,
+        mode=settings.mode,
+    )
+
+    windows = report.get("windows") if isinstance(report.get("windows"), list) else []
+    if not windows:
+        execution = {"status": "skipped", "reason": "no_windows", "results": []}
+        report["execution"] = execution
+        _write_high_recall_report(high_recall_root, report)
+        return report
+
+    results: list[dict[str, Any]] = []
+    try:
+        for index, window in enumerate(windows):
+            _raise_if_cancelled(should_cancel)
+            _emit_progress(
+                progress_callback,
+                {
+                    "stage": "high_recall_windows",
+                    "window_index": index,
+                    "window_count": len(windows),
+                    "current_frame": window.get("start_frame"),
+                    "total_frames": source_total_frames,
+                },
+            )
+            start_time = time.time()
+            config_path = write_high_recall_window_config(config, window, index, high_recall_root)
+            exit_code = run_high_recall_chunk(
+                config_path,
+                progress_callback=progress_callback,
+                should_cancel=should_cancel,
+            )
+            end_time = time.time()
+            result = {
+                "window_index": index,
+                "window_dir": str(high_recall_root / f"window_{index:03d}"),
+                "config_path": str(config_path),
+                "start_time": start_time,
+                "end_time": end_time,
+                "duration": max(0.0, end_time - start_time),
+                "exit_code": exit_code,
+            }
+            results.append(result)
+            if exit_code != 0:
+                execution = {
+                    "status": "failed",
+                    "error": f"High-recall window {index} failed with exit code {exit_code}",
+                    "results": results,
+                }
+                report["execution"] = execution
+                _write_high_recall_report(high_recall_root, report)
+                raise RuntimeError(execution["error"])
+    except CancelledError:
+        report["execution"] = {
+            "status": "cancelled",
+            "error": "High-recall window run cancelled by user.",
+            "results": results,
+        }
+        _write_high_recall_report(high_recall_root, report)
+        raise
+
+    execution = {"status": "succeeded", "results": results}
+    report["execution"] = execution
+    try:
+        reconcile_report = reconcile_high_recall_outputs(
+            config.output_dir,
+            windows,
+            high_recall_root=high_recall_root,
+            csv_name=config.output.csv_name,
+            max_speed_px_per_frame=settings.max_speed_px_per_frame,
+            max_jump_px=settings.max_jump_px,
+        )
+    except Exception as exc:
+        report["reconcile"] = {"status": "failed", "error": str(exc)}
+        _write_high_recall_report(high_recall_root, report)
+        raise
+    report["reconcile"] = reconcile_report
+    _write_high_recall_report(high_recall_root, report)
+    return report
 
 
 def run_temporal_chunks(
@@ -210,6 +410,15 @@ def run_temporal_chunks(
 
     if config.mock.enabled:
         return
+
+    if _high_recall_settings(config).enabled:
+        _raise_if_cancelled(should_cancel)
+        run_high_recall_windows(
+            config,
+            source_total_frames=source_total_frames,
+            progress_callback=progress_callback,
+            should_cancel=should_cancel,
+        )
 
     if config.postprocess.enabled:
         _raise_if_cancelled(should_cancel)
@@ -659,6 +868,122 @@ def _write_stitch_report(output_dir: Path, *, status: str, error: str | None = N
     report["stitch"] = stitch
     with report_path.open("w", encoding="utf-8") as report_file:
         json.dump(report, report_file, ensure_ascii=False, indent=2)
+
+
+def _write_high_recall_report(high_recall_root: Path, report: dict[str, Any]) -> None:
+    high_recall_root.mkdir(parents=True, exist_ok=True)
+    with (high_recall_root / "report.json").open("w", encoding="utf-8") as report_file:
+        json.dump(report, report_file, ensure_ascii=False, indent=2)
+
+
+def _reset_high_recall_outputs(high_recall_root: Path) -> None:
+    for name in ("report.json", "reconcile_report.json"):
+        path = high_recall_root / name
+        try:
+            if path.is_file():
+                path.unlink()
+        except OSError:
+            logger.warning("Unable to remove stale high-recall report before rerun: %s", path)
+    for child in high_recall_root.iterdir():
+        if not child.is_dir() or not child.name.startswith("window_"):
+            continue
+        try:
+            shutil.rmtree(child)
+        except OSError:
+            logger.warning("Unable to remove stale high-recall window directory before rerun: %s", child)
+
+
+def _reset_stale_high_recall_outputs(output_dir: Path, active_root: Path) -> None:
+    active_root.mkdir(parents=True, exist_ok=True)
+    roots = [active_root]
+    if output_dir.exists():
+        for child in output_dir.iterdir():
+            if child == active_root or not child.is_dir():
+                continue
+            if _looks_like_high_recall_root(child):
+                roots.append(child)
+    for root in roots:
+        _reset_high_recall_outputs(root)
+
+
+def _looks_like_high_recall_root(path: Path) -> bool:
+    if (path / "reconcile_report.json").exists():
+        return True
+    report_path = path / "report.json"
+    if not report_path.exists():
+        return False
+    try:
+        report = json.loads(report_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return False
+    return isinstance(report, dict) and any(key in report for key in ("windows", "rejected_windows", "reconcile"))
+
+
+def _remove_stale_postprocess_artifacts(config: AppConfig) -> None:
+    postprocess_config = getattr(config, "postprocess", None)
+    stale_names = {
+        getattr(postprocess_config, "cleanup_report_name", "cleanup_report.json"),
+        getattr(postprocess_config, "cleaned_csv_name", "ball_track.cleaned.csv"),
+        getattr(postprocess_config, "cleaned_debug_jsonl_name", "debug.cleaned.jsonl"),
+        getattr(postprocess_config, "cleaned_video_name", "annotated.cleaned.mp4"),
+    }
+    for name in stale_names:
+        path = config.output_dir / name
+        try:
+            if path.is_file():
+                path.unlink()
+        except OSError:
+            logger.warning("Unable to remove stale postprocess artifact before high-recall planning: %s", path)
+
+
+def _high_recall_settings(config: Any) -> _HighRecallSettings:
+    raw = getattr(config, "high_recall_windows", None)
+    if raw in (None, "", []):
+        return _HighRecallSettings()
+    output_dir_name = str(_setting(raw, "output_dir_name", "high_recall_windows")).strip()
+    output_dir_path = Path(output_dir_name)
+    if not output_dir_name or output_dir_path.is_absolute() or output_dir_path.name != output_dir_name:
+        raise ValueError("high_recall_windows.output_dir_name must be a single directory name")
+    mode = str(_setting(raw, "mode", "sahi") or "sahi").strip().lower()
+    if mode not in {"sahi", "direct_full_frame"}:
+        raise ValueError(f"Unknown high_recall_windows mode: {mode}")
+    return _HighRecallSettings(
+        enabled=bool(_setting(raw, "enabled", False)),
+        margin_frames=max(0, int(_setting(raw, "margin_frames", 0))),
+        merge_gap_frames=min(30, max(0, int(_setting(raw, "merge_gap_frames", 30)))),
+        max_total_frames=_positive_int(_setting(raw, "max_total_frames", 1800)),
+        mode=mode,
+        output_dir_name=output_dir_name,
+        max_speed_px_per_frame=float(_setting(raw, "max_speed_px_per_frame", 180.0)),
+        max_jump_px=float(_setting(raw, "max_jump_px", 260.0)),
+    )
+
+
+def _setting(raw: Any, key: str, default: Any) -> Any:
+    if isinstance(raw, dict):
+        return raw.get(key, default)
+    return getattr(raw, key, default)
+
+
+def _positive_int(value: Any) -> int | None:
+    if value in (None, ""):
+        return None
+    parsed = _coerce_int(value)
+    if parsed is None:
+        raise ValueError("high_recall_windows.max_total_frames must be greater than 0 or null")
+    if parsed <= 0:
+        raise ValueError("high_recall_windows.max_total_frames must be greater than 0 or null")
+    return parsed
+
+
+def _coerce_int(value: Any) -> int | None:
+    if value in (None, ""):
+        return None
+    try:
+        parsed = float(value)
+    except (OverflowError, TypeError, ValueError):
+        return None
+    return int(parsed) if parsed == parsed and parsed not in (float("inf"), float("-inf")) else None
 
 
 def _is_cancelled(should_cancel: Callable[[], bool] | None) -> bool:

@@ -606,7 +606,12 @@ local api-spec codegen attempt blocked by missing esbuild optional platform pack
 - Create: `python_backend/tests/test_high_recall_windows.py`
 - Create: `python_backend/tests/test_high_recall_reconcile.py`
 - Modify: `python_backend/football_tracking/chunk_runner.py`
+- Modify: `python_backend/football_tracking/config.py`
+- Modify: `python_backend/football_tracking/review_packets.py`
 - Modify: `python_backend/config/default.yaml`
+- Modify: `python_backend/tests/test_chunk_runner.py`
+- Modify: `python_backend/tests/test_config_and_provider.py`
+- Modify: `python_backend/tests/test_review_packets.py`
 
 **Window planning inputs:**
 - `ai_review_triggers.json`
@@ -636,7 +641,7 @@ Rules:
 - Reconcile only when the rerun improves continuity and passes jump/field/player-context checks.
 - Rejected windows go to review packets instead of silently changing the track.
 
-- [ ] **Step 1: Write failing window-planning tests**
+- [x] **Step 1: Write failing window-planning tests**
 
 Test:
 
@@ -649,15 +654,15 @@ def test_high_recall_windows_merge_nearby_large_jump_triggers(self) -> None:
     )
 ```
 
-- [ ] **Step 2: Write failing reconcile tests**
+- [x] **Step 2: Write failing reconcile tests**
 
 Use synthetic CSV rows where a lost gap can be filled by a window rerun without exceeding speed/jump gates.
 
-- [ ] **Step 3: Implement planner, execution report, and reconcile rules**
+- [x] **Step 3: Implement planner, execution report, and reconcile rules**
 
 Return a report with accepted windows, rejected windows, and reasons.
 
-- [ ] **Step 4: Run validation**
+- [x] **Step 4: Run validation**
 
 Run:
 
@@ -667,6 +672,22 @@ $env:PYTHONPATH='python_backend'; .\.venv\Scripts\python.exe -m unittest discove
 ```
 
 Expected: all tests pass.
+
+Actual:
+
+```text
+python_backend.tests.test_high_recall_windows + python_backend.tests.test_high_recall_reconcile + python_backend.tests.test_review_packets + python_backend.tests.test_chunk_runner + python_backend.tests.test_config_and_provider: Ran 72 tests, OK
+unittest discover python_backend\tests: Ran 206 tests, OK
+ruff check PR6 changed Python files and tests: OK
+git diff --check: OK
+spec-compliance reviewer: Go
+code-quality reviewer: Go
+```
+
+Implementation notes:
+- `detector.inference_mode` now defaults to `direct_full_frame` in both `default.yaml` and config loading. Full-match SAHI requires an explicit `detector.inference_mode: sahi` opt-in; high-recall windows still default to `mode: sahi`.
+- `high_recall_windows.max_total_frames` defaults to 1800 frames at config/runtime/planner layers. Explicit YAML `null` opts out; non-positive or invalid values are rejected.
+- Rejected high-recall windows from both planning budget and reconcile gates are surfaced to review packets, including custom high-recall output directories.
 
 ## Final Acceptance For The Series
 

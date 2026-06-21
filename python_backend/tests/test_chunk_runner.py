@@ -672,6 +672,131 @@ class TemporalChunkSequentialRunnerTests(unittest.TestCase):
             self.assertIn("temporal_chunks", progress_stages)
             self.assertIn("stitch", progress_stages)
 
+    def test_run_temporal_chunks_runs_high_recall_windows_before_global_outputs(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            base_dir = Path(temp_name)
+            config = make_app_config(base_dir)
+            config.mock.enabled = False
+            config.runtime.start_frame = 0
+            config.runtime.max_frames = 30
+            config.temporal_chunks.chunk_frames = 30
+            config.temporal_chunks.overlap_frames = 5
+            config.high_recall_windows.enabled = True
+            config.high_recall_windows.margin_frames = 4
+            config.high_recall_windows.mode = "sahi"
+            chunks = [TemporalChunk(0, 0, 0, 29, 0, 29, "chunk_0000")]
+            call_order: list[str] = []
+            config.output_dir.mkdir(parents=True, exist_ok=True)
+            stale_cleaned_csv = config.output_dir / config.postprocess.cleaned_csv_name
+            stale_cleanup_report = config.output_dir / config.postprocess.cleanup_report_name
+            stale_cleaned_csv.write_text("stale", encoding="utf-8")
+            stale_cleanup_report.write_text("stale", encoding="utf-8")
+
+            def fake_temporal_chunk_run(*args: object, **kwargs: object) -> int:
+                call_order.append("chunk")
+                return 0
+
+            def fake_stitch(*args: object, **kwargs: object) -> dict[str, int]:
+                call_order.append("stitch")
+                return {"frame_count": 30}
+
+            def fake_window_run(config_path: Path, **kwargs: object) -> int:
+                call_order.append("high_recall")
+                payload = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+                self.assertEqual("sahi", payload["detector"]["inference_mode"])
+                self.assertEqual(10, payload["runtime"]["start_frame"])
+                self.assertEqual(6, payload["runtime"]["max_frames"])
+                self.assertFalse(payload["postprocess"]["enabled"])
+                self.assertFalse(payload["follow_cam"]["enabled"])
+                self.assertFalse(payload["temporal_chunks"]["enabled"])
+                self.assertFalse(payload["high_recall_windows"]["enabled"])
+                return 0
+
+            def fake_reconcile(*args: object, **kwargs: object) -> dict[str, object]:
+                call_order.append("reconcile")
+                return {"summary": {"accepted_count": 1, "rejected_count": 0}, "windows": []}
+
+            def fake_audit(output_dir: Path) -> dict[str, object]:
+                self.assertFalse(stale_cleaned_csv.exists())
+                self.assertFalse(stale_cleanup_report.exists())
+                call_order.append("audit")
+                return {}
+
+            with (
+                patch("football_tracking.chunk_runner.plan_temporal_chunks", return_value=chunks),
+                patch("football_tracking.chunk_runner.run_chunk", side_effect=fake_temporal_chunk_run),
+                patch("football_tracking.chunk_runner.stitch_chunk_outputs", side_effect=fake_stitch),
+                patch("football_tracking.chunk_runner._source_total_frames", return_value=30),
+                patch("football_tracking.chunk_runner.write_ball_audit_report", side_effect=fake_audit),
+                patch("football_tracking.chunk_runner.write_ai_review_trigger_report", side_effect=lambda output_dir: call_order.append("triggers") or {}),
+                patch("football_tracking.chunk_runner.write_event_candidate_report", side_effect=lambda output_dir: call_order.append("events") or {}),
+                patch(
+                    "football_tracking.chunk_runner.write_high_recall_window_report",
+                    return_value={
+                        "windows": [{"start_frame": 10, "end_frame": 15, "reason": "lost_gap", "priority": "high"}],
+                        "summary": {"selected_window_count": 1},
+                    },
+                ) as window_report,
+                patch("football_tracking.chunk_runner.run_high_recall_chunk", side_effect=fake_window_run),
+                patch("football_tracking.chunk_runner.reconcile_high_recall_outputs", side_effect=fake_reconcile) as reconcile,
+                patch("football_tracking.chunk_runner.TrackPostprocessor") as postprocessor_cls,
+                patch("football_tracking.chunk_runner.FollowCamGenerator") as follow_cam_cls,
+            ):
+                postprocessor_cls.return_value.run.side_effect = lambda: call_order.append("postprocess")
+                follow_cam_cls.return_value.run.side_effect = lambda **kwargs: call_order.append("follow_cam")
+
+                run_temporal_chunks(config)
+
+            self.assertEqual(
+                ["chunk", "stitch", "audit", "triggers", "events", "high_recall", "reconcile", "postprocess", "follow_cam"],
+                call_order,
+            )
+            window_report.assert_called_once()
+            self.assertEqual(4, window_report.call_args.kwargs["margin_frames"])
+            reconcile.assert_called_once()
+            self.assertTrue((config.output_dir / "high_recall_windows" / "window_000" / "chunk_config.yaml").exists())
+
+    def test_run_temporal_chunks_records_high_recall_reconcile_failure_before_reraising(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            base_dir = Path(temp_name)
+            config = make_app_config(base_dir)
+            config.mock.enabled = False
+            config.runtime.start_frame = 0
+            config.runtime.max_frames = 30
+            config.temporal_chunks.chunk_frames = 30
+            config.temporal_chunks.overlap_frames = 5
+            config.high_recall_windows.enabled = True
+            chunks = [TemporalChunk(0, 0, 0, 29, 0, 29, "chunk_0000")]
+
+            with (
+                patch("football_tracking.chunk_runner.plan_temporal_chunks", return_value=chunks),
+                patch("football_tracking.chunk_runner.run_chunk", return_value=0),
+                patch("football_tracking.chunk_runner.stitch_chunk_outputs", return_value={"frame_count": 30}),
+                patch("football_tracking.chunk_runner._source_total_frames", return_value=30),
+                patch("football_tracking.chunk_runner.write_ball_audit_report", return_value={}),
+                patch("football_tracking.chunk_runner.write_ai_review_trigger_report", return_value={}),
+                patch("football_tracking.chunk_runner.write_event_candidate_report", return_value={}),
+                patch(
+                    "football_tracking.chunk_runner.write_high_recall_window_report",
+                    return_value={
+                        "windows": [{"start_frame": 10, "end_frame": 15, "reason": "lost_gap", "priority": "high"}],
+                        "summary": {"selected_window_count": 1},
+                    },
+                ),
+                patch("football_tracking.chunk_runner.run_high_recall_chunk", return_value=0),
+                patch("football_tracking.chunk_runner.reconcile_high_recall_outputs", side_effect=RuntimeError("merge failed")),
+                patch("football_tracking.chunk_runner.TrackPostprocessor") as postprocessor_cls,
+                patch("football_tracking.chunk_runner.FollowCamGenerator") as follow_cam_cls,
+            ):
+                with self.assertRaisesRegex(RuntimeError, "merge failed"):
+                    run_temporal_chunks(config)
+
+            report = json.loads((config.output_dir / "high_recall_windows" / "report.json").read_text(encoding="utf-8"))
+            self.assertEqual("failed", report["reconcile"]["status"])
+            self.assertIn("merge failed", report["reconcile"]["error"])
+            postprocessor_cls.assert_not_called()
+            follow_cam_cls.assert_not_called()
+
     def test_run_temporal_chunks_skips_global_outputs_in_mock_mode(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:
             base_dir = Path(temp_name)
