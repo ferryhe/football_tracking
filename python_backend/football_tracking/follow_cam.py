@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-from concurrent.futures import CancelledError
 import csv
 import json
 import math
 import time
+from concurrent.futures import CancelledError
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
@@ -42,6 +42,20 @@ class CameraPathEntry:
     speed: float
     zoom_out_ratio: float
     pan_mode: str
+    profile: str
+    action_center_enabled: bool
+    action_center_x: float | None
+    action_center_y: float | None
+    action_center_source: str
+    action_center_player_count: int
+
+
+@dataclass(slots=True)
+class ActionCenterPoint:
+    x: float | None
+    y: float | None
+    source: str
+    player_count: int = 0
 
 
 class FollowCamGenerator:
@@ -120,6 +134,94 @@ class FollowCamGenerator:
                 )
         return frames
 
+    def _load_action_center_player_tracks(self) -> dict[str, Any] | None:
+        path = self.config.action_center_player_tracks_path
+        if path is None:
+            return None
+        if not path.exists():
+            raise FileNotFoundError(f"Action-center player tracks not found: {path}")
+        with path.open("r", encoding="utf-8") as handle:
+            report = json.load(handle)
+        if not isinstance(report, dict):
+            raise ValueError(f"Action-center player tracks must be a JSON object: {path}")
+        return report
+
+    def _player_points_by_frame(self, report: dict[str, Any] | None) -> dict[int, list[tuple[float, float]]]:
+        if not report:
+            return {}
+        points_by_frame: dict[int, list[tuple[float, float]]] = {}
+        raw_tracks = report.get("tracks", [])
+        if not isinstance(raw_tracks, list):
+            return points_by_frame
+        for track in raw_tracks:
+            if not isinstance(track, dict):
+                continue
+            samples = track.get("samples", [])
+            if not isinstance(samples, list):
+                continue
+            for sample in samples:
+                parsed = self._parse_player_sample(sample)
+                if parsed is None:
+                    continue
+                frame_index, point = parsed
+                points_by_frame.setdefault(frame_index, []).append(point)
+        return points_by_frame
+
+    def _parse_player_sample(self, sample: Any) -> tuple[int, tuple[float, float]] | None:
+        if not isinstance(sample, dict):
+            return None
+        try:
+            raw_frame = float(sample["frame"])
+        except (KeyError, TypeError, ValueError):
+            return None
+        if not math.isfinite(raw_frame):
+            return None
+        frame_index = int(raw_frame)
+
+        foot_point = sample.get("foot_point")
+        if isinstance(foot_point, dict):
+            try:
+                point = (float(foot_point["x"]), float(foot_point["y"]))
+            except (KeyError, TypeError, ValueError):
+                return None
+            return (frame_index, point) if self._is_finite_point(point) else None
+        if isinstance(foot_point, (list, tuple)) and len(foot_point) == 2:
+            try:
+                point = (float(foot_point[0]), float(foot_point[1]))
+            except (TypeError, ValueError):
+                return None
+            return (frame_index, point) if self._is_finite_point(point) else None
+        return None
+
+    def _is_finite_point(self, point: tuple[float, float]) -> bool:
+        return math.isfinite(point[0]) and math.isfinite(point[1])
+
+    def _resolve_action_center(
+        self,
+        frame_info: FollowCamFrame,
+        has_track_point: bool,
+        player_points: list[tuple[float, float]],
+    ) -> ActionCenterPoint:
+        if not has_track_point or frame_info.x is None or frame_info.y is None:
+            return ActionCenterPoint(None, None, "missing_track")
+        ball_point = (float(frame_info.x), float(frame_info.y))
+        if not self.config.action_center_enabled:
+            return ActionCenterPoint(ball_point[0], ball_point[1], "raw_track")
+        if not player_points:
+            return ActionCenterPoint(ball_point[0], ball_point[1], "ball_track")
+
+        player_center = (
+            sum(point[0] for point in player_points) / len(player_points),
+            sum(point[1] for point in player_points) / len(player_points),
+        )
+        weight = self.config.action_center_player_weight
+        return ActionCenterPoint(
+            self._lerp(ball_point[0], player_center[0], weight),
+            self._lerp(ball_point[1], player_center[1], weight),
+            "ball_players",
+            len(player_points),
+        )
+
     def _open_writer(self, output_dir: Path, fps: float) -> cv2.VideoWriter:
         output_path = output_dir / self.config.output_video_name
         fourcc = cv2.VideoWriter_fourcc(*self.app_config.output.video_codec)
@@ -184,6 +286,9 @@ class FollowCamGenerator:
         path_entries: list[CameraPathEntry] = []
         total_frames = len(frames)
         last_progress_at = 0.0
+        player_points_by_frame: dict[int, list[tuple[float, float]]] = {}
+        if cfg.action_center_enabled:
+            player_points_by_frame = self._player_points_by_frame(self._load_action_center_player_tracks())
 
         def emit_progress(current_frame: int, *, force: bool = False) -> None:
             nonlocal last_progress_at
@@ -270,9 +375,19 @@ class FollowCamGenerator:
             )
 
             desired_center = home_center
+            action_center = self._resolve_action_center(
+                frame_info=frame_info,
+                has_track_point=has_track_point,
+                player_points=player_points_by_frame.get(frame_info.frame_index, []),
+            )
             if has_track_point:
+                camera_target = (
+                    (action_center.x, action_center.y)
+                    if action_center.x is not None and action_center.y is not None
+                    else (float(frame_info.x), float(frame_info.y))
+                )
                 anchor_x, anchor_y = self._apply_look_ahead(
-                    current_point=(float(frame_info.x), float(frame_info.y)),
+                    current_point=(float(camera_target[0]), float(camera_target[1])),
                     velocity=smoothed_velocity,
                 )
                 desired_center = (
@@ -333,6 +448,12 @@ class FollowCamGenerator:
                     speed=speed,
                     zoom_out_ratio=zoom_out_ratio,
                     pan_mode=pan_mode,
+                    profile=cfg.profile,
+                    action_center_enabled=cfg.action_center_enabled,
+                    action_center_x=action_center.x,
+                    action_center_y=action_center.y,
+                    action_center_source=action_center.source,
+                    action_center_player_count=action_center.player_count,
                 )
             )
             emit_progress(index, force=index == total_frames)
@@ -663,6 +784,7 @@ class FollowCamGenerator:
             writer.writerow(
                 [
                     "Frame",
+                    "Profile",
                     "CenterX",
                     "CenterY",
                     "CropX1",
@@ -674,6 +796,11 @@ class FollowCamGenerator:
                     "Status",
                     "TrackX",
                     "TrackY",
+                    "ActionCenterEnabled",
+                    "ActionCenterX",
+                    "ActionCenterY",
+                    "ActionCenterSource",
+                    "ActionCenterPlayerCount",
                     "Confidence",
                     "Speed",
                     "ZoomOutRatio",
@@ -684,6 +811,7 @@ class FollowCamGenerator:
                 writer.writerow(
                     [
                         entry.frame_index,
+                        entry.profile,
                         f"{entry.center_x:.2f}",
                         f"{entry.center_y:.2f}",
                         entry.crop_x1,
@@ -695,6 +823,11 @@ class FollowCamGenerator:
                         entry.source_status,
                         "" if entry.track_x is None else f"{entry.track_x:.2f}",
                         "" if entry.track_y is None else f"{entry.track_y:.2f}",
+                        "1" if entry.action_center_enabled else "0",
+                        "" if entry.action_center_x is None else f"{entry.action_center_x:.2f}",
+                        "" if entry.action_center_y is None else f"{entry.action_center_y:.2f}",
+                        entry.action_center_source,
+                        entry.action_center_player_count,
                         f"{entry.confidence:.4f}",
                         f"{entry.speed:.2f}",
                         f"{entry.zoom_out_ratio:.4f}",
@@ -714,6 +847,8 @@ class FollowCamGenerator:
                 "track_source": track_source,
                 "track_csv": track_csv_path.name,
                 "frame_count": 0,
+                "profile": self.config.profile,
+                "action_center": self._action_center_report_payload(path_entries),
             }
         else:
             crop_heights = [entry.crop_height for entry in path_entries]
@@ -721,10 +856,12 @@ class FollowCamGenerator:
                 "track_source": track_source,
                 "track_csv": track_csv_path.name,
                 "frame_count": len(path_entries),
+                "profile": self.config.profile,
                 "target_resolution": [self.config.target_width, self.config.target_height],
                 "min_crop_height": min(crop_heights),
                 "max_crop_height": max(crop_heights),
                 "mean_crop_height": round(sum(crop_heights) / len(crop_heights), 2),
+                "action_center": self._action_center_report_payload(path_entries),
                 "status_counts": {
                     status.value: sum(1 for entry in path_entries if entry.source_status == status.value)
                     for status in OutputStatus
@@ -732,6 +869,21 @@ class FollowCamGenerator:
             }
         with path.open("w", encoding="utf-8") as report_file:
             json.dump(payload, report_file, ensure_ascii=False, indent=2)
+
+    def _action_center_report_payload(self, path_entries: list[CameraPathEntry]) -> dict[str, Any]:
+        sources = sorted({entry.action_center_source for entry in path_entries})
+        return {
+            "enabled": self.config.action_center_enabled,
+            "player_tracks_path": (
+                None
+                if self.config.action_center_player_tracks_path is None
+                else str(self.config.action_center_player_tracks_path)
+            ),
+            "frames_with_player_context": sum(
+                1 for entry in path_entries if entry.action_center_player_count > 0
+            ),
+            "sources": sources,
+        }
 
     def _normalize(self, value: float, start: float, end: float) -> float:
         if end <= start:
