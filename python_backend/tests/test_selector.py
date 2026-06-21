@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from football_tracking.config import SelectionConfig, TrackingConfig
+from football_tracking.config import SelectionConfig, SelectionPriorsConfig, TrackingConfig
 from football_tracking.selection_priors import nearest_recent_player_foot_distance_px
 from football_tracking.selector import UniqueBallSelector
 from football_tracking.types import Candidate, TrackerContext, TrackState
@@ -58,7 +58,7 @@ class UniqueBallSelectorPriorTests(unittest.TestCase):
                 }
             ]
         }
-        selector = UniqueBallSelector(SelectionConfig(), TrackingConfig())
+        selector = UniqueBallSelector(SelectionConfig(priors=SelectionPriorsConfig(enabled=True)), TrackingConfig())
 
         decision = selector.select(
             [noise, near_player],
@@ -92,7 +92,7 @@ class UniqueBallSelectorPriorTests(unittest.TestCase):
             ],
             "pitch_dimensions": {"length_m": 105.0, "width_m": 68.0},
         }
-        selector = UniqueBallSelector(SelectionConfig(), TrackingConfig())
+        selector = UniqueBallSelector(SelectionConfig(priors=SelectionPriorsConfig(enabled=True)), TrackingConfig())
 
         decision = selector.select(
             [outside_pitch, in_pitch],

@@ -218,7 +218,7 @@ class SelectionWeights:
 
 @dataclass(slots=True)
 class SelectionPriorsConfig:
-    enabled: bool = True
+    enabled: bool = False
     player_foot_radius_px: float = 60.0
     player_foot_bonus: float = 0.08
     recent_player_frame_window: int = 2

@@ -76,7 +76,7 @@ def make_pipeline_config(output_dir: Path, player_tracks_path: Path | None = Non
             ],
         ),
         selection=SelectionConfig(
-            priors=SelectionPriorsConfig(player_tracks_path=player_tracks_path),
+            priors=SelectionPriorsConfig(enabled=True, player_tracks_path=player_tracks_path),
         ),
         tracking=TrackingConfig(kalman_enabled=False),
         output=OutputConfig(
