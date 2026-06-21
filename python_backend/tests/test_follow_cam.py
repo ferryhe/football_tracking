@@ -81,6 +81,22 @@ class FollowCamTests(unittest.TestCase):
         self.assertEqual("custom", FollowCamConfig().profile)
         self.assertFalse(FollowCamConfig().action_center_enabled)
 
+    def test_load_config_rejects_non_dict_follow_cam_with_clear_message(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            repo_root = Path(temp_name)
+            config_path = self.write_yaml(
+                repo_root,
+                {
+                    "input_video": "./data/input.mp4",
+                    "output_dir": "./outputs/run_a",
+                    "detector": {"model_path": "./weights/model.pt"},
+                    "follow_cam": "enabled",
+                },
+            )
+
+            with self.assertRaisesRegex(ValueError, "follow_cam must be a dict or null"):
+                load_config(config_path)
+
     def test_profile_preserves_explicit_legacy_value_override(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:
             repo_root = Path(temp_name)

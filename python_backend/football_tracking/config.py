@@ -217,39 +217,6 @@ class FollowCamConfig:
         self.action_center_player_weight = max(0.0, min(1.0, float(self.action_center_player_weight)))
 
 
-FOLLOW_CAM_LEGACY_DEFAULTS: dict[str, int | float] = {
-    "min_crop_height": 900,
-    "max_crop_height": 1260,
-    "dead_zone_ratio_x": 0.12,
-    "dead_zone_ratio_y": 0.10,
-    "glide_pan_smoothing": 0.12,
-    "glide_max_pan_per_frame_x": 32.0,
-    "glide_max_pan_per_frame_y": 18.0,
-    "catch_up_pan_smoothing": 0.24,
-    "catch_up_max_pan_per_frame_x": 64.0,
-    "catch_up_max_pan_per_frame_y": 36.0,
-    "catch_up_trigger_ratio_x": 0.26,
-    "catch_up_trigger_ratio_y": 0.22,
-    "catch_up_release_ratio_x": 0.18,
-    "catch_up_release_ratio_y": 0.15,
-    "zoom_in_smoothing": 0.05,
-    "zoom_out_smoothing": 0.08,
-    "max_zoom_in_per_frame": 10.0,
-    "max_zoom_out_per_frame": 18.0,
-    "zoom_deadband_height": 80.0,
-    "zoom_out_confirm_frames": 4,
-    "zoom_in_confirm_frames": 8,
-    "zoom_reverse_confirm_frames": 14,
-    "zoom_hold_frames_after_change": 10,
-    "velocity_smoothing": 0.35,
-    "look_ahead_gain": 0.20,
-    "look_ahead_max_px": 180.0,
-    "speed_zoom_out_start": 22.0,
-    "speed_zoom_out_end": 85.0,
-    "predicted_pan_decay": 0.75,
-}
-
-
 FOLLOW_CAM_PROFILE_PRESETS: dict[str, dict[str, int | float]] = {
     "custom": {},
     "broadcast": {
@@ -724,7 +691,7 @@ def _to_follow_cam(raw_follow_cam: Any, base_dir: Path) -> FollowCamConfig:
     if raw_follow_cam in (None, "", []):
         return FollowCamConfig()
     if not isinstance(raw_follow_cam, dict):
-        raise ValueError("follow_cam 蹇呴』涓?dict 鎴?null")
+        raise ValueError("follow_cam must be a dict or null")
     action_center_enabled, action_center_player_tracks_path, action_center_player_weight = _to_follow_cam_action_center(
         raw_follow_cam,
         base_dir,
