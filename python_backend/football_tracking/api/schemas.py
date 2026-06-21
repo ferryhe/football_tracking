@@ -1,15 +1,15 @@
 from __future__ import annotations
 
-from typing import Annotated, Any, Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
 RunStatus = Literal["queued", "running", "completed", "failed", "cancelled"]
 AIResponseLanguage = Literal["en", "zh"]
-Point2DPayload = Annotated[list[float], Field(min_length=2, max_length=2)]
-QuadPointsPayload = Annotated[list[Point2DPayload], Field(min_length=4, max_length=4)]
-MatrixRowPayload = Annotated[list[float], Field(min_length=3, max_length=3)]
-Matrix3x3Payload = Annotated[list[MatrixRowPayload], Field(min_length=3, max_length=3)]
+Point2DPayload = tuple[float, float]
+QuadPointsPayload = tuple[Point2DPayload, Point2DPayload, Point2DPayload, Point2DPayload]
+MatrixRowPayload = tuple[float, float, float]
+Matrix3x3Payload = tuple[MatrixRowPayload, MatrixRowPayload, MatrixRowPayload]
 
 
 class HealthResponse(BaseModel):

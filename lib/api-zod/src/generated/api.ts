@@ -246,30 +246,6 @@ export const SuggestFieldSetupBody = zod.object({
   frame_index: zod.union([zod.number(), zod.null()]).optional(),
 });
 
-export const suggestFieldSetupResponseCalibrationOneImagePointsItemMin = 2;
-export const suggestFieldSetupResponseCalibrationOneImagePointsItemMax = 2;
-
-export const suggestFieldSetupResponseCalibrationOneImagePointsMin = 4;
-export const suggestFieldSetupResponseCalibrationOneImagePointsMax = 4;
-
-export const suggestFieldSetupResponseCalibrationOnePitchPointsItemMin = 2;
-export const suggestFieldSetupResponseCalibrationOnePitchPointsItemMax = 2;
-
-export const suggestFieldSetupResponseCalibrationOnePitchPointsMin = 4;
-export const suggestFieldSetupResponseCalibrationOnePitchPointsMax = 4;
-
-export const suggestFieldSetupResponseCalibrationOneImageToPitchMatrixItemMin = 3;
-export const suggestFieldSetupResponseCalibrationOneImageToPitchMatrixItemMax = 3;
-
-export const suggestFieldSetupResponseCalibrationOneImageToPitchMatrixMin = 3;
-export const suggestFieldSetupResponseCalibrationOneImageToPitchMatrixMax = 3;
-
-export const suggestFieldSetupResponseCalibrationOnePitchToImageMatrixItemMin = 3;
-export const suggestFieldSetupResponseCalibrationOnePitchToImageMatrixItemMax = 3;
-
-export const suggestFieldSetupResponseCalibrationOnePitchToImageMatrixMin = 3;
-export const suggestFieldSetupResponseCalibrationOnePitchToImageMatrixMax = 3;
-
 export const SuggestFieldSetupResponse = zod.object({
   input_video: zod.string(),
   preview_data_url: zod.string(),
@@ -307,50 +283,28 @@ export const SuggestFieldSetupResponse = zod.object({
   calibration: zod
     .union([
       zod.object({
-        image_points: zod
-          .array(
-            zod
-              .array(zod.number())
-              .min(suggestFieldSetupResponseCalibrationOneImagePointsItemMin)
-              .max(suggestFieldSetupResponseCalibrationOneImagePointsItemMax),
-          )
-          .min(suggestFieldSetupResponseCalibrationOneImagePointsMin)
-          .max(suggestFieldSetupResponseCalibrationOneImagePointsMax),
-        pitch_points: zod
-          .array(
-            zod
-              .array(zod.number())
-              .min(suggestFieldSetupResponseCalibrationOnePitchPointsItemMin)
-              .max(suggestFieldSetupResponseCalibrationOnePitchPointsItemMax),
-          )
-          .min(suggestFieldSetupResponseCalibrationOnePitchPointsMin)
-          .max(suggestFieldSetupResponseCalibrationOnePitchPointsMax),
-        image_to_pitch_matrix: zod
-          .array(
-            zod
-              .array(zod.number())
-              .min(
-                suggestFieldSetupResponseCalibrationOneImageToPitchMatrixItemMin,
-              )
-              .max(
-                suggestFieldSetupResponseCalibrationOneImageToPitchMatrixItemMax,
-              ),
-          )
-          .min(suggestFieldSetupResponseCalibrationOneImageToPitchMatrixMin)
-          .max(suggestFieldSetupResponseCalibrationOneImageToPitchMatrixMax),
-        pitch_to_image_matrix: zod
-          .array(
-            zod
-              .array(zod.number())
-              .min(
-                suggestFieldSetupResponseCalibrationOnePitchToImageMatrixItemMin,
-              )
-              .max(
-                suggestFieldSetupResponseCalibrationOnePitchToImageMatrixItemMax,
-              ),
-          )
-          .min(suggestFieldSetupResponseCalibrationOnePitchToImageMatrixMin)
-          .max(suggestFieldSetupResponseCalibrationOnePitchToImageMatrixMax),
+        image_points: zod.tuple([
+          zod.tuple([zod.number(), zod.number()]),
+          zod.tuple([zod.number(), zod.number()]),
+          zod.tuple([zod.number(), zod.number()]),
+          zod.tuple([zod.number(), zod.number()]),
+        ]),
+        pitch_points: zod.tuple([
+          zod.tuple([zod.number(), zod.number()]),
+          zod.tuple([zod.number(), zod.number()]),
+          zod.tuple([zod.number(), zod.number()]),
+          zod.tuple([zod.number(), zod.number()]),
+        ]),
+        image_to_pitch_matrix: zod.tuple([
+          zod.tuple([zod.number(), zod.number(), zod.number()]),
+          zod.tuple([zod.number(), zod.number(), zod.number()]),
+          zod.tuple([zod.number(), zod.number(), zod.number()]),
+        ]),
+        pitch_to_image_matrix: zod.tuple([
+          zod.tuple([zod.number(), zod.number(), zod.number()]),
+          zod.tuple([zod.number(), zod.number(), zod.number()]),
+          zod.tuple([zod.number(), zod.number(), zod.number()]),
+        ]),
         pitch_dimensions: zod.object({
           length_m: zod.number(),
           width_m: zod.number(),

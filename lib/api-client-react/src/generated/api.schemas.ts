@@ -228,22 +228,40 @@ export interface FieldCalibrationPayload {
    * @minItems 4
    * @maxItems 4
    */
-  image_points: number[][];
+  image_points: [
+    [number, number],
+    [number, number],
+    [number, number],
+    [number, number],
+  ];
   /**
    * @minItems 4
    * @maxItems 4
    */
-  pitch_points: number[][];
+  pitch_points: [
+    [number, number],
+    [number, number],
+    [number, number],
+    [number, number],
+  ];
   /**
    * @minItems 3
    * @maxItems 3
    */
-  image_to_pitch_matrix: number[][];
+  image_to_pitch_matrix: [
+    [number, number, number],
+    [number, number, number],
+    [number, number, number],
+  ];
   /**
    * @minItems 3
    * @maxItems 3
    */
-  pitch_to_image_matrix: number[][];
+  pitch_to_image_matrix: [
+    [number, number, number],
+    [number, number, number],
+    [number, number, number],
+  ];
   pitch_dimensions: PitchDimensionsPayload;
   confidence: FieldCalibrationPayloadConfidence;
   source: string;

@@ -1057,9 +1057,28 @@ components:
     FieldCalibrationPayload:
       properties:
         image_points:
-          items:
-            items:
-              type: number
+          prefixItems:
+          - prefixItems:
+            - type: number
+            - type: number
+            type: array
+            maxItems: 2
+            minItems: 2
+          - prefixItems:
+            - type: number
+            - type: number
+            type: array
+            maxItems: 2
+            minItems: 2
+          - prefixItems:
+            - type: number
+            - type: number
+            type: array
+            maxItems: 2
+            minItems: 2
+          - prefixItems:
+            - type: number
+            - type: number
             type: array
             maxItems: 2
             minItems: 2
@@ -1068,9 +1087,28 @@ components:
           minItems: 4
           title: Image Points
         pitch_points:
-          items:
-            items:
-              type: number
+          prefixItems:
+          - prefixItems:
+            - type: number
+            - type: number
+            type: array
+            maxItems: 2
+            minItems: 2
+          - prefixItems:
+            - type: number
+            - type: number
+            type: array
+            maxItems: 2
+            minItems: 2
+          - prefixItems:
+            - type: number
+            - type: number
+            type: array
+            maxItems: 2
+            minItems: 2
+          - prefixItems:
+            - type: number
+            - type: number
             type: array
             maxItems: 2
             minItems: 2
@@ -1079,9 +1117,25 @@ components:
           minItems: 4
           title: Pitch Points
         image_to_pitch_matrix:
-          items:
-            items:
-              type: number
+          prefixItems:
+          - prefixItems:
+            - type: number
+            - type: number
+            - type: number
+            type: array
+            maxItems: 3
+            minItems: 3
+          - prefixItems:
+            - type: number
+            - type: number
+            - type: number
+            type: array
+            maxItems: 3
+            minItems: 3
+          - prefixItems:
+            - type: number
+            - type: number
+            - type: number
             type: array
             maxItems: 3
             minItems: 3
@@ -1090,9 +1144,25 @@ components:
           minItems: 3
           title: Image To Pitch Matrix
         pitch_to_image_matrix:
-          items:
-            items:
-              type: number
+          prefixItems:
+          - prefixItems:
+            - type: number
+            - type: number
+            - type: number
+            type: array
+            maxItems: 3
+            minItems: 3
+          - prefixItems:
+            - type: number
+            - type: number
+            - type: number
+            type: array
+            maxItems: 3
+            minItems: 3
+          - prefixItems:
+            - type: number
+            - type: number
+            - type: number
             type: array
             maxItems: 3
             minItems: 3
