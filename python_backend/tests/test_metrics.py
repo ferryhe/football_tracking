@@ -280,6 +280,32 @@ class MetricsTests(unittest.TestCase):
         self.assertEqual(0.84, report["event_candidates"]["max_score"])
         self.assertEqual(report["event_candidates"], stats["event_candidates"])
 
+    def test_build_metrics_report_includes_compact_review_packet_summary(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            (output_dir / "review_packets.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": "1.0",
+                        "generated_at": "2026-01-01T00:00:00+00:00",
+                        "summary": {
+                            "packet_count": 3,
+                            "counts_by_label": {"highlight_worthy": 1, "needs_ai_review": 2},
+                            "media_packet_count": 3,
+                        },
+                        "packets": [],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            report = build_metrics_report(output_dir)
+            stats = stats_from_metrics_report(report)
+
+        self.assertEqual(3, report["review_packets"]["packet_count"])
+        self.assertEqual({"highlight_worthy": 1, "needs_ai_review": 2}, report["review_packets"]["counts_by_label"])
+        self.assertEqual(report["review_packets"], stats["review_packets"])
+
     def test_write_run_artifacts_preserves_manifest_when_ai_review_triggers_fail(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:
             output_dir = Path(temp_name)
