@@ -18,6 +18,7 @@ from football_tracking.player_tracks import (
     compact_player_tracks_summary,
     write_player_tracks_artifacts,
 )
+from football_tracking.review_packets import compact_review_packet_summary
 
 SCHEMA_VERSION = "1.0"
 FALSE_POSITIVE_ISLAND_MAX_LENGTH = 2
@@ -124,6 +125,11 @@ def build_metrics_report(output_dir: Path) -> dict[str, Any]:
         player_tracks_summary = compact_player_tracks_summary(player_tracks_report)
         if player_tracks_summary is not None:
             report["player_tracks"] = player_tracks_summary
+    review_packets_report = _read_optional_json(output_dir / "review_packets.json")
+    if review_packets_report is not None:
+        review_packets_summary = compact_review_packet_summary(review_packets_report)
+        if review_packets_summary is not None:
+            report["review_packets"] = review_packets_summary
     return report
 
 
@@ -212,6 +218,9 @@ def stats_from_metrics_report(report: dict[str, Any]) -> dict[str, Any]:
     player_tracks = report.get("player_tracks")
     if isinstance(player_tracks, dict):
         stats["player_tracks"] = player_tracks
+    review_packets = report.get("review_packets")
+    if isinstance(review_packets, dict):
+        stats["review_packets"] = review_packets
     stats["metrics_report"] = {
         "schema_version": report.get("schema_version"),
         "generated_at": report.get("generated_at"),
