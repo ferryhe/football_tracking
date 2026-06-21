@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 import importlib.util
 import json
+import sys
 import tempfile
 import unittest
 from concurrent.futures import CancelledError
@@ -13,6 +14,7 @@ import yaml
 
 from football_tracking.chunk_runner import (
     build_chunk_config,
+    effective_worker_count,
     enforce_raw_chunk_config,
     run_chunk,
     run_temporal_chunks,
@@ -93,6 +95,235 @@ def make_chunk() -> TemporalChunk:
         core_end_frame=139,
         output_dir_name="chunk_0001",
     )
+
+
+def make_runner_chunks(count: int = 2) -> list[TemporalChunk]:
+    chunks: list[TemporalChunk] = []
+    for index in range(count):
+        core_start = index * 5
+        core_end = core_start + 4
+        start = max(0, core_start - 1)
+        end = core_end + 1
+        chunks.append(
+            TemporalChunk(
+                index=index,
+                decode_start_frame=start,
+                start_frame=start,
+                end_frame=end,
+                core_start_frame=core_start,
+                core_end_frame=core_end,
+                output_dir_name=f"chunk_{index:04d}",
+            )
+        )
+    return chunks
+
+
+def write_raw_outputs_for_chunk_config(config_path: Path) -> None:
+    payload = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    output_dir = Path(payload["output_dir"])
+    start_frame = int(payload["runtime"]["start_frame"])
+    max_frames = int(payload["runtime"]["max_frames"])
+    output_dir.mkdir(parents=True, exist_ok=True)
+    with (output_dir / "ball_track.csv").open("w", newline="", encoding="utf-8-sig") as csv_file:
+        writer = csv.writer(csv_file)
+        writer.writerow(["Frame", "X", "Y", "Confidence", "Status"])
+        for frame in range(start_frame, start_frame + max_frames):
+            writer.writerow([frame, frame + 1, frame + 2, "0.90", "DETECTED"])
+    with (output_dir / "debug.jsonl").open("w", encoding="utf-8") as debug_file:
+        for frame in range(start_frame, start_frame + max_frames):
+            debug_file.write(json.dumps({"frame": frame, "source": output_dir.name}) + "\n")
+
+
+class SuccessfulChunkPopen:
+    instances: list["SuccessfulChunkPopen"] = []
+
+    def __init__(self, command: list[str], **kwargs: object) -> None:
+        self.command = list(command)
+        self.kwargs = kwargs
+        self.config_path = Path(self.command[self.command.index("--config") + 1])
+        self.returncode: int | None = None
+        self.terminated = False
+        self._poll_count = 0
+        write_raw_outputs_for_chunk_config(self.config_path)
+        stdout = kwargs.get("stdout")
+        if stdout is not None and hasattr(stdout, "write"):
+            stdout.write(f"finished {self.config_path.name}")
+            stdout.flush()
+        self.instances.append(self)
+
+    def poll(self) -> int | None:
+        self._poll_count += 1
+        if self._poll_count < 2:
+            return None
+        self.returncode = 0
+        return self.returncode
+
+    def communicate(self) -> tuple[str, str]:
+        if self.returncode is None:
+            self.returncode = 0
+        return ("", "")
+
+    def terminate(self) -> None:
+        self.terminated = True
+        self.returncode = -15
+
+    def wait(self, timeout: float | None = None) -> int:
+        if self.returncode is None:
+            self.returncode = 0
+        return self.returncode
+
+    def kill(self) -> None:
+        self.returncode = -9
+
+
+class FailingFirstChunkPopen:
+    instances: list["FailingFirstChunkPopen"] = []
+
+    def __init__(self, command: list[str], **kwargs: object) -> None:
+        self.command = list(command)
+        self.kwargs = kwargs
+        self.config_path = Path(self.command[self.command.index("--config") + 1])
+        self.returncode: int | None = None
+        self.terminated = False
+        self.is_failure = "chunk_0000" in self.config_path.parts
+        if self.is_failure:
+            stderr = kwargs.get("stderr")
+            if stderr is not None and hasattr(stderr, "write"):
+                stderr.write("worker failed")
+                stderr.flush()
+        self.instances.append(self)
+
+    def poll(self) -> int | None:
+        if self.is_failure:
+            self.returncode = 7
+            return self.returncode
+        return self.returncode
+
+    def communicate(self) -> tuple[str, str]:
+        if self.is_failure:
+            self.returncode = 7
+            return ("", "")
+        if self.returncode is None:
+            self.returncode = -15 if self.terminated else 0
+        return ("", "")
+
+    def terminate(self) -> None:
+        self.terminated = True
+        self.returncode = -15
+
+    def wait(self, timeout: float | None = None) -> int:
+        if self.returncode is None:
+            self.returncode = -15 if self.terminated else 0
+        return self.returncode
+
+    def kill(self) -> None:
+        self.returncode = -9
+
+
+class RunningChunkPopen:
+    instances: list["RunningChunkPopen"] = []
+
+    def __init__(self, command: list[str], **kwargs: object) -> None:
+        self.command = list(command)
+        self.kwargs = kwargs
+        self.config_path = Path(self.command[self.command.index("--config") + 1])
+        self.returncode: int | None = None
+        self.terminated = False
+        self.instances.append(self)
+
+    def poll(self) -> int | None:
+        return self.returncode
+
+    def communicate(self) -> tuple[str, str]:
+        if self.returncode is None:
+            self.returncode = -15 if self.terminated else 0
+        return ("", "")
+
+    def terminate(self) -> None:
+        self.terminated = True
+        self.returncode = -15
+
+    def wait(self, timeout: float | None = None) -> int:
+        if self.returncode is None:
+            self.returncode = -15 if self.terminated else 0
+        return self.returncode
+
+    def kill(self) -> None:
+        self.returncode = -9
+
+
+class StartFailingChunkPopen:
+    instances: list["StartFailingChunkPopen"] = []
+
+    def __init__(self, command: list[str], **kwargs: object) -> None:
+        self.command = list(command)
+        self.kwargs = kwargs
+        self.instances.append(self)
+        raise OSError("cannot start worker")
+
+
+class ChunkRunnerSchedulerTests(unittest.TestCase):
+    def test_effective_worker_count_caps_single_gpu_without_oversubscription(self) -> None:
+        self.assertEqual(
+            1,
+            effective_worker_count(
+                requested=4,
+                detector_device="cuda:0",
+                devices=(),
+                allow_gpu_oversubscription=False,
+            ),
+        )
+
+    def test_effective_worker_count_allows_cpu_parallelism(self) -> None:
+        self.assertEqual(
+            4,
+            effective_worker_count(
+                requested=4,
+                detector_device="cpu",
+                devices=(),
+                allow_gpu_oversubscription=False,
+            ),
+        )
+
+    def test_effective_worker_count_uses_multi_gpu_device_list(self) -> None:
+        self.assertEqual(
+            2,
+            effective_worker_count(
+                requested=4,
+                detector_device="cuda:0",
+                devices=("cuda:0", "cuda:1"),
+                allow_gpu_oversubscription=False,
+            ),
+        )
+
+    def test_effective_worker_count_allows_oversubscription_and_normalizes_zero_or_negative(self) -> None:
+        self.assertEqual(
+            4,
+            effective_worker_count(
+                requested=4,
+                detector_device="cuda:0",
+                devices=(),
+                allow_gpu_oversubscription=True,
+            ),
+        )
+        self.assertEqual(
+            1,
+            effective_worker_count(
+                requested=0,
+                detector_device="cpu",
+                devices=(),
+                allow_gpu_oversubscription=False,
+            ),
+        )
+        self.assertEqual(
+            1,
+            effective_worker_count(
+                requested=-3,
+                detector_device="cuda:0",
+                devices=("cuda:0", "cuda:1"),
+                allow_gpu_oversubscription=False,
+            ),
+        )
 
 
 class ChunkRunnerConfigTests(unittest.TestCase):
@@ -492,11 +723,15 @@ class TemporalChunkSequentialRunnerTests(unittest.TestCase):
             ):
                 with self.assertRaisesRegex(RuntimeError, "chunk_0001"):
                     run_temporal_chunks(config)
+            report = json.loads((config.output_dir / "temporal_chunks_report.json").read_text(encoding="utf-8"))
 
             self.assertEqual(2, run_chunk_mock.call_count)
             stitch.assert_not_called()
             postprocessor_cls.assert_not_called()
             follow_cam_cls.assert_not_called()
+            self.assertEqual("failed", report["execution"]["status"])
+            self.assertIn("chunk_0001", report["execution"]["error"])
+            self.assertEqual(9, report["execution"]["results"][1]["exit_code"])
 
     def test_run_temporal_chunks_cancels_before_starting_next_chunk(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:
@@ -515,9 +750,240 @@ class TemporalChunkSequentialRunnerTests(unittest.TestCase):
             ):
                 with self.assertRaises(CancelledError):
                     run_temporal_chunks(config, should_cancel=should_cancel)
+            report = json.loads((config.output_dir / "temporal_chunks_report.json").read_text(encoding="utf-8"))
 
             self.assertEqual(1, run_chunk_mock.call_count)
             stitch.assert_not_called()
+            self.assertEqual("cancelled", report["execution"]["status"])
+            self.assertEqual(1, len(report["execution"]["results"]))
+
+    def test_run_temporal_chunks_preserves_execution_report_when_stitch_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            base_dir = Path(temp_name)
+            config = make_app_config(base_dir)
+            chunks = make_runner_chunks(1)
+
+            with (
+                patch("football_tracking.chunk_runner.plan_temporal_chunks", return_value=chunks),
+                patch("football_tracking.chunk_runner.run_chunk", return_value=0),
+                patch("football_tracking.chunk_runner.stitch_chunk_outputs", side_effect=RuntimeError("stitch failed")),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "stitch failed"):
+                    run_temporal_chunks(config)
+            report = json.loads((config.output_dir / "temporal_chunks_report.json").read_text(encoding="utf-8"))
+
+        self.assertEqual("succeeded", report["execution"]["status"])
+        self.assertEqual("in_process", report["execution"]["mode"])
+        self.assertEqual(1, len(report["execution"]["results"]))
+        self.assertEqual("failed", report["stitch"]["status"])
+        self.assertIn("stitch failed", report["stitch"]["error"])
+
+    def test_run_temporal_chunks_caps_single_gpu_to_in_process_path(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            base_dir = Path(temp_name)
+            config = make_app_config(base_dir)
+            config.detector.device = "cuda:0"
+            config.temporal_chunks.max_workers = 4
+            chunks = make_runner_chunks(2)
+
+            with (
+                patch("football_tracking.chunk_runner.plan_temporal_chunks", return_value=chunks),
+                patch("football_tracking.chunk_runner.run_chunk", return_value=0) as run_chunk_mock,
+                patch("football_tracking.chunk_runner.stitch_chunk_outputs", return_value={"frame_count": 10}),
+                patch("football_tracking.chunk_runner.subprocess.Popen") as popen,
+            ):
+                run_temporal_chunks(config)
+
+            self.assertEqual(2, run_chunk_mock.call_count)
+            popen.assert_not_called()
+
+    def test_run_temporal_chunks_uses_subprocess_workers_for_cpu_parallelism_and_records_execution(self) -> None:
+        SuccessfulChunkPopen.instances = []
+        with tempfile.TemporaryDirectory() as temp_name:
+            base_dir = Path(temp_name)
+            config = make_app_config(base_dir)
+            config.detector.device = "cpu"
+            config.temporal_chunks.max_workers = 2
+            config.mock.frame_count = 10
+            chunks = make_runner_chunks(2)
+
+            with (
+                patch("football_tracking.chunk_runner.plan_temporal_chunks", return_value=chunks),
+                patch("football_tracking.chunk_runner.subprocess.Popen", SuccessfulChunkPopen),
+                patch("football_tracking.chunk_runner.time.sleep"),
+                patch("football_tracking.chunk_runner.run_chunk") as run_chunk_mock,
+            ):
+                run_temporal_chunks(config)
+
+            report = json.loads((config.output_dir / "temporal_chunks_report.json").read_text(encoding="utf-8"))
+
+        self.assertEqual(2, len(SuccessfulChunkPopen.instances))
+        self.assertEqual(Path(__file__).resolve().parents[1], Path(SuccessfulChunkPopen.instances[0].kwargs["cwd"]))
+        self.assertIn(str(Path(__file__).resolve().parents[1]), SuccessfulChunkPopen.instances[0].kwargs["env"]["PYTHONPATH"])
+        self.assertEqual(
+            [
+                sys.executable,
+                "-m",
+                "football_tracking.chunk_worker",
+                "--config",
+                str(SuccessfulChunkPopen.instances[0].config_path),
+            ],
+            SuccessfulChunkPopen.instances[0].command,
+        )
+        run_chunk_mock.assert_not_called()
+        self.assertEqual("succeeded", report["execution"]["status"])
+        self.assertEqual("subprocess", report["execution"]["mode"])
+        self.assertEqual(2, report["execution"]["requested_workers"])
+        self.assertEqual(2, report["execution"]["effective_workers"])
+        self.assertEqual(2, len(report["execution"]["results"]))
+        first_result = report["execution"]["results"][0]
+        self.assertTrue(
+            {
+                "chunk",
+                "chunk_index",
+                "chunk_name",
+                "config_path",
+                "command",
+                "device",
+                "start_time",
+                "end_time",
+                "duration",
+                "exit_code",
+                "stdout",
+                "stderr",
+            }.issubset(first_result)
+        )
+        self.assertEqual({"index": 0, "name": "chunk_0000"}, first_result["chunk"])
+        self.assertEqual(0, first_result["chunk_index"])
+        self.assertEqual("chunk_0000", first_result["chunk_name"])
+        self.assertEqual(str(SuccessfulChunkPopen.instances[0].config_path), first_result["config_path"])
+        self.assertEqual(SuccessfulChunkPopen.instances[0].command, first_result["command"])
+        self.assertEqual("cpu", first_result["device"])
+        self.assertGreaterEqual(first_result["end_time"], first_result["start_time"])
+        self.assertGreaterEqual(first_result["duration"], 0.0)
+        self.assertEqual(0, first_result["exit_code"])
+        self.assertIn("finished chunk_config.yaml", first_result["stdout"])
+        self.assertEqual("", first_result["stderr"])
+        self.assertEqual([], report["execution"]["devices"])
+
+    def test_run_temporal_chunks_assigns_configured_devices_to_chunk_configs(self) -> None:
+        SuccessfulChunkPopen.instances = []
+        with tempfile.TemporaryDirectory() as temp_name:
+            base_dir = Path(temp_name)
+            config = make_app_config(base_dir)
+            config.detector.device = "cuda:0"
+            config.temporal_chunks.max_workers = 4
+            config.temporal_chunks.devices = ("cuda:0", "cuda:1")
+            config.mock.frame_count = 15
+            chunks = make_runner_chunks(3)
+
+            with (
+                patch("football_tracking.chunk_runner.plan_temporal_chunks", return_value=chunks),
+                patch("football_tracking.chunk_runner.subprocess.Popen", SuccessfulChunkPopen),
+                patch("football_tracking.chunk_runner.time.sleep"),
+            ):
+                run_temporal_chunks(config)
+
+            written_devices = [
+                yaml.safe_load((config.output_dir / "chunks" / chunk.output_dir_name / "chunk_config.yaml").read_text(
+                    encoding="utf-8"
+                ))["detector"]["device"]
+                for chunk in chunks
+            ]
+            report = json.loads((config.output_dir / "temporal_chunks_report.json").read_text(encoding="utf-8"))
+
+        self.assertEqual(["cuda:0", "cuda:1", "cuda:0"], written_devices)
+        self.assertEqual(["cuda:0", "cuda:1"], report["execution"]["devices"])
+        self.assertEqual(2, report["execution"]["effective_workers"])
+
+    def test_run_temporal_chunks_stops_subprocess_workers_on_failure(self) -> None:
+        FailingFirstChunkPopen.instances = []
+        with tempfile.TemporaryDirectory() as temp_name:
+            base_dir = Path(temp_name)
+            config = make_app_config(base_dir)
+            config.detector.device = "cpu"
+            config.temporal_chunks.max_workers = 2
+            chunks = make_runner_chunks(3)
+
+            with (
+                patch("football_tracking.chunk_runner.plan_temporal_chunks", return_value=chunks),
+                patch("football_tracking.chunk_runner.subprocess.Popen", FailingFirstChunkPopen),
+                patch("football_tracking.chunk_runner.time.sleep"),
+                patch("football_tracking.chunk_runner.run_chunk") as run_chunk_mock,
+                patch("football_tracking.chunk_runner.stitch_chunk_outputs") as stitch,
+            ):
+                with self.assertRaisesRegex(RuntimeError, "chunk_0000"):
+                    run_temporal_chunks(config)
+            report = json.loads((config.output_dir / "temporal_chunks_report.json").read_text(encoding="utf-8"))
+
+        self.assertEqual(2, len(FailingFirstChunkPopen.instances))
+        self.assertTrue(FailingFirstChunkPopen.instances[1].terminated)
+        run_chunk_mock.assert_not_called()
+        stitch.assert_not_called()
+        self.assertEqual("failed", report["execution"]["status"])
+        self.assertIn("chunk_0000", report["execution"]["error"])
+        self.assertEqual(2, len(report["execution"]["results"]))
+        self.assertEqual(7, report["execution"]["results"][0]["exit_code"])
+        self.assertIn("worker failed", report["execution"]["results"][0]["stderr"])
+
+    def test_run_temporal_chunks_writes_failed_report_when_subprocess_cannot_start(self) -> None:
+        StartFailingChunkPopen.instances = []
+        with tempfile.TemporaryDirectory() as temp_name:
+            base_dir = Path(temp_name)
+            config = make_app_config(base_dir)
+            config.detector.device = "cpu"
+            config.temporal_chunks.max_workers = 2
+            chunks = make_runner_chunks(2)
+
+            with (
+                patch("football_tracking.chunk_runner.plan_temporal_chunks", return_value=chunks),
+                patch("football_tracking.chunk_runner.subprocess.Popen", StartFailingChunkPopen),
+                patch("football_tracking.chunk_runner.run_chunk") as run_chunk_mock,
+                patch("football_tracking.chunk_runner.stitch_chunk_outputs") as stitch,
+            ):
+                with self.assertRaisesRegex(RuntimeError, "Unable to start temporal chunk chunk_0000"):
+                    run_temporal_chunks(config)
+            report = json.loads((config.output_dir / "temporal_chunks_report.json").read_text(encoding="utf-8"))
+
+        self.assertEqual(1, len(StartFailingChunkPopen.instances))
+        run_chunk_mock.assert_not_called()
+        stitch.assert_not_called()
+        self.assertEqual("failed", report["execution"]["status"])
+        self.assertIn("cannot start worker", report["execution"]["error"])
+        self.assertEqual([], report["execution"]["results"])
+
+    def test_run_temporal_chunks_terminates_subprocess_workers_on_cancel(self) -> None:
+        RunningChunkPopen.instances = []
+        cancel_calls = {"count": 0}
+
+        def should_cancel() -> bool:
+            cancel_calls["count"] += 1
+            return cancel_calls["count"] > 1
+
+        with tempfile.TemporaryDirectory() as temp_name:
+            base_dir = Path(temp_name)
+            config = make_app_config(base_dir)
+            config.detector.device = "cpu"
+            config.temporal_chunks.max_workers = 2
+            chunks = make_runner_chunks(2)
+
+            with (
+                patch("football_tracking.chunk_runner.plan_temporal_chunks", return_value=chunks),
+                patch("football_tracking.chunk_runner.subprocess.Popen", RunningChunkPopen),
+                patch("football_tracking.chunk_runner.time.sleep"),
+                patch("football_tracking.chunk_runner.run_chunk") as run_chunk_mock,
+                patch("football_tracking.chunk_runner.stitch_chunk_outputs") as stitch,
+            ):
+                with self.assertRaises(CancelledError):
+                    run_temporal_chunks(config, should_cancel=should_cancel)
+            report = json.loads((config.output_dir / "temporal_chunks_report.json").read_text(encoding="utf-8"))
+
+        self.assertGreaterEqual(len(RunningChunkPopen.instances), 1)
+        self.assertTrue(all(instance.terminated for instance in RunningChunkPopen.instances))
+        run_chunk_mock.assert_not_called()
+        stitch.assert_not_called()
+        self.assertEqual("cancelled", report["execution"]["status"])
+        self.assertEqual(len(RunningChunkPopen.instances), len(report["execution"]["results"]))
 
 
 class ChunkWorkerCliTests(unittest.TestCase):
