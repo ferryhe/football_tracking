@@ -10,6 +10,7 @@ from football_tracking.physics import (
     velocity_score,
 )
 from football_tracking.scene_bias import SceneBiasResolver
+from football_tracking.selection_priors import SelectionPriorScore, score_selection_priors
 from football_tracking.types import Candidate, CandidateScore, SelectionDecision, TrackerContext
 
 
@@ -95,6 +96,7 @@ class UniqueBallSelector:
         scene_zone = None
         if self.scene_bias is not None:
             scene_bonus, scene_zone = self.scene_bias.get_selection_bonus(candidate, context, frame_index)
+        prior_score = score_selection_priors(candidate, context, frame_index, self.config.priors)
 
         weights = self.config.weights
         total_score = (
@@ -105,6 +107,7 @@ class UniqueBallSelector:
             + weights.trajectory_length_bonus * history_component
             + weights.confidence * confidence_component
             + scene_bonus
+            + prior_score.prior_score
         )
 
         reason = self._build_reason(
@@ -118,6 +121,7 @@ class UniqueBallSelector:
             history_component=history_component,
             scene_bonus=scene_bonus,
             scene_zone=scene_zone,
+            prior_score=prior_score,
         )
 
         return CandidateScore(
@@ -132,6 +136,12 @@ class UniqueBallSelector:
             scene_bonus=scene_bonus,
             scene_zone=scene_zone,
             reason=reason,
+            prior_score=prior_score.prior_score,
+            player_foot_bonus=prior_score.player_foot_bonus,
+            nearest_player_foot_distance_px=prior_score.nearest_player_foot_distance_px,
+            pitch_boundary_penalty=prior_score.pitch_boundary_penalty,
+            pitch_point_m=prior_score.pitch_point_m,
+            outside_pitch=prior_score.outside_pitch,
         )
 
     def _build_reason(
@@ -146,9 +156,14 @@ class UniqueBallSelector:
         history_component: float,
         scene_bonus: float,
         scene_zone: str | None,
+        prior_score: SelectionPriorScore,
     ) -> str:
         if anchor_position is None:
-            return "bootstrap_selection_without_history"
+            reason = "bootstrap_selection_without_history"
+            prior_reason = self._build_prior_reason(prior_score)
+            if prior_reason:
+                reason += f", {prior_reason}"
+            return reason
 
         distance = euclidean_distance(candidate.center, anchor_position)
         reason = (
@@ -158,4 +173,25 @@ class UniqueBallSelector:
         )
         if scene_zone is not None or scene_bonus != 0.0:
             reason += f", scene_zone={scene_zone}, scene_bonus={scene_bonus:.3f}"
+        prior_reason = self._build_prior_reason(prior_score)
+        if prior_reason:
+            reason += f", {prior_reason}"
         return reason
+
+    def _build_prior_reason(self, prior_score: SelectionPriorScore) -> str:
+        parts: list[str] = []
+        if prior_score.nearest_player_foot_distance_px is not None or prior_score.player_foot_bonus != 0.0:
+            if prior_score.nearest_player_foot_distance_px is not None:
+                parts.append(f"nearest_player_foot_distance_px={prior_score.nearest_player_foot_distance_px:.2f}")
+            parts.append(f"player_foot_bonus={prior_score.player_foot_bonus:.3f}")
+        if prior_score.pitch_point_m is not None or prior_score.outside_pitch is not None:
+            if prior_score.pitch_point_m is not None:
+                parts.append(
+                    f"pitch_point_m=({prior_score.pitch_point_m[0]:.2f},{prior_score.pitch_point_m[1]:.2f})"
+                )
+            parts.append(f"outside_pitch={prior_score.outside_pitch}")
+            parts.append(f"pitch_boundary_penalty={prior_score.pitch_boundary_penalty:.3f}")
+        if not parts:
+            return ""
+        parts.append(f"prior_score={prior_score.prior_score:.3f}")
+        return ", ".join(parts)

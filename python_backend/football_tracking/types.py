@@ -84,6 +84,12 @@ class CandidateScore:
     scene_bonus: float
     scene_zone: str | None
     reason: str
+    prior_score: float = 0.0
+    player_foot_bonus: float = 0.0
+    nearest_player_foot_distance_px: float | None = None
+    pitch_boundary_penalty: float = 0.0
+    pitch_point_m: tuple[float, float] | None = None
+    outside_pitch: bool | None = None
 
     def to_debug_dict(self) -> dict[str, Any]:
         return {
@@ -106,6 +112,20 @@ class CandidateScore:
             "confidence_score": round(self.confidence_score, 4),
             "scene_bonus": round(self.scene_bonus, 4),
             "scene_zone": self.scene_zone,
+            "prior_score": round(self.prior_score, 4),
+            "player_foot_bonus": round(self.player_foot_bonus, 4),
+            "nearest_player_foot_distance_px": (
+                None
+                if self.nearest_player_foot_distance_px is None
+                else round(self.nearest_player_foot_distance_px, 2)
+            ),
+            "pitch_boundary_penalty": round(self.pitch_boundary_penalty, 4),
+            "pitch_point_m": (
+                None
+                if self.pitch_point_m is None
+                else [round(self.pitch_point_m[0], 2), round(self.pitch_point_m[1], 2)]
+            ),
+            "outside_pitch": self.outside_pitch,
             "reason": self.reason,
         }
 
@@ -123,6 +143,8 @@ class TrackerContext:
     acceleration: tuple[float, float] = (0.0, 0.0)
     history_length: int = 0
     lost_frames: int = 0
+    pitch_calibration: dict[str, Any] | None = None
+    player_tracks_report: dict[str, Any] | None = None
 
 
 @dataclass(slots=True)

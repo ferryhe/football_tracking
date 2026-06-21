@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from concurrent.futures import CancelledError
+import json
 import logging
 import math
 import time
@@ -10,6 +11,7 @@ from typing import Any, Callable
 import cv2
 import torch
 
+from football_tracking.calibration import build_pitch_calibration_from_field_polygon
 from football_tracking.config import AppConfig
 from football_tracking.detector import MockBallDetector, YOLOSahiBallDetector
 from football_tracking.exporter import TrackingExporter
@@ -43,6 +45,8 @@ class BallTrackingPipeline:
         self.logger = self._build_logger()
         self.detector = self._build_detector()
         self.scene_bias = SceneBiasResolver(config.scene_bias)
+        self.selection_pitch_calibration = self._build_selection_pitch_calibration()
+        self.selection_player_tracks_report = self._load_selection_player_tracks_report()
         self.candidate_filter = CandidateFilter(config.filtering, self.scene_bias)
         self.selector = UniqueBallSelector(config.selection, config.tracking, self.scene_bias)
         self.tracker = BallTracker(config.tracking)
@@ -253,11 +257,52 @@ class BallTrackingPipeline:
         if skipped != start_frame:
             raise RuntimeError(f"无法跳转到起始帧: start_frame={start_frame}, skipped={skipped}")
 
+    def _build_selection_pitch_calibration(self) -> dict[str, Any] | None:
+        if not self.config.selection.priors.enabled or not self.config.scene_bias.enabled:
+            return None
+
+        for zone in self.config.scene_bias.ground_zones:
+            if not zone.points:
+                continue
+            calibration = build_pitch_calibration_from_field_polygon(
+                zone.points,
+                confidence="config",
+                source=f"scene_bias.ground_zones.{zone.name}",
+            )
+            if calibration is not None:
+                return calibration
+        return None
+
+    def _load_selection_player_tracks_report(self) -> dict[str, Any] | None:
+        if not self.config.selection.priors.enabled:
+            return None
+
+        player_tracks_path = self.config.selection.priors.player_tracks_path
+        if player_tracks_path is None:
+            return None
+        if not player_tracks_path.exists():
+            return None
+
+        try:
+            payload = json.loads(player_tracks_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            self.logger.warning("Unable to load selection player tracks report %s: %s", player_tracks_path, exc)
+            return None
+        if not isinstance(payload, dict):
+            self.logger.warning("Selection player tracks report is not an object: %s", player_tracks_path)
+            return None
+        return payload
+
+    def _attach_selection_prior_context(self, context: TrackerContext) -> TrackerContext:
+        context.pitch_calibration = self.selection_pitch_calibration
+        context.player_tracks_report = self.selection_player_tracks_report
+        return context
+
     def _process_frame(self, frame, frame_index: int):
         """处理单帧，任何异常都退化为预测或丢失，不让整体流程中断。"""
         try:
             raw_candidates = self.detector.detect(frame, frame_index=frame_index)
-            context = self.tracker.build_context()
+            context = self._attach_selection_prior_context(self.tracker.build_context())
             filtered_candidates, filter_rejections, filter_rejection_counts = self.candidate_filter.filter(
                 raw_candidates,
                 context,
@@ -555,6 +600,8 @@ class BallTrackingPipeline:
             acceleration=context.acceleration,
             history_length=context.history_length,
             lost_frames=context.lost_frames,
+            pitch_calibration=context.pitch_calibration,
+            player_tracks_report=context.player_tracks_report,
         )
 
     def _scale_roi(
