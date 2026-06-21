@@ -10,6 +10,7 @@ from football_tracking.api.schemas import (
     ArtifactSummary,
     BallAuditReport,
     CameraPathResponse,
+    EventCandidateReport,
     PlayerTracksReport,
 )
 from football_tracking.api.service import ApiService
@@ -89,6 +90,23 @@ def get_ai_review_triggers_report(
         raise HTTPException(status_code=404, detail=f"Run not found: {run_id}") from exc
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail="ai_review_triggers.json not found") from exc
+
+
+@router.get(
+    "/runs/{run_id}/event-candidates",
+    response_model=EventCandidateReport,
+    responses={404: {"model": ApiErrorResponse, "description": "Run or event candidate report not found"}},
+)
+def get_event_candidates_report(
+    run_id: str,
+    service: ApiService = Depends(get_service),
+) -> EventCandidateReport:
+    try:
+        return EventCandidateReport(**service.get_event_candidates_report(run_id))
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=f"Run not found: {run_id}") from exc
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="event_candidates.json not found") from exc
 
 
 @router.get(

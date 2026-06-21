@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 RunStatus = Literal["queued", "running", "completed", "failed", "cancelled"]
 AIResponseLanguage = Literal["en", "zh"]
@@ -316,6 +316,46 @@ class PlayerTracksReport(BaseModel):
     tracks: list[PlayerTrack] = Field(default_factory=list)
 
 
+class EventCandidateSource(BaseModel):
+    name: str
+    path: str | None = None
+    row_count: int
+
+
+class EventCandidateSummary(BaseModel):
+    frame_count: int
+    detected_frame_count: int
+    candidate_count: int
+    counts_by_type: dict[str, int] = Field(default_factory=dict)
+    min_frame: int | None = None
+    max_frame: int | None = None
+
+
+class EventCandidateWindow(BaseModel):
+    start_frame: int
+    end_frame: int
+
+
+class EventCandidate(BaseModel):
+    id: str
+    type: str
+    label: Literal["candidate"] = "candidate"
+    start_frame: int
+    end_frame: int
+    frame_count: int
+    score: float
+    reason: str
+    render_window: EventCandidateWindow
+    evidence: dict[str, Any] = Field(default_factory=dict)
+
+
+class EventCandidateReport(BaseModel):
+    schema_version: str
+    source: EventCandidateSource
+    summary: EventCandidateSummary
+    candidates: list[EventCandidate] = Field(default_factory=list)
+
+
 class RunProgress(BaseModel):
     stage: str
     current_frame: int | None = None
@@ -382,6 +422,39 @@ class FollowCamRenderRequest(BaseModel):
     target_width: int = 1920
     target_height: int = 1080
     notes: str | None = None
+
+
+class HighlightRenderRequest(BaseModel):
+    model_config = ConfigDict(
+        json_schema_extra={
+            "anyOf": [
+                {"required": ["candidate_id"]},
+                {"required": ["start_frame", "end_frame"]},
+            ],
+        }
+    )
+
+    candidate_id: str | None = None
+    start_frame: int | None = Field(default=None, ge=0)
+    end_frame: int | None = Field(default=None, ge=0)
+    pre_roll_frames: int = Field(default=15, ge=0)
+    post_roll_frames: int = Field(default=30, ge=0)
+    output_dir_name: str | None = None
+    output_video_name: str | None = None
+    notes: str | None = None
+
+    @model_validator(mode="after")
+    def validate_selection(self) -> "HighlightRenderRequest":
+        has_candidate = bool(self.candidate_id)
+        has_start = self.start_frame is not None
+        has_end = self.end_frame is not None
+        if not has_candidate and not (has_start and has_end):
+            raise ValueError("Highlight render requires candidate_id or start_frame/end_frame.")
+        if has_start != has_end:
+            raise ValueError("Highlight render frame window requires both start_frame and end_frame.")
+        if has_start and has_end and self.end_frame is not None and self.start_frame is not None and self.end_frame < self.start_frame:
+            raise ValueError("Highlight render requires end_frame to be greater than or equal to start_frame.")
+        return self
 
 
 class CameraPathResponse(BaseModel):

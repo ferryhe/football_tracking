@@ -4,10 +4,12 @@ from fastapi import APIRouter, Depends, HTTPException
 
 from football_tracking.api.dependencies import get_service
 from football_tracking.api.schemas import (
+    ApiErrorResponse,
     AssetGroup,
     CreateRunRequest,
     DeleteResourceResponse,
     FollowCamRenderRequest,
+    HighlightRenderRequest,
     RunRecord,
 )
 from football_tracking.api.service import ApiService
@@ -65,7 +67,15 @@ def cancel_run(run_id: str, service: ApiService = Depends(get_service)) -> RunRe
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
-@router.post("/runs/{run_id}/follow-cam-render", response_model=RunRecord, status_code=202)
+@router.post(
+    "/runs/{run_id}/follow-cam-render",
+    response_model=RunRecord,
+    status_code=202,
+    responses={
+        404: {"model": ApiErrorResponse, "description": "Run, config, input video, or track CSV not found"},
+        409: {"model": ApiErrorResponse, "description": "Render could not be queued"},
+    },
+)
 def create_follow_cam_render(
     run_id: str,
     request: FollowCamRenderRequest,
@@ -73,6 +83,32 @@ def create_follow_cam_render(
 ) -> RunRecord:
     try:
         return RunRecord(**service.create_follow_cam_render(run_id, request.model_dump()))
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=f"Run not found: {run_id}") from exc
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except FileExistsError as exc:
+        raise HTTPException(status_code=409, detail=f"Output dir already exists: {exc}") from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@router.post(
+    "/runs/{run_id}/highlight-render",
+    response_model=RunRecord,
+    status_code=202,
+    responses={
+        404: {"model": ApiErrorResponse, "description": "Run, event candidate, config, input video, or track CSV not found"},
+        409: {"model": ApiErrorResponse, "description": "Highlight render could not be queued"},
+    },
+)
+def create_highlight_render(
+    run_id: str,
+    request: HighlightRenderRequest,
+    service: ApiService = Depends(get_service),
+) -> RunRecord:
+    try:
+        return RunRecord(**service.create_highlight_render(run_id, request.model_dump()))
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=f"Run not found: {run_id}") from exc
     except FileNotFoundError as exc:
