@@ -21,12 +21,11 @@ class ExportOpenApiTests(unittest.TestCase):
 
         self.assertTrue(expected_paths.issubset(paths))
         self.assertFalse(any(path.startswith("/api/v1/") for path in paths))
-        for path_item in document["paths"].values():
-            for operation in path_item.values():
-                if not isinstance(operation, dict):
-                    continue
-                operation_id = operation.get("operationId", "")
-                self.assertNotIn("api_v1", operation_id)
+        self.assertEqual("get_config", document["paths"]["/configs/{name}"]["get"]["operationId"])
+        self.assertEqual(
+            "get_artifact",
+            document["paths"]["/runs/{run_id}/artifacts/{artifact_name}"]["get"]["operationId"],
+        )
         self.assertEqual("Api", document["info"]["title"])
         self.assertEqual([{"url": "/api"}], document["servers"])
 

@@ -592,7 +592,7 @@ export const getConfig = async (
 };
 
 export const getGetConfigQueryKey = (name: string) => {
-  return [`/api/configs/${name}`] as const;
+  return [`/api/configs/${encodePathSegmented(name)}`] as const;
 };
 
 export const getGetConfigQueryOptions = <
@@ -1496,7 +1496,7 @@ export const getRun = async (
 };
 
 export const getGetRunQueryKey = (runId: string) => {
-  return [`/api/runs/${runId}`] as const;
+  return [`/api/runs/${encodePathSegmented(runId)}`] as const;
 };
 
 export const getGetRunQueryOptions = <
@@ -1571,7 +1571,7 @@ export const listArtifacts = async (
 };
 
 export const getListArtifactsQueryKey = (runId: string) => {
-  return [`/api/runs/${runId}/artifacts`] as const;
+  return [`/api/runs/${encodePathSegmented(runId)}/artifacts`] as const;
 };
 
 export const getListArtifactsQueryOptions = <
@@ -1659,7 +1659,7 @@ export const getArtifact = async (
 };
 
 export const getGetArtifactQueryKey = (runId: string, artifactName: string) => {
-  return [`/api/runs/${runId}/artifacts/${artifactName}`] as const;
+  return [`/api/runs/${encodePathSegmented(runId)}/artifacts/${encodePathSegmented(artifactName)}`] as const;
 };
 
 export const getGetArtifactQueryOptions = <
@@ -1749,8 +1749,8 @@ export const getGetCameraPathUrl = (
   const stringifiedParams = normalizedParams.toString();
 
   return stringifiedParams.length > 0
-    ? `/api/runs/${runId}/camera-path?${stringifiedParams}`
-    : `/api/runs/${runId}/camera-path`;
+    ? `/api/runs/${encodePathSegmented(runId)}/camera-path?${stringifiedParams}`
+    : `/api/runs/${encodePathSegmented(runId)}/camera-path`;
 };
 
 export const getCameraPath = async (
@@ -1769,7 +1769,7 @@ export const getGetCameraPathQueryKey = (
   params?: GetCameraPathParams,
 ) => {
   return [
-    `/api/runs/${runId}/camera-path`,
+    `/api/runs/${encodePathSegmented(runId)}/camera-path`,
     ...(params ? [params] : []),
   ] as const;
 };
@@ -1945,7 +1945,7 @@ export const getCleanupReport = async (
 };
 
 export const getGetCleanupReportQueryKey = (runId: string) => {
-  return [`/api/runs/${runId}/cleanup-report`] as const;
+  return [`/api/runs/${encodePathSegmented(runId)}/cleanup-report`] as const;
 };
 
 export const getGetCleanupReportQueryOptions = <
@@ -2120,7 +2120,7 @@ export const getFollowCamReport = async (
 };
 
 export const getGetFollowCamReportQueryKey = (runId: string) => {
-  return [`/api/runs/${runId}/follow-cam-report`] as const;
+  return [`/api/runs/${encodePathSegmented(runId)}/follow-cam-report`] as const;
 };
 
 export const getGetFollowCamReportQueryOptions = <
