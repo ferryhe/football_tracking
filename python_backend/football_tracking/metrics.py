@@ -8,6 +8,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from football_tracking.ai_review_triggers import (
+    compact_ai_review_trigger_summary,
+    write_ai_review_trigger_report,
+)
 from football_tracking.ball_audit import compact_ball_audit_summary, write_ball_audit_report
 
 
@@ -101,6 +105,11 @@ def build_metrics_report(output_dir: Path) -> dict[str, Any]:
         ball_audit_summary = compact_ball_audit_summary(ball_audit_report)
         if ball_audit_summary is not None:
             report["ball_audit"] = ball_audit_summary
+    ai_review_trigger_report = _read_optional_json(output_dir / "ai_review_triggers.json")
+    if ai_review_trigger_report is not None:
+        ai_review_trigger_summary = compact_ai_review_trigger_summary(ai_review_trigger_report)
+        if ai_review_trigger_summary is not None:
+            report["ai_review_triggers"] = ai_review_trigger_summary
     return report
 
 
@@ -132,9 +141,16 @@ def write_run_artifacts(output_dir: Path, run: dict[str, Any]) -> tuple[dict[str
         write_ball_audit_report(output_dir)
     except Exception as exc:
         ball_audit_error = f"Failed to write ball_audit.json: {exc}"
+    ai_review_triggers_error: str | None = None
+    try:
+        write_ai_review_trigger_report(output_dir)
+    except Exception as exc:
+        ai_review_triggers_error = f"Failed to write ai_review_triggers.json: {exc}"
     report = build_metrics_report(output_dir)
     if ball_audit_error is not None:
         report["ball_audit_error"] = ball_audit_error
+    if ai_review_triggers_error is not None:
+        report["ai_review_triggers_error"] = ai_review_triggers_error
     _write_json(output_dir / "run_manifest.json", manifest)
     _write_json(output_dir / "metrics_report.json", report)
     return manifest, report
@@ -158,6 +174,9 @@ def stats_from_metrics_report(report: dict[str, Any]) -> dict[str, Any]:
     ball_audit = report.get("ball_audit")
     if isinstance(ball_audit, dict):
         stats["ball_audit"] = ball_audit
+    ai_review_triggers = report.get("ai_review_triggers")
+    if isinstance(ai_review_triggers, dict):
+        stats["ai_review_triggers"] = ai_review_triggers
     stats["metrics_report"] = {
         "schema_version": report.get("schema_version"),
         "generated_at": report.get("generated_at"),

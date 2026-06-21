@@ -4,7 +4,13 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import FileResponse, JSONResponse
 
 from football_tracking.api.dependencies import get_service
-from football_tracking.api.schemas import ApiErrorResponse, ArtifactSummary, BallAuditReport, CameraPathResponse
+from football_tracking.api.schemas import (
+    AIReviewTriggerReport,
+    ApiErrorResponse,
+    ArtifactSummary,
+    BallAuditReport,
+    CameraPathResponse,
+)
 from football_tracking.api.service import ApiService
 
 router = APIRouter()
@@ -65,6 +71,23 @@ def get_ball_audit_report(run_id: str, service: ApiService = Depends(get_service
         raise HTTPException(status_code=404, detail=f"Run not found: {run_id}") from exc
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail="ball_audit.json not found") from exc
+
+
+@router.get(
+    "/runs/{run_id}/ai-review-triggers",
+    response_model=AIReviewTriggerReport,
+    responses={404: {"model": ApiErrorResponse, "description": "Run or AI review trigger report not found"}},
+)
+def get_ai_review_triggers_report(
+    run_id: str,
+    service: ApiService = Depends(get_service),
+) -> AIReviewTriggerReport:
+    try:
+        return AIReviewTriggerReport(**service.get_ai_review_triggers_report(run_id))
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=f"Run not found: {run_id}") from exc
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="ai_review_triggers.json not found") from exc
 
 
 @router.get("/runs/{run_id}/camera-path", response_model=CameraPathResponse)
