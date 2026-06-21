@@ -55,6 +55,82 @@ export interface AIRecommendRequest {
   language?: AIRecommendRequestLanguage;
 }
 
+export type AIReviewDecisionPriority =
+  (typeof AIReviewDecisionPriority)[keyof typeof AIReviewDecisionPriority];
+
+export const AIReviewDecisionPriority = {
+  none: "none",
+  low: "low",
+  medium: "medium",
+  high: "high",
+} as const;
+
+export interface AIReviewWindow {
+  start_frame: number;
+  end_frame: number;
+  reason: string;
+}
+
+export interface AIReviewDecision {
+  needs_ai_review: boolean;
+  priority: AIReviewDecisionPriority;
+  reason: string;
+  trigger_count: number;
+  recommended_review_windows?: AIReviewWindow[];
+}
+
+export type AIReviewSummaryCountsByType = { [key: string]: number };
+
+export type AIReviewSummaryCountsByPriority = { [key: string]: number };
+
+export type AIReviewSummaryMaxTriggerPriority =
+  (typeof AIReviewSummaryMaxTriggerPriority)[keyof typeof AIReviewSummaryMaxTriggerPriority];
+
+export const AIReviewSummaryMaxTriggerPriority = {
+  none: "none",
+  low: "low",
+  medium: "medium",
+  high: "high",
+} as const;
+
+export interface AIReviewSummary {
+  counts_by_type?: AIReviewSummaryCountsByType;
+  counts_by_priority?: AIReviewSummaryCountsByPriority;
+  max_trigger_priority: AIReviewSummaryMaxTriggerPriority;
+}
+
+export type AIReviewTriggerPriority =
+  (typeof AIReviewTriggerPriority)[keyof typeof AIReviewTriggerPriority];
+
+export const AIReviewTriggerPriority = {
+  none: "none",
+  low: "low",
+  medium: "medium",
+  high: "high",
+} as const;
+
+export type AIReviewTriggerEvidence = { [key: string]: unknown };
+
+export interface AIReviewTrigger {
+  id: string;
+  type: string;
+  priority: AIReviewTriggerPriority;
+  source: string;
+  start_frame?: number | null;
+  end_frame?: number | null;
+  frame_count: number;
+  reason: string;
+  evidence?: AIReviewTriggerEvidence;
+}
+
+export interface AIReviewTriggerReport {
+  schema_version: string;
+  generated_at: string;
+  decision: AIReviewDecision;
+  triggers?: AIReviewTrigger[];
+  summary: AIReviewSummary;
+}
+
 export type AISuggestionPatch = { [key: string]: unknown };
 
 export interface AISuggestion {

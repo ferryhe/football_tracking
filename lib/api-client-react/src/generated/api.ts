@@ -21,6 +21,7 @@ import type {
   AIExplainRequest,
   AIExplainResponse,
   AIRecommendRequest,
+  AIReviewTriggerReport,
   AISuggestion,
   ApiErrorResponse,
   ArtifactSummary,
@@ -1637,6 +1638,100 @@ export function useGetRun<
   },
 ): UseQueryResult<TData, TError> & { queryKey: QueryKey } {
   const queryOptions = getGetRunQueryOptions(runId, options);
+
+  const query = useQuery(queryOptions) as UseQueryResult<TData, TError> & {
+    queryKey: QueryKey;
+  };
+
+  return { ...query, queryKey: queryOptions.queryKey };
+}
+
+/**
+ * @summary Get Ai Review Triggers Report
+ */
+export const getGetAiReviewTriggersReportUrl = (runId: string) => {
+  return `/api/runs/${encodePathSegmented(runId)}/ai-review-triggers`;
+};
+
+export const getAiReviewTriggersReport = async (
+  runId: string,
+  options?: RequestInit,
+): Promise<AIReviewTriggerReport> => {
+  return customFetch<AIReviewTriggerReport>(
+    getGetAiReviewTriggersReportUrl(runId),
+    {
+      ...options,
+      method: "GET",
+    },
+  );
+};
+
+export const getGetAiReviewTriggersReportQueryKey = (runId: string) => {
+  return [`/api/runs/${encodePathSegmented(runId)}/ai-review-triggers`] as const;
+};
+
+export const getGetAiReviewTriggersReportQueryOptions = <
+  TData = Awaited<ReturnType<typeof getAiReviewTriggersReport>>,
+  TError = ErrorType<ApiErrorResponse | HTTPValidationError>,
+>(
+  runId: string,
+  options?: {
+    query?: UseQueryOptions<
+      Awaited<ReturnType<typeof getAiReviewTriggersReport>>,
+      TError,
+      TData
+    >;
+    request?: SecondParameter<typeof customFetch>;
+  },
+) => {
+  const { query: queryOptions, request: requestOptions } = options ?? {};
+
+  const queryKey =
+    queryOptions?.queryKey ?? getGetAiReviewTriggersReportQueryKey(runId);
+
+  const queryFn: QueryFunction<
+    Awaited<ReturnType<typeof getAiReviewTriggersReport>>
+  > = ({ signal }) =>
+    getAiReviewTriggersReport(runId, { signal, ...requestOptions });
+
+  return {
+    queryKey,
+    queryFn,
+    enabled: !!runId,
+    ...queryOptions,
+  } as UseQueryOptions<
+    Awaited<ReturnType<typeof getAiReviewTriggersReport>>,
+    TError,
+    TData
+  > & { queryKey: QueryKey };
+};
+
+export type GetAiReviewTriggersReportQueryResult = NonNullable<
+  Awaited<ReturnType<typeof getAiReviewTriggersReport>>
+>;
+export type GetAiReviewTriggersReportQueryError = ErrorType<
+  ApiErrorResponse | HTTPValidationError
+>;
+
+/**
+ * @summary Get Ai Review Triggers Report
+ */
+
+export function useGetAiReviewTriggersReport<
+  TData = Awaited<ReturnType<typeof getAiReviewTriggersReport>>,
+  TError = ErrorType<ApiErrorResponse | HTTPValidationError>,
+>(
+  runId: string,
+  options?: {
+    query?: UseQueryOptions<
+      Awaited<ReturnType<typeof getAiReviewTriggersReport>>,
+      TError,
+      TData
+    >;
+    request?: SecondParameter<typeof customFetch>;
+  },
+): UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+  const queryOptions = getGetAiReviewTriggersReportQueryOptions(runId, options);
 
   const query = useQuery(queryOptions) as UseQueryResult<TData, TError> & {
     queryKey: QueryKey;

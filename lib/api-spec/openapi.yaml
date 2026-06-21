@@ -446,6 +446,38 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/HTTPValidationError'
+  /runs/{run_id}/ai-review-triggers:
+    get:
+      tags:
+      - artifacts
+      summary: Get Ai Review Triggers Report
+      operationId: get_ai_review_triggers_report
+      parameters:
+      - name: run_id
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Run Id
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AIReviewTriggerReport'
+        '404':
+          description: Run or AI review trigger report not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiErrorResponse'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
   /runs/{run_id}/artifacts:
     get:
       tags:
@@ -805,6 +837,150 @@ components:
       required:
       - run_id
       title: AIRecommendRequest
+    AIReviewDecision:
+      properties:
+        needs_ai_review:
+          type: boolean
+          title: Needs Ai Review
+        priority:
+          type: string
+          enum:
+          - none
+          - low
+          - medium
+          - high
+          title: Priority
+        reason:
+          type: string
+          title: Reason
+        trigger_count:
+          type: integer
+          title: Trigger Count
+        recommended_review_windows:
+          items:
+            $ref: '#/components/schemas/AIReviewWindow'
+          type: array
+          title: Recommended Review Windows
+      type: object
+      required:
+      - needs_ai_review
+      - priority
+      - reason
+      - trigger_count
+      title: AIReviewDecision
+    AIReviewSummary:
+      properties:
+        counts_by_type:
+          additionalProperties:
+            type: integer
+          type: object
+          title: Counts By Type
+        counts_by_priority:
+          additionalProperties:
+            type: integer
+          type: object
+          title: Counts By Priority
+        max_trigger_priority:
+          type: string
+          enum:
+          - none
+          - low
+          - medium
+          - high
+          title: Max Trigger Priority
+      type: object
+      required:
+      - max_trigger_priority
+      title: AIReviewSummary
+    AIReviewTrigger:
+      properties:
+        id:
+          type: string
+          title: Id
+        type:
+          type: string
+          title: Type
+        priority:
+          type: string
+          enum:
+          - none
+          - low
+          - medium
+          - high
+          title: Priority
+        source:
+          type: string
+          title: Source
+        start_frame:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          title: Start Frame
+        end_frame:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          title: End Frame
+        frame_count:
+          type: integer
+          title: Frame Count
+        reason:
+          type: string
+          title: Reason
+        evidence:
+          additionalProperties: true
+          type: object
+          title: Evidence
+      type: object
+      required:
+      - id
+      - type
+      - priority
+      - source
+      - frame_count
+      - reason
+      title: AIReviewTrigger
+    AIReviewTriggerReport:
+      properties:
+        schema_version:
+          type: string
+          title: Schema Version
+        generated_at:
+          type: string
+          title: Generated At
+        decision:
+          $ref: '#/components/schemas/AIReviewDecision'
+        triggers:
+          items:
+            $ref: '#/components/schemas/AIReviewTrigger'
+          type: array
+          title: Triggers
+        summary:
+          $ref: '#/components/schemas/AIReviewSummary'
+      type: object
+      required:
+      - schema_version
+      - generated_at
+      - decision
+      - summary
+      title: AIReviewTriggerReport
+    AIReviewWindow:
+      properties:
+        start_frame:
+          type: integer
+          title: Start Frame
+        end_frame:
+          type: integer
+          title: End Frame
+        reason:
+          type: string
+          title: Reason
+      type: object
+      required:
+      - start_frame
+      - end_frame
+      - reason
+      title: AIReviewWindow
     AISuggestion:
       properties:
         title:

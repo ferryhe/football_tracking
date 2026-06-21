@@ -8,7 +8,9 @@ from unittest import mock
 
 from football_tracking.metrics import (
     FALSE_POSITIVE_ISLAND_MAX_LENGTH,
+    build_metrics_report,
     compute_track_metrics,
+    stats_from_metrics_report,
     write_run_artifacts,
 )
 
@@ -96,6 +98,7 @@ class MetricsTests(unittest.TestCase):
             self.assertTrue((output_dir / "run_manifest.json").exists())
             self.assertTrue((output_dir / "metrics_report.json").exists())
             self.assertTrue((output_dir / "ball_audit.json").exists())
+            self.assertTrue((output_dir / "ai_review_triggers.json").exists())
             self.assertEqual("run_fixture", manifest["run_id"])
             self.assertIn("git_commit", manifest)
             self.assertEqual(10, report["tracks"]["raw"]["frame_count"])
@@ -103,6 +106,9 @@ class MetricsTests(unittest.TestCase):
             self.assertEqual("raw", report["follow_cam"]["track_source"])
             self.assertEqual(3, report["ball_audit"]["tracklet_count"])
             self.assertEqual(1, report["ball_audit"]["review_event_count"])
+            self.assertIn("ai_review_triggers", report)
+            self.assertTrue(report["ai_review_triggers"]["needs_ai_review"])
+            self.assertGreaterEqual(report["ai_review_triggers"]["trigger_count"], 1)
 
     def test_write_run_artifacts_preserves_manifest_when_ball_audit_fails(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:
@@ -134,6 +140,69 @@ class MetricsTests(unittest.TestCase):
             self.assertTrue((output_dir / "metrics_report.json").exists())
             self.assertIn("ball_audit_error", report)
             self.assertNotIn("ball_audit", report)
+
+    def test_build_metrics_report_includes_compact_ai_review_trigger_summary(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            (output_dir / "ai_review_triggers.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": "1.0",
+                        "generated_at": "2026-01-01T00:00:00+00:00",
+                        "decision": {
+                            "needs_ai_review": True,
+                            "priority": "high",
+                            "reason": "high_priority_triggers",
+                            "trigger_count": 2,
+                            "recommended_review_windows": [
+                                {"start_frame": 10, "end_frame": 20, "reason": "large_jump"}
+                            ],
+                        },
+                        "triggers": [],
+                        "summary": {
+                            "counts_by_type": {"large_jump": 1, "dense_noise_cluster": 1},
+                            "counts_by_priority": {"high": 2},
+                            "max_trigger_priority": "high",
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            report = build_metrics_report(output_dir)
+            stats = stats_from_metrics_report(report)
+
+        self.assertEqual("high", report["ai_review_triggers"]["priority"])
+        self.assertEqual(2, report["ai_review_triggers"]["trigger_count"])
+        self.assertEqual(1, report["ai_review_triggers"]["recommended_window_count"])
+        self.assertEqual(report["ai_review_triggers"], stats["ai_review_triggers"])
+
+    def test_write_run_artifacts_preserves_manifest_when_ai_review_triggers_fail(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            (output_dir / "ball_track.csv").write_text(
+                "Frame,X,Y,Confidence,Status\n0,1,2,0.9000,Detected\n",
+                encoding="utf-8",
+            )
+
+            with mock.patch(
+                "football_tracking.metrics.write_ai_review_trigger_report",
+                side_effect=RuntimeError("trigger write failed"),
+            ):
+                manifest, report = write_run_artifacts(
+                    output_dir=output_dir,
+                    run={
+                        "run_id": "run_trigger_failure",
+                        "source": "api",
+                        "status": "completed",
+                    },
+                )
+
+            self.assertEqual("run_trigger_failure", manifest["run_id"])
+            self.assertTrue((output_dir / "run_manifest.json").exists())
+            self.assertTrue((output_dir / "metrics_report.json").exists())
+            self.assertTrue((output_dir / "ball_audit.json").exists())
+            self.assertIn("ai_review_triggers_error", report)
 
 
 if __name__ == "__main__":

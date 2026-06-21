@@ -259,6 +259,40 @@ class ApiServiceSmokeTests(unittest.TestCase):
                 "review_events": [],
             },
         )
+        self.write_json(
+            f"outputs/{folder_name}/ai_review_triggers.json",
+            {
+                "schema_version": "1.0",
+                "generated_at": "2026-01-01T00:00:00+00:00",
+                "decision": {
+                    "needs_ai_review": True,
+                    "priority": "medium",
+                    "reason": "medium_priority_triggers",
+                    "trigger_count": 1,
+                    "recommended_review_windows": [
+                        {"start_frame": 2, "end_frame": 2, "reason": "postprocess_action"}
+                    ],
+                },
+                "triggers": [
+                    {
+                        "id": "event:0:postprocess_action:2-2",
+                        "type": "postprocess_action",
+                        "priority": "medium",
+                        "source": "postprocess",
+                        "start_frame": 2,
+                        "end_frame": 2,
+                        "frame_count": 1,
+                        "reason": "scrub",
+                        "evidence": {"action": "scrub"},
+                    }
+                ],
+                "summary": {
+                    "counts_by_type": {"postprocess_action": 1},
+                    "counts_by_priority": {"medium": 1},
+                    "max_trigger_priority": "medium",
+                },
+            },
+        )
         return output_dir
 
     def test_list_input_videos_filters_supported_suffixes(self) -> None:
@@ -616,6 +650,7 @@ class ApiServiceSmokeTests(unittest.TestCase):
         self.assertEqual(2, run["stats"]["cleaned"]["detected"])
         self.assertEqual("cleaned", run["stats"]["follow_cam"]["track_source"])
         self.assertEqual(2, run["stats"]["ball_audit"]["tracklet_count"])
+        self.assertEqual("medium", run["stats"]["ai_review_triggers"]["priority"])
         self.assertIn("follow_cam.mp4", {artifact["name"] for artifact in run["artifacts"]})
         output_dir = self.repo_root / "outputs" / "kept_baseline"
         self.assertFalse((output_dir / "run_manifest.json").exists())
@@ -653,6 +688,9 @@ class ApiServiceSmokeTests(unittest.TestCase):
         self.assertEqual("cleaned", run["stats"]["follow_cam"]["track_source"])
         self.assertIn("ball_audit.json", artifact_names)
         self.assertEqual(2, run["stats"]["ball_audit"]["tracklet_count"])
+        self.assertIn("ai_review_triggers.json", artifact_names)
+        self.assertIn("ai_review_triggers", run["stats"])
+        self.assertTrue(run["stats"]["ai_review_triggers"]["needs_ai_review"])
 
     def test_get_ball_audit_report_loads_json_artifact(self) -> None:
         self.create_output_bundle("kept_baseline")
@@ -662,6 +700,38 @@ class ApiServiceSmokeTests(unittest.TestCase):
 
         self.assertEqual("1.0", report["schema_version"])
         self.assertEqual(2, report["summary"]["tracklet_count"])
+
+    def test_get_ai_review_triggers_report_loads_json_artifact(self) -> None:
+        self.create_output_bundle("kept_baseline")
+        run = self.service.list_runs()[0]
+
+        report = self.service.get_ai_review_triggers_report(run["run_id"])
+
+        self.assertEqual("1.0", report["schema_version"])
+        self.assertTrue(report["decision"]["needs_ai_review"])
+        self.assertEqual("medium", report["decision"]["priority"])
+
+    def test_list_runs_ignores_malformed_audit_artifacts(self) -> None:
+        output_dir = self.create_output_bundle("kept_baseline")
+        (output_dir / "ball_audit.json").write_bytes(b"\xff\xfe\xff")
+        (output_dir / "ai_review_triggers.json").write_text("{", encoding="utf-8")
+
+        runs = self.service.list_runs()
+
+        self.assertEqual(1, len(runs))
+        self.assertNotIn("ball_audit", runs[0]["stats"])
+        self.assertNotIn("ai_review_triggers", runs[0]["stats"])
+
+    def test_report_loaders_treat_malformed_json_as_missing(self) -> None:
+        output_dir = self.create_output_bundle("kept_baseline")
+        run = self.service.list_runs()[0]
+        (output_dir / "ball_audit.json").write_text("{", encoding="utf-8")
+        (output_dir / "ai_review_triggers.json").write_bytes(b"\xff\xfe\xff")
+
+        with self.assertRaises(FileNotFoundError):
+            self.service.get_ball_audit_report(run["run_id"])
+        with self.assertRaises(FileNotFoundError):
+            self.service.get_ai_review_triggers_report(run["run_id"])
 
     def test_list_runs_falls_back_when_metrics_report_is_not_an_object(self) -> None:
         output_dir = self.create_output_bundle("kept_baseline")
@@ -1021,6 +1091,7 @@ class ApiServiceSmokeTests(unittest.TestCase):
             "/api/v1/runs/{run_id}/cleanup-report",
             "/api/v1/runs/{run_id}/follow-cam-report",
             "/api/v1/runs/{run_id}/ball-audit",
+            "/api/v1/runs/{run_id}/ai-review-triggers",
             "/api/v1/runs/{run_id}/camera-path",
             "/api/v1/ai/explain",
             "/api/v1/ai/recommend",
@@ -1043,6 +1114,19 @@ class ApiServiceSmokeTests(unittest.TestCase):
 
         self.assertEqual(
             "#/components/schemas/BallAuditReport",
+            operation["responses"]["200"]["content"]["application/json"]["schema"]["$ref"],
+        )
+        self.assertEqual(
+            "#/components/schemas/ApiErrorResponse",
+            operation["responses"]["404"]["content"]["application/json"]["schema"]["$ref"],
+        )
+
+    def test_create_app_documents_ai_review_triggers_response_schema(self) -> None:
+        app = create_app(self.repo_root)
+        operation = app.openapi()["paths"]["/api/v1/runs/{run_id}/ai-review-triggers"]["get"]
+
+        self.assertEqual(
+            "#/components/schemas/AIReviewTriggerReport",
             operation["responses"]["200"]["content"]["application/json"]["schema"]["$ref"],
         )
         self.assertEqual(

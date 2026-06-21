@@ -22,6 +22,7 @@ import numpy as np
 import yaml
 
 from football_tracking.api.ai_provider import OpenAIResponsesClient, load_provider_settings
+from football_tracking.ai_review_triggers import compact_ai_review_trigger_summary
 from football_tracking.ball_audit import compact_ball_audit_summary
 from football_tracking.calibration import build_pitch_calibration_from_field_polygon
 from football_tracking.config import AppConfig, load_config
@@ -825,6 +826,9 @@ class ApiService:
 
     def get_ball_audit_report(self, run_id: str) -> dict[str, Any]:
         return self._load_optional_json_artifact(run_id, "ball_audit.json")
+
+    def get_ai_review_triggers_report(self, run_id: str) -> dict[str, Any]:
+        return self._load_optional_json_artifact(run_id, "ai_review_triggers.json")
 
     def get_camera_path(self, run_id: str, offset: int, limit: int) -> dict[str, Any]:
         camera_path = self.get_artifact_path(run_id, "camera_path.csv")
@@ -2721,6 +2725,7 @@ class ApiService:
         cleanup_report = self._read_optional_json(output_dir / "cleanup_report.json")
         follow_cam_report = self._read_optional_json(output_dir / "follow_cam_report.json")
         ball_audit_report = self._read_optional_json(output_dir / "ball_audit.json")
+        ai_review_trigger_report = self._read_optional_json(output_dir / "ai_review_triggers.json")
         if raw_summary is not None:
             stats["raw"] = raw_summary
         if cleaned_summary is not None:
@@ -2733,6 +2738,10 @@ class ApiService:
             ball_audit_summary = compact_ball_audit_summary(ball_audit_report)
             if ball_audit_summary is not None:
                 stats["ball_audit"] = ball_audit_summary
+        if ai_review_trigger_report is not None and "ai_review_triggers" not in stats:
+            ai_review_trigger_summary = compact_ai_review_trigger_summary(ai_review_trigger_report)
+            if ai_review_trigger_summary is not None:
+                stats["ai_review_triggers"] = ai_review_trigger_summary
         return stats
 
     def _summarize_track_csv(self, csv_path: Path) -> dict[str, Any] | None:
@@ -2754,17 +2763,23 @@ class ApiService:
 
     def _load_optional_json_artifact(self, run_id: str, name: str) -> dict[str, Any]:
         artifact_path = self.get_artifact_path(run_id, name)
-        with artifact_path.open("r", encoding="utf-8") as handle:
-            return json.load(handle)
+        try:
+            with artifact_path.open("r", encoding="utf-8") as handle:
+                loaded = json.load(handle)
+        except (json.JSONDecodeError, UnicodeDecodeError, OSError) as exc:
+            raise FileNotFoundError(name) from exc
+        if not isinstance(loaded, dict):
+            raise FileNotFoundError(name)
+        return loaded
 
     def _read_optional_json(self, path: Path) -> dict[str, Any] | None:
         if not path.exists():
             return None
-        with path.open("r", encoding="utf-8") as handle:
-            try:
+        try:
+            with path.open("r", encoding="utf-8") as handle:
                 loaded = json.load(handle)
-            except json.JSONDecodeError:
-                return None
+        except (json.JSONDecodeError, UnicodeDecodeError, OSError):
+            return None
         return loaded if isinstance(loaded, dict) else None
 
     def _slugify(self, text: str) -> str:

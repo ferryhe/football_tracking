@@ -7,6 +7,7 @@ from pydantic import BaseModel, Field
 RunStatus = Literal["queued", "running", "completed", "failed", "cancelled"]
 AIResponseLanguage = Literal["en", "zh"]
 QualityStatus = Literal["pass", "warn", "fail"]
+AIReviewPriority = Literal["none", "low", "medium", "high"]
 Point2DPayload = tuple[float, float]
 QuadPointsPayload = tuple[Point2DPayload, Point2DPayload, Point2DPayload, Point2DPayload]
 MatrixRowPayload = tuple[float, float, float]
@@ -221,6 +222,46 @@ class BallAuditReport(BaseModel):
     sources: list[BallAuditSource] = Field(default_factory=list)
     tracklets: list[BallAuditTracklet] = Field(default_factory=list)
     review_events: list[BallAuditReviewEvent] = Field(default_factory=list)
+
+
+class AIReviewWindow(BaseModel):
+    start_frame: int
+    end_frame: int
+    reason: str
+
+
+class AIReviewDecision(BaseModel):
+    needs_ai_review: bool
+    priority: AIReviewPriority
+    reason: str
+    trigger_count: int
+    recommended_review_windows: list[AIReviewWindow] = Field(default_factory=list)
+
+
+class AIReviewTrigger(BaseModel):
+    id: str
+    type: str
+    priority: AIReviewPriority
+    source: str
+    start_frame: int | None = None
+    end_frame: int | None = None
+    frame_count: int
+    reason: str
+    evidence: dict[str, Any] = Field(default_factory=dict)
+
+
+class AIReviewSummary(BaseModel):
+    counts_by_type: dict[str, int] = Field(default_factory=dict)
+    counts_by_priority: dict[str, int] = Field(default_factory=dict)
+    max_trigger_priority: AIReviewPriority
+
+
+class AIReviewTriggerReport(BaseModel):
+    schema_version: str
+    generated_at: str
+    decision: AIReviewDecision
+    triggers: list[AIReviewTrigger] = Field(default_factory=list)
+    summary: AIReviewSummary
 
 
 class RunProgress(BaseModel):

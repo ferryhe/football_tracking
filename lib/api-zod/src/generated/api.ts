@@ -657,6 +657,53 @@ export const GetRunResponse = zod.object({
 });
 
 /**
+ * @summary Get Ai Review Triggers Report
+ */
+export const GetAiReviewTriggersReportParams = zod.object({
+  run_id: zod.coerce.string(),
+});
+
+export const GetAiReviewTriggersReportResponse = zod.object({
+  schema_version: zod.string(),
+  generated_at: zod.string(),
+  decision: zod.object({
+    needs_ai_review: zod.boolean(),
+    priority: zod.enum(["none", "low", "medium", "high"]),
+    reason: zod.string(),
+    trigger_count: zod.number(),
+    recommended_review_windows: zod
+      .array(
+        zod.object({
+          start_frame: zod.number(),
+          end_frame: zod.number(),
+          reason: zod.string(),
+        }),
+      )
+      .optional(),
+  }),
+  triggers: zod
+    .array(
+      zod.object({
+        id: zod.string(),
+        type: zod.string(),
+        priority: zod.enum(["none", "low", "medium", "high"]),
+        source: zod.string(),
+        start_frame: zod.union([zod.number(), zod.null()]).optional(),
+        end_frame: zod.union([zod.number(), zod.null()]).optional(),
+        frame_count: zod.number(),
+        reason: zod.string(),
+        evidence: zod.record(zod.string(), zod.unknown()).optional(),
+      }),
+    )
+    .optional(),
+  summary: zod.object({
+    counts_by_type: zod.record(zod.string(), zod.number()).optional(),
+    counts_by_priority: zod.record(zod.string(), zod.number()).optional(),
+    max_trigger_priority: zod.enum(["none", "low", "medium", "high"]),
+  }),
+});
+
+/**
  * @summary List Artifacts
  */
 export const ListArtifactsParams = zod.object({
