@@ -319,6 +319,47 @@ export const SuggestFieldSetupResponse = zod.object({
 });
 
 /**
+ * @summary Check Input Quality
+ */
+export const CheckInputQualityBody = zod.object({
+  input_video: zod.string(),
+  config_name: zod.union([zod.string(), zod.null()]).optional(),
+});
+
+export const checkInputQualityResponseOverallScoreMin = 0;
+export const checkInputQualityResponseOverallScoreMax = 1;
+
+export const checkInputQualityResponseChecksItemScoreMin = 0;
+export const checkInputQualityResponseChecksItemScoreMax = 1;
+
+export const CheckInputQualityResponse = zod.object({
+  input_video: zod.string(),
+  frame_width: zod.number(),
+  frame_height: zod.number(),
+  sample_count: zod.number(),
+  overall_score: zod
+    .number()
+    .min(checkInputQualityResponseOverallScoreMin)
+    .max(checkInputQualityResponseOverallScoreMax),
+  overall_status: zod.enum(["pass", "warn", "fail"]),
+  checks: zod.array(
+    zod.object({
+      key: zod.string(),
+      label: zod.string(),
+      score: zod
+        .number()
+        .min(checkInputQualityResponseChecksItemScoreMin)
+        .max(checkInputQualityResponseChecksItemScoreMax),
+      status: zod.enum(["pass", "warn", "fail"]),
+      value: zod.unknown(),
+      unit: zod.string(),
+      guidance: zod.string(),
+    }),
+  ),
+  recommendations: zod.array(zod.string()),
+});
+
+/**
  * @summary List Runs
  */
 export const listRunsResponseProgressOnePercentDefault = 0;

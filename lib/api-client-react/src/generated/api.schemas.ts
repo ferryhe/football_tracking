@@ -68,6 +68,10 @@ export interface AISuggestion {
   output_name_suggestion?: string | null;
 }
 
+export interface ApiErrorResponse {
+  detail: string;
+}
+
 export interface ArtifactSummary {
   name: string;
   path: string;
@@ -368,6 +372,58 @@ export interface HealthResponse {
 export interface InputCatalogResponse {
   root_dir: string;
   videos?: InputVideoItem[];
+}
+
+export type InputQualityCheckStatus =
+  (typeof InputQualityCheckStatus)[keyof typeof InputQualityCheckStatus];
+
+export const InputQualityCheckStatus = {
+  pass: "pass",
+  warn: "warn",
+  fail: "fail",
+} as const;
+
+export interface InputQualityCheck {
+  key: string;
+  label: string;
+  /**
+   * @minimum 0
+   * @maximum 1
+   */
+  score: number;
+  status: InputQualityCheckStatus;
+  value: unknown;
+  unit: string;
+  guidance: string;
+}
+
+export interface InputQualityRequest {
+  input_video: string;
+  config_name?: string | null;
+}
+
+export type InputQualityResponseOverallStatus =
+  (typeof InputQualityResponseOverallStatus)[keyof typeof InputQualityResponseOverallStatus];
+
+export const InputQualityResponseOverallStatus = {
+  pass: "pass",
+  warn: "warn",
+  fail: "fail",
+} as const;
+
+export interface InputQualityResponse {
+  input_video: string;
+  frame_width: number;
+  frame_height: number;
+  sample_count: number;
+  /**
+   * @minimum 0
+   * @maximum 1
+   */
+  overall_score: number;
+  overall_status: InputQualityResponseOverallStatus;
+  checks: InputQualityCheck[];
+  recommendations: string[];
 }
 
 export interface UpdateConfigRequest {

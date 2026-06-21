@@ -22,6 +22,7 @@ import type {
   AIExplainResponse,
   AIRecommendRequest,
   AISuggestion,
+  ApiErrorResponse,
   ArtifactSummary,
   AssetGroup,
   CameraPathResponse,
@@ -43,6 +44,8 @@ import type {
   HealthResponse,
   HealthStatus,
   InputCatalogResponse,
+  InputQualityRequest,
+  InputQualityResponse,
   RunRecord,
   UpdateConfigRequest,
 } from "./api.schemas";
@@ -1154,6 +1157,94 @@ export const useSuggestFieldSetup = <
   TContext
 > => {
   return useMutation(getSuggestFieldSetupMutationOptions(options));
+};
+
+/**
+ * @summary Check Input Quality
+ */
+export const getCheckInputQualityUrl = () => {
+  return `/api/inputs/quality-check`;
+};
+
+export const checkInputQuality = async (
+  inputQualityRequest: InputQualityRequest,
+  options?: RequestInit,
+): Promise<InputQualityResponse> => {
+  return customFetch<InputQualityResponse>(getCheckInputQualityUrl(), {
+    ...options,
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...options?.headers },
+    body: JSON.stringify(inputQualityRequest),
+  });
+};
+
+export const getCheckInputQualityMutationOptions = <
+  TError = ErrorType<ApiErrorResponse | HTTPValidationError>,
+  TContext = unknown,
+>(options?: {
+  mutation?: UseMutationOptions<
+    Awaited<ReturnType<typeof checkInputQuality>>,
+    TError,
+    { data: BodyType<InputQualityRequest> },
+    TContext
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}): UseMutationOptions<
+  Awaited<ReturnType<typeof checkInputQuality>>,
+  TError,
+  { data: BodyType<InputQualityRequest> },
+  TContext
+> => {
+  const mutationKey = ["checkInputQuality"];
+  const { mutation: mutationOptions, request: requestOptions } = options
+    ? options.mutation &&
+      "mutationKey" in options.mutation &&
+      options.mutation.mutationKey
+      ? options
+      : { ...options, mutation: { ...options.mutation, mutationKey } }
+    : { mutation: { mutationKey }, request: undefined };
+
+  const mutationFn: MutationFunction<
+    Awaited<ReturnType<typeof checkInputQuality>>,
+    { data: BodyType<InputQualityRequest> }
+  > = (props) => {
+    const { data } = props ?? {};
+
+    return checkInputQuality(data, requestOptions);
+  };
+
+  return { mutationFn, ...mutationOptions };
+};
+
+export type CheckInputQualityMutationResult = NonNullable<
+  Awaited<ReturnType<typeof checkInputQuality>>
+>;
+export type CheckInputQualityMutationBody = BodyType<InputQualityRequest>;
+export type CheckInputQualityMutationError = ErrorType<
+  ApiErrorResponse | HTTPValidationError
+>;
+
+/**
+ * @summary Check Input Quality
+ */
+export const useCheckInputQuality = <
+  TError = ErrorType<ApiErrorResponse | HTTPValidationError>,
+  TContext = unknown,
+>(options?: {
+  mutation?: UseMutationOptions<
+    Awaited<ReturnType<typeof checkInputQuality>>,
+    TError,
+    { data: BodyType<InputQualityRequest> },
+    TContext
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}): UseMutationResult<
+  Awaited<ReturnType<typeof checkInputQuality>>,
+  TError,
+  { data: BodyType<InputQualityRequest> },
+  TContext
+> => {
+  return useMutation(getCheckInputQualityMutationOptions(options));
 };
 
 /**

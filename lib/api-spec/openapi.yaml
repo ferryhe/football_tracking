@@ -302,6 +302,43 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/HTTPValidationError'
+  /inputs/quality-check:
+    post:
+      tags:
+      - inputs
+      summary: Check Input Quality
+      operationId: check_input_quality
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/InputQualityRequest'
+        required: true
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InputQualityResponse'
+        '404':
+          description: Input video or config not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiErrorResponse'
+        '400':
+          description: Input video could not be read
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiErrorResponse'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
   /runs:
     get:
       tags:
@@ -776,6 +813,15 @@ components:
       - recommendation
       - expected_tradeoff
       title: AISuggestion
+    ApiErrorResponse:
+      properties:
+        detail:
+          type: string
+          title: Detail
+      type: object
+      required:
+      - detail
+      title: ApiErrorResponse
     ArtifactSummary:
       properties:
         name:
@@ -1460,6 +1506,105 @@ components:
       required:
       - root_dir
       title: InputCatalogResponse
+    InputQualityCheck:
+      properties:
+        key:
+          type: string
+          title: Key
+        label:
+          type: string
+          title: Label
+        score:
+          type: number
+          maximum: 1.0
+          minimum: 0.0
+          title: Score
+        status:
+          type: string
+          enum:
+          - pass
+          - warn
+          - fail
+          title: Status
+        value:
+          title: Value
+        unit:
+          type: string
+          title: Unit
+        guidance:
+          type: string
+          title: Guidance
+      type: object
+      required:
+      - key
+      - label
+      - score
+      - status
+      - value
+      - unit
+      - guidance
+      title: InputQualityCheck
+    InputQualityRequest:
+      properties:
+        input_video:
+          type: string
+          title: Input Video
+        config_name:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Config Name
+      type: object
+      required:
+      - input_video
+      title: InputQualityRequest
+    InputQualityResponse:
+      properties:
+        input_video:
+          type: string
+          title: Input Video
+        frame_width:
+          type: integer
+          title: Frame Width
+        frame_height:
+          type: integer
+          title: Frame Height
+        sample_count:
+          type: integer
+          title: Sample Count
+        overall_score:
+          type: number
+          maximum: 1.0
+          minimum: 0.0
+          title: Overall Score
+        overall_status:
+          type: string
+          enum:
+          - pass
+          - warn
+          - fail
+          title: Overall Status
+        checks:
+          items:
+            $ref: '#/components/schemas/InputQualityCheck'
+          type: array
+          title: Checks
+        recommendations:
+          items:
+            type: string
+          type: array
+          title: Recommendations
+      type: object
+      required:
+      - input_video
+      - frame_width
+      - frame_height
+      - sample_count
+      - overall_score
+      - overall_status
+      - checks
+      - recommendations
+      title: InputQualityResponse
     InputVideoItem:
       properties:
         name:

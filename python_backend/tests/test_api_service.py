@@ -6,13 +6,16 @@ import threading
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 import cv2
 import numpy as np
 import yaml
+from fastapi import HTTPException
 
 from football_tracking.api.app import create_app
+from football_tracking.api.routes import inputs as input_routes
 from football_tracking.api.service import ApiService
 from football_tracking.config import load_config
 from football_tracking.metrics import write_run_artifacts
@@ -134,6 +137,60 @@ class ApiServiceSmokeTests(unittest.TestCase):
         for frame_index in range(12):
             frame = np.zeros((360, 1280, 3), dtype=np.uint8)
             cv2.fillPoly(frame, [polygon], (8, 150 + frame_index * 5, 8))
+            writer.write(frame)
+        writer.release()
+        return path
+
+    def write_quality_video(self, relative_path: str, *, poor: bool = False) -> Path:
+        path = self.repo_root / relative_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        writer = cv2.VideoWriter(
+            str(path),
+            cv2.VideoWriter_fourcc(*"MJPG"),
+            8.0,
+            (640, 360),
+        )
+        if not writer.isOpened():
+            self.skipTest("OpenCV video writer is unavailable in this environment.")
+        field_polygon = np.array([[54, 70], [586, 68], [632, 332], [8, 334]], dtype=np.int32)
+        for frame_index in range(18):
+            frame = np.zeros((360, 640, 3), dtype=np.uint8)
+            if poor:
+                shift = frame_index * 9
+                dim_polygon = np.array(
+                    [[170 + shift, 132], [470 + shift, 132], [500 + shift, 250], [140 + shift, 250]],
+                    dtype=np.int32,
+                )
+                cv2.fillPoly(frame, [dim_polygon], (3, 18, 3))
+                frame = cv2.GaussianBlur(frame, (31, 31), 0)
+            else:
+                cv2.fillPoly(frame, [field_polygon], (20, 145, 20))
+                cv2.polylines(frame, [field_polygon], isClosed=True, color=(235, 235, 235), thickness=3)
+                cv2.line(frame, (320, 78), (320, 326), (230, 230, 230), thickness=2)
+                cv2.circle(frame, (320, 200), 48, (230, 230, 230), thickness=2)
+                cv2.circle(frame, (250 + frame_index, 190), 6, (245, 245, 245), thickness=-1)
+            writer.write(frame)
+        writer.release()
+        return path
+
+    def write_neutral_field_video(self, relative_path: str) -> Path:
+        path = self.repo_root / relative_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        writer = cv2.VideoWriter(
+            str(path),
+            cv2.VideoWriter_fourcc(*"MJPG"),
+            8.0,
+            (640, 360),
+        )
+        if not writer.isOpened():
+            self.skipTest("OpenCV video writer is unavailable in this environment.")
+        field_polygon = np.array([[54, 70], [586, 68], [632, 332], [8, 334]], dtype=np.int32)
+        for frame_index in range(18):
+            frame = np.full((360, 640, 3), 28, dtype=np.uint8)
+            cv2.fillPoly(frame, [field_polygon], (130, 130, 130))
+            cv2.polylines(frame, [field_polygon], isClosed=True, color=(235, 235, 235), thickness=3)
+            cv2.line(frame, (320, 78), (320, 326), (230, 230, 230), thickness=2)
+            cv2.circle(frame, (250 + frame_index, 190), 6, (245, 245, 245), thickness=-1)
             writer.write(frame)
         writer.release()
         return path
@@ -337,6 +394,137 @@ class ApiServiceSmokeTests(unittest.TestCase):
         self.assertLess(suggestion["field_polygon"][3][1], suggestion["field_polygon"][0][1])
         self.assertLess(suggestion["field_polygon"][3][1], suggestion["field_polygon"][6][1])
         self.assertGreater(suggestion["field_polygon"][7][1], suggestion["field_polygon"][3][1])
+
+    def test_check_input_quality_passes_good_synthetic_video(self) -> None:
+        video_path = self.write_quality_video("data/good_quality.avi")
+        self.write_yaml(
+            "config/quality_polygon.yaml",
+            {
+                **build_sample_config(),
+                "scene_bias": {
+                    "enabled": True,
+                    "ground_zones": [
+                        {
+                            "name": "main_pitch",
+                            "points": [[54, 70], [586, 68], [632, 332], [8, 334]],
+                        }
+                    ],
+                },
+            },
+        )
+        if not hasattr(self.service, "check_input_quality"):
+            self.fail("ApiService.check_input_quality is missing")
+
+        quality = self.service.check_input_quality(str(video_path), config_name="quality_polygon.yaml")
+
+        self.assertEqual(str(video_path.resolve()), quality["input_video"])
+        self.assertEqual(640, quality["frame_width"])
+        self.assertEqual(360, quality["frame_height"])
+        self.assertEqual(3, quality["sample_count"])
+        self.assertGreaterEqual(quality["overall_score"], 0.75)
+        self.assertEqual("pass", quality["overall_status"])
+        checks = {check["key"]: check for check in quality["checks"]}
+        self.assertEqual(
+            {"brightness", "blur", "field_visibility", "camera_stability", "calibration"},
+            set(checks),
+        )
+        self.assertEqual("pass", checks["calibration"]["status"])
+        self.assertEqual("config", checks["calibration"]["value"])
+        self.assertIn("Proceed with a normal tracking run.", quality["recommendations"])
+
+    def test_check_input_quality_fails_poor_synthetic_video(self) -> None:
+        video_path = self.write_quality_video("data/poor_quality.avi", poor=True)
+        if not hasattr(self.service, "check_input_quality"):
+            self.fail("ApiService.check_input_quality is missing")
+
+        quality = self.service.check_input_quality(str(video_path))
+
+        self.assertEqual("fail", quality["overall_status"])
+        self.assertLess(quality["overall_score"], 0.45)
+        checks = {check["key"]: check for check in quality["checks"]}
+        self.assertEqual("fail", checks["brightness"]["status"])
+        self.assertEqual("fail", checks["blur"]["status"])
+        self.assertEqual("fail", checks["field_visibility"]["status"])
+        self.assertTrue(any("light" in recommendation.lower() for recommendation in quality["recommendations"]))
+
+    def test_check_input_quality_uses_config_polygon_for_field_visibility(self) -> None:
+        video_path = self.write_neutral_field_video("data/non_green_quality.avi")
+        self.write_yaml(
+            "config/non_green_quality.yaml",
+            {
+                **build_sample_config(),
+                "scene_bias": {
+                    "enabled": True,
+                    "ground_zones": [
+                        {
+                            "name": "main_pitch",
+                            "points": [[54, 70], [586, 68], [632, 332], [8, 334]],
+                        }
+                    ],
+                },
+            },
+        )
+
+        quality = self.service.check_input_quality(str(video_path), config_name="non_green_quality.yaml")
+
+        checks = {check["key"]: check for check in quality["checks"]}
+        self.assertEqual("pass", checks["field_visibility"]["status"])
+        self.assertEqual("config", checks["calibration"]["value"])
+
+    def test_quality_check_route_reports_missing_input_video(self) -> None:
+        if not hasattr(input_routes, "check_input_quality"):
+            self.fail("inputs.check_input_quality route is missing")
+
+        with self.assertRaises(HTTPException) as raised:
+            input_routes.check_input_quality(
+                SimpleNamespace(input_video=str((self.repo_root / "data" / "missing.mp4").resolve()), config_name=None),
+                service=self.service,
+            )
+
+        self.assertEqual(404, raised.exception.status_code)
+
+    def test_quality_check_route_reports_unreadable_input_video(self) -> None:
+        if not hasattr(input_routes, "check_input_quality"):
+            self.fail("inputs.check_input_quality route is missing")
+
+        with self.assertRaises(HTTPException) as raised:
+            input_routes.check_input_quality(
+                SimpleNamespace(input_video=str((self.repo_root / "data" / "ignore.txt").resolve()), config_name=None),
+                service=self.service,
+            )
+
+        self.assertEqual(400, raised.exception.status_code)
+
+    def test_create_app_registers_quality_check_route(self) -> None:
+        app = create_app(self.repo_root)
+        route_paths = {route.path for route in app.routes}
+
+        self.assertIn("/api/v1/inputs/quality-check", route_paths)
+
+    def test_quality_check_route_uses_service_response(self) -> None:
+        if not hasattr(input_routes, "check_input_quality"):
+            self.fail("inputs.check_input_quality route is missing")
+
+        response = input_routes.check_input_quality(
+            SimpleNamespace(input_video="video.mp4", config_name="default.yaml"),
+            service=mock.Mock(
+                check_input_quality=mock.Mock(
+                    return_value={
+                        "input_video": "video.mp4",
+                        "frame_width": 640,
+                        "frame_height": 360,
+                        "sample_count": 3,
+                        "overall_score": 0.8,
+                        "overall_status": "pass",
+                        "checks": [],
+                        "recommendations": ["Proceed with a normal tracking run."],
+                    }
+                )
+            ),
+        )
+
+        self.assertEqual("pass", response.overall_status)
+        self.assertEqual("video.mp4", response.input_video)
 
     def test_sample_video_frames_uses_warmup_before_target_seek(self) -> None:
         class FakeCapture:
@@ -790,6 +978,7 @@ class ApiServiceSmokeTests(unittest.TestCase):
             "/api/v1/inputs",
             "/api/v1/inputs/field-preview",
             "/api/v1/inputs/field-suggestion",
+            "/api/v1/inputs/quality-check",
             "/api/v1/configs",
             "/api/v1/configs/{name:path}",
             "/api/v1/runs",
@@ -807,6 +996,14 @@ class ApiServiceSmokeTests(unittest.TestCase):
         }
 
         self.assertTrue(expected_paths.issubset(route_paths))
+
+    def test_create_app_documents_quality_check_domain_errors(self) -> None:
+        app = create_app(self.repo_root)
+        operation = app.openapi()["paths"]["/api/v1/inputs/quality-check"]["post"]
+
+        self.assertEqual("#/components/schemas/ApiErrorResponse", operation["responses"]["400"]["content"]["application/json"]["schema"]["$ref"])
+        self.assertEqual("#/components/schemas/ApiErrorResponse", operation["responses"]["404"]["content"]["application/json"]["schema"]["$ref"])
+        self.assertEqual("#/components/schemas/HTTPValidationError", operation["responses"]["422"]["content"]["application/json"]["schema"]["$ref"])
 
 
 if __name__ == "__main__":

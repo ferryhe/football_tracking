@@ -6,6 +6,7 @@ from pydantic import BaseModel, Field
 
 RunStatus = Literal["queued", "running", "completed", "failed", "cancelled"]
 AIResponseLanguage = Literal["en", "zh"]
+QualityStatus = Literal["pass", "warn", "fail"]
 Point2DPayload = tuple[float, float]
 QuadPointsPayload = tuple[Point2DPayload, Point2DPayload, Point2DPayload, Point2DPayload]
 MatrixRowPayload = tuple[float, float, float]
@@ -49,6 +50,10 @@ class DeleteResourceResponse(BaseModel):
     deleted: bool = True
 
 
+class ApiErrorResponse(BaseModel):
+    detail: str
+
+
 class FieldPreviewRequest(BaseModel):
     input_video: str
     sample_index: int | None = None
@@ -69,6 +74,32 @@ class FieldSuggestionRequest(BaseModel):
     input_video: str
     config_name: str | None = None
     frame_index: int | None = None
+
+
+class InputQualityRequest(BaseModel):
+    input_video: str
+    config_name: str | None = None
+
+
+class InputQualityCheck(BaseModel):
+    key: str
+    label: str
+    score: float = Field(ge=0.0, le=1.0)
+    status: QualityStatus
+    value: Any
+    unit: str
+    guidance: str
+
+
+class InputQualityResponse(BaseModel):
+    input_video: str
+    frame_width: int
+    frame_height: int
+    sample_count: int
+    overall_score: float = Field(ge=0.0, le=1.0)
+    overall_status: QualityStatus
+    checks: list[InputQualityCheck]
+    recommendations: list[str]
 
 
 class PitchDimensionsPayload(BaseModel):
