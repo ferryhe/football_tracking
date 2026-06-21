@@ -432,6 +432,8 @@ Expected: all tests pass.
 
 **Branch:** `feat/temporal-chunk-parallel-workers`
 
+**Status:** Implemented locally; focused and full backend unittest validation pass.
+
 **Purpose:** Add Windows-safe subprocess scheduling while avoiding single-GPU oversubscription.
 
 **Files:**
@@ -454,7 +456,7 @@ Rules:
 - Failure in any chunk cancels pending chunks and writes failure details.
 - Capture stdout, stderr, start/end time, exit code, and chunk config path in `temporal_chunks_report.json`.
 
-- [ ] **Step 1: Write failing scheduler tests**
+- [x] **Step 1: Write failing scheduler tests**
 
 Test cases:
 
@@ -485,7 +487,7 @@ def test_effective_worker_count_uses_multi_gpu_device_list(self) -> None:
     )
 ```
 
-- [ ] **Step 2: Implement scheduler**
+- [x] **Step 2: Implement scheduler**
 
 Add:
 
@@ -500,11 +502,11 @@ def effective_worker_count(
     """Return the safe worker count for CPU, single-GPU, or multi-GPU chunk execution."""
 ```
 
-- [ ] **Step 3: Add subprocess execution path**
+- [x] **Step 3: Add subprocess execution path**
 
 Keep sequential in-process path for `effective_workers == 1`; use subprocess workers otherwise.
 
-- [ ] **Step 4: Run validation**
+- [x] **Step 4: Run validation**
 
 Run:
 
@@ -514,6 +516,14 @@ $env:PYTHONPATH='python_backend'; .\.venv\Scripts\python.exe -m unittest discove
 ```
 
 Expected: all tests pass.
+
+Verified on 2026-06-21:
+
+```text
+python_backend.tests.test_chunk_runner: Ran 30 tests, OK
+unittest discover python_backend\tests: Ran 178 tests, OK
+ruff check chunk_runner/test_chunk_runner: OK
+```
 
 ### PR5: Metrics, Review Packets, And API Visibility
 
