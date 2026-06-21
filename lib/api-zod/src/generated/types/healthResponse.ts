@@ -5,6 +5,9 @@
  * OpenAPI spec version: 0.1.0
  */
 
-export interface HealthStatus {
+export interface HealthResponse {
   status: string;
+  active_run_id?: string | null;
+  config_count: number;
+  run_count: number;
 }
