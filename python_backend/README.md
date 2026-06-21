@@ -107,9 +107,9 @@ To stop managed UI processes:
    - Review the suggested config
    - Run the next task if the suggestion looks right
 3. `Deliverable task`
-   - Pick a completed source run
-   - Render a clean `16:9` deliverable without rerunning the full baseline pipeline
-   - Render short highlight clips from shot/goal candidates when `event_candidates.json` is available
+   - Pick a source video and tuned config to run the full video
+   - Optionally post-process the ball track and render the final `16:9` follow-cam output
+   - Pick a completed run with `event_candidates.json` to render short highlight clips from shot/goal candidates
 4. `History`
    - Review past runs
    - Filter `baseline / deliverable / highlight / failed`
@@ -321,9 +321,9 @@ cd ..
    - 查看建议的新配置
    - 如果建议合理，直接启动下一次任务
 3. `成品任务`
-   - 选择一个已完成 run
-   - 单独导出干净的 `16:9` 成品，不需要重新跑完整基线
-   - 有 `event_candidates.json` 时，可以从射门/进球候选渲染集锦短片
+   - 选择原视频和调好的配置，跑完整视频
+   - 按需后处理球轨迹，并渲染最终 `16:9` 跟随镜头成品
+   - 选择带有 `event_candidates.json` 的已完成 run，从射门/进球候选渲染集锦短片
 4. `历史`
    - 查看过往 run
    - 按 `baseline / deliverable / highlight / failed` 过滤

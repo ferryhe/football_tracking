@@ -15,11 +15,20 @@ import { Film, Clapperboard, AlertCircle, Loader2, CheckCircle2, Settings2, Arro
 import { useToast } from "@/hooks/use-toast";
 import { useLanguage } from "@/contexts/LanguageContext";
 
-function hasEventCandidateReport(run: RunRecord): boolean {
-  return (
-    run.artifacts.some((artifact) => artifact.exists && artifact.name === "event_candidates.json") ||
-    (run.stats.event_candidates !== null && typeof run.stats.event_candidates === "object")
-  );
+function eventCandidateCount(run: RunRecord): number | null {
+  const summary = run.stats.event_candidates;
+  if (summary === null || typeof summary !== "object") return null;
+
+  const count = (summary as { candidate_count?: unknown }).candidate_count;
+  return typeof count === "number" ? count : null;
+}
+
+function canRenderCandidateHighlights(run: RunRecord): boolean {
+  const hasReportArtifact = run.artifacts.some((artifact) => artifact.exists && artifact.name === "event_candidates.json");
+  if (!hasReportArtifact) return false;
+
+  const count = eventCandidateCount(run);
+  return count === null || count > 0;
 }
 
 export default function DeliverablePage() {
@@ -57,7 +66,7 @@ export default function DeliverablePage() {
   const highlightSourceRuns = useMemo(
     () =>
       (runs ?? []).filter(
-        (run) => run.status === "completed" && run.source !== "highlight_render" && hasEventCandidateReport(run)
+        (run) => run.status === "completed" && run.source !== "highlight_render" && canRenderCandidateHighlights(run)
       ),
     [runs]
   );
@@ -74,7 +83,7 @@ export default function DeliverablePage() {
   });
 
   const candidates = useMemo(
-    () => [...(eventCandidates.data?.candidates ?? [])].sort((a, b) => b.score - a.score).slice(0, 8),
+    () => [...(eventCandidates.data?.candidates ?? [])].sort((a, b) => b.score - a.score),
     [eventCandidates.data?.candidates]
   );
 
@@ -360,7 +369,7 @@ export default function DeliverablePage() {
             ) : !highlightSourceRuns.length ? (
               <Alert>
                 <AlertCircle className="h-4 w-4" />
-                <AlertDescription>{t.deliverable.noRuns}</AlertDescription>
+                <AlertDescription>{t.deliverable.noHighlightSourceRuns}</AlertDescription>
               </Alert>
             ) : (
               <Select
@@ -409,7 +418,7 @@ export default function DeliverablePage() {
             {!selectedHighlightRunId ? (
               <Alert>
                 <AlertCircle className="h-4 w-4" />
-                <AlertDescription>{t.deliverable.noRuns}</AlertDescription>
+                <AlertDescription>{t.deliverable.noHighlightSourceRuns}</AlertDescription>
               </Alert>
             ) : eventCandidates.isLoading ? (
               <div className="flex items-center gap-2 text-muted-foreground text-sm">
