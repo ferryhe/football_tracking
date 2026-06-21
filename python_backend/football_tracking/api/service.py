@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import base64
-from concurrent.futures import CancelledError
 import csv
 import inspect
 import json
@@ -10,6 +9,7 @@ import re
 import shutil
 import threading
 import unicodedata
+from concurrent.futures import CancelledError
 from copy import deepcopy
 from dataclasses import asdict, is_dataclass
 from datetime import datetime, timezone
@@ -21,12 +21,14 @@ import cv2
 import numpy as np
 import yaml
 
-from football_tracking.api.ai_provider import OpenAIResponsesClient, load_provider_settings
 from football_tracking.ai_review_triggers import compact_ai_review_trigger_summary
+from football_tracking.api.ai_provider import OpenAIResponsesClient, load_provider_settings
 from football_tracking.ball_audit import compact_ball_audit_summary
 from football_tracking.calibration import build_pitch_calibration_from_field_polygon
 from football_tracking.config import AppConfig, load_config
+from football_tracking.events import compact_event_candidate_summary
 from football_tracking.follow_cam import FollowCamGenerator
+from football_tracking.highlights import render_highlight_clip
 from football_tracking.metrics import compute_track_metrics, stats_from_metrics_report, write_run_artifacts
 from football_tracking.pipeline import BallTrackingPipeline
 from football_tracking.player_tracks import compact_player_tracks_summary
@@ -831,6 +833,9 @@ class ApiService:
     def get_ai_review_triggers_report(self, run_id: str) -> dict[str, Any]:
         return self._load_optional_json_artifact(run_id, "ai_review_triggers.json")
 
+    def get_event_candidates_report(self, run_id: str) -> dict[str, Any]:
+        return self._load_optional_json_artifact(run_id, "event_candidates.json")
+
     def get_player_tracks_report(self, run_id: str) -> dict[str, Any]:
         return self._load_optional_json_artifact(run_id, "player_tracks.json")
 
@@ -1413,8 +1418,10 @@ class ApiService:
         config.follow_cam.draw_frame_text = bool(request.get("draw_frame_text", False))
         config.follow_cam.target_width = max(320, int(request.get("target_width") or 1920))
         config.follow_cam.target_height = max(180, int(request.get("target_height") or 1080))
-        requested_video_name = str(request.get("output_video_name") or "deliverable_16x9.mp4")
-        config.follow_cam.output_video_name = Path(requested_video_name).name or "deliverable_16x9.mp4"
+        config.follow_cam.output_video_name = self._resolve_render_video_name(
+            request.get("output_video_name"),
+            default_name="deliverable_16x9.mp4",
+        )
 
         source_output_dir = Path(source_run["output_dir"]).resolve()
         self._prepare_follow_cam_render_inputs(source_output_dir=source_output_dir, render_output_dir=config.output_dir, config=config)
@@ -1458,6 +1465,85 @@ class ApiService:
                 target=self._execute_follow_cam_render,
                 args=(run_id, config, source_run_id, cancel_event),
                 name=f"football-tracking-render-{run_id}",
+                daemon=True,
+            )
+            self._active_threads[run_id] = thread
+            self._cancel_events[run_id] = cancel_event
+        thread.start()
+        return run_record
+
+    def create_highlight_render(self, source_run_id: str, request: dict[str, Any]) -> dict[str, Any]:
+        source_run = self.get_run(source_run_id)
+        if source_run.get("status") != "completed":
+            raise RuntimeError(f"Run must be completed before rendering a highlight: {source_run_id}")
+
+        highlight_selection = self._resolve_highlight_selection(source_run_id, request)
+        config_path, relative_name = self._resolve_run_config_reference(source_run)
+        config = load_config(config_path)
+        input_video = source_run.get("input_video") or str(config.input_video)
+        if not input_video:
+            raise FileNotFoundError(f"Run {source_run_id} is not linked to an input video.")
+        config.input_video = self._resolve_input_video_path(input_video)
+
+        requested_output_name = request.get("output_dir_name")
+        run_id = Path(requested_output_name).name if requested_output_name else ""
+        if not run_id:
+            run_id = f"highlight_{source_run_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid4().hex[:6]}"
+
+        config.output_dir = self._build_run_output_dir(run_id=run_id, input_video=config.input_video)
+        if config.output_dir.exists() and any(config.output_dir.iterdir()):
+            raise FileExistsError(str(config.output_dir))
+        config.output_dir.mkdir(parents=True, exist_ok=True)
+
+        config.postprocess.enabled = False
+        config.follow_cam.enabled = False
+        output_video_name = self._resolve_render_video_name(
+            request.get("output_video_name"),
+            default_name="highlight.mp4",
+        )
+
+        source_output_dir = Path(source_run["output_dir"]).resolve()
+        self._prepare_highlight_render_inputs(source_output_dir=source_output_dir, render_output_dir=config.output_dir, config=config)
+
+        window = highlight_selection["window"]
+        render_notes = request.get("notes") or (
+            f"Highlight render from {source_run_id} | "
+            f"frames={window['start_frame']}-{window['end_frame']}"
+        )
+        run_record = {
+            "run_id": run_id,
+            "source": "highlight_render",
+            "status": "queued",
+            "created_at": _utc_now_iso(),
+            "started_at": None,
+            "completed_at": None,
+            "config_name": relative_name,
+            "config_path": str(config_path),
+            "input_video": str(config.input_video),
+            "parent_run_id": source_run_id,
+            "output_dir": str(config.output_dir),
+            "modules_enabled": {
+                "postprocess": False,
+                "follow_cam": False,
+            },
+            "artifacts": self._collect_artifacts(config.output_dir),
+            "stats": self._collect_stats(config.output_dir),
+            "progress": self._initial_progress(),
+            "notes": render_notes,
+            "error": None,
+        }
+
+        with self._lock:
+            self._assert_no_active_run_locked()
+            registry = self._read_registry()
+            registry["runs"] = [run for run in registry["runs"] if run["run_id"] != run_id]
+            registry["runs"].append(run_record)
+            self._write_registry(registry)
+            cancel_event = threading.Event()
+            thread = threading.Thread(
+                target=self._execute_highlight_render,
+                args=(run_id, config, source_run_id, output_video_name, highlight_selection, cancel_event),
+                name=f"football-tracking-highlight-{run_id}",
                 daemon=True,
             )
             self._active_threads[run_id] = thread
@@ -1630,6 +1716,125 @@ class ApiService:
                 parent_run_id=parent_run_id,
                 output_dir=config.output_dir,
                 modules_enabled={"postprocess": False, "follow_cam": True},
+                notes=existing.get("notes"),
+                started_at=existing.get("started_at"),
+                completed_at=_utc_now_iso(),
+                progress=self._completed_progress(existing.get("progress"), existing.get("started_at")),
+            )
+            self._replace_run(run_id, updated)
+        except CancelledError:
+            existing = self.get_run(run_id)
+            completed_at = _utc_now_iso()
+            partial_run = {
+                **existing,
+                "status": "cancelled",
+                "completed_at": completed_at,
+                "error": None,
+            }
+            artifact_error = self._write_run_artifacts(config.output_dir, partial_run)
+            self._update_run(
+                run_id,
+                {
+                    "status": "cancelled",
+                    "completed_at": completed_at,
+                    "error": self._append_artifact_error(None, artifact_error),
+                    "artifacts": self._collect_artifacts(config.output_dir),
+                    "stats": self._collect_stats(config.output_dir),
+                    "progress": self._cancelled_progress(existing.get("progress"), existing.get("started_at")),
+                },
+            )
+        except Exception as exc:
+            existing = self.get_run(run_id)
+            completed_at = _utc_now_iso()
+            partial_run = {
+                **existing,
+                "status": "failed",
+                "completed_at": completed_at,
+                "error": str(exc),
+            }
+            artifact_error = self._write_run_artifacts(config.output_dir, partial_run)
+            self._update_run(
+                run_id,
+                {
+                    "status": "failed",
+                    "completed_at": completed_at,
+                    "error": self._append_artifact_error(str(exc), artifact_error),
+                    "artifacts": self._collect_artifacts(config.output_dir),
+                    "stats": self._collect_stats(config.output_dir),
+                    "progress": self._failed_progress(existing.get("progress"), existing.get("started_at")),
+                },
+            )
+        finally:
+            with self._lock:
+                self._active_threads.pop(run_id, None)
+                self._cancel_events.pop(run_id, None)
+
+    def _execute_highlight_render(
+        self,
+        run_id: str,
+        config: AppConfig,
+        parent_run_id: str,
+        output_video_name: str,
+        selection: dict[str, Any],
+        cancel_event: threading.Event,
+    ) -> None:
+        progress_plan = self._progress_stage_plan(tracking=False, postprocess=False, render=True)
+        started_at = _utc_now_iso()
+        self._update_run(
+            run_id,
+            {
+                "status": "running",
+                "started_at": started_at,
+                "error": None,
+                "progress": self._build_progress_payload(
+                    {"stage": "render", "current_frame": 0, "total_frames": None},
+                    progress_plan,
+                    started_at=started_at,
+                ),
+            },
+        )
+        try:
+            window = selection["window"]
+            output_path = config.output_dir / output_video_name
+
+            def run_highlight(
+                progress_callback=None,
+                should_cancel=None,
+            ) -> None:
+                renderer_report = render_highlight_clip(
+                    input_video=config.input_video,
+                    output_path=output_path,
+                    start_frame=int(window["start_frame"]),
+                    end_frame=int(window["end_frame"]),
+                    progress_callback=progress_callback,
+                    should_cancel=should_cancel,
+                )
+                self._write_highlight_report(
+                    output_dir=config.output_dir,
+                    source_run_id=parent_run_id,
+                    input_video=config.input_video,
+                    output_video_name=output_video_name,
+                    selection=selection,
+                    renderer_report=renderer_report,
+                )
+
+            self._run_with_optional_progress(
+                run_highlight,
+                lambda update: self._update_run_progress(run_id, update, progress_plan),
+                cancel_event.is_set,
+            )
+            existing = self.get_run(run_id)
+            updated = self._build_run_snapshot(
+                run_id=run_id,
+                source="highlight_render",
+                status="completed",
+                created_at=existing["created_at"],
+                config_name=existing.get("config_name"),
+                config_path=existing.get("config_path"),
+                input_video=str(config.input_video),
+                parent_run_id=parent_run_id,
+                output_dir=config.output_dir,
+                modules_enabled={"postprocess": False, "follow_cam": False},
                 notes=existing.get("notes"),
                 started_at=existing.get("started_at"),
                 completed_at=_utc_now_iso(),
@@ -2087,6 +2292,109 @@ class ApiService:
         if not candidate.exists() or not candidate.is_file():
             raise FileNotFoundError(f"Input video not found: {input_video}")
         return candidate
+
+    def _resolve_highlight_selection(self, source_run_id: str, request: dict[str, Any]) -> dict[str, Any]:
+        candidate_id = request.get("candidate_id")
+        if candidate_id:
+            report = self.get_event_candidates_report(source_run_id)
+            candidates_raw = report.get("candidates")
+            candidates = candidates_raw if isinstance(candidates_raw, list) else []
+            candidate = next(
+                (item for item in candidates if isinstance(item, dict) and item.get("id") == candidate_id),
+                None,
+            )
+            if candidate is None:
+                raise FileNotFoundError(f"Event candidate not found: {candidate_id}")
+            start_frame = self._optional_int(candidate.get("start_frame"))
+            end_frame = self._optional_int(candidate.get("end_frame"))
+            if start_frame is None or end_frame is None:
+                raise RuntimeError(f"Event candidate has no usable frame window: {candidate_id}")
+            pre_roll = self._optional_int(request.get("pre_roll_frames"))
+            post_roll = self._optional_int(request.get("post_roll_frames"))
+            pre_roll = max(0, pre_roll if pre_roll is not None else 15)
+            post_roll = max(0, post_roll if post_roll is not None else 30)
+            return self._highlight_selection_payload(
+                candidate_id=str(candidate_id),
+                candidate=candidate,
+                start_frame=max(0, start_frame - pre_roll),
+                end_frame=end_frame + post_roll,
+                request=request,
+            )
+
+        start_frame = self._optional_int(request.get("start_frame"))
+        end_frame = self._optional_int(request.get("end_frame"))
+        if start_frame is None or end_frame is None:
+            raise RuntimeError("Highlight render requires candidate_id or start_frame/end_frame.")
+        return self._highlight_selection_payload(
+            candidate_id=None,
+            candidate=None,
+            start_frame=start_frame,
+            end_frame=end_frame,
+            request=request,
+        )
+
+    def _highlight_selection_payload(
+        self,
+        *,
+        candidate_id: str | None,
+        candidate: dict[str, Any] | None,
+        start_frame: int,
+        end_frame: int,
+        request: dict[str, Any],
+    ) -> dict[str, Any]:
+        if start_frame < 0 or end_frame < start_frame:
+            raise RuntimeError(f"Invalid highlight frame window: {start_frame}-{end_frame}")
+        return {
+            "candidate_id": candidate_id,
+            "candidate": candidate,
+            "window": {"start_frame": start_frame, "end_frame": end_frame},
+            "request": {
+                "start_frame": request.get("start_frame"),
+                "end_frame": request.get("end_frame"),
+                "pre_roll_frames": request.get("pre_roll_frames"),
+                "post_roll_frames": request.get("post_roll_frames"),
+            },
+        }
+
+    def _prepare_highlight_render_inputs(self, source_output_dir: Path, render_output_dir: Path, config: AppConfig) -> None:
+        self._prepare_follow_cam_render_inputs(
+            source_output_dir=source_output_dir,
+            render_output_dir=render_output_dir,
+            config=config,
+        )
+        event_candidates = source_output_dir / "event_candidates.json"
+        if event_candidates.exists() and event_candidates.is_file():
+            shutil.copy2(event_candidates, render_output_dir / event_candidates.name)
+
+    def _write_highlight_report(
+        self,
+        *,
+        output_dir: Path,
+        source_run_id: str,
+        input_video: Path,
+        output_video_name: str,
+        selection: dict[str, Any],
+        renderer_report: dict[str, Any],
+    ) -> None:
+        payload = {
+            "schema_version": "1.0",
+            "source_run_id": source_run_id,
+            "input_video": str(input_video),
+            "output_video": output_video_name,
+            "candidate_id": selection.get("candidate_id"),
+            "candidate_type": (
+                None
+                if not isinstance(selection.get("candidate"), dict)
+                else selection["candidate"].get("type")
+            ),
+            "window": selection["window"],
+            "renderer": renderer_report,
+            "candidate": selection.get("candidate"),
+        }
+        (output_dir / "highlight_report.json").write_text(
+            json.dumps(_jsonable(payload), ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
 
     def _prepare_follow_cam_render_inputs(self, source_output_dir: Path, render_output_dir: Path, config: AppConfig) -> None:
         raw_csv = source_output_dir / config.output.csv_name
@@ -2629,6 +2937,31 @@ class ApiService:
         input_group = self._input_group_slug(input_video)
         return (self.run_outputs_dir / input_group / run_id).resolve()
 
+    def _resolve_render_video_name(self, requested_name: Any, *, default_name: str) -> str:
+        raw_name = str(requested_name or default_name).strip() or default_name
+        output_name = Path(raw_name).name
+        if output_name != raw_name:
+            raise RuntimeError("Output video name must be a file name, not a path.")
+        if Path(output_name).suffix.lower() != ".mp4":
+            raise RuntimeError("Output video name must end with .mp4.")
+        reserved_names = {
+            "ball_track.csv",
+            "ball_track.cleaned.csv",
+            "camera_path.csv",
+            "run_manifest.json",
+            "metrics_report.json",
+            "cleanup_report.json",
+            "follow_cam_report.json",
+            "ball_audit.json",
+            "ai_review_triggers.json",
+            "event_candidates.json",
+            "player_tracks.json",
+            "highlight_report.json",
+        }
+        if output_name in reserved_names:
+            raise RuntimeError(f"Output video name is reserved: {output_name}")
+        return output_name
+
     def _input_group_slug(self, input_video: Path | None) -> str:
         if input_video is None:
             return "unbound"
@@ -2730,6 +3063,7 @@ class ApiService:
         follow_cam_report = self._read_optional_json(output_dir / "follow_cam_report.json")
         ball_audit_report = self._read_optional_json(output_dir / "ball_audit.json")
         ai_review_trigger_report = self._read_optional_json(output_dir / "ai_review_triggers.json")
+        event_candidate_report = self._read_optional_json(output_dir / "event_candidates.json")
         player_tracks_report = self._read_optional_json(output_dir / "player_tracks.json")
         if raw_summary is not None:
             stats["raw"] = raw_summary
@@ -2747,6 +3081,10 @@ class ApiService:
             ai_review_trigger_summary = compact_ai_review_trigger_summary(ai_review_trigger_report)
             if ai_review_trigger_summary is not None:
                 stats["ai_review_triggers"] = ai_review_trigger_summary
+        if event_candidate_report is not None and "event_candidates" not in stats:
+            event_candidate_summary = compact_event_candidate_summary(event_candidate_report)
+            if event_candidate_summary is not None:
+                stats["event_candidates"] = event_candidate_summary
         if player_tracks_report is not None and "player_tracks" not in stats:
             player_tracks_summary = compact_player_tracks_summary(player_tracks_report)
             if player_tracks_summary is not None:

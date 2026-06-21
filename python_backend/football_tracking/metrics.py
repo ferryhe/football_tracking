@@ -13,11 +13,11 @@ from football_tracking.ai_review_triggers import (
     write_ai_review_trigger_report,
 )
 from football_tracking.ball_audit import compact_ball_audit_summary, write_ball_audit_report
+from football_tracking.events import compact_event_candidate_summary, write_event_candidate_report
 from football_tracking.player_tracks import (
     compact_player_tracks_summary,
     write_player_tracks_artifacts,
 )
-
 
 SCHEMA_VERSION = "1.0"
 FALSE_POSITIVE_ISLAND_MAX_LENGTH = 2
@@ -114,6 +114,11 @@ def build_metrics_report(output_dir: Path) -> dict[str, Any]:
         ai_review_trigger_summary = compact_ai_review_trigger_summary(ai_review_trigger_report)
         if ai_review_trigger_summary is not None:
             report["ai_review_triggers"] = ai_review_trigger_summary
+    event_candidate_report = _read_optional_json(output_dir / "event_candidates.json")
+    if event_candidate_report is not None:
+        event_candidate_summary = compact_event_candidate_summary(event_candidate_report)
+        if event_candidate_summary is not None:
+            report["event_candidates"] = event_candidate_summary
     player_tracks_report = _read_optional_json(output_dir / "player_tracks.json")
     if player_tracks_report is not None:
         player_tracks_summary = compact_player_tracks_summary(player_tracks_report)
@@ -155,6 +160,11 @@ def write_run_artifacts(output_dir: Path, run: dict[str, Any]) -> tuple[dict[str
         write_ai_review_trigger_report(output_dir)
     except Exception as exc:
         ai_review_triggers_error = f"Failed to write ai_review_triggers.json: {exc}"
+    event_candidates_error: str | None = None
+    try:
+        write_event_candidate_report(output_dir)
+    except Exception as exc:
+        event_candidates_error = f"Failed to write event_candidates.json: {exc}"
     player_tracks_error: str | None = None
     try:
         write_player_tracks_artifacts(output_dir)
@@ -165,6 +175,8 @@ def write_run_artifacts(output_dir: Path, run: dict[str, Any]) -> tuple[dict[str
         report["ball_audit_error"] = ball_audit_error
     if ai_review_triggers_error is not None:
         report["ai_review_triggers_error"] = ai_review_triggers_error
+    if event_candidates_error is not None:
+        report["event_candidates_error"] = event_candidates_error
     if player_tracks_error is not None:
         report["player_tracks_error"] = player_tracks_error
     _write_json(output_dir / "run_manifest.json", manifest)
@@ -174,7 +186,8 @@ def write_run_artifacts(output_dir: Path, run: dict[str, Any]) -> tuple[dict[str
 
 def stats_from_metrics_report(report: dict[str, Any]) -> dict[str, Any]:
     stats: dict[str, Any] = {}
-    tracks = report.get("tracks") if isinstance(report.get("tracks"), dict) else {}
+    tracks_raw = report.get("tracks")
+    tracks = tracks_raw if isinstance(tracks_raw, dict) else {}
     raw = tracks.get("raw")
     if isinstance(raw, dict):
         stats["raw"] = raw
@@ -193,6 +206,9 @@ def stats_from_metrics_report(report: dict[str, Any]) -> dict[str, Any]:
     ai_review_triggers = report.get("ai_review_triggers")
     if isinstance(ai_review_triggers, dict):
         stats["ai_review_triggers"] = ai_review_triggers
+    event_candidates = report.get("event_candidates")
+    if isinstance(event_candidates, dict):
+        stats["event_candidates"] = event_candidates
     player_tracks = report.get("player_tracks")
     if isinstance(player_tracks, dict):
         stats["player_tracks"] = player_tracks

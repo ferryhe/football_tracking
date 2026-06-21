@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import base64
 import json
-import threading
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -13,9 +13,12 @@ import cv2
 import numpy as np
 import yaml
 from fastapi import HTTPException
+from pydantic import ValidationError
 
 from football_tracking.api.app import create_app
 from football_tracking.api.routes import inputs as input_routes
+from football_tracking.api.routes import runs as run_routes
+from football_tracking.api.schemas import HighlightRenderRequest
 from football_tracking.api.service import ApiService
 from football_tracking.config import load_config
 from football_tracking.metrics import write_run_artifacts
@@ -291,6 +294,39 @@ class ApiServiceSmokeTests(unittest.TestCase):
                     "counts_by_priority": {"medium": 1},
                     "max_trigger_priority": "medium",
                 },
+            },
+        )
+        self.write_json(
+            f"outputs/{folder_name}/event_candidates.json",
+            {
+                "schema_version": "1.0",
+                "source": {"name": "cleaned", "path": "ball_track.cleaned.csv", "row_count": 3},
+                "summary": {
+                    "frame_count": 3,
+                    "detected_frame_count": 2,
+                    "candidate_count": 1,
+                    "counts_by_type": {"shot_candidate": 1},
+                    "min_frame": 0,
+                    "max_frame": 2,
+                },
+                "candidates": [
+                    {
+                        "id": "cleaned:shot_candidate:0-1",
+                        "type": "shot_candidate",
+                        "label": "candidate",
+                        "start_frame": 0,
+                        "end_frame": 1,
+                        "frame_count": 2,
+                        "score": 0.62,
+                        "reason": "Sustained ball track contains a speed burst.",
+                        "render_window": {"start_frame": 0, "end_frame": 31},
+                        "evidence": {
+                            "max_speed_px_per_frame": 35.0,
+                            "mean_confidence": 0.9,
+                            "goal_side": None,
+                        },
+                    }
+                ],
             },
         )
         self.write_json(
@@ -730,6 +766,7 @@ class ApiServiceSmokeTests(unittest.TestCase):
         self.assertEqual("cleaned", run["stats"]["follow_cam"]["track_source"])
         self.assertEqual(2, run["stats"]["ball_audit"]["tracklet_count"])
         self.assertEqual("medium", run["stats"]["ai_review_triggers"]["priority"])
+        self.assertEqual(1, run["stats"]["event_candidates"]["candidate_count"])
         self.assertEqual(1, run["stats"]["player_tracks"]["track_count"])
         self.assertIn("follow_cam.mp4", {artifact["name"] for artifact in run["artifacts"]})
         output_dir = self.repo_root / "outputs" / "kept_baseline"
@@ -771,6 +808,9 @@ class ApiServiceSmokeTests(unittest.TestCase):
         self.assertIn("ai_review_triggers.json", artifact_names)
         self.assertIn("ai_review_triggers", run["stats"])
         self.assertTrue(run["stats"]["ai_review_triggers"]["needs_ai_review"])
+        self.assertIn("event_candidates.json", artifact_names)
+        self.assertIn("event_candidates", run["stats"])
+        self.assertEqual("cleaned", run["stats"]["event_candidates"]["source_name"])
         self.assertIn("player_tracks.json", artifact_names)
         self.assertEqual(1, run["stats"]["player_tracks"]["track_count"])
 
@@ -803,10 +843,22 @@ class ApiServiceSmokeTests(unittest.TestCase):
         self.assertEqual(1, report["summary"]["track_count"])
         self.assertEqual("P001", report["tracks"][0]["id"])
 
+    def test_get_event_candidates_report_loads_json_artifact(self) -> None:
+        self.create_output_bundle("kept_baseline")
+        run = self.service.list_runs()[0]
+
+        report = self.service.get_event_candidates_report(run["run_id"])
+
+        self.assertEqual("1.0", report["schema_version"])
+        self.assertEqual("cleaned", report["source"]["name"])
+        self.assertEqual(1, report["summary"]["candidate_count"])
+        self.assertEqual("shot_candidate", report["candidates"][0]["type"])
+
     def test_list_runs_ignores_malformed_audit_artifacts(self) -> None:
         output_dir = self.create_output_bundle("kept_baseline")
         (output_dir / "ball_audit.json").write_bytes(b"\xff\xfe\xff")
         (output_dir / "ai_review_triggers.json").write_text("{", encoding="utf-8")
+        (output_dir / "event_candidates.json").write_text("{", encoding="utf-8")
         (output_dir / "player_tracks.json").write_bytes(b"\xff\xfe\xff")
 
         runs = self.service.list_runs()
@@ -814,6 +866,7 @@ class ApiServiceSmokeTests(unittest.TestCase):
         self.assertEqual(1, len(runs))
         self.assertNotIn("ball_audit", runs[0]["stats"])
         self.assertNotIn("ai_review_triggers", runs[0]["stats"])
+        self.assertNotIn("event_candidates", runs[0]["stats"])
         self.assertNotIn("player_tracks", runs[0]["stats"])
 
     def test_report_loaders_treat_malformed_json_as_missing(self) -> None:
@@ -821,12 +874,15 @@ class ApiServiceSmokeTests(unittest.TestCase):
         run = self.service.list_runs()[0]
         (output_dir / "ball_audit.json").write_text("{", encoding="utf-8")
         (output_dir / "ai_review_triggers.json").write_bytes(b"\xff\xfe\xff")
+        (output_dir / "event_candidates.json").write_text("{", encoding="utf-8")
         (output_dir / "player_tracks.json").write_text("{", encoding="utf-8")
 
         with self.assertRaises(FileNotFoundError):
             self.service.get_ball_audit_report(run["run_id"])
         with self.assertRaises(FileNotFoundError):
             self.service.get_ai_review_triggers_report(run["run_id"])
+        with self.assertRaises(FileNotFoundError):
+            self.service.get_event_candidates_report(run["run_id"])
         with self.assertRaises(FileNotFoundError):
             self.service.get_player_tracks_report(run["run_id"])
 
@@ -947,6 +1003,222 @@ class ApiServiceSmokeTests(unittest.TestCase):
         self.assertTrue((Path(completed_run["output_dir"]) / "run_manifest.json").exists())
         self.assertTrue((Path(completed_run["output_dir"]) / "metrics_report.json").exists())
         self.assertIn("/outputs/runs/input/", Path(completed_run["output_dir"]).resolve().as_posix())
+
+    def test_create_highlight_render_creates_child_task_from_event_candidate(self) -> None:
+        self.create_output_bundle("kept_baseline")
+        source_run = self.service.list_runs()[0]
+
+        class ImmediateThread:
+            def __init__(self, *, target, args, name, daemon) -> None:
+                self._target = target
+                self._args = args
+                self._alive = False
+
+            def start(self) -> None:
+                self._alive = True
+                try:
+                    self._target(*self._args)
+                finally:
+                    self._alive = False
+
+            def is_alive(self) -> bool:
+                return self._alive
+
+        calls: list[dict[str, object]] = []
+
+        def fake_render_highlight_clip(
+            *,
+            input_video: Path,
+            output_path: Path,
+            start_frame: int,
+            end_frame: int,
+            progress_callback=None,
+            should_cancel=None,
+        ) -> dict[str, object]:
+            calls.append(
+                {
+                    "input_video": input_video,
+                    "output_path": output_path,
+                    "start_frame": start_frame,
+                    "end_frame": end_frame,
+                    "should_cancel": should_cancel is not None,
+                }
+            )
+            if progress_callback is not None:
+                progress_callback({"stage": "render", "current_frame": 0, "total_frames": end_frame - start_frame + 1})
+            output_path.write_text("highlight", encoding="utf-8")
+            return {"frame_count": end_frame - start_frame + 1, "fps": 6.0}
+
+        with mock.patch("football_tracking.api.service.threading.Thread", ImmediateThread), mock.patch(
+            "football_tracking.api.service.render_highlight_clip",
+            fake_render_highlight_clip,
+        ):
+            created_run = self.service.create_highlight_render(
+                source_run["run_id"],
+                {
+                    "candidate_id": "cleaned:shot_candidate:0-1",
+                    "output_dir_name": "candidate_highlight_run",
+                },
+            )
+
+        completed_run = self.service.get_run(created_run["run_id"])
+        output_dir = Path(completed_run["output_dir"])
+        report = json.loads((output_dir / "highlight_report.json").read_text(encoding="utf-8"))
+
+        self.assertEqual("highlight_render", completed_run["source"])
+        self.assertEqual(source_run["run_id"], completed_run["parent_run_id"])
+        self.assertEqual("completed", completed_run["status"])
+        self.assertFalse(completed_run["modules_enabled"]["postprocess"])
+        self.assertFalse(completed_run["modules_enabled"]["follow_cam"])
+        self.assertEqual(0, calls[0]["start_frame"])
+        self.assertEqual(31, calls[0]["end_frame"])
+        self.assertEqual("highlight.mp4", Path(calls[0]["output_path"]).name)
+        self.assertEqual("cleaned:shot_candidate:0-1", report["candidate_id"])
+        self.assertEqual({"start_frame": 0, "end_frame": 31}, report["window"])
+        self.assertEqual({"frame_count": 32, "fps": 6.0}, report["renderer"])
+        self.assertIn("highlight.mp4", {artifact["name"] for artifact in completed_run["artifacts"]})
+        self.assertIn("highlight_report.json", {artifact["name"] for artifact in completed_run["artifacts"]})
+        self.assertTrue((output_dir / "ball_track.cleaned.csv").exists())
+        self.assertTrue((output_dir / "event_candidates.json").exists())
+        self.assertTrue((output_dir / "run_manifest.json").exists())
+        self.assertTrue((output_dir / "metrics_report.json").exists())
+
+    def test_create_highlight_render_creates_child_task_from_frame_window(self) -> None:
+        self.create_output_bundle("kept_baseline")
+        source_run = self.service.list_runs()[0]
+
+        class ImmediateThread:
+            def __init__(self, *, target, args, name, daemon) -> None:
+                self._target = target
+                self._args = args
+                self._alive = False
+
+            def start(self) -> None:
+                self._alive = True
+                try:
+                    self._target(*self._args)
+                finally:
+                    self._alive = False
+
+            def is_alive(self) -> bool:
+                return self._alive
+
+        calls: list[dict[str, object]] = []
+
+        def fake_render_highlight_clip(
+            *,
+            input_video: Path,
+            output_path: Path,
+            start_frame: int,
+            end_frame: int,
+            progress_callback=None,
+            should_cancel=None,
+        ) -> dict[str, object]:
+            calls.append(
+                {
+                    "input_video": input_video,
+                    "output_path": output_path,
+                    "start_frame": start_frame,
+                    "end_frame": end_frame,
+                }
+            )
+            output_path.write_text("highlight", encoding="utf-8")
+            return {"frame_count": end_frame - start_frame + 1, "fps": 6.0}
+
+        with mock.patch("football_tracking.api.service.threading.Thread", ImmediateThread), mock.patch(
+            "football_tracking.api.service.render_highlight_clip",
+            fake_render_highlight_clip,
+        ):
+            created_run = self.service.create_highlight_render(
+                source_run["run_id"],
+                {
+                    "start_frame": 2,
+                    "end_frame": 4,
+                    "output_dir_name": "manual_highlight_run",
+                    "output_video_name": "manual_clip.mp4",
+                },
+            )
+
+        completed_run = self.service.get_run(created_run["run_id"])
+        report = json.loads((Path(completed_run["output_dir"]) / "highlight_report.json").read_text(encoding="utf-8"))
+
+        self.assertEqual("completed", completed_run["status"])
+        self.assertEqual(2, calls[0]["start_frame"])
+        self.assertEqual(4, calls[0]["end_frame"])
+        self.assertEqual("manual_clip.mp4", Path(calls[0]["output_path"]).name)
+        self.assertIsNone(report["candidate_id"])
+        self.assertEqual({"start_frame": 2, "end_frame": 4}, report["window"])
+
+    def test_create_highlight_render_requires_completed_source_run_and_window(self) -> None:
+        active_input = (self.repo_root / "data" / "input.mp4").resolve()
+        active_config = (self.repo_root / "config" / "default.yaml").resolve()
+        output_dir = self.repo_root / "outputs" / "active_demo"
+        output_dir.mkdir(parents=True, exist_ok=True)
+        self.service._write_registry(
+            {
+                "runs": [
+                    {
+                        "run_id": "active_demo",
+                        "source": "api",
+                        "status": "running",
+                        "created_at": "2026-01-01T00:00:00+00:00",
+                        "started_at": "2026-01-01T00:00:00+00:00",
+                        "completed_at": None,
+                        "config_name": "default.yaml",
+                        "config_path": str(active_config),
+                        "input_video": str(active_input),
+                        "parent_run_id": None,
+                        "output_dir": str(output_dir.resolve()),
+                        "modules_enabled": {"postprocess": True, "follow_cam": False},
+                        "artifacts": [],
+                        "stats": {},
+                        "progress": {"stage": "tracking", "percent": 42.0},
+                        "notes": None,
+                        "error": None,
+                    }
+                ]
+            }
+        )
+
+        with self.assertRaises(RuntimeError):
+            self.service.create_highlight_render("active_demo", {"start_frame": 0, "end_frame": 4})
+
+        self.service._write_registry({"runs": []})
+        self.create_output_bundle("kept_baseline")
+        completed_run = self.service.list_runs()[0]
+
+        with self.assertRaises(RuntimeError):
+            self.service.create_highlight_render(completed_run["run_id"], {})
+        with self.assertRaises(FileNotFoundError):
+            self.service.create_highlight_render(completed_run["run_id"], {"candidate_id": "missing"})
+        with self.assertRaises(RuntimeError):
+            self.service.create_highlight_render(
+                completed_run["run_id"],
+                {"start_frame": 0, "end_frame": 4, "output_video_name": "metrics_report.json"},
+            )
+        with self.assertRaises(RuntimeError):
+            self.service.create_highlight_render(
+                completed_run["run_id"],
+                {"start_frame": 0, "end_frame": 4, "output_video_name": "clips/highlight.mp4"},
+            )
+
+    def test_highlight_render_request_validates_selection_and_route_maps_missing_candidate(self) -> None:
+        self.create_output_bundle("kept_baseline")
+        source_run = self.service.list_runs()[0]
+
+        with self.assertRaises(ValidationError):
+            HighlightRenderRequest()
+        with self.assertRaises(ValidationError):
+            HighlightRenderRequest(start_frame=5, end_frame=4)
+
+        with self.assertRaises(HTTPException) as raised:
+            run_routes.create_highlight_render(
+                source_run["run_id"],
+                HighlightRenderRequest(candidate_id="missing"),
+                self.service,
+            )
+
+        self.assertEqual(404, raised.exception.status_code)
 
     def test_delete_input_video_blocks_active_run_reference(self) -> None:
         active_input = (self.repo_root / "data" / "input.mp4").resolve()
@@ -1183,12 +1455,14 @@ class ApiServiceSmokeTests(unittest.TestCase):
             "/api/v1/runs/asset-groups",
             "/api/v1/runs/{run_id}",
             "/api/v1/runs/{run_id}/follow-cam-render",
+            "/api/v1/runs/{run_id}/highlight-render",
             "/api/v1/runs/{run_id}/artifacts",
             "/api/v1/runs/{run_id}/artifacts/{artifact_name:path}",
             "/api/v1/runs/{run_id}/cleanup-report",
             "/api/v1/runs/{run_id}/follow-cam-report",
             "/api/v1/runs/{run_id}/ball-audit",
             "/api/v1/runs/{run_id}/ai-review-triggers",
+            "/api/v1/runs/{run_id}/event-candidates",
             "/api/v1/runs/{run_id}/player-tracks",
             "/api/v1/runs/{run_id}/camera-path",
             "/api/v1/ai/explain",
@@ -1243,6 +1517,40 @@ class ApiServiceSmokeTests(unittest.TestCase):
         self.assertEqual(
             "#/components/schemas/ApiErrorResponse",
             operation["responses"]["404"]["content"]["application/json"]["schema"]["$ref"],
+        )
+
+    def test_create_app_documents_event_candidates_response_schema(self) -> None:
+        app = create_app(self.repo_root)
+        operation = app.openapi()["paths"]["/api/v1/runs/{run_id}/event-candidates"]["get"]
+
+        self.assertEqual(
+            "#/components/schemas/EventCandidateReport",
+            operation["responses"]["200"]["content"]["application/json"]["schema"]["$ref"],
+        )
+        self.assertEqual(
+            "#/components/schemas/ApiErrorResponse",
+            operation["responses"]["404"]["content"]["application/json"]["schema"]["$ref"],
+        )
+
+    def test_create_app_documents_highlight_render_request_schema(self) -> None:
+        app = create_app(self.repo_root)
+        operation = app.openapi()["paths"]["/api/v1/runs/{run_id}/highlight-render"]["post"]
+
+        self.assertEqual(
+            "#/components/schemas/HighlightRenderRequest",
+            operation["requestBody"]["content"]["application/json"]["schema"]["$ref"],
+        )
+        self.assertEqual(
+            "#/components/schemas/RunRecord",
+            operation["responses"]["202"]["content"]["application/json"]["schema"]["$ref"],
+        )
+        self.assertEqual(
+            "#/components/schemas/ApiErrorResponse",
+            operation["responses"]["404"]["content"]["application/json"]["schema"]["$ref"],
+        )
+        self.assertEqual(
+            "#/components/schemas/ApiErrorResponse",
+            operation["responses"]["409"]["content"]["application/json"]["schema"]["$ref"],
         )
 
 

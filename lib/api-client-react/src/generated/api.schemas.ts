@@ -359,6 +359,50 @@ export interface DeriveConfigRequest {
   patch?: DeriveConfigRequestPatch;
 }
 
+export type EventCandidateEvidence = { [key: string]: unknown };
+
+export interface EventCandidateWindow {
+  start_frame: number;
+  end_frame: number;
+}
+
+export interface EventCandidate {
+  id: string;
+  type: string;
+  label?: "candidate";
+  start_frame: number;
+  end_frame: number;
+  frame_count: number;
+  score: number;
+  reason: string;
+  render_window: EventCandidateWindow;
+  evidence?: EventCandidateEvidence;
+}
+
+export interface EventCandidateSource {
+  name: string;
+  path?: string | null;
+  row_count: number;
+}
+
+export type EventCandidateSummaryCountsByType = { [key: string]: number };
+
+export interface EventCandidateSummary {
+  frame_count: number;
+  detected_frame_count: number;
+  candidate_count: number;
+  counts_by_type?: EventCandidateSummaryCountsByType;
+  min_frame?: number | null;
+  max_frame?: number | null;
+}
+
+export interface EventCandidateReport {
+  schema_version: string;
+  source: EventCandidateSource;
+  summary: EventCandidateSummary;
+  candidates?: EventCandidate[];
+}
+
 export type FieldCalibrationPayloadConfidence =
   (typeof FieldCalibrationPayloadConfidence)[keyof typeof FieldCalibrationPayloadConfidence];
 
@@ -514,6 +558,19 @@ export interface HealthResponse {
   config_count: number;
   run_count: number;
 }
+
+export type HighlightRenderRequest = unknown & {
+  candidate_id?: string | null;
+  start_frame?: number | null;
+  end_frame?: number | null;
+  /** @minimum 0 */
+  pre_roll_frames?: number;
+  /** @minimum 0 */
+  post_roll_frames?: number;
+  output_dir_name?: string | null;
+  output_video_name?: string | null;
+  notes?: string | null;
+};
 
 export interface InputCatalogResponse {
   root_dir: string;

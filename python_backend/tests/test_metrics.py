@@ -14,7 +14,6 @@ from football_tracking.metrics import (
     write_run_artifacts,
 )
 
-
 FIXTURES_DIR = Path(__file__).parent / "fixtures" / "benchmark_tracks"
 
 
@@ -125,6 +124,7 @@ class MetricsTests(unittest.TestCase):
             self.assertTrue((output_dir / "metrics_report.json").exists())
             self.assertTrue((output_dir / "ball_audit.json").exists())
             self.assertTrue((output_dir / "ai_review_triggers.json").exists())
+            self.assertTrue((output_dir / "event_candidates.json").exists())
             self.assertEqual("run_fixture", manifest["run_id"])
             self.assertIn("git_commit", manifest)
             self.assertEqual(10, report["tracks"]["raw"]["frame_count"])
@@ -135,6 +135,9 @@ class MetricsTests(unittest.TestCase):
             self.assertIn("ai_review_triggers", report)
             self.assertTrue(report["ai_review_triggers"]["needs_ai_review"])
             self.assertGreaterEqual(report["ai_review_triggers"]["trigger_count"], 1)
+            self.assertIn("event_candidates", report)
+            self.assertEqual("raw", report["event_candidates"]["source_name"])
+            self.assertGreaterEqual(report["event_candidates"]["candidate_count"], 0)
             self.assertTrue((output_dir / "player_tracks.json").exists())
             self.assertTrue((output_dir / "player_tracks.csv").exists())
             self.assertEqual(1, report["player_tracks"]["track_count"])
@@ -242,6 +245,40 @@ class MetricsTests(unittest.TestCase):
         self.assertEqual(1, report["player_tracks"]["track_count"])
         self.assertEqual({"home": 1}, report["player_tracks"]["teams"])
         self.assertEqual(report["player_tracks"], stats["player_tracks"])
+
+    def test_build_metrics_report_includes_compact_event_candidate_summary(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            (output_dir / "event_candidates.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": "1.0",
+                        "source": {"name": "cleaned", "path": "ball_track.cleaned.csv", "row_count": 7},
+                        "summary": {
+                            "frame_count": 7,
+                            "detected_frame_count": 7,
+                            "candidate_count": 2,
+                            "counts_by_type": {"shot_candidate": 1, "goal_candidate": 1},
+                            "min_frame": 10,
+                            "max_frame": 50,
+                        },
+                        "candidates": [
+                            {"id": "cleaned:shot_candidate:10-14", "score": 0.68},
+                            {"id": "cleaned:goal_candidate:40-44", "score": 0.84},
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            report = build_metrics_report(output_dir)
+            stats = stats_from_metrics_report(report)
+
+        self.assertEqual("cleaned", report["event_candidates"]["source_name"])
+        self.assertEqual(2, report["event_candidates"]["candidate_count"])
+        self.assertEqual({"shot_candidate": 1, "goal_candidate": 1}, report["event_candidates"]["counts_by_type"])
+        self.assertEqual(0.84, report["event_candidates"]["max_score"])
+        self.assertEqual(report["event_candidates"], stats["event_candidates"])
 
     def test_write_run_artifacts_preserves_manifest_when_ai_review_triggers_fail(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:

@@ -36,6 +36,7 @@ import type {
   DeleteResourceResponse,
   DeleteRunOutputParams,
   DeriveConfigRequest,
+  EventCandidateReport,
   FieldPreviewRequest,
   FieldPreviewResponse,
   FieldSuggestionRequest,
@@ -45,6 +46,7 @@ import type {
   HTTPValidationError,
   HealthResponse,
   HealthStatus,
+  HighlightRenderRequest,
   InputCatalogResponse,
   InputQualityRequest,
   InputQualityResponse,
@@ -2293,6 +2295,100 @@ export function useGetCleanupReport<
 }
 
 /**
+ * @summary Get Event Candidates Report
+ */
+export const getGetEventCandidatesReportUrl = (runId: string) => {
+  return `/api/runs/${encodePathSegmented(runId)}/event-candidates`;
+};
+
+export const getEventCandidatesReport = async (
+  runId: string,
+  options?: RequestInit,
+): Promise<EventCandidateReport> => {
+  return customFetch<EventCandidateReport>(
+    getGetEventCandidatesReportUrl(runId),
+    {
+      ...options,
+      method: "GET",
+    },
+  );
+};
+
+export const getGetEventCandidatesReportQueryKey = (runId: string) => {
+  return [`/api/runs/${encodePathSegmented(runId)}/event-candidates`] as const;
+};
+
+export const getGetEventCandidatesReportQueryOptions = <
+  TData = Awaited<ReturnType<typeof getEventCandidatesReport>>,
+  TError = ErrorType<ApiErrorResponse | HTTPValidationError>,
+>(
+  runId: string,
+  options?: {
+    query?: UseQueryOptions<
+      Awaited<ReturnType<typeof getEventCandidatesReport>>,
+      TError,
+      TData
+    >;
+    request?: SecondParameter<typeof customFetch>;
+  },
+) => {
+  const { query: queryOptions, request: requestOptions } = options ?? {};
+
+  const queryKey =
+    queryOptions?.queryKey ?? getGetEventCandidatesReportQueryKey(runId);
+
+  const queryFn: QueryFunction<
+    Awaited<ReturnType<typeof getEventCandidatesReport>>
+  > = ({ signal }) =>
+    getEventCandidatesReport(runId, { signal, ...requestOptions });
+
+  return {
+    queryKey,
+    queryFn,
+    enabled: !!runId,
+    ...queryOptions,
+  } as UseQueryOptions<
+    Awaited<ReturnType<typeof getEventCandidatesReport>>,
+    TError,
+    TData
+  > & { queryKey: QueryKey };
+};
+
+export type GetEventCandidatesReportQueryResult = NonNullable<
+  Awaited<ReturnType<typeof getEventCandidatesReport>>
+>;
+export type GetEventCandidatesReportQueryError = ErrorType<
+  ApiErrorResponse | HTTPValidationError
+>;
+
+/**
+ * @summary Get Event Candidates Report
+ */
+
+export function useGetEventCandidatesReport<
+  TData = Awaited<ReturnType<typeof getEventCandidatesReport>>,
+  TError = ErrorType<ApiErrorResponse | HTTPValidationError>,
+>(
+  runId: string,
+  options?: {
+    query?: UseQueryOptions<
+      Awaited<ReturnType<typeof getEventCandidatesReport>>,
+      TError,
+      TData
+    >;
+    request?: SecondParameter<typeof customFetch>;
+  },
+): UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+  const queryOptions = getGetEventCandidatesReportQueryOptions(runId, options);
+
+  const query = useQuery(queryOptions) as UseQueryResult<TData, TError> & {
+    queryKey: QueryKey;
+  };
+
+  return { ...query, queryKey: queryOptions.queryKey };
+}
+
+/**
  * @summary Create Follow Cam Render
  */
 export const getCreateFollowCamRenderUrl = (runId: string) => {
@@ -2313,7 +2409,7 @@ export const createFollowCamRender = async (
 };
 
 export const getCreateFollowCamRenderMutationOptions = <
-  TError = ErrorType<HTTPValidationError>,
+  TError = ErrorType<ApiErrorResponse | HTTPValidationError>,
   TContext = unknown,
 >(options?: {
   mutation?: UseMutationOptions<
@@ -2355,13 +2451,15 @@ export type CreateFollowCamRenderMutationResult = NonNullable<
 >;
 export type CreateFollowCamRenderMutationBody =
   BodyType<FollowCamRenderRequest>;
-export type CreateFollowCamRenderMutationError = ErrorType<HTTPValidationError>;
+export type CreateFollowCamRenderMutationError = ErrorType<
+  ApiErrorResponse | HTTPValidationError
+>;
 
 /**
  * @summary Create Follow Cam Render
  */
 export const useCreateFollowCamRender = <
-  TError = ErrorType<HTTPValidationError>,
+  TError = ErrorType<ApiErrorResponse | HTTPValidationError>,
   TContext = unknown,
 >(options?: {
   mutation?: UseMutationOptions<
@@ -2467,6 +2565,96 @@ export function useGetFollowCamReport<
 
   return { ...query, queryKey: queryOptions.queryKey };
 }
+
+/**
+ * @summary Create Highlight Render
+ */
+export const getCreateHighlightRenderUrl = (runId: string) => {
+  return `/api/runs/${encodePathSegmented(runId)}/highlight-render`;
+};
+
+export const createHighlightRender = async (
+  runId: string,
+  highlightRenderRequest: HighlightRenderRequest,
+  options?: RequestInit,
+): Promise<RunRecord> => {
+  return customFetch<RunRecord>(getCreateHighlightRenderUrl(runId), {
+    ...options,
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...options?.headers },
+    body: JSON.stringify(highlightRenderRequest),
+  });
+};
+
+export const getCreateHighlightRenderMutationOptions = <
+  TError = ErrorType<ApiErrorResponse | HTTPValidationError>,
+  TContext = unknown,
+>(options?: {
+  mutation?: UseMutationOptions<
+    Awaited<ReturnType<typeof createHighlightRender>>,
+    TError,
+    { runId: string; data: BodyType<HighlightRenderRequest> },
+    TContext
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}): UseMutationOptions<
+  Awaited<ReturnType<typeof createHighlightRender>>,
+  TError,
+  { runId: string; data: BodyType<HighlightRenderRequest> },
+  TContext
+> => {
+  const mutationKey = ["createHighlightRender"];
+  const { mutation: mutationOptions, request: requestOptions } = options
+    ? options.mutation &&
+      "mutationKey" in options.mutation &&
+      options.mutation.mutationKey
+      ? options
+      : { ...options, mutation: { ...options.mutation, mutationKey } }
+    : { mutation: { mutationKey }, request: undefined };
+
+  const mutationFn: MutationFunction<
+    Awaited<ReturnType<typeof createHighlightRender>>,
+    { runId: string; data: BodyType<HighlightRenderRequest> }
+  > = (props) => {
+    const { runId, data } = props ?? {};
+
+    return createHighlightRender(runId, data, requestOptions);
+  };
+
+  return { mutationFn, ...mutationOptions };
+};
+
+export type CreateHighlightRenderMutationResult = NonNullable<
+  Awaited<ReturnType<typeof createHighlightRender>>
+>;
+export type CreateHighlightRenderMutationBody =
+  BodyType<HighlightRenderRequest>;
+export type CreateHighlightRenderMutationError = ErrorType<
+  ApiErrorResponse | HTTPValidationError
+>;
+
+/**
+ * @summary Create Highlight Render
+ */
+export const useCreateHighlightRender = <
+  TError = ErrorType<ApiErrorResponse | HTTPValidationError>,
+  TContext = unknown,
+>(options?: {
+  mutation?: UseMutationOptions<
+    Awaited<ReturnType<typeof createHighlightRender>>,
+    TError,
+    { runId: string; data: BodyType<HighlightRenderRequest> },
+    TContext
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}): UseMutationResult<
+  Awaited<ReturnType<typeof createHighlightRender>>,
+  TError,
+  { runId: string; data: BodyType<HighlightRenderRequest> },
+  TContext
+> => {
+  return useMutation(getCreateHighlightRenderMutationOptions(options));
+};
 
 /**
  * @summary Get Player Tracks Report

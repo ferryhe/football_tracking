@@ -664,6 +664,38 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/HTTPValidationError'
+  /runs/{run_id}/event-candidates:
+    get:
+      tags:
+      - artifacts
+      summary: Get Event Candidates Report
+      operationId: get_event_candidates_report
+      parameters:
+      - name: run_id
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Run Id
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EventCandidateReport'
+        '404':
+          description: Run or event candidate report not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiErrorResponse'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
   /runs/{run_id}/follow-cam-render:
     post:
       tags:
@@ -690,6 +722,18 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/RunRecord'
+        '404':
+          description: Run, config, input video, or track CSV not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiErrorResponse'
+        '409':
+          description: Render could not be queued
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiErrorResponse'
         '422':
           description: Validation Error
           content:
@@ -715,6 +759,51 @@ paths:
           content:
             application/json:
               schema: {}
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /runs/{run_id}/highlight-render:
+    post:
+      tags:
+      - runs
+      summary: Create Highlight Render
+      operationId: create_highlight_render
+      parameters:
+      - name: run_id
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Run Id
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/HighlightRenderRequest'
+      responses:
+        '202':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RunRecord'
+        '404':
+          description: Run, event candidate, config, input video, or track CSV not
+            found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiErrorResponse'
+        '409':
+          description: Highlight render could not be queued
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiErrorResponse'
         '422':
           description: Validation Error
           content:
@@ -1540,6 +1629,134 @@ components:
       - base_config_name
       - output_name
       title: DeriveConfigRequest
+    EventCandidate:
+      properties:
+        id:
+          type: string
+          title: Id
+        type:
+          type: string
+          title: Type
+        label:
+          type: string
+          const: candidate
+          title: Label
+          default: candidate
+        start_frame:
+          type: integer
+          title: Start Frame
+        end_frame:
+          type: integer
+          title: End Frame
+        frame_count:
+          type: integer
+          title: Frame Count
+        score:
+          type: number
+          title: Score
+        reason:
+          type: string
+          title: Reason
+        render_window:
+          $ref: '#/components/schemas/EventCandidateWindow'
+        evidence:
+          additionalProperties: true
+          type: object
+          title: Evidence
+      type: object
+      required:
+      - id
+      - type
+      - start_frame
+      - end_frame
+      - frame_count
+      - score
+      - reason
+      - render_window
+      title: EventCandidate
+    EventCandidateReport:
+      properties:
+        schema_version:
+          type: string
+          title: Schema Version
+        source:
+          $ref: '#/components/schemas/EventCandidateSource'
+        summary:
+          $ref: '#/components/schemas/EventCandidateSummary'
+        candidates:
+          items:
+            $ref: '#/components/schemas/EventCandidate'
+          type: array
+          title: Candidates
+      type: object
+      required:
+      - schema_version
+      - source
+      - summary
+      title: EventCandidateReport
+    EventCandidateSource:
+      properties:
+        name:
+          type: string
+          title: Name
+        path:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Path
+        row_count:
+          type: integer
+          title: Row Count
+      type: object
+      required:
+      - name
+      - row_count
+      title: EventCandidateSource
+    EventCandidateSummary:
+      properties:
+        frame_count:
+          type: integer
+          title: Frame Count
+        detected_frame_count:
+          type: integer
+          title: Detected Frame Count
+        candidate_count:
+          type: integer
+          title: Candidate Count
+        counts_by_type:
+          additionalProperties:
+            type: integer
+          type: object
+          title: Counts By Type
+        min_frame:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          title: Min Frame
+        max_frame:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          title: Max Frame
+      type: object
+      required:
+      - frame_count
+      - detected_frame_count
+      - candidate_count
+      title: EventCandidateSummary
+    EventCandidateWindow:
+      properties:
+        start_frame:
+          type: integer
+          title: Start Frame
+        end_frame:
+          type: integer
+          title: End Frame
+      type: object
+      required:
+      - start_frame
+      - end_frame
+      title: EventCandidateWindow
     FieldCalibrationPayload:
       properties:
         image_points:
@@ -1932,6 +2149,58 @@ components:
       - config_count
       - run_count
       title: HealthResponse
+    HighlightRenderRequest:
+      anyOf:
+      - required:
+        - candidate_id
+      - required:
+        - start_frame
+        - end_frame
+      properties:
+        candidate_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Candidate Id
+        start_frame:
+          anyOf:
+          - type: integer
+            minimum: 0.0
+          - type: 'null'
+          title: Start Frame
+        end_frame:
+          anyOf:
+          - type: integer
+            minimum: 0.0
+          - type: 'null'
+          title: End Frame
+        pre_roll_frames:
+          type: integer
+          minimum: 0.0
+          title: Pre Roll Frames
+          default: 15
+        post_roll_frames:
+          type: integer
+          minimum: 0.0
+          title: Post Roll Frames
+          default: 30
+        output_dir_name:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Output Dir Name
+        output_video_name:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Output Video Name
+        notes:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Notes
+      type: object
+      title: HighlightRenderRequest
     InputCatalogResponse:
       properties:
         root_dir:
