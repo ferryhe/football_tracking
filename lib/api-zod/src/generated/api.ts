@@ -940,6 +940,74 @@ export const GetFollowCamReportParams = zod.object({
 export const GetFollowCamReportResponse = zod.unknown();
 
 /**
+ * @summary Get Player Tracks Report
+ */
+export const GetPlayerTracksReportParams = zod.object({
+  run_id: zod.coerce.string(),
+});
+
+export const GetPlayerTracksReportResponse = zod.object({
+  schema_version: zod.string(),
+  generated_at: zod.string(),
+  source: zod.object({
+    path: zod.string(),
+    status: zod.enum(["missing", "empty", "loaded"]),
+    detection_count: zod.number(),
+    malformed_line_count: zod.number(),
+  }),
+  summary: zod.object({
+    frame_count: zod.number(),
+    detection_count: zod.number(),
+    track_count: zod.number(),
+    active_track_count: zod.number(),
+    mean_track_length: zod.number(),
+    longest_track_length: zod.number(),
+    teams: zod.record(zod.string(), zod.number()).optional(),
+  }),
+  tracks: zod
+    .array(
+      zod.object({
+        id: zod.string(),
+        start_frame: zod.number(),
+        end_frame: zod.number(),
+        length: zod.number(),
+        team: zod.string(),
+        mean_confidence: zod.number(),
+        first_foot_point: zod.object({
+          x: zod.number(),
+          y: zod.number(),
+        }),
+        last_foot_point: zod.object({
+          x: zod.number(),
+          y: zod.number(),
+        }),
+        max_step_px: zod.union([zod.number(), zod.null()]).optional(),
+        samples: zod
+          .array(
+            zod.object({
+              frame: zod.number(),
+              bbox: zod.tuple([
+                zod.number(),
+                zod.number(),
+                zod.number(),
+                zod.number(),
+              ]),
+              foot_point: zod.object({
+                x: zod.number(),
+                y: zod.number(),
+              }),
+              confidence: zod.number(),
+              label: zod.string(),
+              team: zod.string(),
+            }),
+          )
+          .optional(),
+      }),
+    )
+    .optional(),
+});
+
+/**
  * @summary Health check
  */
 export const HealthCheckResponse = zod.object({

@@ -721,6 +721,38 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/HTTPValidationError'
+  /runs/{run_id}/player-tracks:
+    get:
+      tags:
+      - artifacts
+      summary: Get Player Tracks Report
+      operationId: get_player_tracks_report
+      parameters:
+      - name: run_id
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Run Id
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PlayerTracksReport'
+        '404':
+          description: Run or player tracks report not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiErrorResponse'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
   /healthz:
     get:
       tags:
@@ -2047,6 +2079,182 @@ components:
       - length_m
       - width_m
       title: PitchDimensionsPayload
+    PlayerTrack:
+      properties:
+        id:
+          type: string
+          title: Id
+        start_frame:
+          type: integer
+          title: Start Frame
+        end_frame:
+          type: integer
+          title: End Frame
+        length:
+          type: integer
+          title: Length
+        team:
+          type: string
+          title: Team
+        mean_confidence:
+          type: number
+          title: Mean Confidence
+        first_foot_point:
+          $ref: '#/components/schemas/PlayerTrackPoint'
+        last_foot_point:
+          $ref: '#/components/schemas/PlayerTrackPoint'
+        max_step_px:
+          anyOf:
+          - type: number
+          - type: 'null'
+          title: Max Step Px
+        samples:
+          items:
+            $ref: '#/components/schemas/PlayerTrackSample'
+          type: array
+          title: Samples
+      type: object
+      required:
+      - id
+      - start_frame
+      - end_frame
+      - length
+      - team
+      - mean_confidence
+      - first_foot_point
+      - last_foot_point
+      title: PlayerTrack
+    PlayerTrackPoint:
+      properties:
+        x:
+          type: number
+          title: X
+        y:
+          type: number
+          title: Y
+      type: object
+      required:
+      - x
+      - y
+      title: PlayerTrackPoint
+    PlayerTrackSample:
+      properties:
+        frame:
+          type: integer
+          title: Frame
+        bbox:
+          prefixItems:
+          - type: number
+          - type: number
+          - type: number
+          - type: number
+          type: array
+          maxItems: 4
+          minItems: 4
+          title: Bbox
+        foot_point:
+          $ref: '#/components/schemas/PlayerTrackPoint'
+        confidence:
+          type: number
+          title: Confidence
+        label:
+          type: string
+          title: Label
+        team:
+          type: string
+          title: Team
+      type: object
+      required:
+      - frame
+      - bbox
+      - foot_point
+      - confidence
+      - label
+      - team
+      title: PlayerTrackSample
+    PlayerTracksReport:
+      properties:
+        schema_version:
+          type: string
+          title: Schema Version
+        generated_at:
+          type: string
+          title: Generated At
+        source:
+          $ref: '#/components/schemas/PlayerTracksSource'
+        summary:
+          $ref: '#/components/schemas/PlayerTracksSummary'
+        tracks:
+          items:
+            $ref: '#/components/schemas/PlayerTrack'
+          type: array
+          title: Tracks
+      type: object
+      required:
+      - schema_version
+      - generated_at
+      - source
+      - summary
+      title: PlayerTracksReport
+    PlayerTracksSource:
+      properties:
+        path:
+          type: string
+          title: Path
+        status:
+          type: string
+          enum:
+          - missing
+          - empty
+          - loaded
+          title: Status
+        detection_count:
+          type: integer
+          title: Detection Count
+        malformed_line_count:
+          type: integer
+          title: Malformed Line Count
+      type: object
+      required:
+      - path
+      - status
+      - detection_count
+      - malformed_line_count
+      title: PlayerTracksSource
+    PlayerTracksSummary:
+      properties:
+        frame_count:
+          type: integer
+          title: Frame Count
+        detection_count:
+          type: integer
+          title: Detection Count
+        track_count:
+          type: integer
+          title: Track Count
+        active_track_count:
+          type: integer
+          title: Active Track Count
+        mean_track_length:
+          type: number
+          title: Mean Track Length
+        longest_track_length:
+          type: integer
+          title: Longest Track Length
+        teams:
+          additionalProperties:
+            type: integer
+          type: object
+          title: Teams
+      type: object
+      required:
+      - frame_count
+      - detection_count
+      - track_count
+      - active_track_count
+      - mean_track_length
+      - longest_track_length
+      title: PlayerTracksSummary
     RunProgress:
       properties:
         stage:

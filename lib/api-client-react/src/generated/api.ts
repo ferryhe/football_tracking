@@ -48,6 +48,7 @@ import type {
   InputCatalogResponse,
   InputQualityRequest,
   InputQualityResponse,
+  PlayerTracksReport,
   RunRecord,
   UpdateConfigRequest,
 } from "./api.schemas";
@@ -2459,6 +2460,97 @@ export function useGetFollowCamReport<
   },
 ): UseQueryResult<TData, TError> & { queryKey: QueryKey } {
   const queryOptions = getGetFollowCamReportQueryOptions(runId, options);
+
+  const query = useQuery(queryOptions) as UseQueryResult<TData, TError> & {
+    queryKey: QueryKey;
+  };
+
+  return { ...query, queryKey: queryOptions.queryKey };
+}
+
+/**
+ * @summary Get Player Tracks Report
+ */
+export const getGetPlayerTracksReportUrl = (runId: string) => {
+  return `/api/runs/${encodePathSegmented(runId)}/player-tracks`;
+};
+
+export const getPlayerTracksReport = async (
+  runId: string,
+  options?: RequestInit,
+): Promise<PlayerTracksReport> => {
+  return customFetch<PlayerTracksReport>(getGetPlayerTracksReportUrl(runId), {
+    ...options,
+    method: "GET",
+  });
+};
+
+export const getGetPlayerTracksReportQueryKey = (runId: string) => {
+  return [`/api/runs/${encodePathSegmented(runId)}/player-tracks`] as const;
+};
+
+export const getGetPlayerTracksReportQueryOptions = <
+  TData = Awaited<ReturnType<typeof getPlayerTracksReport>>,
+  TError = ErrorType<ApiErrorResponse | HTTPValidationError>,
+>(
+  runId: string,
+  options?: {
+    query?: UseQueryOptions<
+      Awaited<ReturnType<typeof getPlayerTracksReport>>,
+      TError,
+      TData
+    >;
+    request?: SecondParameter<typeof customFetch>;
+  },
+) => {
+  const { query: queryOptions, request: requestOptions } = options ?? {};
+
+  const queryKey =
+    queryOptions?.queryKey ?? getGetPlayerTracksReportQueryKey(runId);
+
+  const queryFn: QueryFunction<
+    Awaited<ReturnType<typeof getPlayerTracksReport>>
+  > = ({ signal }) =>
+    getPlayerTracksReport(runId, { signal, ...requestOptions });
+
+  return {
+    queryKey,
+    queryFn,
+    enabled: !!runId,
+    ...queryOptions,
+  } as UseQueryOptions<
+    Awaited<ReturnType<typeof getPlayerTracksReport>>,
+    TError,
+    TData
+  > & { queryKey: QueryKey };
+};
+
+export type GetPlayerTracksReportQueryResult = NonNullable<
+  Awaited<ReturnType<typeof getPlayerTracksReport>>
+>;
+export type GetPlayerTracksReportQueryError = ErrorType<
+  ApiErrorResponse | HTTPValidationError
+>;
+
+/**
+ * @summary Get Player Tracks Report
+ */
+
+export function useGetPlayerTracksReport<
+  TData = Awaited<ReturnType<typeof getPlayerTracksReport>>,
+  TError = ErrorType<ApiErrorResponse | HTTPValidationError>,
+>(
+  runId: string,
+  options?: {
+    query?: UseQueryOptions<
+      Awaited<ReturnType<typeof getPlayerTracksReport>>,
+      TError,
+      TData
+    >;
+    request?: SecondParameter<typeof customFetch>;
+  },
+): UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+  const queryOptions = getGetPlayerTracksReportQueryOptions(runId, options);
 
   const query = useQuery(queryOptions) as UseQueryResult<TData, TError> & {
     queryKey: QueryKey;

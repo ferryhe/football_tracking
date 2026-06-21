@@ -293,6 +293,85 @@ class ApiServiceSmokeTests(unittest.TestCase):
                 },
             },
         )
+        self.write_json(
+            f"outputs/{folder_name}/player_tracks.json",
+            {
+                "schema_version": "1.0",
+                "generated_at": "2026-01-01T00:00:00+00:00",
+                "source": {
+                    "path": "player_detections.jsonl",
+                    "status": "loaded",
+                    "detection_count": 2,
+                    "malformed_line_count": 0,
+                },
+                "summary": {
+                    "frame_count": 2,
+                    "detection_count": 2,
+                    "track_count": 1,
+                    "active_track_count": 1,
+                    "mean_track_length": 2.0,
+                    "longest_track_length": 2,
+                    "teams": {"home": 1},
+                },
+                "tracks": [
+                    {
+                        "id": "P001",
+                        "start_frame": 0,
+                        "end_frame": 1,
+                        "length": 2,
+                        "team": "home",
+                        "mean_confidence": 0.85,
+                        "first_foot_point": {"x": 10.0, "y": 50.0},
+                        "last_foot_point": {"x": 12.0, "y": 50.0},
+                        "max_step_px": 2.0,
+                        "samples": [
+                            {
+                                "frame": 0,
+                                "bbox": [0.0, 0.0, 20.0, 50.0],
+                                "foot_point": {"x": 10.0, "y": 50.0},
+                                "confidence": 0.9,
+                                "label": "person",
+                                "team": "home",
+                            },
+                            {
+                                "frame": 1,
+                                "bbox": [2.0, 0.0, 22.0, 50.0],
+                                "foot_point": {"x": 12.0, "y": 50.0},
+                                "confidence": 0.8,
+                                "label": "person",
+                                "team": "home",
+                            },
+                        ],
+                    }
+                ],
+            },
+        )
+        self.write_text(
+            f"outputs/{folder_name}/player_detections.jsonl",
+            "\n".join(
+                [
+                    json.dumps(
+                        {
+                            "frame": 0,
+                            "bbox": [0.0, 0.0, 20.0, 50.0],
+                            "confidence": 0.9,
+                            "label": "person",
+                            "team": "home",
+                        }
+                    ),
+                    json.dumps(
+                        {
+                            "frame": 1,
+                            "bbox": [2.0, 0.0, 22.0, 50.0],
+                            "confidence": 0.8,
+                            "label": "person",
+                            "team": "home",
+                        }
+                    ),
+                ]
+            )
+            + "\n",
+        )
         return output_dir
 
     def test_list_input_videos_filters_supported_suffixes(self) -> None:
@@ -651,6 +730,7 @@ class ApiServiceSmokeTests(unittest.TestCase):
         self.assertEqual("cleaned", run["stats"]["follow_cam"]["track_source"])
         self.assertEqual(2, run["stats"]["ball_audit"]["tracklet_count"])
         self.assertEqual("medium", run["stats"]["ai_review_triggers"]["priority"])
+        self.assertEqual(1, run["stats"]["player_tracks"]["track_count"])
         self.assertIn("follow_cam.mp4", {artifact["name"] for artifact in run["artifacts"]})
         output_dir = self.repo_root / "outputs" / "kept_baseline"
         self.assertFalse((output_dir / "run_manifest.json").exists())
@@ -691,6 +771,8 @@ class ApiServiceSmokeTests(unittest.TestCase):
         self.assertIn("ai_review_triggers.json", artifact_names)
         self.assertIn("ai_review_triggers", run["stats"])
         self.assertTrue(run["stats"]["ai_review_triggers"]["needs_ai_review"])
+        self.assertIn("player_tracks.json", artifact_names)
+        self.assertEqual(1, run["stats"]["player_tracks"]["track_count"])
 
     def test_get_ball_audit_report_loads_json_artifact(self) -> None:
         self.create_output_bundle("kept_baseline")
@@ -711,27 +793,42 @@ class ApiServiceSmokeTests(unittest.TestCase):
         self.assertTrue(report["decision"]["needs_ai_review"])
         self.assertEqual("medium", report["decision"]["priority"])
 
+    def test_get_player_tracks_report_loads_json_artifact(self) -> None:
+        self.create_output_bundle("kept_baseline")
+        run = self.service.list_runs()[0]
+
+        report = self.service.get_player_tracks_report(run["run_id"])
+
+        self.assertEqual("1.0", report["schema_version"])
+        self.assertEqual(1, report["summary"]["track_count"])
+        self.assertEqual("P001", report["tracks"][0]["id"])
+
     def test_list_runs_ignores_malformed_audit_artifacts(self) -> None:
         output_dir = self.create_output_bundle("kept_baseline")
         (output_dir / "ball_audit.json").write_bytes(b"\xff\xfe\xff")
         (output_dir / "ai_review_triggers.json").write_text("{", encoding="utf-8")
+        (output_dir / "player_tracks.json").write_bytes(b"\xff\xfe\xff")
 
         runs = self.service.list_runs()
 
         self.assertEqual(1, len(runs))
         self.assertNotIn("ball_audit", runs[0]["stats"])
         self.assertNotIn("ai_review_triggers", runs[0]["stats"])
+        self.assertNotIn("player_tracks", runs[0]["stats"])
 
     def test_report_loaders_treat_malformed_json_as_missing(self) -> None:
         output_dir = self.create_output_bundle("kept_baseline")
         run = self.service.list_runs()[0]
         (output_dir / "ball_audit.json").write_text("{", encoding="utf-8")
         (output_dir / "ai_review_triggers.json").write_bytes(b"\xff\xfe\xff")
+        (output_dir / "player_tracks.json").write_text("{", encoding="utf-8")
 
         with self.assertRaises(FileNotFoundError):
             self.service.get_ball_audit_report(run["run_id"])
         with self.assertRaises(FileNotFoundError):
             self.service.get_ai_review_triggers_report(run["run_id"])
+        with self.assertRaises(FileNotFoundError):
+            self.service.get_player_tracks_report(run["run_id"])
 
     def test_list_runs_falls_back_when_metrics_report_is_not_an_object(self) -> None:
         output_dir = self.create_output_bundle("kept_baseline")
@@ -1092,6 +1189,7 @@ class ApiServiceSmokeTests(unittest.TestCase):
             "/api/v1/runs/{run_id}/follow-cam-report",
             "/api/v1/runs/{run_id}/ball-audit",
             "/api/v1/runs/{run_id}/ai-review-triggers",
+            "/api/v1/runs/{run_id}/player-tracks",
             "/api/v1/runs/{run_id}/camera-path",
             "/api/v1/ai/explain",
             "/api/v1/ai/recommend",
@@ -1127,6 +1225,19 @@ class ApiServiceSmokeTests(unittest.TestCase):
 
         self.assertEqual(
             "#/components/schemas/AIReviewTriggerReport",
+            operation["responses"]["200"]["content"]["application/json"]["schema"]["$ref"],
+        )
+        self.assertEqual(
+            "#/components/schemas/ApiErrorResponse",
+            operation["responses"]["404"]["content"]["application/json"]["schema"]["$ref"],
+        )
+
+    def test_create_app_documents_player_tracks_response_schema(self) -> None:
+        app = create_app(self.repo_root)
+        operation = app.openapi()["paths"]["/api/v1/runs/{run_id}/player-tracks"]["get"]
+
+        self.assertEqual(
+            "#/components/schemas/PlayerTracksReport",
             operation["responses"]["200"]["content"]["application/json"]["schema"]["$ref"],
         )
         self.assertEqual(
