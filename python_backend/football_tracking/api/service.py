@@ -3068,7 +3068,10 @@ class ApiService:
         artifact_paths = [item for item in output_dir.iterdir() if item.is_file()]
         for chunk_root in self._temporal_chunk_artifact_roots(output_dir):
             artifact_paths.extend(
-                item for item in chunk_root.rglob("*") if self._is_temporal_chunk_artifact(chunk_root, item)
+                item
+                for chunk_dir in sorted((item for item in chunk_root.iterdir() if item.is_dir()), key=lambda item: item.name)
+                for item in chunk_dir.iterdir()
+                if self._is_temporal_chunk_artifact(chunk_root, item)
             )
         return sorted(artifact_paths, key=lambda item: item.relative_to(output_dir).as_posix())
 

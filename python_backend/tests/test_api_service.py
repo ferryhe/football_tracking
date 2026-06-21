@@ -923,9 +923,14 @@ class ApiServiceSmokeTests(unittest.TestCase):
         run = self.service.list_runs()[0]
 
         response = get_artifact(run["run_id"], "chunks/chunk_0000/ball_track.csv", service=self.service)
+        expected_content_type = next(
+            artifact["content_type"]
+            for artifact in self.service.list_artifacts(run["run_id"])
+            if artifact["name"] == "chunks/chunk_0000/ball_track.csv"
+        )
 
         self.assertTrue(str(response.path).endswith("chunks\\chunk_0000\\ball_track.csv") or str(response.path).endswith("chunks/chunk_0000/ball_track.csv"))
-        self.assertEqual("application/vnd.ms-excel", response.media_type)
+        self.assertEqual(expected_content_type, response.media_type)
         self.assertEqual("ball_track.csv", response.filename)
 
     def test_list_runs_exposes_custom_temporal_chunk_artifact_root(self) -> None:

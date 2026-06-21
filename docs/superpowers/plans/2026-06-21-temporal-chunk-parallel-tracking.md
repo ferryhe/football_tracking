@@ -586,8 +586,9 @@ Expected: all tests pass.
 Actual:
 
 ```text
-python_backend.tests.test_metrics + python_backend.tests.test_api_service: Ran 66 tests, OK
+python_backend.tests.test_metrics + python_backend.tests.test_api_service + python_backend.tests.test_export_openapi: Ran 69 tests, OK
 unittest discover python_backend\tests: Ran 184 tests, OK
+export_openapi.py --check: OK
 ruff check PR5 changed Python files: OK
 ```
 
