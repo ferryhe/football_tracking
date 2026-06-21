@@ -4,12 +4,15 @@ from fastapi import APIRouter, Depends, HTTPException
 
 from football_tracking.api.dependencies import get_service
 from football_tracking.api.schemas import (
+    ApiErrorResponse,
     DeleteResourceResponse,
     FieldPreviewRequest,
     FieldPreviewResponse,
     FieldSuggestionRequest,
     FieldSuggestionResponse,
     InputCatalogResponse,
+    InputQualityRequest,
+    InputQualityResponse,
 )
 from football_tracking.api.service import ApiService
 
@@ -45,6 +48,28 @@ def suggest_field_setup(request: FieldSuggestionRequest, service: ApiService = D
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except RuntimeError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.post(
+    "/inputs/quality-check",
+    response_model=InputQualityResponse,
+    responses={
+        404: {"model": ApiErrorResponse, "description": "Input video or config not found"},
+        400: {"model": ApiErrorResponse, "description": "Input video could not be read"},
+    },
+)
+def check_input_quality(request: InputQualityRequest, service: ApiService = Depends(get_service)) -> InputQualityResponse:
+    try:
+        return InputQualityResponse(
+            **service.check_input_quality(
+                request.input_video,
+                config_name=request.config_name,
+            )
+        )
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.delete("/inputs", response_model=DeleteResourceResponse)

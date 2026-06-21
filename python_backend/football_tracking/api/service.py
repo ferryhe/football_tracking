@@ -27,6 +27,7 @@ from football_tracking.config import AppConfig, load_config
 from football_tracking.follow_cam import FollowCamGenerator
 from football_tracking.metrics import compute_track_metrics, stats_from_metrics_report, write_run_artifacts
 from football_tracking.pipeline import BallTrackingPipeline
+from football_tracking.quality import assess_video_quality
 
 
 def _utc_now_iso() -> str:
@@ -504,6 +505,78 @@ class ApiService:
                 expanded_roi=best_sample["expanded_roi"],
             ),
         }
+
+    def check_input_quality(self, input_video: str, config_name: str | None = None) -> dict[str, Any]:
+        video_path = self._resolve_input_video_path(input_video)
+        samples = self._sample_video_frames(video_path)
+        if not samples:
+            raise RuntimeError(f"Unable to read quality-check frames from input video: {video_path}")
+
+        middle_sample = samples[len(samples) // 2]
+        config_shape: dict[str, Any] | None = None
+        if config_name:
+            config_shape = self._load_field_setup_from_config(
+                config_name=config_name,
+                frame_width=middle_sample["frame_width"],
+                frame_height=middle_sample["frame_height"],
+            )
+
+        best_field_polygon: list[tuple[int, int]] | None = None
+        best_field_confidence = "fallback"
+        best_field_source = "safe-trapezoid-fallback"
+        best_coverage = -1.0
+        field_coverages: list[float] = []
+
+        if config_shape is not None:
+            best_field_polygon = config_shape["field_polygon"]
+            best_field_confidence = "config"
+            best_field_source = f"config:{config_name}"
+            configured_coverage = self._field_polygon_coverage(
+                config_shape["field_polygon"],
+                frame_width=middle_sample["frame_width"],
+                frame_height=middle_sample["frame_height"],
+            )
+
+        for sample in samples:
+            content_bounds = self._detect_content_bounds(sample["frame"])
+            field_polygon, coverage, detected = self._detect_field_polygon(sample["frame"], content_bounds)
+            if config_shape is not None:
+                field_coverages.append(round(configured_coverage, 4))
+            else:
+                field_coverages.append(round(coverage if detected else 0.0, 4))
+            if config_shape is not None or coverage <= best_coverage:
+                continue
+            best_field_polygon = field_polygon
+            best_field_confidence = "detected" if detected else "fallback"
+            best_field_source = "field-green-heuristic" if detected else "safe-trapezoid-fallback"
+            best_coverage = coverage
+
+        calibration = build_pitch_calibration_from_field_polygon(
+            best_field_polygon,
+            confidence=best_field_confidence,
+            source=best_field_source,
+        )
+        calibration_confidence = calibration["confidence"] if calibration else None
+        return assess_video_quality(
+            input_video=str(video_path),
+            samples=samples,
+            field_coverages=field_coverages,
+            calibration_confidence=calibration_confidence,
+        )
+
+    def _field_polygon_coverage(
+        self,
+        field_polygon: list[tuple[int, int]],
+        *,
+        frame_width: int,
+        frame_height: int,
+    ) -> float:
+        if not field_polygon:
+            return 0.0
+        frame_area = max(1.0, float(frame_width * frame_height))
+        polygon = np.asarray(field_polygon, dtype=np.float32)
+        area = abs(float(cv2.contourArea(polygon)))
+        return max(0.0, min(1.0, area / frame_area))
 
     def _build_field_preview_response(self, video_path: Path, sample: dict[str, Any]) -> dict[str, Any]:
         return {
