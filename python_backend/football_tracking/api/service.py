@@ -24,6 +24,7 @@ import yaml
 from football_tracking.api.ai_provider import OpenAIResponsesClient, load_provider_settings
 from football_tracking.config import AppConfig, load_config
 from football_tracking.follow_cam import FollowCamGenerator
+from football_tracking.metrics import compute_track_metrics, stats_from_metrics_report, write_run_artifacts
 from football_tracking.pipeline import BallTrackingPipeline
 
 
@@ -1386,13 +1387,19 @@ class ApiService:
                     cancel_event.set()
                     run["progress"] = self._cancelling_progress(run.get("progress"), run.get("started_at"))
                 else:
+                    completed_at = _utc_now_iso()
                     run.update(
                         {
                             "status": "cancelled",
-                            "completed_at": _utc_now_iso(),
+                            "completed_at": completed_at,
                             "progress": self._cancelled_progress(run.get("progress"), run.get("started_at")),
                         }
                     )
+                    output_dir = Path(run["output_dir"]).resolve()
+                    artifact_error = self._write_run_artifacts(output_dir, run)
+                    run["artifacts"] = self._collect_artifacts(output_dir)
+                    run["stats"] = self._collect_stats(output_dir)
+                    run["error"] = self._append_artifact_error(run.get("error"), artifact_error)
                 self._write_registry(registry)
                 return run
         raise KeyError(run_id)
@@ -1446,12 +1453,20 @@ class ApiService:
             self._replace_run(run_id, updated)
         except CancelledError:
             existing = self.get_run(run_id)
+            completed_at = _utc_now_iso()
+            partial_run = {
+                **existing,
+                "status": "cancelled",
+                "completed_at": completed_at,
+                "error": None,
+            }
+            artifact_error = self._write_run_artifacts(config.output_dir, partial_run)
             self._update_run(
                 run_id,
                 {
                     "status": "cancelled",
-                    "completed_at": _utc_now_iso(),
-                    "error": None,
+                    "completed_at": completed_at,
+                    "error": self._append_artifact_error(None, artifact_error),
                     "artifacts": self._collect_artifacts(config.output_dir),
                     "stats": self._collect_stats(config.output_dir),
                     "progress": self._cancelled_progress(existing.get("progress"), existing.get("started_at")),
@@ -1459,12 +1474,20 @@ class ApiService:
             )
         except Exception as exc:
             existing = self.get_run(run_id)
+            completed_at = _utc_now_iso()
+            partial_run = {
+                **existing,
+                "status": "failed",
+                "completed_at": completed_at,
+                "error": str(exc),
+            }
+            artifact_error = self._write_run_artifacts(config.output_dir, partial_run)
             self._update_run(
                 run_id,
                 {
                     "status": "failed",
-                    "completed_at": _utc_now_iso(),
-                    "error": str(exc),
+                    "completed_at": completed_at,
+                    "error": self._append_artifact_error(str(exc), artifact_error),
                     "artifacts": self._collect_artifacts(config.output_dir),
                     "stats": self._collect_stats(config.output_dir),
                     "progress": self._failed_progress(existing.get("progress"), existing.get("started_at")),
@@ -1523,12 +1546,20 @@ class ApiService:
             self._replace_run(run_id, updated)
         except CancelledError:
             existing = self.get_run(run_id)
+            completed_at = _utc_now_iso()
+            partial_run = {
+                **existing,
+                "status": "cancelled",
+                "completed_at": completed_at,
+                "error": None,
+            }
+            artifact_error = self._write_run_artifacts(config.output_dir, partial_run)
             self._update_run(
                 run_id,
                 {
                     "status": "cancelled",
-                    "completed_at": _utc_now_iso(),
-                    "error": None,
+                    "completed_at": completed_at,
+                    "error": self._append_artifact_error(None, artifact_error),
                     "artifacts": self._collect_artifacts(config.output_dir),
                     "stats": self._collect_stats(config.output_dir),
                     "progress": self._cancelled_progress(existing.get("progress"), existing.get("started_at")),
@@ -1536,12 +1567,20 @@ class ApiService:
             )
         except Exception as exc:
             existing = self.get_run(run_id)
+            completed_at = _utc_now_iso()
+            partial_run = {
+                **existing,
+                "status": "failed",
+                "completed_at": completed_at,
+                "error": str(exc),
+            }
+            artifact_error = self._write_run_artifacts(config.output_dir, partial_run)
             self._update_run(
                 run_id,
                 {
                     "status": "failed",
-                    "completed_at": _utc_now_iso(),
-                    "error": str(exc),
+                    "completed_at": completed_at,
+                    "error": self._append_artifact_error(str(exc), artifact_error),
                     "artifacts": self._collect_artifacts(config.output_dir),
                     "stats": self._collect_stats(config.output_dir),
                     "progress": self._failed_progress(existing.get("progress"), existing.get("started_at")),
@@ -1777,6 +1816,7 @@ class ApiService:
                     output_dir=output_dir,
                     modules_enabled=self._collect_module_flags(output_dir, config_meta),
                     notes=None,
+                    write_artifacts=False,
                 )
             )
 
@@ -1822,13 +1862,14 @@ class ApiService:
         started_at: str | None = None,
         completed_at: str | None = None,
         progress: dict[str, Any] | None = None,
+        write_artifacts: bool = True,
     ) -> dict[str, Any]:
         normalized_created_at = _normalize_iso_timestamp(created_at) or created_at
         normalized_started_at = _normalize_iso_timestamp(started_at) if started_at else None
         normalized_completed_at = _normalize_iso_timestamp(completed_at) if completed_at else None
         if status in {"completed", "failed", "cancelled"} and normalized_completed_at is None:
             normalized_completed_at = normalized_started_at or normalized_created_at
-        return {
+        snapshot = {
             "run_id": run_id,
             "source": source,
             "status": status,
@@ -1841,12 +1882,21 @@ class ApiService:
             "parent_run_id": parent_run_id,
             "output_dir": str(output_dir.resolve()),
             "modules_enabled": modules_enabled,
-            "artifacts": self._collect_artifacts(output_dir),
-            "stats": self._collect_stats(output_dir),
+            "artifacts": [] if write_artifacts else self._collect_artifacts(output_dir),
+            "stats": {} if write_artifacts else self._collect_stats(output_dir),
             "progress": progress,
             "notes": notes,
             "error": None,
         }
+        if write_artifacts:
+            artifact_error = self._write_run_artifacts(output_dir, snapshot)
+            snapshot["artifacts"] = self._collect_artifacts(output_dir)
+            snapshot["stats"] = self._collect_stats(output_dir)
+            if artifact_error is not None:
+                snapshot["status"] = "failed"
+                snapshot["error"] = artifact_error
+                snapshot["progress"] = self._failed_progress(progress, snapshot.get("started_at"))
+        return snapshot
 
     def _build_config_output_index(self) -> dict[Path, dict[str, Any]]:
         index: dict[Path, dict[str, Any]] = {}
@@ -2580,11 +2630,12 @@ class ApiService:
         return artifacts
 
     def _collect_stats(self, output_dir: Path) -> dict[str, Any]:
-        raw_summary = self._summarize_track_csv(output_dir / "ball_track.csv")
-        cleaned_summary = self._summarize_track_csv(output_dir / "ball_track.cleaned.csv")
+        metrics_report = self._read_optional_json(output_dir / "metrics_report.json")
+        stats = stats_from_metrics_report(metrics_report) if metrics_report is not None else {}
+        raw_summary = stats.get("raw") or self._summarize_track_csv(output_dir / "ball_track.csv")
+        cleaned_summary = stats.get("cleaned") or self._summarize_track_csv(output_dir / "ball_track.cleaned.csv")
         cleanup_report = self._read_optional_json(output_dir / "cleanup_report.json")
         follow_cam_report = self._read_optional_json(output_dir / "follow_cam_report.json")
-        stats: dict[str, Any] = {}
         if raw_summary is not None:
             stats["raw"] = raw_summary
         if cleaned_summary is not None:
@@ -2596,26 +2647,21 @@ class ApiService:
         return stats
 
     def _summarize_track_csv(self, csv_path: Path) -> dict[str, Any] | None:
-        if not csv_path.exists():
-            return None
-        frame_count = 0
-        status_counts = {"Detected": 0, "Predicted": 0, "Lost": 0}
-        with csv_path.open("r", encoding="utf-8-sig", newline="") as handle:
-            reader = csv.DictReader(handle)
-            for row in reader:
-                frame_count += 1
-                status = row.get("Status", "")
-                if status in status_counts:
-                    status_counts[status] += 1
-        return {
-            "frame_count": frame_count,
-            "detected": status_counts["Detected"],
-            "predicted": status_counts["Predicted"],
-            "lost": status_counts["Lost"],
-            "detected_ratio": 0.0 if frame_count == 0 else round(status_counts["Detected"] / frame_count, 4),
-            "predicted_ratio": 0.0 if frame_count == 0 else round(status_counts["Predicted"] / frame_count, 4),
-            "lost_ratio": 0.0 if frame_count == 0 else round(status_counts["Lost"] / frame_count, 4),
-        }
+        return compute_track_metrics(csv_path)
+
+    def _write_run_artifacts(self, output_dir: Path, run: dict[str, Any]) -> str | None:
+        try:
+            write_run_artifacts(output_dir=output_dir, run=run)
+        except Exception as exc:
+            return f"Failed to write run manifest/metrics: {exc}"
+        return None
+
+    def _append_artifact_error(self, existing_error: str | None, artifact_error: str | None) -> str | None:
+        if artifact_error is None:
+            return existing_error
+        if existing_error:
+            return f"{existing_error} | {artifact_error}"
+        return artifact_error
 
     def _load_optional_json_artifact(self, run_id: str, name: str) -> dict[str, Any]:
         artifact_path = self.get_artifact_path(run_id, name)
@@ -2626,7 +2672,11 @@ class ApiService:
         if not path.exists():
             return None
         with path.open("r", encoding="utf-8") as handle:
-            return json.load(handle)
+            try:
+                loaded = json.load(handle)
+            except json.JSONDecodeError:
+                return None
+        return loaded if isinstance(loaded, dict) else None
 
     def _slugify(self, text: str) -> str:
         normalized = unicodedata.normalize("NFKD", text.strip()).encode("ascii", "ignore").decode("ascii")

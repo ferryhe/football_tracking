@@ -1,0 +1,11 @@
+Frame,X,Y,Confidence,Status
+0,0,0,0.9000,Detected
+1,3,4,0.9100,Detected
+2,6,8,0.5000,Predicted
+3,,,0.0000,Lost
+4,,,0.0000,Lost
+5,9,12,0.8800,Detected
+6,,,0.0000,Lost
+7,10,12,0.8700,Detected
+8,13,16,0.5000,Predicted
+9,16,20,0.8600,Detected

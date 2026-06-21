@@ -15,6 +15,7 @@ import yaml
 from football_tracking.api.app import create_app
 from football_tracking.api.service import ApiService
 from football_tracking.config import load_config
+from football_tracking.metrics import write_run_artifacts
 
 
 def build_sample_config(output_dir: str = "./outputs/kept_baseline") -> dict[str, object]:
@@ -392,6 +393,50 @@ class ApiServiceSmokeTests(unittest.TestCase):
         self.assertEqual(2, run["stats"]["cleaned"]["detected"])
         self.assertEqual("cleaned", run["stats"]["follow_cam"]["track_source"])
         self.assertIn("follow_cam.mp4", {artifact["name"] for artifact in run["artifacts"]})
+        output_dir = self.repo_root / "outputs" / "kept_baseline"
+        self.assertFalse((output_dir / "run_manifest.json").exists())
+        self.assertFalse((output_dir / "metrics_report.json").exists())
+
+    def test_list_runs_collects_metrics_artifacts_and_stats(self) -> None:
+        output_dir = self.create_output_bundle("kept_baseline")
+        write_run_artifacts(
+            output_dir=output_dir,
+            run={
+                "run_id": "scan_kept_baseline",
+                "source": "scan",
+                "status": "completed",
+                "created_at": "2026-01-01T00:00:00+00:00",
+                "started_at": "2026-01-01T00:00:00+00:00",
+                "completed_at": "2026-01-01T00:00:01+00:00",
+                "config_name": "default.yaml",
+                "config_path": str((self.repo_root / "config" / "default.yaml").resolve()),
+                "input_video": str((self.repo_root / "data" / "input.mp4").resolve()),
+                "output_dir": str(output_dir),
+                "modules_enabled": {"postprocess": True, "follow_cam": True},
+                "notes": None,
+            },
+        )
+
+        run = self.service.list_runs()[0]
+
+        artifact_names = {artifact["name"] for artifact in run["artifacts"]}
+        self.assertIn("run_manifest.json", artifact_names)
+        self.assertIn("metrics_report.json", artifact_names)
+        self.assertIn("metrics_report", run["stats"])
+        self.assertEqual(3, run["stats"]["raw"]["frame_count"])
+        self.assertEqual({"Detected": 1, "Predicted": 1, "Lost": 1}, run["stats"]["raw"]["status_counts"])
+        self.assertEqual(1, run["stats"]["cleanup"]["scrubbed_frame_count"])
+        self.assertEqual("cleaned", run["stats"]["follow_cam"]["track_source"])
+
+    def test_list_runs_falls_back_when_metrics_report_is_not_an_object(self) -> None:
+        output_dir = self.create_output_bundle("kept_baseline")
+        (output_dir / "metrics_report.json").write_text("[]", encoding="utf-8")
+
+        run = self.service.list_runs()[0]
+
+        self.assertNotIn("metrics_report", run["stats"])
+        self.assertEqual(3, run["stats"]["raw"]["frame_count"])
+        self.assertEqual(2, run["stats"]["cleaned"]["detected"])
 
     def test_list_asset_groups_groups_by_input_and_keeps_unbound_legacy(self) -> None:
         self.create_output_bundle("kept_baseline")
@@ -497,6 +542,8 @@ class ApiServiceSmokeTests(unittest.TestCase):
         self.assertEqual([1920, 1080], completed_run["stats"]["follow_cam"]["target_resolution"])
         self.assertIn("deliverable_16x9.mp4", {artifact["name"] for artifact in completed_run["artifacts"]})
         self.assertTrue((Path(completed_run["output_dir"]) / "ball_track.cleaned.csv").exists())
+        self.assertTrue((Path(completed_run["output_dir"]) / "run_manifest.json").exists())
+        self.assertTrue((Path(completed_run["output_dir"]) / "metrics_report.json").exists())
         self.assertIn("/outputs/runs/input/", Path(completed_run["output_dir"]).resolve().as_posix())
 
     def test_delete_input_video_blocks_active_run_reference(self) -> None:
@@ -555,6 +602,106 @@ class ApiServiceSmokeTests(unittest.TestCase):
         self.assertEqual("running", updated["status"])
         self.assertEqual("cancelling", updated["progress"]["stage"])
         self.assertEqual(42.0, updated["progress"]["percent"])
+
+    def test_cancel_run_without_active_thread_writes_artifacts(self) -> None:
+        active_input = (self.repo_root / "data" / "input.mp4").resolve()
+        active_config = (self.repo_root / "config" / "default.yaml").resolve()
+        output_dir = self.repo_root / "outputs" / "queued_demo"
+        output_dir.mkdir(parents=True, exist_ok=True)
+        self.write_csv(
+            "outputs/queued_demo/ball_track.csv",
+            [
+                {"Frame": 0, "X": 10, "Y": 20, "Confidence": "0.9000", "Status": "Detected"},
+                {"Frame": 1, "X": "", "Y": "", "Confidence": "0.0000", "Status": "Lost"},
+            ],
+        )
+        self.service._write_registry(
+            {
+                "runs": [
+                    {
+                        "run_id": "queued_demo",
+                        "source": "api",
+                        "status": "queued",
+                        "created_at": "2026-01-01T00:00:00+00:00",
+                        "started_at": None,
+                        "completed_at": None,
+                        "config_name": "default.yaml",
+                        "config_path": str(active_config),
+                        "input_video": str(active_input),
+                        "parent_run_id": None,
+                        "output_dir": str(output_dir.resolve()),
+                        "modules_enabled": {"postprocess": True, "follow_cam": False},
+                        "artifacts": [],
+                        "stats": {},
+                        "progress": {"stage": "queued", "percent": 0.0},
+                        "notes": None,
+                        "error": None,
+                    }
+                ]
+            }
+        )
+
+        updated = self.service.cancel_run("queued_demo")
+
+        self.assertEqual("cancelled", updated["status"])
+        self.assertTrue((output_dir / "run_manifest.json").exists())
+        self.assertTrue((output_dir / "metrics_report.json").exists())
+        self.assertIn("metrics_report.json", {artifact["name"] for artifact in updated["artifacts"]})
+        self.assertEqual(2, updated["stats"]["raw"]["frame_count"])
+
+    def test_failed_pipeline_run_writes_artifacts(self) -> None:
+        active_input = (self.repo_root / "data" / "input.mp4").resolve()
+        active_config = (self.repo_root / "config" / "default.yaml").resolve()
+        output_dir = self.repo_root / "outputs" / "failed_demo"
+        self.service._write_registry(
+            {
+                "runs": [
+                    {
+                        "run_id": "failed_demo",
+                        "source": "api",
+                        "status": "queued",
+                        "created_at": "2026-01-01T00:00:00+00:00",
+                        "started_at": None,
+                        "completed_at": None,
+                        "config_name": "default.yaml",
+                        "config_path": str(active_config),
+                        "input_video": str(active_input),
+                        "parent_run_id": None,
+                        "output_dir": str(output_dir.resolve()),
+                        "modules_enabled": {"postprocess": True, "follow_cam": False},
+                        "artifacts": [],
+                        "stats": {},
+                        "progress": {"stage": "queued", "percent": 0.0},
+                        "notes": None,
+                        "error": None,
+                    }
+                ]
+            }
+        )
+
+        class FailingPipeline:
+            def __init__(self, app_config) -> None:
+                self.app_config = app_config
+
+            def run(self) -> None:
+                self.app_config.output_dir.mkdir(parents=True, exist_ok=True)
+                (self.app_config.output_dir / "ball_track.csv").write_text(
+                    "Frame,X,Y,Confidence,Status\n0,10,20,0.9000,Detected\n",
+                    encoding="utf-8",
+                )
+                raise RuntimeError("pipeline exploded")
+
+        config = load_config(active_config)
+        config.output_dir = output_dir
+        with mock.patch("football_tracking.api.service.BallTrackingPipeline", FailingPipeline):
+            self.service._execute_run("failed_demo", config, threading.Event())
+
+        failed_run = self.service.get_run("failed_demo")
+        self.assertEqual("failed", failed_run["status"])
+        self.assertIn("pipeline exploded", failed_run["error"])
+        self.assertTrue((output_dir / "run_manifest.json").exists())
+        self.assertTrue((output_dir / "metrics_report.json").exists())
+        self.assertEqual(1, failed_run["stats"]["raw"]["frame_count"])
 
     def test_delete_config_and_input_video_remove_files(self) -> None:
         deleted_video = self.service.delete_input_video("clip.mov")
