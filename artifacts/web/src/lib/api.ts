@@ -10,7 +10,9 @@ import type {
   FieldSuggestionResponse,
   FollowCamRenderRequest,
   HealthResponse,
+  HighlightRenderRequest,
   InputCatalogResponse,
+  EventCandidateReport,
   RunRecord,
   UpdateConfigRequest,
 } from "./types";
@@ -49,6 +51,13 @@ export const api = {
     request<RunRecord>("/runs", { method: "POST", body: JSON.stringify(body) }),
   createFollowCamRender: (runId: string, body: FollowCamRenderRequest) =>
     request<RunRecord>(`/runs/${runId}/follow-cam-render`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  getEventCandidates: (runId: string) =>
+    request<EventCandidateReport>(`/runs/${encodeURIComponent(runId)}/event-candidates`),
+  createHighlightRender: (runId: string, body: HighlightRenderRequest) =>
+    request<RunRecord>(`/runs/${encodeURIComponent(runId)}/highlight-render`, {
       method: "POST",
       body: JSON.stringify(body),
     }),

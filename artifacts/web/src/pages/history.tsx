@@ -20,13 +20,13 @@ import {
 import { Input } from "@/components/ui/input";
 import { Progress } from "@/components/ui/progress";
 import { StatusBadge } from "@/components/StatusBadge";
-import { Loader2, AlertCircle, Trash2, Film, Crosshair, ChevronDown, ChevronRight, Search, Square } from "lucide-react";
+import { Loader2, AlertCircle, Trash2, Film, Crosshair, Clapperboard, ChevronDown, ChevronRight, Search, Square } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useToast } from "@/hooks/use-toast";
 import type { RunRecord } from "@/lib/types";
 import { useLanguage } from "@/contexts/LanguageContext";
 
-type FilterCategory = "all" | "baseline" | "deliverable" | "failed" | "cancelled";
+type FilterCategory = "all" | "baseline" | "deliverable" | "highlight" | "failed" | "cancelled";
 
 function RunProgressView({ run }: { run: RunRecord }) {
   const { t } = useLanguage();
@@ -83,7 +83,13 @@ function RunDetailRow({
           {open ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
         </span>
         <span className="shrink-0 text-muted-foreground">
-          {cat === "deliverable" ? <Film className="h-4 w-4" /> : <Crosshair className="h-4 w-4" />}
+          {cat === "highlight" ? (
+            <Clapperboard className="h-4 w-4" />
+          ) : cat === "deliverable" ? (
+            <Film className="h-4 w-4" />
+          ) : (
+            <Crosshair className="h-4 w-4" />
+          )}
         </span>
         <div className="flex-1 min-w-0">
           <p className="text-sm font-medium font-mono truncate">{run.run_id}</p>
@@ -240,6 +246,7 @@ export default function HistoryPage() {
     { value: "all", label: t.history.all },
     { value: "baseline", label: t.history.baseline },
     { value: "deliverable", label: t.history.deliverable },
+    { value: "highlight", label: t.history.highlight },
     { value: "failed", label: t.history.failed },
     { value: "cancelled", label: t.history.cancelled },
   ];
@@ -258,6 +265,7 @@ export default function HistoryPage() {
     all: runs?.length ?? 0,
     baseline: (runs ?? []).filter((r) => historyCategory(r) === "baseline").length,
     deliverable: (runs ?? []).filter((r) => isDeliverable(r)).length,
+    highlight: (runs ?? []).filter((r) => historyCategory(r) === "highlight").length,
     failed: (runs ?? []).filter((r) => r.status === "failed").length,
     cancelled: (runs ?? []).filter((r) => r.status === "cancelled").length,
   };
@@ -270,7 +278,7 @@ export default function HistoryPage() {
       </div>
 
       {/* Stats row */}
-      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
         {filters.map((f) => (
           <button
             key={f.value}

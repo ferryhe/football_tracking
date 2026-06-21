@@ -173,3 +173,50 @@ export interface FollowCamRenderRequest {
   target_height?: number;
   notes?: string | null;
 }
+
+export interface EventCandidateWindow {
+  start_frame: number;
+  end_frame: number;
+}
+
+export interface EventCandidate {
+  id: string;
+  type: string;
+  label?: "candidate";
+  start_frame: number;
+  end_frame: number;
+  frame_count: number;
+  score: number;
+  reason: string;
+  render_window: EventCandidateWindow;
+  evidence?: Record<string, unknown>;
+}
+
+export interface EventCandidateReport {
+  schema_version: string;
+  source: {
+    name: string;
+    path: string | null;
+    row_count: number;
+  };
+  summary: {
+    frame_count: number;
+    detected_frame_count: number;
+    candidate_count: number;
+    counts_by_type?: Record<string, number>;
+    min_frame: number | null;
+    max_frame: number | null;
+  };
+  candidates: EventCandidate[];
+}
+
+export interface HighlightRenderRequest {
+  candidate_id?: string | null;
+  start_frame?: number | null;
+  end_frame?: number | null;
+  pre_roll_frames?: number;
+  post_roll_frames?: number;
+  output_dir_name?: string | null;
+  output_video_name?: string | null;
+  notes?: string | null;
+}

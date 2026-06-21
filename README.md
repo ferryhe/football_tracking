@@ -26,7 +26,7 @@ Browser
 ```
 
 - The **Node API server** proxies `/api/*` to the Python FastAPI service. It uses `fixRequestBody` so JSON request bodies survive the round-trip through `express.json()`.
-- The **Python backend** lives in `python_backend/` and is **not** part of the pnpm workspace; it's a standalone Python project with its own `pyproject.toml`. Its endpoints are preserved unchanged from upstream.
+- The **Python backend** lives in `python_backend/` and is **not** part of the pnpm workspace; it's a standalone Python project with its own `pyproject.toml`. The tracking pipeline remains compatible with upstream, while the local FastAPI surface adds workspace endpoints for metrics, review reports, renders, and highlights.
 - All paths are routed by the shared Replit proxy — never call service ports directly.
 
 ### Repository layout
@@ -56,14 +56,20 @@ Browser
 | `/`           | Dashboard    | System status (backend / configs / runs), recent runs, available configs                                 |
 | `/baseline`   | Baseline     | Pick video + config, **preview field & accept AI field setup**, set frame range, launch baseline run     |
 | `/ai`         | AI Analysis  | For any finished run (completed or failed), request AI tracking improvement suggestions with overlays    |
-| `/deliverable`| Deliverable  | Render a follow-cam 16:9 deliverable from a completed run                                                |
-| `/history`    | History      | Filter & search past runs, delete outputs                                                                |
+| `/deliverable`| Deliverable  | Render a follow-cam 16:9 deliverable and create short highlight clips from event candidates              |
+| `/history`    | History      | Filter & search past runs, including baseline, deliverable, highlight, failed, and stopped jobs          |
 
 Highlights of the new Baseline page:
 
 - **Field Setup card** — captures a sample frame from the chosen video, requests an AI suggestion that marks the playing field, and forwards the accepted `config_patch` to the run. Suggestion is auto-invalidated when the source video or config changes.
 - **Frame Range** — optional `start_frame` and `max_frames` inputs let you do quick partial-clip tests (leave both empty to process the full video).
 - **Auto-redirect** — after a run is queued, the user is sent to `/history` to watch progress.
+
+Review and highlight outputs:
+
+- **Run metrics and manifest** — each run writes reproducible summaries for raw/cleaned tracks, audit reports, AI review triggers, player tracks, event candidates, and generated renders.
+- **Event candidates** — completed runs can expose `event_candidates.json` with shot and goal candidates. These are review candidates, not confirmed football events.
+- **Highlight clips** — the Deliverable page can render a short `highlight.mp4` from a selected event candidate; the child run writes `highlight_report.json` and appears in History as a highlight job.
 
 ### Workflows (managed automatically on Replit)
 
@@ -110,7 +116,7 @@ These are stored as Replit Secrets. **Do not** create `.env` files for them.
 2. Make sure a YOLO detector checkpoint is available at `python_backend/weights/football_ball_yolo.pt` (or update `detector.model_path` in your YAML).
 3. Open the web preview, go to **Baseline**, pick a video & config, optionally request an AI field suggestion, set a frame range for a quick test, then **Start Baseline Run**.
 4. Watch progress in **History**.
-5. After a run completes, visit **Deliverable** to render a 16:9 follow-cam video, or **AI Analysis** to ask for tuning suggestions.
+5. After a run completes, visit **Deliverable** to render a 16:9 follow-cam video or create short highlight clips from event candidates; use **AI Analysis** to ask for tuning suggestions.
 
 ### What changed vs. upstream
 
@@ -118,6 +124,7 @@ These are stored as Replit Secrets. **Do not** create `.env` files for them.
 - A Node.js Express **reverse proxy** sits in front of FastAPI to fit Replit's path-routed proxy and to simplify local dev URLs.
 - The frontend gained: 5 pages with sidebar nav, Dashboard overview, dark/light mode, EN/中文 i18n, mobile responsive layout.
 - Frame-range partial-clip runs (`start_frame` / `max_frames`) were added to the baseline UI; the backend already accepted these fields.
+- The backend now writes review artifacts (`ball_audit.json`, `ai_review_triggers.json`, `event_candidates.json`, `player_tracks.json`) and supports child render jobs for follow-cam deliverables and highlight clips.
 
 ---
 
@@ -143,7 +150,7 @@ These are stored as Replit Secrets. **Do not** create `.env` files for them.
 ```
 
 - **Node API server** 把 `/api/*` 转发到 FastAPI；通过 `fixRequestBody` 让 JSON 请求体能完整穿过 `express.json()`。
-- **Python 后端** 是独立 Python 项目，**不在** pnpm workspace 里；接口与上游完全一致，没动过。
+- **Python 后端** 是独立 Python 项目，**不在** pnpm workspace 里；追踪主流程保持与上游兼容，本地 FastAPI 额外提供指标、审核报告、渲染和集锦相关的工作台接口。
 - 所有访问都走 Replit 共享代理，**别直接打服务端口**。
 
 ### 目录结构
@@ -173,14 +180,20 @@ These are stored as Replit Secrets. **Do not** create `.env` files for them.
 | `/`            | 概览     | 系统状态（后端 / 配置 / 任务）、近期任务、可用配置                                  |
 | `/baseline`    | 跑基线   | 选视频 + 配置，**预览球场并接受 AI 球场设置**，设置帧范围，启动基线任务             |
 | `/ai`          | AI 分析  | 针对任意已结束（完成或失败）的任务，向 AI 请求改进建议，并叠加可视化标注           |
-| `/deliverable` | 成品任务 | 基于已完成的基线任务渲染干净的 16:9 跟随裁剪视频                                    |
-| `/history`     | 历史     | 过滤 / 搜索过往任务、删除输出                                                       |
+| `/deliverable` | 成品任务 | 渲染 16:9 跟随裁剪视频，并基于事件候选生成集锦短片                                  |
+| `/history`     | 历史     | 过滤 / 搜索基线、成品、集锦、失败、已停止任务，删除输出                             |
 
 新版「跑基线」页要点：
 
 - **球场设置卡片** —— 抽取一帧预览，让 AI 自动识别球场区域；接受后建议的 `config_patch` 会随任务提交。源视频或配置变更时建议自动失效。
 - **帧范围** —— 可选 `start_frame` / `max_frames`，便于快速试跑一小段（留空则处理整段）。
 - **自动跳转** —— 任务排队后自动跳到「历史」页让你看进度。
+
+审核与集锦输出：
+
+- **指标与运行清单** —— 每次任务都会写出 raw/cleaned 轨迹、审核报告、AI 审核触发、球员轨迹、事件候选和渲染结果摘要。
+- **事件候选** —— 已完成任务可生成 `event_candidates.json`，其中包含射门和进球候选；这些是待复核候选，不是已确认事件。
+- **集锦短片** —— 「成品任务」页可以从某个事件候选渲染 `highlight.mp4`；子任务会写 `highlight_report.json`，并在「历史」页显示为集锦任务。
 
 ### Replit 工作流（自动管理）
 
@@ -227,7 +240,7 @@ curl -s -X POST -H "Content-Type: application/json" \
 2. 确认 `python_backend/weights/football_ball_yolo.pt` 存在（或在 YAML 里改 `detector.model_path`）。
 3. 打开网页预览，进入「跑基线」，选视频和配置，可以让 AI 给球场建议，可以填一个帧范围先试跑一小段，然后点「启动基线任务」。
 4. 在「历史」页看进度。
-5. 完成后到「成品任务」渲染 16:9 跟随视频，或到「AI 分析」获取调参建议。
+5. 完成后到「成品任务」渲染 16:9 跟随视频，或从事件候选生成集锦短片；也可以到「AI 分析」获取调参建议。
 
 ### 与上游的差异
 
@@ -235,3 +248,4 @@ curl -s -X POST -H "Content-Type: application/json" \
 - 在 FastAPI 前面加了一个 Node.js Express **反向代理**，匹配 Replit 的路径路由模型，也方便本地调用。
 - 前端新增了：5 个页面 + 侧边栏、概览页、暗黑/明亮主题、中英切换、移动端响应式布局。
 - 「跑基线」UI 增加了 `start_frame` / `max_frames` 帧范围（后端早已支持，只是 UI 没暴露）。
+- 后端新增审核产物（`ball_audit.json`、`ai_review_triggers.json`、`event_candidates.json`、`player_tracks.json`），并支持跟随镜头成品和集锦短片两类子渲染任务。
