@@ -4,6 +4,7 @@
  * Api
  * OpenAPI spec version: 0.1.0
  */
+import type { FieldCalibrationPayload } from "./fieldCalibrationPayload";
 import type { FieldSuggestionResponseConfidence } from "./fieldSuggestionResponseConfidence";
 import type { FieldSuggestionResponseConfigPatch } from "./fieldSuggestionResponseConfigPatch";
 
@@ -36,5 +37,6 @@ export interface FieldSuggestionResponse {
   confidence: FieldSuggestionResponseConfidence;
   source: string;
   field_coverage: number;
+  calibration?: FieldCalibrationPayload | null;
   config_patch?: FieldSuggestionResponseConfigPatch;
 }

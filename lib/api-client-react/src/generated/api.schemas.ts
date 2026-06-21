@@ -209,6 +209,46 @@ export interface DeriveConfigRequest {
   patch?: DeriveConfigRequestPatch;
 }
 
+export type FieldCalibrationPayloadConfidence =
+  (typeof FieldCalibrationPayloadConfidence)[keyof typeof FieldCalibrationPayloadConfidence];
+
+export const FieldCalibrationPayloadConfidence = {
+  config: "config",
+  estimated: "estimated",
+  low: "low",
+} as const;
+
+export interface PitchDimensionsPayload {
+  length_m: number;
+  width_m: number;
+}
+
+export interface FieldCalibrationPayload {
+  /**
+   * @minItems 4
+   * @maxItems 4
+   */
+  image_points: number[][];
+  /**
+   * @minItems 4
+   * @maxItems 4
+   */
+  pitch_points: number[][];
+  /**
+   * @minItems 3
+   * @maxItems 3
+   */
+  image_to_pitch_matrix: number[][];
+  /**
+   * @minItems 3
+   * @maxItems 3
+   */
+  pitch_to_image_matrix: number[][];
+  pitch_dimensions: PitchDimensionsPayload;
+  confidence: FieldCalibrationPayloadConfidence;
+  source: string;
+}
+
 export interface FieldPreviewRequest {
   input_video: string;
   sample_index?: number | null;
@@ -271,6 +311,7 @@ export interface FieldSuggestionResponse {
   confidence: FieldSuggestionResponseConfidence;
   source: string;
   field_coverage: number;
+  calibration?: FieldCalibrationPayload | null;
   config_patch?: FieldSuggestionResponseConfigPatch;
 }
 

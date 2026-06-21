@@ -22,6 +22,7 @@ import numpy as np
 import yaml
 
 from football_tracking.api.ai_provider import OpenAIResponsesClient, load_provider_settings
+from football_tracking.calibration import build_pitch_calibration_from_field_polygon
 from football_tracking.config import AppConfig, load_config
 from football_tracking.follow_cam import FollowCamGenerator
 from football_tracking.metrics import compute_track_metrics, stats_from_metrics_report, write_run_artifacts
@@ -474,6 +475,11 @@ class ApiService:
 
         if best_sample is None:
             raise RuntimeError(f"Unable to build a field suggestion for input video: {video_path}")
+        calibration = build_pitch_calibration_from_field_polygon(
+            best_sample["field_polygon"],
+            confidence=best_sample["confidence"],
+            source=best_sample["source"],
+        )
         return {
             "input_video": str(video_path),
             "preview_data_url": self._encode_frame_data_url(self._prepare_preview_frame(best_sample["frame"])),
@@ -491,6 +497,7 @@ class ApiService:
             "confidence": best_sample["confidence"],
             "source": best_sample["source"],
             "field_coverage": best_sample["coverage"],
+            "calibration": calibration,
             "config_patch": self._build_field_config_patch(
                 field_polygon=best_sample["field_polygon"],
                 expanded_polygon=best_sample["expanded_polygon"],

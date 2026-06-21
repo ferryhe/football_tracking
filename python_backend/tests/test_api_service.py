@@ -252,6 +252,16 @@ class ApiServiceSmokeTests(unittest.TestCase):
         self.assertGreaterEqual(expanded_roi[2], field_roi[2])
         self.assertEqual(list(expanded_roi), suggestion["config_patch"]["filtering"]["roi"])
         self.assertEqual(9, len(suggestion["config_patch"]["scene_bias"]["ground_zones"][0]["points"]))
+        calibration = suggestion["calibration"]
+        self.assertIsNotNone(calibration)
+        self.assertEqual(4, len(calibration["image_points"]))
+        self.assertEqual(4, len(calibration["pitch_points"]))
+        self.assertEqual(3, len(calibration["image_to_pitch_matrix"]))
+        self.assertEqual(3, len(calibration["pitch_to_image_matrix"]))
+        self.assertEqual({"length_m": 105.0, "width_m": 68.0}, calibration["pitch_dimensions"])
+        self.assertEqual(f"{suggestion['source']}:field-polygon-corners", calibration["source"])
+        self.assertEqual("estimated" if suggestion["confidence"] == "detected" else "low", calibration["confidence"])
+        self.assertEqual(list(suggestion["field_polygon"][0]), calibration["image_points"][0])
 
     def test_capture_field_preview_returns_fixed_preview_frame(self) -> None:
         video_path = self.write_video("data/preview_only.avi")
@@ -307,6 +317,12 @@ class ApiServiceSmokeTests(unittest.TestCase):
         self.assertEqual("config:polygon.yaml", suggestion["source"])
         self.assertEqual((32, 96), suggestion["field_polygon"][0])
         self.assertEqual((8, 80), suggestion["expanded_polygon"][0])
+        self.assertEqual(
+            [[32.0, 96.0], [608.0, 92.0], [632.0, 340.0], [12.0, 344.0]],
+            suggestion["calibration"]["image_points"],
+        )
+        self.assertEqual("config", suggestion["calibration"]["confidence"])
+        self.assertEqual("config:polygon.yaml:field-polygon-corners", suggestion["calibration"]["source"])
         preview_image = self.decode_preview_image(suggestion["preview_data_url"])
         self.assertLessEqual(preview_image.shape[1], 1600)
         self.assertAlmostEqual(640 / 360, preview_image.shape[1] / preview_image.shape[0], places=2)
