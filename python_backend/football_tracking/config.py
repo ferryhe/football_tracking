@@ -427,6 +427,7 @@ class HighRecallWindowConfig:
     max_total_frames: int | None = DEFAULT_HIGH_RECALL_MAX_TOTAL_FRAMES
     mode: str = "sahi"
     output_dir_name: str = "high_recall_windows"
+    approved_actions_path: str | None = None
     max_speed_px_per_frame: float = 180.0
     max_jump_px: float = 260.0
 
@@ -444,6 +445,10 @@ class HighRecallWindowConfig:
         output_dir_path = Path(self.output_dir_name)
         if not self.output_dir_name or output_dir_path.is_absolute() or output_dir_path.name != self.output_dir_name:
             raise ValueError("high_recall_windows.output_dir_name must be a single directory name")
+        if self.approved_actions_path in ("",):
+            self.approved_actions_path = None
+        elif self.approved_actions_path is not None:
+            self.approved_actions_path = str(self.approved_actions_path).strip() or None
         self.max_speed_px_per_frame = float(self.max_speed_px_per_frame)
         self.max_jump_px = float(self.max_jump_px)
 
@@ -882,6 +887,7 @@ def _to_high_recall_windows(raw_high_recall_windows: Any) -> HighRecallWindowCon
         "merge_gap_frames": int(raw_high_recall_windows.get("merge_gap_frames", 30)),
         "mode": str(raw_high_recall_windows.get("mode", "sahi")),
         "output_dir_name": str(raw_high_recall_windows.get("output_dir_name", "high_recall_windows")),
+        "approved_actions_path": raw_high_recall_windows.get("approved_actions_path"),
         "max_speed_px_per_frame": float(raw_high_recall_windows.get("max_speed_px_per_frame", 180.0)),
         "max_jump_px": float(raw_high_recall_windows.get("max_jump_px", 260.0)),
     }

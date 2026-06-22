@@ -988,7 +988,97 @@ class ApiService:
         if follow_cam_plan_path.exists():
             response["follow_cam_rerender_plan_artifact_name"] = FOLLOW_CAM_RERENDER_PLAN_FILE_NAME
             response["follow_cam_rerender_plan_artifact_path"] = str(follow_cam_plan_path)
+        response["summary"] = self._approval_summary(
+            artifact=artifact,
+            artifact_path=artifact_path,
+            config_patch_path=config_patch_path,
+            follow_cam_plan_path=follow_cam_plan_path,
+        )
         return response
+
+    def _approval_summary(
+        self,
+        *,
+        artifact: dict[str, Any],
+        artifact_path: Path,
+        config_patch_path: Path,
+        follow_cam_plan_path: Path,
+    ) -> dict[str, Any]:
+        actions = artifact.get("approved_actions") if isinstance(artifact.get("approved_actions"), list) else []
+        action_counts: dict[str, int] = {}
+        config_patch_count = 0
+        for action in actions:
+            if not isinstance(action, dict):
+                continue
+            action_name = str(action.get("approved_action") or "")
+            if action_name:
+                action_counts[action_name] = action_counts.get(action_name, 0) + 1
+            if isinstance(action.get("config_patch"), dict) and action["config_patch"]:
+                config_patch_count += 1
+
+        follow_cam_plan = self._read_optional_json(follow_cam_plan_path)
+        requires_tracking_rerun = bool(action_counts.get("tracking_rerun_before_follow_cam"))
+        if isinstance(follow_cam_plan, dict):
+            requires_tracking_rerun = requires_tracking_rerun or bool(follow_cam_plan.get("requires_tracking_rerun"))
+        requires_high_recall_rerun = bool(action_counts.get("targeted_rerun"))
+        requires_highlight_render = bool(
+            action_counts.get("adjust_highlight_window") or action_counts.get("render_suggested_highlight")
+        )
+        requires_follow_cam_rerender = (
+            follow_cam_plan_path.exists()
+            and bool(action_counts.get("adjust_follow_cam"))
+            and not requires_tracking_rerun
+        )
+        requires_config_apply = config_patch_path.exists()
+        requires_execution = any(
+            (
+                requires_high_recall_rerun,
+                requires_tracking_rerun,
+                requires_follow_cam_rerender,
+                requires_highlight_render,
+                requires_config_apply,
+            )
+        )
+
+        return {
+            "approved_action_count": len([action for action in actions if isinstance(action, dict)]),
+            "approved_action_counts": action_counts,
+            "targeted_rerun_count": action_counts.get("targeted_rerun", 0),
+            "config_patch_count": config_patch_count,
+            "highlight_action_count": action_counts.get("adjust_highlight_window", 0)
+            + action_counts.get("render_suggested_highlight", 0),
+            "follow_cam_action_count": action_counts.get("adjust_follow_cam", 0)
+            + action_counts.get("tracking_rerun_before_follow_cam", 0),
+            "requires_execution": requires_execution,
+            "requires_high_recall_rerun": requires_high_recall_rerun,
+            "requires_tracking_rerun": requires_tracking_rerun,
+            "requires_follow_cam_rerender": requires_follow_cam_rerender,
+            "requires_highlight_render": requires_highlight_render,
+            "artifacts": {
+                "approved_actions": self._approval_artifact_summary(
+                    APPROVED_ACTIONS_FILE_NAME,
+                    artifact_path,
+                    exists=True,
+                ),
+                "config_patch": self._approval_artifact_summary(
+                    APPROVED_CONFIG_PATCH_FILE_NAME if config_patch_path.exists() else None,
+                    config_patch_path,
+                    exists=config_patch_path.exists(),
+                ),
+                "follow_cam_rerender_plan": self._approval_artifact_summary(
+                    FOLLOW_CAM_RERENDER_PLAN_FILE_NAME if follow_cam_plan_path.exists() else None,
+                    follow_cam_plan_path,
+                    exists=follow_cam_plan_path.exists(),
+                ),
+            },
+        }
+
+    def _approval_artifact_summary(self, name: str | None, path: Path, *, exists: bool) -> dict[str, Any]:
+        return {
+            "name": name,
+            "path": str(path) if exists else None,
+            "exists": exists,
+        }
 
     def _ai_explain_heuristic(
         self,
@@ -1493,6 +1583,8 @@ class ApiService:
         source_run = self.get_run(source_run_id)
         if source_run.get("status") != "completed":
             raise RuntimeError(f"Run must be completed before rendering a deliverable: {source_run_id}")
+        source_output_dir = Path(source_run["output_dir"]).resolve()
+        self._assert_follow_cam_only_render_allowed(source_output_dir)
 
         config_path, relative_name = self._resolve_run_config_reference(source_run)
         config = load_config(config_path)
@@ -1523,7 +1615,6 @@ class ApiService:
             default_name="deliverable_16x9.mp4",
         )
 
-        source_output_dir = Path(source_run["output_dir"]).resolve()
         self._prepare_follow_cam_render_inputs(source_output_dir=source_output_dir, render_output_dir=config.output_dir, config=config)
 
         render_notes = request.get("notes") or (
@@ -2671,6 +2762,22 @@ class ApiService:
         (output_dir / "highlight_report.json").write_text(
             json.dumps(_jsonable(payload), ensure_ascii=False, indent=2) + "\n",
             encoding="utf-8",
+        )
+
+    def _assert_follow_cam_only_render_allowed(self, source_output_dir: Path) -> None:
+        plan_path = source_output_dir / FOLLOW_CAM_RERENDER_PLAN_FILE_NAME
+        if not plan_path.exists():
+            return
+        plan = self._read_optional_json(plan_path)
+        if plan is None:
+            raise RuntimeError("follow_cam_rerender_plan.json is corrupt or invalid; cannot determine rerender safety.")
+        if not isinstance(plan, dict) or not bool(plan.get("requires_tracking_rerun")):
+            return
+        scope = plan.get("tracking_rerun_scope")
+        scope_text = f" scope={scope}" if isinstance(scope, dict) else ""
+        raise RuntimeError(
+            "follow-cam rerender plan requires tracking rerun before follow-cam-only render; "
+            f"run the approved tracking rerun first.{scope_text}"
         )
 
     def _prepare_follow_cam_render_inputs(self, source_output_dir: Path, render_output_dir: Path, config: AppConfig) -> None:

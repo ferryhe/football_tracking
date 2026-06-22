@@ -4,6 +4,12 @@
  * Api
  * OpenAPI spec version: 0.1.0
  */
+export interface AIApprovalArtifactSummary {
+  name?: string | null;
+  path?: string | null;
+  exists?: boolean;
+}
+
 export type AIApprovedActionApprovedAction =
   (typeof AIApprovedActionApprovedAction)[keyof typeof AIApprovedActionApprovedAction];
 
@@ -181,6 +187,29 @@ export interface AIImproveApprovalRequest {
   follow_cam_rerender_plan_overrides?: AIImproveApprovalRequestFollowCamRerenderPlanOverrides;
 }
 
+export type AIImproveApprovalSummaryApprovedActionCounts = {
+  [key: string]: number;
+};
+
+export type AIImproveApprovalSummaryArtifacts = {
+  [key: string]: AIApprovalArtifactSummary;
+};
+
+export interface AIImproveApprovalSummary {
+  approved_action_count?: number;
+  approved_action_counts?: AIImproveApprovalSummaryApprovedActionCounts;
+  targeted_rerun_count?: number;
+  config_patch_count?: number;
+  highlight_action_count?: number;
+  follow_cam_action_count?: number;
+  requires_execution?: boolean;
+  requires_high_recall_rerun?: boolean;
+  requires_tracking_rerun?: boolean;
+  requires_follow_cam_rerender?: boolean;
+  requires_highlight_render?: boolean;
+  artifacts?: AIImproveApprovalSummaryArtifacts;
+}
+
 export interface AIImproveApprovalResponse {
   schema_version: string;
   generated_at: string;
@@ -194,6 +223,7 @@ export interface AIImproveApprovalResponse {
   follow_cam_rerender_plan_artifact_name?: string | null;
   follow_cam_rerender_plan_artifact_path?: string | null;
   approved_actions: AIApprovedAction[];
+  summary: AIImproveApprovalSummary;
   warnings?: string[];
 }
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import io
 import json
 import tempfile
@@ -61,6 +62,83 @@ class AiImprovementTests(unittest.TestCase):
         self.assertEqual(report["summary"], written["summary"])
         self.assertEqual(report["artifact_status"], written["artifact_status"])
         self.assertTrue(any("missing" in warning for warning in report["warnings"]))
+
+    def test_write_ai_improvement_report_preserves_tracks_and_does_not_create_apply_artifacts(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_minimal_artifacts(output_dir)
+            _write_ball_track(
+                output_dir,
+                [
+                    (10, "Detected", 100, 100),
+                    (11, "Lost", "", ""),
+                    (12, "Detected", 120, 105),
+                ],
+            )
+            cleaned_path = output_dir / "ball_track.cleaned.csv"
+            cleaned_path.write_text(
+                "Frame,X,Y,Status\n10,100,100,Detected\n11,110,102,Detected\n12,120,105,Detected\n",
+                encoding="utf-8",
+            )
+            raw_path = output_dir / "ball_track.csv"
+            before = {
+                path.name: (_hash_file(path), path.stat().st_mtime_ns)
+                for path in (raw_path, cleaned_path)
+            }
+            client = _FakeImprovementClient(
+                {
+                    "summary": {"status": "needs_rerun", "primary_issue": "tracking"},
+                    "improvements": [
+                        {
+                            "id": "imp_track",
+                            "priority": "P0",
+                            "area": "tracking",
+                            "failure_tags": ["ball_lost"],
+                            "root_cause_module": "reacquisition",
+                            "diagnosis": "Localized rerun may recover a lost ball.",
+                            "recommended_action": "targeted_rerun",
+                            "config_patch": {"tracking": {"max_lost_frames": 30}},
+                            "rerun_scope": {"start_frame": 8, "end_frame": 18},
+                            "likely_ball_region": {
+                                "description": "right channel near the player cluster",
+                                "frame": 11,
+                                "confidence": 0.7,
+                            },
+                            "confidence": 0.82,
+                        }
+                    ],
+                    "highlight_adjustments": [
+                        {
+                            "candidate_id": "cleaned:shot_candidate:10-20",
+                            "current_window": {"start_frame": 10, "end_frame": 20},
+                            "suggested_window": {"start_frame": 5, "end_frame": 45},
+                            "reason": "Preserve the result tail.",
+                            "confidence": 0.74,
+                        }
+                    ],
+                }
+            )
+
+            write_ai_improvement_report(output_dir, client=client, model="gpt-improve")
+
+            after = {
+                path.name: (_hash_file(path), path.stat().st_mtime_ns)
+                for path in (raw_path, cleaned_path)
+            }
+            artifact_exists = {
+                "report": (output_dir / "ai_improvement_report.json").exists(),
+                "config_patch": (output_dir / "ai_improvement_approved_config_patch.json").exists(),
+                "follow_cam_plan": (output_dir / "follow_cam_rerender_plan.json").exists(),
+                "highlight_report": (output_dir / "highlight_report.json").exists(),
+                "highlight_video": (output_dir / "highlight.mp4").exists(),
+            }
+
+        self.assertEqual(before, after)
+        self.assertTrue(artifact_exists["report"])
+        self.assertFalse(artifact_exists["config_patch"])
+        self.assertFalse(artifact_exists["follow_cam_plan"])
+        self.assertFalse(artifact_exists["highlight_report"])
+        self.assertFalse(artifact_exists["highlight_video"])
 
     def test_build_context_skips_corrupt_json_limits_items_and_strips_data_urls(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:
@@ -1651,6 +1729,10 @@ def _write_ball_track(output_dir: Path, rows: list[tuple[int, str, object, objec
     for frame, status, x, y in rows:
         lines.append(f"{frame},{x},{y},{status}")
     (output_dir / "ball_track.csv").write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def _hash_file(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
 def _write_json(path: Path, payload: object) -> None:

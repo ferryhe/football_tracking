@@ -477,6 +477,18 @@ export const approveImprovementsResponseApprovedActionsItemStartFrameOneMin = 0;
 
 export const approveImprovementsResponseApprovedActionsItemEndFrameOneMin = 0;
 
+export const approveImprovementsResponseSummaryApprovedActionCountDefault = 0;
+export const approveImprovementsResponseSummaryTargetedRerunCountDefault = 0;
+export const approveImprovementsResponseSummaryConfigPatchCountDefault = 0;
+export const approveImprovementsResponseSummaryHighlightActionCountDefault = 0;
+export const approveImprovementsResponseSummaryFollowCamActionCountDefault = 0;
+export const approveImprovementsResponseSummaryRequiresExecutionDefault = false;
+export const approveImprovementsResponseSummaryRequiresHighRecallRerunDefault = false;
+export const approveImprovementsResponseSummaryRequiresTrackingRerunDefault = false;
+export const approveImprovementsResponseSummaryRequiresFollowCamRerenderDefault = false;
+export const approveImprovementsResponseSummaryRequiresHighlightRenderDefault = false;
+export const approveImprovementsResponseSummaryArtifactsExistsDefault = false;
+
 export const ApproveImprovementsResponse = zod.object({
   schema_version: zod.string(),
   generated_at: zod.string(),
@@ -627,6 +639,57 @@ export const ApproveImprovementsResponse = zod.object({
         .optional(),
     }),
   ),
+  summary: zod.object({
+    approved_action_count: zod
+      .number()
+      .default(approveImprovementsResponseSummaryApprovedActionCountDefault),
+    approved_action_counts: zod.record(zod.string(), zod.number()).optional(),
+    targeted_rerun_count: zod
+      .number()
+      .default(approveImprovementsResponseSummaryTargetedRerunCountDefault),
+    config_patch_count: zod
+      .number()
+      .default(approveImprovementsResponseSummaryConfigPatchCountDefault),
+    highlight_action_count: zod
+      .number()
+      .default(approveImprovementsResponseSummaryHighlightActionCountDefault),
+    follow_cam_action_count: zod
+      .number()
+      .default(approveImprovementsResponseSummaryFollowCamActionCountDefault),
+    requires_execution: zod
+      .boolean()
+      .default(approveImprovementsResponseSummaryRequiresExecutionDefault),
+    requires_high_recall_rerun: zod
+      .boolean()
+      .default(
+        approveImprovementsResponseSummaryRequiresHighRecallRerunDefault,
+      ),
+    requires_tracking_rerun: zod
+      .boolean()
+      .default(approveImprovementsResponseSummaryRequiresTrackingRerunDefault),
+    requires_follow_cam_rerender: zod
+      .boolean()
+      .default(
+        approveImprovementsResponseSummaryRequiresFollowCamRerenderDefault,
+      ),
+    requires_highlight_render: zod
+      .boolean()
+      .default(
+        approveImprovementsResponseSummaryRequiresHighlightRenderDefault,
+      ),
+    artifacts: zod
+      .record(
+        zod.string(),
+        zod.object({
+          name: zod.union([zod.string(), zod.null()]).optional(),
+          path: zod.union([zod.string(), zod.null()]).optional(),
+          exists: zod
+            .boolean()
+            .default(approveImprovementsResponseSummaryArtifactsExistsDefault),
+        }),
+      )
+      .optional(),
+  }),
   warnings: zod.array(zod.string()).optional(),
 });
 
