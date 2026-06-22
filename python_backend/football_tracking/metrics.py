@@ -29,6 +29,7 @@ from football_tracking.review_packets import compact_review_packet_summary
 
 SCHEMA_VERSION = "1.0"
 FALSE_POSITIVE_ISLAND_MAX_LENGTH = 2
+QUALITY_LONG_LOST_GAP_MIN_FRAMES = 120
 TRACK_STATUSES = ("Detected", "Predicted", "Lost")
 
 
@@ -152,6 +153,13 @@ def build_metrics_report(output_dir: Path) -> dict[str, Any]:
         temporal_chunks_summary = compact_temporal_chunk_summary(temporal_chunks_report)
         if temporal_chunks_summary is not None:
             report["temporal_chunks"] = temporal_chunks_summary
+    quality_gate_summary = _build_quality_gate_summary(
+        ball_audit_report=ball_audit_report,
+        review_packets_report=review_packets_report,
+        high_recall_reports=_read_high_recall_reports(output_dir),
+    )
+    if quality_gate_summary is not None:
+        report["quality_gate"] = quality_gate_summary
     return report
 
 
@@ -243,6 +251,9 @@ def stats_from_metrics_report(report: dict[str, Any]) -> dict[str, Any]:
     review_packets = report.get("review_packets")
     if isinstance(review_packets, dict):
         stats["review_packets"] = review_packets
+    quality_gate = report.get("quality_gate")
+    if isinstance(quality_gate, dict):
+        stats["quality_gate"] = quality_gate
     ai_visual_review = report.get("ai_visual_review")
     if isinstance(ai_visual_review, dict):
         stats["ai_visual_review"] = ai_visual_review
@@ -301,6 +312,166 @@ def compact_temporal_chunk_summary(report: dict[str, Any]) -> dict[str, Any] | N
         summary["boundary_review_event_count"] = len(boundary_events)
 
     return summary
+
+
+def _build_quality_gate_summary(
+    *,
+    ball_audit_report: dict[str, Any] | None,
+    review_packets_report: dict[str, Any] | None,
+    high_recall_reports: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    if not isinstance(ball_audit_report, dict):
+        return None
+
+    long_lost_gaps = _long_lost_gap_ranges(ball_audit_report)
+    covered_gaps = [gap for gap in long_lost_gaps if _gap_has_review_packet(gap, review_packets_report)]
+    unreviewed_gaps = [gap for gap in long_lost_gaps if gap not in covered_gaps]
+    high_recall_budget_rejections = _lost_gap_budget_rejection_ranges(
+        high_recall_reports,
+        long_lost_gaps=unreviewed_gaps,
+    )
+    status = "stable"
+    if unreviewed_gaps or high_recall_budget_rejections:
+        status = "needs_review"
+    elif long_lost_gaps:
+        status = "review_ready"
+
+    return {
+        "status": status,
+        "long_lost_gap_scope": "between_tracklets",
+        "long_lost_gap_count": len(long_lost_gaps),
+        "reviewed_long_lost_gap_count": len(covered_gaps),
+        "unreviewed_long_lost_gap_count": len(unreviewed_gaps),
+        "unreviewed_long_lost_gaps": [list(gap) for gap in unreviewed_gaps],
+        "high_recall_lost_gap_budget_rejection_count": len(high_recall_budget_rejections),
+        "high_recall_lost_gap_budget_rejections": [list(gap) for gap in high_recall_budget_rejections],
+    }
+
+
+def _long_lost_gap_ranges(report: dict[str, Any]) -> list[tuple[int, int]]:
+    review_events = report.get("review_events")
+    if not isinstance(review_events, list):
+        return []
+    gaps: list[tuple[int, int]] = []
+    for event in review_events:
+        if not isinstance(event, dict) or event.get("type") != "lost_gap":
+            continue
+        start = _parse_int(event.get("start_frame"))
+        end = _parse_int(event.get("end_frame"))
+        if start is None or end is None:
+            continue
+        if end < start:
+            start, end = end, start
+        frame_count = _parse_int(event.get("frame_count"))
+        if frame_count is None:
+            frame_count = end - start + 1
+        if frame_count >= QUALITY_LONG_LOST_GAP_MIN_FRAMES:
+            gaps.append((start, end))
+    return sorted(set(gaps))
+
+
+def _gap_has_review_packet(gap: tuple[int, int], report: dict[str, Any] | None) -> bool:
+    if not isinstance(report, dict):
+        return False
+    packets = report.get("packets")
+    if not isinstance(packets, list):
+        return False
+    for packet in packets:
+        if not isinstance(packet, dict):
+            continue
+        source = packet.get("source") if isinstance(packet.get("source"), dict) else {}
+        if not _mapping_mentions_lost_gap(source):
+            continue
+        source_range = _range_from_mapping(source)
+        window = packet.get("window") if isinstance(packet.get("window"), dict) else {}
+        window_range = _range_from_mapping(window)
+        if (source_range is not None and _range_covers(source_range, gap)) or (
+            window_range is not None and _range_covers(window_range, gap)
+        ):
+            return True
+    return False
+
+
+def _lost_gap_budget_rejection_ranges(
+    reports: list[dict[str, Any]],
+    *,
+    long_lost_gaps: list[tuple[int, int]],
+) -> list[tuple[int, int]]:
+    if not long_lost_gaps:
+        return []
+    ranges: list[tuple[int, int]] = []
+    for report in reports:
+        rejected_windows = report.get("rejected_windows")
+        if not isinstance(rejected_windows, list):
+            continue
+        for window in rejected_windows:
+            if not isinstance(window, dict):
+                continue
+            if not _mapping_mentions_lost_gap(window) or window.get("rejection_reason") != "max_total_frames_exceeded":
+                continue
+            parsed_range = _range_from_mapping(window)
+            if (
+                parsed_range is not None
+                and _range_frame_count(parsed_range) >= QUALITY_LONG_LOST_GAP_MIN_FRAMES
+                and any(_range_covers(parsed_range, gap) for gap in long_lost_gaps)
+            ):
+                ranges.append(parsed_range)
+    return sorted(set(ranges))
+
+
+def _read_high_recall_reports(output_dir: Path) -> list[dict[str, Any]]:
+    reports: list[dict[str, Any]] = []
+    seen: set[Path] = set()
+    default_report = output_dir / "high_recall_windows" / "report.json"
+    if default_report.exists():
+        seen.add(default_report.resolve())
+        loaded = _read_optional_json(default_report)
+        if isinstance(loaded, dict):
+            reports.append(loaded)
+    if not output_dir.exists():
+        return reports
+    for child in output_dir.iterdir():
+        if not child.is_dir():
+            continue
+        report_path = child / "report.json"
+        if not report_path.exists():
+            continue
+        resolved = report_path.resolve()
+        if resolved in seen:
+            continue
+        loaded = _read_optional_json(report_path)
+        if isinstance(loaded, dict) and (
+            "rejected_windows" in loaded or "windows" in loaded or "reconcile" in loaded
+        ):
+            reports.append(loaded)
+            seen.add(resolved)
+    return reports
+
+
+def _range_from_mapping(mapping: dict[str, Any]) -> tuple[int, int] | None:
+    start = _parse_int(mapping.get("start_frame"))
+    end = _parse_int(mapping.get("end_frame"))
+    if start is None or end is None:
+        return None
+    return (start, end) if start <= end else (end, start)
+
+
+def _range_covers(container: tuple[int, int], contained: tuple[int, int]) -> bool:
+    return container[0] <= contained[0] and container[1] >= contained[1]
+
+
+def _range_frame_count(value: tuple[int, int]) -> int:
+    return abs(value[1] - value[0]) + 1
+
+
+def _mapping_mentions_lost_gap(mapping: dict[str, Any]) -> bool:
+    if str(mapping.get("type") or "").casefold() == "lost_gap":
+        return True
+    values = [mapping.get("reason")]
+    evidence = mapping.get("evidence")
+    if isinstance(evidence, dict):
+        values.extend([evidence.get("reason"), evidence.get("window_reason"), evidence.get("trigger_type")])
+    return any("lost_gap" in str(value or "").casefold() for value in values)
 
 
 def _parse_int(value: str | None) -> int | None:

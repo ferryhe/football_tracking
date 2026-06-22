@@ -157,6 +157,126 @@ class ReviewPacketTests(unittest.TestCase):
             self.assertIn("event_candidate", source_kinds)
             self.assertIn("trigger", source_kinds)
 
+    def test_build_review_packet_report_reserves_space_for_long_lost_gap(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            output_dir = Path(temp)
+            rows = ["Frame,X,Y,Confidence,Status"]
+            for frame in range(2601):
+                if 2049 <= frame <= 2544:
+                    rows.append(f"{frame},,,0.00,Lost")
+                else:
+                    rows.append(f"{frame},{100 + frame * 0.1:.1f},100,0.90,Detected")
+            (output_dir / "ball_track.cleaned.csv").write_text("\n".join(rows) + "\n", encoding="utf-8")
+            (output_dir / "event_candidates.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": "1.0",
+                        "candidates": [
+                            {
+                                "id": f"goal:{index}",
+                                "type": "goal_candidate",
+                                "start_frame": 100 + index * 10,
+                                "end_frame": 104 + index * 10,
+                                "score": 0.96 - index * 0.01,
+                                "reason": "goal",
+                                "evidence": {},
+                            }
+                            for index in range(8)
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            triggers = [
+                {
+                    "id": f"event:{index}:large_jump:{300 + index * 10}-{301 + index * 10}",
+                    "type": "large_jump",
+                    "priority": "high",
+                    "source": "cleaned",
+                    "start_frame": 300 + index * 10,
+                    "end_frame": 301 + index * 10,
+                    "frame_count": 2,
+                    "reason": "large jump",
+                    "evidence": {"max_step_px": 400.0},
+                }
+                for index in range(8)
+            ]
+            triggers.append(
+                {
+                    "id": "event:61:lost_gap:2049-2544",
+                    "type": "lost_gap",
+                    "priority": "medium",
+                    "source": "cleaned",
+                    "start_frame": 2049,
+                    "end_frame": 2544,
+                    "frame_count": 496,
+                    "reason": "Ball track is lost for 496 frames between tracklets.",
+                    "evidence": {"lost_frame_count": 496},
+                }
+            )
+            (output_dir / "ai_review_triggers.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": "1.0",
+                        "decision": {"needs_ai_review": True},
+                        "triggers": triggers,
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            report = build_review_packet_report(output_dir, max_packets=10, include_media=False)
+
+        lost_gap_packets = [
+            packet
+            for packet in report["packets"]
+            if packet["source"]["type"] == "lost_gap"
+            and packet["source"]["start_frame"] == 2049
+            and packet["source"]["end_frame"] == 2544
+        ]
+        self.assertEqual(1, len(lost_gap_packets))
+        self.assertEqual("ball_not_visible", lost_gap_packets[0]["decision"]["label"])
+
+    def test_build_review_packet_report_keeps_oversized_long_lost_gap_for_audit(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            output_dir = Path(temp)
+            rows = ["Frame,X,Y,Confidence,Status"]
+            for frame in range(900):
+                if 100 <= frame <= 800:
+                    rows.append(f"{frame},,,0.00,Lost")
+                else:
+                    rows.append(f"{frame},{100 + frame * 0.1:.1f},100,0.90,Detected")
+            (output_dir / "ball_track.cleaned.csv").write_text("\n".join(rows) + "\n", encoding="utf-8")
+            (output_dir / "ai_review_triggers.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": "1.0",
+                        "decision": {"needs_ai_review": True},
+                        "triggers": [
+                            {
+                                "id": "event:1:lost_gap:100-800",
+                                "type": "lost_gap",
+                                "priority": "medium",
+                                "source": "cleaned",
+                                "start_frame": 100,
+                                "end_frame": 800,
+                                "frame_count": 701,
+                                "reason": "Ball track is lost for 701 frames between tracklets.",
+                                "evidence": {"lost_frame_count": 701},
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            report = build_review_packet_report(output_dir, max_packets=10, include_media=False)
+
+        self.assertEqual(1, report["summary"]["packet_count"])
+        packet = report["packets"][0]
+        self.assertEqual("lost_gap", packet["source"]["type"])
+        self.assertEqual({"start_frame": 70, "end_frame": 830, "frame_count": 761}, packet["window"])
+
     def test_build_review_packet_report_includes_rejected_high_recall_windows(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             output_dir = Path(temp)
@@ -231,6 +351,94 @@ class ReviewPacketTests(unittest.TestCase):
         packet = report["packets"][0]
         self.assertEqual("high_recall_rejection", packet["source"]["kind"])
         self.assertEqual("max_total_frames_exceeded", packet["source"]["evidence"]["rejection_reason"])
+        self.assertEqual("needs_ai_review", packet["decision"]["label"])
+
+    def test_build_review_packet_report_reserves_long_high_recall_lost_gap_rejection(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            output_dir = Path(temp)
+            rows = ["Frame,X,Y,Confidence,Status"]
+            for frame in range(2601):
+                if 2049 <= frame <= 2544:
+                    rows.append(f"{frame},,,0.00,Lost")
+                else:
+                    rows.append(f"{frame},{100 + frame * 0.1:.1f},100,0.90,Detected")
+            (output_dir / "ball_track.cleaned.csv").write_text("\n".join(rows) + "\n", encoding="utf-8")
+            (output_dir / "event_candidates.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": "1.0",
+                        "candidates": [
+                            {
+                                "id": f"goal:{index}",
+                                "type": "goal_candidate",
+                                "start_frame": 100 + index * 10,
+                                "end_frame": 104 + index * 10,
+                                "score": 0.96 - index * 0.01,
+                                "reason": "goal",
+                                "evidence": {},
+                            }
+                            for index in range(8)
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (output_dir / "ai_review_triggers.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": "1.0",
+                        "decision": {"needs_ai_review": True},
+                        "triggers": [
+                            {
+                                "id": f"event:{index}:large_jump:{300 + index * 10}-{301 + index * 10}",
+                                "type": "large_jump",
+                                "priority": "high",
+                                "source": "cleaned",
+                                "start_frame": 300 + index * 10,
+                                "end_frame": 301 + index * 10,
+                                "frame_count": 2,
+                                "reason": "large jump",
+                                "evidence": {"max_step_px": 400.0},
+                            }
+                            for index in range(8)
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            report_dir = output_dir / "high_recall_windows"
+            report_dir.mkdir()
+            (report_dir / "report.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": "1.0",
+                        "windows": [],
+                        "rejected_windows": [
+                            {
+                                "start_frame": 2049,
+                                "end_frame": 2544,
+                                "reason": "ball_audit: lost_gap",
+                                "priority": "medium",
+                                "rejection_reason": "max_total_frames_exceeded",
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            report = build_review_packet_report(output_dir, max_packets=10, include_media=False)
+
+        high_recall_lost_gap_packets = [
+            packet
+            for packet in report["packets"]
+            if packet["source"]["kind"] == "high_recall_rejection"
+            and packet["source"]["start_frame"] == 2049
+            and packet["source"]["end_frame"] == 2544
+        ]
+        self.assertEqual(1, len(high_recall_lost_gap_packets))
+        packet = high_recall_lost_gap_packets[0]
+        self.assertEqual("ball_audit: lost_gap", packet["source"]["evidence"]["window_reason"])
         self.assertEqual("needs_ai_review", packet["decision"]["label"])
 
     def test_build_review_packet_report_discovers_custom_high_recall_output_dir(self) -> None:

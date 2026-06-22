@@ -7,7 +7,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from football_tracking.chunk_runner import run_high_recall_windows
+from football_tracking.chunk_runner import build_high_recall_window_config, run_high_recall_windows
 from football_tracking.config import load_config
 from football_tracking.high_recall_windows import (
     build_high_recall_windows,
@@ -160,6 +160,55 @@ class HighRecallWindowTests(unittest.TestCase):
         self.assertEqual(1, report["summary"]["rejected_count"])
         self.assertEqual(1800, report["settings"]["max_total_frames"])
 
+    def test_budget_selects_long_lost_gap_before_noisy_merged_span(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_json(
+                output_dir / "ai_review_triggers.json",
+                {
+                    "triggers": [
+                        {
+                            "type": "dense_noise_cluster",
+                            "priority": "high",
+                            "start_frame": 160,
+                            "end_frame": 5191,
+                            "reason": "dense audit signals",
+                        },
+                        *[
+                            {
+                                "type": "large_jump",
+                                "priority": "high",
+                                "start_frame": start,
+                                "end_frame": start + 12,
+                                "reason": "large jump",
+                            }
+                            for start in range(180, 5200, 45)
+                        ],
+                        {
+                            "type": "lost_gap",
+                            "priority": "medium",
+                            "start_frame": 2049,
+                            "end_frame": 2544,
+                            "reason": "Ball track is lost for 496 frames between tracklets.",
+                        },
+                    ]
+                },
+            )
+
+            report = build_high_recall_windows(
+                output_dir,
+                margin_frames=12,
+                merge_gap_frames=30,
+                max_total_frames=1800,
+                total_frames=5194,
+                mode="sahi",
+            )
+
+        selected_ranges = [(window["start_frame"], window["end_frame"]) for window in report["windows"]]
+        self.assertTrue(any(start <= 2049 and end >= 2544 for start, end in selected_ranges))
+        self.assertGreater(report["summary"]["selected_window_count"], 0)
+        self.assertNotEqual("rejected", report["summary"]["status"])
+
     def test_non_positive_budget_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:
             output_dir = Path(temp_name)
@@ -242,6 +291,39 @@ class HighRecallWindowTests(unittest.TestCase):
 
 
 class HighRecallChunkRunnerHookTests(unittest.TestCase):
+    def test_high_recall_sahi_window_disables_half_precision(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            config = SimpleNamespace(
+                output_dir=output_dir,
+                detector=SimpleNamespace(inference_mode="direct_full_frame", use_half=True),
+                runtime=SimpleNamespace(start_frame=0, max_frames=None),
+                postprocess=SimpleNamespace(enabled=True),
+                follow_cam=SimpleNamespace(enabled=True),
+                temporal_chunks=SimpleNamespace(enabled=True),
+                output=SimpleNamespace(save_csv=False, save_debug_jsonl=False),
+                logging=SimpleNamespace(save_debug_jsonl=False),
+                high_recall_windows=SimpleNamespace(
+                    enabled=True,
+                    margin_frames=0,
+                    merge_gap_frames=0,
+                    max_total_frames=100,
+                    mode="sahi",
+                    output_dir_name="high_recall_windows",
+                    max_speed_px_per_frame=120.0,
+                    max_jump_px=180.0,
+                ),
+            )
+
+            window_config = build_high_recall_window_config(
+                config,
+                {"start_frame": 12, "end_frame": 18},
+                output_dir / "high_recall_windows" / "window_000",
+            )
+
+        self.assertEqual("sahi", window_config.detector.inference_mode)
+        self.assertFalse(window_config.detector.use_half)
+
     def test_runner_executes_only_selected_windows_and_reconciles_results(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:
             output_dir = Path(temp_name)

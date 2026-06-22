@@ -11,6 +11,8 @@ CSV_HEADER = ["Frame", "X", "Y", "Confidence", "Status"]
 STATUS_BY_KEY = {"detected": "Detected", "predicted": "Predicted", "lost": "Lost"}
 VALID_STATUSES = {"Detected", "Predicted"}
 SCHEMA_VERSION = "1.0"
+MAX_SEGMENT_FRAME_GAP = 20
+REPLACEMENT_REASON_MARKERS = ("large_jump", "suspicious_tracklet")
 
 
 def reconcile_high_recall_window(
@@ -33,40 +35,56 @@ def reconcile_high_recall_window(
     high_by_frame = _rows_by_frame(high_recall_rows)
     proposed_by_frame = {frame: dict(row) for frame, row in main_by_frame.items()}
     accepted_frames: list[int] = []
+    review_packet_clues: list[dict[str, Any]] = []
+    gate_violations: list[dict[str, Any]] = []
+    allow_replacement = _window_allows_replacement(window)
 
-    for frame in range(start_frame, end_frame + 1):
-        high_row = high_by_frame.get(frame)
-        if high_row is None or not _is_valid_track_row(high_row):
-            continue
-        main_row = proposed_by_frame.get(frame)
-        if main_row is not None and _is_valid_track_row(main_row):
-            continue
-        proposed_by_frame[frame] = _normalized_csv_row(high_row)
-        accepted_frames.append(frame)
-
-    if not accepted_frames:
-        return _rejected_result(main_rows, window, "no_continuity_improvement")
-
-    proposed_rows = _rows_from_frame_map(proposed_by_frame)
-    violations = _jump_gate_violations(
-        proposed_rows,
-        touched_frames=set(accepted_frames),
+    high_segments = _split_high_recall_segments(
+        [
+            _normalized_csv_row(high_row)
+            for frame in range(start_frame, end_frame + 1)
+            if (high_row := high_by_frame.get(frame)) is not None and _is_valid_track_row(high_row)
+        ],
         max_speed_px_per_frame=max_speed_px_per_frame,
         max_jump_px=max_jump_px,
     )
-    if violations:
-        result = _rejected_result(main_rows, window, "jump_gate_failed")
-        result["gate_violations"] = violations
+
+    for segment in sorted(high_segments, key=_segment_acceptance_key):
+        candidate_by_frame, touched_frames, violations, rejected_segment = _try_apply_segment(
+            proposed_by_frame,
+            segment,
+            allow_replacement=allow_replacement,
+            max_speed_px_per_frame=max_speed_px_per_frame,
+            max_jump_px=max_jump_px,
+        )
+        if not touched_frames:
+            if violations:
+                gate_violations.extend(violations)
+                review_packet_clues.append(_segment_clue(window, rejected_segment or segment, "jump_gate_failed"))
+            continue
+        if violations:
+            gate_violations.extend(violations)
+            review_packet_clues.append(_segment_clue(window, rejected_segment or segment, "jump_gate_failed"))
+            continue
+
+        proposed_by_frame = candidate_by_frame
+        accepted_frames.extend(touched_frames)
+
+    if not accepted_frames:
+        reason = "jump_gate_failed" if gate_violations else "no_continuity_improvement"
+        result = _rejected_result(main_rows, window, reason)
+        result["gate_violations"] = gate_violations
         return result
 
+    proposed_rows = _rows_from_frame_map(proposed_by_frame)
     return {
         "accepted": True,
         "reason": "accepted",
         "window": _window_clue(window),
-        "accepted_frames": accepted_frames,
+        "accepted_frames": sorted(set(accepted_frames)),
         "rows": proposed_rows,
-        "review_packet_clues": [],
-        "gate_violations": [],
+        "review_packet_clues": review_packet_clues,
+        "gate_violations": gate_violations,
     }
 
 
@@ -197,6 +215,16 @@ def _window_clue(window: dict[str, Any], *, rejection_reason: str | None = None)
     return clue
 
 
+def _segment_clue(window: dict[str, Any], segment: list[dict[str, Any]], rejection_reason: str) -> dict[str, Any]:
+    clue = _window_clue(window, rejection_reason=rejection_reason)
+    frames = [_parse_int(row.get("Frame")) for row in segment]
+    frames = [frame for frame in frames if frame is not None]
+    if frames:
+        clue["start_frame"] = min(frames)
+        clue["end_frame"] = max(frames)
+    return clue
+
+
 def _rows_by_frame(rows: list[dict[str, Any]]) -> dict[int, dict[str, Any]]:
     by_frame: dict[int, dict[str, Any]] = {}
     for row in rows:
@@ -209,6 +237,131 @@ def _rows_by_frame(rows: list[dict[str, Any]]) -> dict[int, dict[str, Any]]:
 
 def _rows_from_frame_map(rows_by_frame: dict[int, dict[str, Any]]) -> list[dict[str, str]]:
     return [_csv_row(rows_by_frame[frame]) for frame in sorted(rows_by_frame)]
+
+
+def _try_apply_segment(
+    base_by_frame: dict[int, dict[str, Any]],
+    segment: list[dict[str, Any]],
+    *,
+    allow_replacement: bool,
+    max_speed_px_per_frame: float,
+    max_jump_px: float,
+) -> tuple[dict[int, dict[str, Any]], list[int], list[dict[str, Any]], list[dict[str, Any]]]:
+    remaining = list(segment)
+    last_violations: list[dict[str, Any]] = []
+    while remaining:
+        candidate_by_frame = {frame: dict(row) for frame, row in base_by_frame.items()}
+        touched_frames: list[int] = []
+        for high_row in remaining:
+            frame = _parse_int(high_row.get("Frame"))
+            if frame is None:
+                continue
+            main_row = candidate_by_frame.get(frame)
+            if main_row is not None and _is_valid_track_row(main_row) and not allow_replacement:
+                continue
+            candidate_by_frame[frame] = _normalized_csv_row(high_row)
+            touched_frames.append(frame)
+
+        if not touched_frames:
+            return base_by_frame, [], last_violations, remaining
+
+        violations = _jump_gate_violations(
+            _rows_from_frame_map(candidate_by_frame),
+            touched_frames=set(touched_frames),
+            max_speed_px_per_frame=max_speed_px_per_frame,
+            max_jump_px=max_jump_px,
+        )
+        if not violations:
+            return candidate_by_frame, touched_frames, [], []
+
+        last_violations = violations
+        trimmed = _trim_boundary_violation(remaining, touched_frames, violations)
+        if trimmed is None:
+            return base_by_frame, [], violations, remaining
+        remaining = trimmed
+
+    return base_by_frame, [], last_violations, remaining
+
+
+def _trim_boundary_violation(
+    segment: list[dict[str, Any]],
+    touched_frames: list[int],
+    violations: list[dict[str, Any]],
+) -> list[dict[str, Any]] | None:
+    if not touched_frames:
+        return None
+    touched = set(touched_frames)
+    first_frame = min(touched_frames)
+    last_frame = max(touched_frames)
+    for violation in violations:
+        previous_frame = _parse_int(violation.get("previous_frame"))
+        current_frame = _parse_int(violation.get("current_frame"))
+        if current_frame == first_frame and previous_frame not in touched:
+            return [row for row in segment if _parse_int(row.get("Frame")) != first_frame]
+        if previous_frame == last_frame and current_frame not in touched:
+            return [row for row in segment if _parse_int(row.get("Frame")) != last_frame]
+    return None
+
+
+def _split_high_recall_segments(
+    rows: list[dict[str, Any]],
+    *,
+    max_speed_px_per_frame: float,
+    max_jump_px: float,
+) -> list[list[dict[str, Any]]]:
+    segments: list[list[dict[str, Any]]] = []
+    current: list[dict[str, Any]] = []
+    previous: dict[str, Any] | None = None
+    for row in rows:
+        if previous is not None and _breaks_segment(
+            previous,
+            row,
+            max_speed_px_per_frame=max_speed_px_per_frame,
+            max_jump_px=max_jump_px,
+        ):
+            if current:
+                segments.append(current)
+            current = []
+        current.append(row)
+        previous = row
+    if current:
+        segments.append(current)
+    return segments
+
+
+def _breaks_segment(
+    previous: dict[str, Any],
+    current: dict[str, Any],
+    *,
+    max_speed_px_per_frame: float,
+    max_jump_px: float,
+) -> bool:
+    previous_frame = _parse_int(previous.get("Frame"))
+    current_frame = _parse_int(current.get("Frame"))
+    if previous_frame is None or current_frame is None:
+        return True
+    if current_frame - previous_frame > MAX_SEGMENT_FRAME_GAP:
+        return True
+    return _motion_violation(
+        previous,
+        current,
+        max_speed_px_per_frame=max_speed_px_per_frame,
+        max_jump_px=max_jump_px,
+    ) is not None
+
+
+def _segment_acceptance_key(segment: list[dict[str, Any]]) -> tuple[float, float, float, int]:
+    frames = [_parse_int(row.get("Frame")) for row in segment]
+    start_frame = min((frame for frame in frames if frame is not None), default=0)
+    detected_count = sum(1 for row in segment if _normalize_status(row.get("Status")) == "Detected")
+    confidences = [_parse_float(row.get("Confidence")) or 0.0 for row in segment]
+    average_confidence = sum(confidences) / len(confidences) if confidences else 0.0
+    return (-float(len(segment)), -float(detected_count), -average_confidence, start_frame)
+
+
+def _window_allows_replacement(window: dict[str, Any]) -> bool:
+    reason = str(window.get("reason") or "").casefold()
+    return any(marker in reason for marker in REPLACEMENT_REASON_MARKERS)
 
 
 def _csv_row(row: dict[str, Any]) -> dict[str, str]:
@@ -265,24 +418,49 @@ def _jump_gate_violations(
         current_point = (_parse_float(current.get("X")), _parse_float(current.get("Y")))
         if None in previous_point or None in current_point:
             continue
-        frame_gap = max(1, current_frame - previous_frame)
-        distance = math.dist(
-            (float(previous_point[0]), float(previous_point[1])),
-            (float(current_point[0]), float(current_point[1])),
+        violation = _motion_violation(
+            previous,
+            current,
+            max_speed_px_per_frame=max_speed_px_per_frame,
+            max_jump_px=max_jump_px,
         )
-        speed = distance / frame_gap
-        if distance > max_jump_px or speed > max_speed_px_per_frame:
-            violations.append(
-                {
-                    "previous_frame": previous_frame,
-                    "current_frame": current_frame,
-                    "distance_px": round(distance, 4),
-                    "speed_px_per_frame": round(speed, 4),
-                    "max_jump_px": max_jump_px,
-                    "max_speed_px_per_frame": max_speed_px_per_frame,
-                }
-            )
+        if violation is not None:
+            violations.append(violation)
     return violations
+
+
+def _motion_violation(
+    previous: dict[str, Any],
+    current: dict[str, Any],
+    *,
+    max_speed_px_per_frame: float,
+    max_jump_px: float,
+) -> dict[str, Any] | None:
+    previous_frame = _parse_int(previous.get("Frame"))
+    current_frame = _parse_int(current.get("Frame"))
+    if previous_frame is None or current_frame is None:
+        return None
+    previous_point = (_parse_float(previous.get("X")), _parse_float(previous.get("Y")))
+    current_point = (_parse_float(current.get("X")), _parse_float(current.get("Y")))
+    if None in previous_point or None in current_point:
+        return None
+    frame_gap = max(1, current_frame - previous_frame)
+    distance = math.dist(
+        (float(previous_point[0]), float(previous_point[1])),
+        (float(current_point[0]), float(current_point[1])),
+    )
+    speed = distance / frame_gap
+    adjacent_jump_failed = frame_gap <= 1 and distance > max_jump_px
+    if adjacent_jump_failed or speed > max_speed_px_per_frame:
+        return {
+            "previous_frame": previous_frame,
+            "current_frame": current_frame,
+            "distance_px": round(distance, 4),
+            "speed_px_per_frame": round(speed, 4),
+            "max_jump_px": max_jump_px,
+            "max_speed_px_per_frame": max_speed_px_per_frame,
+        }
+    return None
 
 
 def _parse_int(value: Any) -> int | None:

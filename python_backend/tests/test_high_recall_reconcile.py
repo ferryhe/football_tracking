@@ -85,6 +85,110 @@ class HighRecallReconcileTests(unittest.TestCase):
             result["review_packet_clues"][0],
         )
 
+    def test_reconcile_accepts_clean_subsegments_from_noisy_high_recall_window(self) -> None:
+        main_rows = [
+            _row(0, 4700, 940, "Detected"),
+            _row(1, 3200, 1100, "Predicted", 0.12),
+            _row(2, None, None, "Lost", 0.0),
+            _row(3, None, None, "Lost", 0.0),
+            _row(4, None, None, "Lost", 0.0),
+            _row(5, None, None, "Lost", 0.0),
+            _row(6, None, None, "Lost", 0.0),
+            _row(7, None, None, "Lost", 0.0),
+        ]
+        high_recall_rows = [
+            _row(1, 4710, 942, "Detected", 0.70),
+            _row(2, 4720, 944, "Detected", 0.71),
+            _row(3, 4730, 946, "Predicted", 0.55),
+            _row(4, 3300, 1080, "Detected", 0.75),
+            _row(5, 5040, 1025, "Detected", 0.68),
+            _row(6, 5050, 1028, "Detected", 0.69),
+        ]
+
+        result = reconcile_high_recall_window(
+            main_rows,
+            high_recall_rows,
+            {
+                "start_frame": 1,
+                "end_frame": 6,
+                "reason": "large_jump; suspicious_tracklet; lost_gap",
+                "priority": "high",
+            },
+            max_speed_px_per_frame=180.0,
+            max_jump_px=260.0,
+        )
+
+        self.assertTrue(result["accepted"])
+        self.assertEqual([1, 2, 3, 5, 6], result["accepted_frames"])
+        by_frame = {int(row["Frame"]): row for row in result["rows"]}
+        self.assertEqual("4710.0", by_frame[1]["X"])
+        self.assertEqual("4730.0", by_frame[3]["X"])
+        self.assertEqual("Lost", by_frame[4]["Status"])
+        self.assertEqual("5050.0", by_frame[6]["X"])
+
+    def test_reconcile_uses_speed_gate_across_long_lost_gaps(self) -> None:
+        main_rows = [
+            _row(0, 0, 0, "Detected"),
+            _row(1, None, None, "Lost", 0.0),
+            _row(2, None, None, "Lost", 0.0),
+            _row(3, None, None, "Lost", 0.0),
+            _row(4, None, None, "Lost", 0.0),
+            _row(5, None, None, "Lost", 0.0),
+            _row(6, 600, 0, "Detected"),
+        ]
+        high_recall_rows = [_row(3, 300, 0, "Detected", 0.8)]
+
+        result = reconcile_high_recall_window(
+            main_rows,
+            high_recall_rows,
+            {"start_frame": 1, "end_frame": 5, "reason": "lost_gap", "priority": "medium"},
+            max_speed_px_per_frame=120.0,
+            max_jump_px=180.0,
+        )
+
+        self.assertTrue(result["accepted"])
+        self.assertEqual([3], result["accepted_frames"])
+
+    def test_reconcile_prefers_long_segment_over_short_false_bridge(self) -> None:
+        main_rows = [_row(0, 4937, 1010, "Detected")]
+        main_rows.extend(_row(frame, None, None, "Lost", 0.0) for frame in range(1, 35))
+        high_recall_rows = [
+            _row(10, 3773, 769, "Detected", 0.43),
+            *[_row(frame, 4980 + frame, 1010, "Detected", 0.65) for frame in range(11, 31)],
+        ]
+
+        result = reconcile_high_recall_window(
+            main_rows,
+            high_recall_rows,
+            {"start_frame": 1, "end_frame": 34, "reason": "lost_gap", "priority": "high"},
+            max_speed_px_per_frame=180.0,
+            max_jump_px=260.0,
+        )
+
+        self.assertTrue(result["accepted"])
+        self.assertNotIn(10, result["accepted_frames"])
+        self.assertEqual(list(range(11, 31)), result["accepted_frames"])
+
+    def test_reconcile_trims_bad_prefix_and_keeps_later_continuous_segment(self) -> None:
+        main_rows = [_row(0, 4980, 1000, "Detected")]
+        main_rows.extend(_row(frame, None, None, "Lost", 0.0) for frame in range(1, 40))
+        high_recall_rows = [
+            _row(1, 4200, 720, "Detected", 0.5),
+            *[_row(frame, 3400 + frame, 880, "Detected", 0.62) for frame in range(20, 31)],
+        ]
+
+        result = reconcile_high_recall_window(
+            main_rows,
+            high_recall_rows,
+            {"start_frame": 1, "end_frame": 39, "reason": "lost_gap", "priority": "high"},
+            max_speed_px_per_frame=180.0,
+            max_jump_px=260.0,
+        )
+
+        self.assertTrue(result["accepted"])
+        self.assertNotIn(1, result["accepted_frames"])
+        self.assertEqual(list(range(20, 31)), result["accepted_frames"])
+
     def test_reconcile_accepts_case_insensitive_detected_status_and_normalizes_output(self) -> None:
         main_rows = [
             _row(0, 0, 0, "Detected"),

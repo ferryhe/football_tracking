@@ -267,11 +267,11 @@ class SceneBiasResolver:
             profile = "fisheye_180_indoor"
 
         if anchor_y >= 1000:
-            return (1100.0, 430.0, 90.0)
+            return (1100.0, 430.0, 140.0)
         if anchor_y >= 800:
-            return (900.0, 320.0, 80.0)
+            return (900.0, 320.0, 180.0)
         if anchor_y >= 620:
-            return (700.0, 240.0, 60.0)
+            return (700.0, 240.0, 240.0)
         return (520.0, 180.0, 50.0)
 
     def _point_in_polygon(self, x: float, y: float, points: tuple[tuple[int, int], ...]) -> bool:

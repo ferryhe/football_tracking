@@ -9,6 +9,7 @@ from typing import Any
 SCHEMA_VERSION = "1.0"
 DEFAULT_MERGE_GAP_FRAMES = 30
 DEFAULT_MAX_TOTAL_FRAMES = 1800
+LONG_LOST_GAP_MIN_FRAMES = 120
 PRIORITY_RANK = {"none": 0, "low": 1, "medium": 2, "high": 3}
 
 
@@ -33,11 +34,21 @@ def build_high_recall_windows(
         total_frames=safe_total_frames,
         mode=str(mode or "sahi"),
     )
-    merged_windows = _merge_windows(candidates, merge_gap_frames=safe_merge_gap)
+    budgeted_candidates, budget_rejected_windows, _ = _apply_frame_budget(
+        candidates,
+        max_total_frames=safe_max_total_frames,
+    )
+    merged_windows = _merge_windows(
+        budgeted_candidates,
+        merge_gap_frames=safe_merge_gap,
+        max_window_frames=safe_max_total_frames,
+    )
     selected_windows, rejected_windows, status = _apply_frame_budget(
         merged_windows,
         max_total_frames=safe_max_total_frames,
     )
+    rejected_windows = [*budget_rejected_windows, *rejected_windows]
+    status = _plan_status(selected_windows, rejected_windows)
 
     return {
         "schema_version": SCHEMA_VERSION,
@@ -139,6 +150,8 @@ def _ai_review_trigger_windows(report: dict[str, Any] | None) -> list[dict[str, 
     if isinstance(triggers, list):
         for trigger in triggers:
             if not isinstance(trigger, dict):
+                continue
+            if str(trigger.get("type") or "") == "dense_noise_cluster":
                 continue
             windows.append(
                 _raw_window(
@@ -268,7 +281,12 @@ def _normalize_windows(
     return normalized
 
 
-def _merge_windows(windows: list[dict[str, Any]], *, merge_gap_frames: int) -> list[dict[str, Any]]:
+def _merge_windows(
+    windows: list[dict[str, Any]],
+    *,
+    merge_gap_frames: int,
+    max_window_frames: int | None = None,
+) -> list[dict[str, Any]]:
     merged: list[dict[str, Any]] = []
     for window in sorted(windows, key=lambda item: (item["start_frame"], item["end_frame"])):
         if not merged:
@@ -277,6 +295,10 @@ def _merge_windows(windows: list[dict[str, Any]], *, merge_gap_frames: int) -> l
         previous = merged[-1]
         gap = window["start_frame"] - previous["end_frame"] - 1
         if gap > merge_gap_frames:
+            merged.append(_copy_window(window))
+            continue
+        merged_end = max(previous["end_frame"], window["end_frame"])
+        if max_window_frames is not None and merged_end - previous["start_frame"] + 1 > max_window_frames:
             merged.append(_copy_window(window))
             continue
         previous["end_frame"] = max(previous["end_frame"], window["end_frame"])
@@ -301,7 +323,7 @@ def _apply_frame_budget(
     used_frames = 0
     priority_order = sorted(
         windows,
-        key=lambda item: (-_priority_rank(item["priority"]), _window_frame_count(item), item["start_frame"]),
+        key=lambda item: (-_budget_priority_rank(item), _window_frame_count(item), item["start_frame"]),
     )
     for window in priority_order:
         window_frames = _window_frame_count(window)
@@ -318,10 +340,28 @@ def _apply_frame_budget(
     return selected, rejected, "capped" if selected else "rejected"
 
 
+def _plan_status(selected: list[dict[str, Any]], rejected: list[dict[str, Any]]) -> str:
+    if rejected:
+        return "capped" if selected else "rejected"
+    return "succeeded"
+
+
 def _copy_window(window: dict[str, Any]) -> dict[str, Any]:
     copied = dict(window)
     copied["sources"] = list(window.get("sources") or [])
     return copied
+
+
+def _budget_priority_rank(window: dict[str, Any]) -> int:
+    rank = _priority_rank(str(window.get("priority") or "none"))
+    if _is_long_lost_gap_window(window):
+        rank += len(PRIORITY_RANK)
+    return rank
+
+
+def _is_long_lost_gap_window(window: dict[str, Any]) -> bool:
+    reason = str(window.get("reason") or "").lower()
+    return "lost_gap" in reason and _window_frame_count(window) >= LONG_LOST_GAP_MIN_FRAMES
 
 
 def _ball_audit_event_priority(event: dict[str, Any]) -> str:
