@@ -322,7 +322,18 @@ class ApiServiceSmokeTests(unittest.TestCase):
                         "frame_count": 2,
                         "score": 0.62,
                         "reason": "Sustained ball track contains a speed burst.",
-                        "render_window": {"start_frame": 0, "end_frame": 31},
+                        "core_window": {"start_frame": 0, "end_frame": 1},
+                        "render_window": {"start_frame": 0, "end_frame": 7},
+                        "buffer_policy": {
+                            "fps": 6.0,
+                            "fps_source": "test_fixture",
+                            "pre_buffer_seconds": 0.75,
+                            "post_buffer_seconds": 4.5,
+                            "pre_buffer_frames": 4,
+                            "post_buffer_frames": 27,
+                            "min_post_event_frames": 27,
+                            "min_tail_frames": 27,
+                        },
                         "evidence": {
                             "max_speed_px_per_frame": 35.0,
                             "mean_confidence": 0.9,
@@ -1231,17 +1242,250 @@ class ApiServiceSmokeTests(unittest.TestCase):
         self.assertFalse(completed_run["modules_enabled"]["postprocess"])
         self.assertFalse(completed_run["modules_enabled"]["follow_cam"])
         self.assertEqual(0, calls[0]["start_frame"])
-        self.assertEqual(31, calls[0]["end_frame"])
+        self.assertEqual(7, calls[0]["end_frame"])
         self.assertEqual("highlight.mp4", Path(calls[0]["output_path"]).name)
         self.assertEqual("cleaned:shot_candidate:0-1", report["candidate_id"])
-        self.assertEqual({"start_frame": 0, "end_frame": 31}, report["window"])
-        self.assertEqual({"frame_count": 32, "fps": 6.0}, report["renderer"])
+        self.assertEqual({"start_frame": 0, "end_frame": 7}, report["window"])
+        self.assertEqual({"frame_count": 8, "fps": 6.0}, report["renderer"])
+        self.assertEqual("candidate_render_window", report["selection_source"])
         self.assertIn("highlight.mp4", {artifact["name"] for artifact in completed_run["artifacts"]})
         self.assertIn("highlight_report.json", {artifact["name"] for artifact in completed_run["artifacts"]})
         self.assertTrue((output_dir / "ball_track.cleaned.csv").exists())
         self.assertTrue((output_dir / "event_candidates.json").exists())
         self.assertTrue((output_dir / "run_manifest.json").exists())
         self.assertTrue((output_dir / "metrics_report.json").exists())
+
+    def test_create_highlight_render_allows_manual_roll_override_for_candidate(self) -> None:
+        self.create_output_bundle("kept_baseline")
+        source_run = self.service.list_runs()[0]
+
+        class ImmediateThread:
+            def __init__(self, *, target, args, name, daemon) -> None:
+                self._target = target
+                self._args = args
+                self._alive = False
+
+            def start(self) -> None:
+                self._alive = True
+                try:
+                    self._target(*self._args)
+                finally:
+                    self._alive = False
+
+            def is_alive(self) -> bool:
+                return self._alive
+
+        calls: list[dict[str, object]] = []
+
+        def fake_render_highlight_clip(
+            *,
+            input_video: Path,
+            output_path: Path,
+            start_frame: int,
+            end_frame: int,
+            progress_callback=None,
+            should_cancel=None,
+        ) -> dict[str, object]:
+            calls.append({"start_frame": start_frame, "end_frame": end_frame})
+            output_path.write_text("highlight", encoding="utf-8")
+            return {"frame_count": end_frame - start_frame + 1, "fps": 6.0}
+
+        with mock.patch("football_tracking.api.service.threading.Thread", ImmediateThread), mock.patch(
+            "football_tracking.api.service.render_highlight_clip",
+            fake_render_highlight_clip,
+        ):
+            created_run = self.service.create_highlight_render(
+                source_run["run_id"],
+                {
+                    "candidate_id": "cleaned:shot_candidate:0-1",
+                    "pre_roll_frames": 2,
+                    "post_roll_frames": 3,
+                    "output_dir_name": "manual_roll_highlight_run",
+                },
+            )
+
+        completed_run = self.service.get_run(created_run["run_id"])
+        report = json.loads((Path(completed_run["output_dir"]) / "highlight_report.json").read_text(encoding="utf-8"))
+
+        self.assertEqual(0, calls[0]["start_frame"])
+        self.assertEqual(4, calls[0]["end_frame"])
+        self.assertEqual({"start_frame": 0, "end_frame": 4}, report["window"])
+        self.assertEqual("manual_candidate_roll", report["selection_source"])
+        self.assertTrue(any("minimum post-event tail" in warning for warning in report["warnings"]))
+
+    def test_create_highlight_render_can_use_explicit_approved_ai_window(self) -> None:
+        source_output = self.create_output_bundle("kept_baseline")
+        self.write_json(
+            "outputs/kept_baseline/ai_improvement_approved_actions.json",
+            {
+                "schema_version": "1.0",
+                "approved_actions": [
+                    {
+                        "approval_id": "approval_highlight_001",
+                        "improvement_id": "imp_highlight",
+                        "approved_action": "render_suggested_highlight",
+                        "approval_source": "api",
+                        "approved_at": "2026-06-22T00:00:00+00:00",
+                        "approved_by": "operator-a",
+                        "candidate_id": "cleaned:shot_candidate:0-1",
+                        "clip_action": "extend_tail",
+                        "suggested_window": {"start_frame": 0, "end_frame": 30},
+                        "provenance": {"source": "ai_improvement", "model": "gpt-improve"},
+                    }
+                ],
+            },
+        )
+        source_run = self.service.list_runs()[0]
+
+        class ImmediateThread:
+            def __init__(self, *, target, args, name, daemon) -> None:
+                self._target = target
+                self._args = args
+                self._alive = False
+
+            def start(self) -> None:
+                self._alive = True
+                try:
+                    self._target(*self._args)
+                finally:
+                    self._alive = False
+
+            def is_alive(self) -> bool:
+                return self._alive
+
+        calls: list[dict[str, object]] = []
+
+        def fake_render_highlight_clip(
+            *,
+            input_video: Path,
+            output_path: Path,
+            start_frame: int,
+            end_frame: int,
+            progress_callback=None,
+            should_cancel=None,
+        ) -> dict[str, object]:
+            calls.append({"start_frame": start_frame, "end_frame": end_frame})
+            output_path.write_text("highlight", encoding="utf-8")
+            return {"frame_count": end_frame - start_frame + 1, "fps": 6.0}
+
+        with mock.patch("football_tracking.api.service.threading.Thread", ImmediateThread), mock.patch(
+            "football_tracking.api.service.render_highlight_clip",
+            fake_render_highlight_clip,
+        ):
+            created_run = self.service.create_highlight_render(
+                source_run["run_id"],
+                {
+                    "approved_action_id": "approval_highlight_001",
+                    "output_dir_name": "approved_ai_highlight_run",
+                },
+            )
+
+        completed_run = self.service.get_run(created_run["run_id"])
+        report = json.loads((Path(completed_run["output_dir"]) / "highlight_report.json").read_text(encoding="utf-8"))
+
+        self.assertTrue(source_output.exists())
+        self.assertEqual({"start_frame": 0, "end_frame": 30}, report["window"])
+        self.assertEqual(30, calls[0]["end_frame"])
+        self.assertEqual("approved_ai_suggested_window", report["selection_source"])
+        self.assertEqual("approval_highlight_001", report["approval"]["approval_id"])
+        self.assertEqual("imp_highlight", report["approval"]["improvement_id"])
+        self.assertEqual("ai_improvement_approved_actions.json", report["approval"]["source_approved_actions"])
+
+    def test_create_highlight_render_rejects_approved_ai_window_that_excludes_core(self) -> None:
+        self.create_output_bundle("kept_baseline")
+        self.write_json(
+            "outputs/kept_baseline/ai_improvement_approved_actions.json",
+            {
+                "schema_version": "1.0",
+                "approved_actions": [
+                    {
+                        "approval_id": "approval_highlight_core",
+                        "improvement_id": "imp_highlight",
+                        "approved_action": "render_suggested_highlight",
+                        "candidate_id": "cleaned:shot_candidate:0-1",
+                        "suggested_window": {"start_frame": 1, "end_frame": 30},
+                    }
+                ],
+            },
+        )
+        source_run = self.service.list_runs()[0]
+
+        with self.assertRaisesRegex(RuntimeError, "core_window"):
+            self.service.create_highlight_render(
+                source_run["run_id"],
+                {
+                    "approved_action_id": "approval_highlight_core",
+                    "output_dir_name": "bad_approved_core_highlight",
+                },
+            )
+
+        self.assertFalse((self.repo_root / "outputs" / "runs" / "input" / "bad_approved_core_highlight").exists())
+
+    def test_create_highlight_render_rejects_approved_ai_window_that_trims_tail(self) -> None:
+        self.create_output_bundle("kept_baseline")
+        self.write_json(
+            "outputs/kept_baseline/ai_improvement_approved_actions.json",
+            {
+                "schema_version": "1.0",
+                "approved_actions": [
+                    {
+                        "approval_id": "approval_highlight_tail",
+                        "improvement_id": "imp_highlight",
+                        "approved_action": "adjust_highlight_window",
+                        "candidate_id": "cleaned:shot_candidate:0-1",
+                        "suggested_window": {"start_frame": 0, "end_frame": 4},
+                    }
+                ],
+            },
+        )
+        source_run = self.service.list_runs()[0]
+
+        with self.assertRaisesRegex(RuntimeError, "minimum post-event tail"):
+            self.service.create_highlight_render(
+                source_run["run_id"],
+                {
+                    "approved_action_id": "approval_highlight_tail",
+                    "output_dir_name": "bad_approved_tail_highlight",
+                },
+            )
+
+        self.assertFalse((self.repo_root / "outputs" / "runs" / "input" / "bad_approved_tail_highlight").exists())
+
+    def test_create_highlight_render_uses_post_buffer_frames_tail_fallback_for_approved_ai_window(self) -> None:
+        output_dir = self.create_output_bundle("kept_baseline")
+        event_candidates_path = output_dir / "event_candidates.json"
+        event_candidates = json.loads(event_candidates_path.read_text(encoding="utf-8"))
+        policy = event_candidates["candidates"][0]["buffer_policy"]
+        policy.pop("min_tail_frames", None)
+        policy.pop("min_post_event_frames", None)
+        event_candidates_path.write_text(json.dumps(event_candidates, ensure_ascii=False, indent=2), encoding="utf-8")
+        self.write_json(
+            "outputs/kept_baseline/ai_improvement_approved_actions.json",
+            {
+                "schema_version": "1.0",
+                "approved_actions": [
+                    {
+                        "approval_id": "approval_highlight_post_buffer",
+                        "improvement_id": "imp_highlight",
+                        "approved_action": "render_suggested_highlight",
+                        "candidate_id": "cleaned:shot_candidate:0-1",
+                        "suggested_window": {"start_frame": 0, "end_frame": 4},
+                    }
+                ],
+            },
+        )
+        source_run = self.service.list_runs()[0]
+
+        with self.assertRaisesRegex(RuntimeError, "minimum post-event tail"):
+            self.service.create_highlight_render(
+                source_run["run_id"],
+                {
+                    "approved_action_id": "approval_highlight_post_buffer",
+                    "output_dir_name": "bad_approved_post_buffer_highlight",
+                },
+            )
+
+        self.assertFalse((self.repo_root / "outputs" / "runs" / "input" / "bad_approved_post_buffer_highlight").exists())
 
     def test_create_highlight_render_creates_child_task_from_frame_window(self) -> None:
         self.create_output_bundle("kept_baseline")
@@ -1370,6 +1614,10 @@ class ApiServiceSmokeTests(unittest.TestCase):
             HighlightRenderRequest()
         with self.assertRaises(ValidationError):
             HighlightRenderRequest(start_frame=5, end_frame=4)
+        with self.assertRaises(ValidationError):
+            HighlightRenderRequest(candidate_id="cleaned:shot_candidate:0-1", start_frame=0, end_frame=4)
+        with self.assertRaises(ValidationError):
+            HighlightRenderRequest(candidate_id="cleaned:shot_candidate:0-1", approved_action_id="approval_001")
 
         with self.assertRaises(HTTPException) as raised:
             run_routes.create_highlight_render(
@@ -2063,7 +2311,8 @@ class ApiServiceSmokeTests(unittest.TestCase):
 
     def test_create_app_documents_event_candidates_response_schema(self) -> None:
         app = create_app(self.repo_root)
-        operation = app.openapi()["paths"]["/api/v1/runs/{run_id}/event-candidates"]["get"]
+        openapi = app.openapi()
+        operation = openapi["paths"]["/api/v1/runs/{run_id}/event-candidates"]["get"]
 
         self.assertEqual(
             "#/components/schemas/EventCandidateReport",
@@ -2073,15 +2322,32 @@ class ApiServiceSmokeTests(unittest.TestCase):
             "#/components/schemas/ApiErrorResponse",
             operation["responses"]["404"]["content"]["application/json"]["schema"]["$ref"],
         )
+        report_schema = openapi["components"]["schemas"]["EventCandidateReport"]
+        self.assertIn("warnings", report_schema["properties"])
+        self.assertEqual("array", report_schema["properties"]["warnings"]["type"])
+        candidate_schema = openapi["components"]["schemas"]["EventCandidate"]
+        self.assertIn("core_window", candidate_schema["required"])
+        self.assertIn("buffer_policy", candidate_schema["required"])
+        self.assertEqual(
+            "#/components/schemas/EventCandidateBufferPolicy",
+            candidate_schema["properties"]["buffer_policy"]["$ref"],
+        )
+        buffer_schema = openapi["components"]["schemas"]["EventCandidateBufferPolicy"]
+        self.assertIn("fps_source", buffer_schema["required"])
+        self.assertIn("min_tail_frames", buffer_schema["required"])
 
     def test_create_app_documents_highlight_render_request_schema(self) -> None:
         app = create_app(self.repo_root)
-        operation = app.openapi()["paths"]["/api/v1/runs/{run_id}/highlight-render"]["post"]
+        openapi = app.openapi()
+        operation = openapi["paths"]["/api/v1/runs/{run_id}/highlight-render"]["post"]
 
         self.assertEqual(
             "#/components/schemas/HighlightRenderRequest",
             operation["requestBody"]["content"]["application/json"]["schema"]["$ref"],
         )
+        request_schema = openapi["components"]["schemas"]["HighlightRenderRequest"]
+        self.assertIn("oneOf", request_schema)
+        self.assertEqual(3, len(request_schema["oneOf"]))
         self.assertEqual(
             "#/components/schemas/RunRecord",
             operation["responses"]["202"]["content"]["application/json"]["schema"]["$ref"],

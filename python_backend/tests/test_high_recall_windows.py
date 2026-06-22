@@ -583,7 +583,7 @@ class HighRecallChunkRunnerHookTests(unittest.TestCase):
 
         write_audit.assert_called_once_with(output_dir)
         write_ai_review.assert_called_once_with(output_dir)
-        write_events.assert_called_once_with(output_dir)
+        write_events.assert_called_once_with(output_dir, fps=None, fps_source=None)
         write_windows.assert_called_once()
         self.assertIsNone(write_windows.call_args.kwargs["approved_actions_path"])
         write_config.assert_called_once()

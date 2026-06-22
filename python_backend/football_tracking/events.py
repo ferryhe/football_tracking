@@ -13,19 +13,23 @@ MIN_DETECTED_FRAMES = 2
 SPEED_BURST_MIN_PX_PER_FRAME = 32.0
 GOAL_ZONE_EDGE_RATIO = 0.08
 GOAL_ZONE_MIN_TRACK_SPAN_PX = 300.0
-DEFAULT_PRE_ROLL_FRAMES = 15
-DEFAULT_POST_ROLL_FRAMES = 30
+DEFAULT_FPS = 20.0
+SHOT_PRE_BUFFER_SECONDS = 0.75
+SHOT_POST_BUFFER_SECONDS = 4.5
+GOAL_PRE_BUFFER_SECONDS = 0.75
+GOAL_POST_BUFFER_SECONDS = 6.0
 VALID_TRACK_STATUSES = {"Detected", "Predicted"}
 
 
-def build_event_candidate_report(output_dir: Path) -> dict[str, Any]:
+def build_event_candidate_report(output_dir: Path, *, fps: float | None = None, fps_source: str | None = None) -> dict[str, Any]:
     csv_path, source_name = _resolve_track_csv(output_dir)
     if csv_path is None:
         return _empty_report()
 
     rows = _read_track_rows(csv_path)
     valid_rows = [row for row in rows if _is_valid_track_row(row)]
-    candidates = _build_candidates(source_name, valid_rows)
+    normalized_fps, resolved_fps_source, fps_warnings = _normalize_fps(fps, fps_source=fps_source)
+    candidates = _build_candidates(source_name, valid_rows, fps=normalized_fps, fps_source=resolved_fps_source)
     counts_by_type: dict[str, int] = {}
     for candidate in candidates:
         event_type = str(candidate["type"])
@@ -45,12 +49,13 @@ def build_event_candidate_report(output_dir: Path) -> dict[str, Any]:
         "source": {"name": source_name, "path": csv_path.name, "row_count": len(rows)},
         "summary": summary,
         "candidates": candidates,
+        "warnings": fps_warnings,
     }
 
 
-def write_event_candidate_report(output_dir: Path) -> dict[str, Any]:
+def write_event_candidate_report(output_dir: Path, *, fps: float | None = None, fps_source: str | None = None) -> dict[str, Any]:
     output_dir.mkdir(parents=True, exist_ok=True)
-    report = build_event_candidate_report(output_dir)
+    report = build_event_candidate_report(output_dir, fps=fps, fps_source=fps_source)
     (output_dir / EVENT_CANDIDATES_NAME).write_text(
         json.dumps(report, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
@@ -104,6 +109,7 @@ def _empty_report() -> dict[str, Any]:
             "max_frame": None,
         },
         "candidates": [],
+        "warnings": [],
     }
 
 
@@ -142,7 +148,7 @@ def _read_track_rows(csv_path: Path) -> list[dict[str, Any]]:
     )
 
 
-def _build_candidates(source_name: str, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _build_candidates(source_name: str, rows: list[dict[str, Any]], *, fps: float, fps_source: str) -> list[dict[str, Any]]:
     if not rows:
         return []
 
@@ -158,6 +164,8 @@ def _build_candidates(source_name: str, rows: list[dict[str, Any]]) -> list[dict
             segment=segment,
             min_x=min_x,
             x_span=x_span,
+            fps=fps,
+            fps_source=fps_source,
         )
         if candidate is not None:
             candidates.append(candidate)
@@ -170,6 +178,8 @@ def _candidate_from_segment(
     segment: list[dict[str, Any]],
     min_x: float,
     x_span: float,
+    fps: float,
+    fps_source: str,
 ) -> dict[str, Any] | None:
     if len(segment) < MIN_SEGMENT_FRAMES:
         return None
@@ -190,6 +200,7 @@ def _candidate_from_segment(
     mean_confidence = _mean(confidences)
     goal_side = _goal_side(segment, min_x=min_x, x_span=x_span)
     event_type = "goal_candidate" if goal_side is not None else "shot_candidate"
+    buffer_policy = _buffer_policy(event_type, fps=fps, fps_source=fps_source)
 
     reason = "Sustained ball track contains a speed burst."
     if goal_side is not None:
@@ -202,13 +213,18 @@ def _candidate_from_segment(
         "label": "candidate",
         "start_frame": start_frame,
         "end_frame": end_frame,
+        "core_window": {
+            "start_frame": start_frame,
+            "end_frame": end_frame,
+        },
         "frame_count": len(segment),
         "score": score,
         "reason": reason,
         "render_window": {
-            "start_frame": max(0, start_frame - DEFAULT_PRE_ROLL_FRAMES),
-            "end_frame": end_frame + DEFAULT_POST_ROLL_FRAMES,
+            "start_frame": max(0, start_frame - int(buffer_policy["pre_buffer_frames"])),
+            "end_frame": end_frame + int(buffer_policy["post_buffer_frames"]),
         },
+        "buffer_policy": buffer_policy,
         "evidence": {
             "track_source": source_name,
             "status_counts": _status_counts(segment),
@@ -263,6 +279,38 @@ def _candidate_score(*, max_speed: float, mean_confidence: float | None, goal_si
     confidence_score = 0.0 if mean_confidence is None else max(0.0, min(1.0, mean_confidence))
     goal_bonus = 0.10 if goal_side is not None else 0.0
     return round(min(0.99, 0.45 + speed_score * 0.35 + confidence_score * 0.10 + goal_bonus), 4)
+
+
+def _buffer_policy(event_type: str, *, fps: float, fps_source: str) -> dict[str, float | int | str]:
+    if event_type == "goal_candidate":
+        pre_seconds = GOAL_PRE_BUFFER_SECONDS
+        post_seconds = GOAL_POST_BUFFER_SECONDS
+    else:
+        pre_seconds = SHOT_PRE_BUFFER_SECONDS
+        post_seconds = SHOT_POST_BUFFER_SECONDS
+    pre_frames = _seconds_to_frames(pre_seconds, fps)
+    post_frames = _seconds_to_frames(post_seconds, fps)
+    return {
+        "fps": fps,
+        "fps_source": fps_source,
+        "pre_buffer_seconds": pre_seconds,
+        "post_buffer_seconds": post_seconds,
+        "pre_buffer_frames": pre_frames,
+        "post_buffer_frames": post_frames,
+        "min_post_event_frames": post_frames,
+        "min_tail_frames": post_frames,
+    }
+
+
+def _seconds_to_frames(seconds: float, fps: float) -> int:
+    return max(0, int(math.ceil(seconds * fps)))
+
+
+def _normalize_fps(value: float | None, *, fps_source: str | None = None) -> tuple[float, str, list[str]]:
+    if isinstance(value, (int, float)) and math.isfinite(float(value)) and float(value) > 0:
+        source = fps_source.strip() if isinstance(fps_source, str) and fps_source.strip() else "explicit"
+        return float(value), source, []
+    return DEFAULT_FPS, "default", [f"fps unavailable; defaulted to {DEFAULT_FPS:.1f}fps for event candidate buffers."]
 
 
 def _status_counts(rows: list[dict[str, Any]]) -> dict[str, int]:

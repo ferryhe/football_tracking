@@ -2422,31 +2422,44 @@ class ApiService:
         return candidate
 
     def _resolve_highlight_selection(self, source_run_id: str, request: dict[str, Any]) -> dict[str, Any]:
+        approved_action_id = request.get("approved_action_id")
+        if approved_action_id:
+            return self._resolve_approved_highlight_selection(source_run_id, str(approved_action_id), request)
+
         candidate_id = request.get("candidate_id")
         if candidate_id:
             report = self.get_event_candidates_report(source_run_id)
             candidates_raw = report.get("candidates")
             candidates = candidates_raw if isinstance(candidates_raw, list) else []
-            candidate = next(
-                (item for item in candidates if isinstance(item, dict) and item.get("id") == candidate_id),
-                None,
-            )
-            if candidate is None:
-                raise FileNotFoundError(f"Event candidate not found: {candidate_id}")
-            start_frame = self._optional_int(candidate.get("start_frame"))
-            end_frame = self._optional_int(candidate.get("end_frame"))
-            if start_frame is None or end_frame is None:
+            candidate = self._candidate_by_id(candidates, str(candidate_id))
+            core_window = self._candidate_core_window(candidate)
+            if core_window is None:
                 raise RuntimeError(f"Event candidate has no usable frame window: {candidate_id}")
             pre_roll = self._optional_int(request.get("pre_roll_frames"))
             post_roll = self._optional_int(request.get("post_roll_frames"))
-            pre_roll = max(0, pre_roll if pre_roll is not None else 15)
-            post_roll = max(0, post_roll if post_roll is not None else 30)
+            selection_source = "candidate_render_window"
+            if pre_roll is not None or post_roll is not None:
+                pre_roll = max(0, pre_roll if pre_roll is not None else 0)
+                post_roll = max(0, post_roll if post_roll is not None else 0)
+                start_frame = max(0, core_window["start_frame"] - pre_roll)
+                end_frame = core_window["end_frame"] + post_roll
+                selection_source = "manual_candidate_roll"
+            else:
+                render_window = self._window_payload(candidate.get("render_window"))
+                if render_window is None:
+                    start_frame = max(0, core_window["start_frame"] - 15)
+                    end_frame = core_window["end_frame"] + 30
+                    selection_source = "legacy_candidate_roll"
+                else:
+                    start_frame = render_window["start_frame"]
+                    end_frame = render_window["end_frame"]
             return self._highlight_selection_payload(
                 candidate_id=str(candidate_id),
                 candidate=candidate,
-                start_frame=max(0, start_frame - pre_roll),
-                end_frame=end_frame + post_roll,
+                start_frame=start_frame,
+                end_frame=end_frame,
                 request=request,
+                selection_source=selection_source,
             )
 
         start_frame = self._optional_int(request.get("start_frame"))
@@ -2459,6 +2472,66 @@ class ApiService:
             start_frame=start_frame,
             end_frame=end_frame,
             request=request,
+            selection_source="explicit_frame_window",
+        )
+
+    def _resolve_approved_highlight_selection(
+        self,
+        source_run_id: str,
+        approved_action_id: str,
+        request: dict[str, Any],
+    ) -> dict[str, Any]:
+        source_run = self.get_run(source_run_id)
+        source_output_dir = Path(source_run["output_dir"]).resolve()
+        approved_actions_path = source_output_dir / "ai_improvement_approved_actions.json"
+        artifact = self._read_optional_json(approved_actions_path)
+        if not isinstance(artifact, dict):
+            raise FileNotFoundError("Approved AI improvement actions not found for highlight render.")
+        actions = artifact.get("approved_actions")
+        if not isinstance(actions, list):
+            raise RuntimeError("ai_improvement_approved_actions.json does not contain approved_actions.")
+        action = next(
+            (
+                item
+                for item in actions
+                if isinstance(item, dict) and str(item.get("approval_id") or "") == approved_action_id
+            ),
+            None,
+        )
+        if action is None:
+            raise FileNotFoundError(f"Approved highlight action not found: {approved_action_id}")
+        if action.get("approved_action") not in {"adjust_highlight_window", "render_suggested_highlight"}:
+            raise RuntimeError(f"Approved action is not a highlight render action: {approved_action_id}")
+        candidate_id = action.get("candidate_id")
+        if not isinstance(candidate_id, str) or not candidate_id.strip():
+            raise RuntimeError(f"Approved highlight action has no candidate_id: {approved_action_id}")
+        window = self._window_payload(action.get("suggested_window"))
+        if window is None:
+            raise RuntimeError(f"Approved highlight action has no suggested_window: {approved_action_id}")
+
+        report = self.get_event_candidates_report(source_run_id)
+        candidates_raw = report.get("candidates")
+        candidates = candidates_raw if isinstance(candidates_raw, list) else []
+        candidate = self._candidate_by_id(candidates, candidate_id.strip())
+        approval = {
+            "approval_id": action.get("approval_id"),
+            "improvement_id": action.get("improvement_id"),
+            "approved_action": action.get("approved_action"),
+            "clip_action": action.get("clip_action"),
+            "approved_by": action.get("approved_by"),
+            "approved_at": action.get("approved_at"),
+            "source_approved_actions": "ai_improvement_approved_actions.json",
+            "provenance": action.get("provenance") if isinstance(action.get("provenance"), dict) else {},
+        }
+        self._validate_approved_highlight_window(candidate, window, approved_action_id)
+        return self._highlight_selection_payload(
+            candidate_id=candidate_id.strip(),
+            candidate=candidate,
+            start_frame=window["start_frame"],
+            end_frame=window["end_frame"],
+            request=request,
+            selection_source="approved_ai_suggested_window",
+            approval=approval,
         )
 
     def _highlight_selection_payload(
@@ -2469,20 +2542,92 @@ class ApiService:
         start_frame: int,
         end_frame: int,
         request: dict[str, Any],
+        selection_source: str,
+        approval: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         if start_frame < 0 or end_frame < start_frame:
             raise RuntimeError(f"Invalid highlight frame window: {start_frame}-{end_frame}")
+        window = {"start_frame": start_frame, "end_frame": end_frame}
         return {
             "candidate_id": candidate_id,
             "candidate": candidate,
-            "window": {"start_frame": start_frame, "end_frame": end_frame},
+            "window": window,
+            "selection_source": selection_source,
+            "approval": approval,
+            "warnings": self._highlight_window_warnings(candidate, window),
             "request": {
                 "start_frame": request.get("start_frame"),
                 "end_frame": request.get("end_frame"),
                 "pre_roll_frames": request.get("pre_roll_frames"),
                 "post_roll_frames": request.get("post_roll_frames"),
+                "approved_action_id": request.get("approved_action_id"),
             },
         }
+
+    def _validate_approved_highlight_window(
+        self,
+        candidate: dict[str, Any],
+        window: dict[str, int],
+        approved_action_id: str,
+    ) -> None:
+        warnings = self._highlight_window_warnings(candidate, window)
+        if warnings:
+            raise RuntimeError(
+                f"Approved highlight action has invalid suggested_window: {approved_action_id}. "
+                + " ".join(warnings)
+            )
+
+    def _candidate_by_id(self, candidates: list[Any], candidate_id: str) -> dict[str, Any]:
+        candidate = next(
+            (item for item in candidates if isinstance(item, dict) and item.get("id") == candidate_id),
+            None,
+        )
+        if candidate is None:
+            raise FileNotFoundError(f"Event candidate not found: {candidate_id}")
+        return candidate
+
+    def _candidate_core_window(self, candidate: dict[str, Any]) -> dict[str, int] | None:
+        core_window = self._window_payload(candidate.get("core_window"))
+        if core_window is not None:
+            return core_window
+        start_frame = self._optional_int(candidate.get("start_frame"))
+        end_frame = self._optional_int(candidate.get("end_frame"))
+        if start_frame is None or end_frame is None or end_frame < start_frame:
+            return None
+        return {"start_frame": start_frame, "end_frame": end_frame}
+
+    def _window_payload(self, value: Any) -> dict[str, int] | None:
+        if not isinstance(value, dict):
+            return None
+        start_frame = self._optional_int(value.get("start_frame"))
+        end_frame = self._optional_int(value.get("end_frame"))
+        if start_frame is None or end_frame is None or start_frame < 0 or end_frame < start_frame:
+            return None
+        return {"start_frame": start_frame, "end_frame": end_frame}
+
+    def _highlight_window_warnings(self, candidate: dict[str, Any] | None, window: dict[str, int]) -> list[str]:
+        if not isinstance(candidate, dict):
+            return []
+        core_window = self._candidate_core_window(candidate)
+        if core_window is None:
+            return ["Event candidate has no core_window; highlight tail could not be verified."]
+        warnings: list[str] = []
+        if window["start_frame"] > core_window["start_frame"] or window["end_frame"] < core_window["end_frame"]:
+            warnings.append("Highlight window does not include the event candidate core_window.")
+        min_tail = None
+        if isinstance(candidate.get("buffer_policy"), dict):
+            min_tail = self._optional_int(candidate["buffer_policy"].get("min_tail_frames"))
+            if min_tail is None:
+                min_tail = self._optional_int(candidate["buffer_policy"].get("min_post_event_frames"))
+            if min_tail is None:
+                min_tail = self._optional_int(candidate["buffer_policy"].get("post_buffer_frames"))
+        if min_tail is not None and min_tail > 0:
+            required_end = core_window["end_frame"] + min_tail
+            if window["end_frame"] < required_end:
+                warnings.append(
+                    f"Highlight window does not preserve the minimum post-event tail: end_frame {window['end_frame']} < {required_end}."
+                )
+        return warnings
 
     def _prepare_highlight_render_inputs(self, source_output_dir: Path, render_output_dir: Path, config: AppConfig) -> None:
         self._prepare_follow_cam_render_inputs(
@@ -2516,6 +2661,10 @@ class ApiService:
                 else selection["candidate"].get("type")
             ),
             "window": selection["window"],
+            "selection_source": selection.get("selection_source"),
+            "request": selection.get("request") or {},
+            "approval": selection.get("approval"),
+            "warnings": selection.get("warnings") or [],
             "renderer": renderer_report,
             "candidate": selection.get("candidate"),
         }

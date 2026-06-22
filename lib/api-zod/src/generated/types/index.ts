@@ -86,6 +86,7 @@ export * from "./deleteRunOutputParams";
 export * from "./deriveConfigRequest";
 export * from "./deriveConfigRequestPatch";
 export * from "./eventCandidate";
+export * from "./eventCandidateBufferPolicy";
 export * from "./eventCandidateEvidence";
 export * from "./eventCandidateReport";
 export * from "./eventCandidateSource";

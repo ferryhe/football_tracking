@@ -4,6 +4,7 @@
  * Api
  * OpenAPI spec version: 0.1.0
  */
+import type { EventCandidateBufferPolicy } from "./eventCandidateBufferPolicy";
 import type { EventCandidateEvidence } from "./eventCandidateEvidence";
 import type { EventCandidateWindow } from "./eventCandidateWindow";
 
@@ -16,6 +17,8 @@ export interface EventCandidate {
   frame_count: number;
   score: number;
   reason: string;
+  core_window: EventCandidateWindow;
   render_window: EventCandidateWindow;
+  buffer_policy: EventCandidateBufferPolicy;
   evidence?: EventCandidateEvidence;
 }

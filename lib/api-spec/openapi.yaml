@@ -1505,6 +1505,26 @@ components:
           - type: string
           - type: 'null'
           title: False Positive Class
+        candidate_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Candidate Id
+        suggested_window:
+          anyOf:
+          - $ref: '#/components/schemas/AIFrameWindow'
+          - type: 'null'
+        clip_action:
+          anyOf:
+          - type: string
+            enum:
+            - extend_tail
+            - trim_head
+            - trim_tail
+            - split
+            - keep
+          - type: 'null'
+          title: Clip Action
         camera_motion_event_id:
           anyOf:
           - type: string
@@ -2318,8 +2338,12 @@ components:
         reason:
           type: string
           title: Reason
+        core_window:
+          $ref: '#/components/schemas/EventCandidateWindow'
         render_window:
           $ref: '#/components/schemas/EventCandidateWindow'
+        buffer_policy:
+          $ref: '#/components/schemas/EventCandidateBufferPolicy'
         evidence:
           additionalProperties: true
           type: object
@@ -2333,8 +2357,54 @@ components:
       - frame_count
       - score
       - reason
+      - core_window
       - render_window
+      - buffer_policy
       title: EventCandidate
+    EventCandidateBufferPolicy:
+      properties:
+        fps:
+          type: number
+          exclusiveMinimum: 0.0
+          title: Fps
+        fps_source:
+          type: string
+          title: Fps Source
+        pre_buffer_seconds:
+          type: number
+          minimum: 0.0
+          title: Pre Buffer Seconds
+        post_buffer_seconds:
+          type: number
+          minimum: 0.0
+          title: Post Buffer Seconds
+        pre_buffer_frames:
+          type: integer
+          minimum: 0.0
+          title: Pre Buffer Frames
+        post_buffer_frames:
+          type: integer
+          minimum: 0.0
+          title: Post Buffer Frames
+        min_post_event_frames:
+          type: integer
+          minimum: 0.0
+          title: Min Post Event Frames
+        min_tail_frames:
+          type: integer
+          minimum: 0.0
+          title: Min Tail Frames
+      type: object
+      required:
+      - fps
+      - fps_source
+      - pre_buffer_seconds
+      - post_buffer_seconds
+      - pre_buffer_frames
+      - post_buffer_frames
+      - min_post_event_frames
+      - min_tail_frames
+      title: EventCandidateBufferPolicy
     EventCandidateReport:
       properties:
         schema_version:
@@ -2349,6 +2419,11 @@ components:
             $ref: '#/components/schemas/EventCandidate'
           type: array
           title: Candidates
+        warnings:
+          items:
+            type: string
+          type: array
+          title: Warnings
       type: object
       required:
       - schema_version
@@ -2409,9 +2484,11 @@ components:
       properties:
         start_frame:
           type: integer
+          minimum: 0.0
           title: Start Frame
         end_frame:
           type: integer
+          minimum: 0.0
           title: End Frame
       type: object
       required:
@@ -2811,10 +2888,34 @@ components:
       - run_count
       title: HealthResponse
     HighlightRenderRequest:
-      anyOf:
-      - required:
+      oneOf:
+      - not:
+          anyOf:
+          - required:
+            - approved_action_id
+          - required:
+            - start_frame
+          - required:
+            - end_frame
+        required:
         - candidate_id
-      - required:
+      - not:
+          anyOf:
+          - required:
+            - candidate_id
+          - required:
+            - start_frame
+          - required:
+            - end_frame
+        required:
+        - approved_action_id
+      - not:
+          anyOf:
+          - required:
+            - candidate_id
+          - required:
+            - approved_action_id
+        required:
         - start_frame
         - end_frame
       properties:
@@ -2823,6 +2924,11 @@ components:
           - type: string
           - type: 'null'
           title: Candidate Id
+        approved_action_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Approved Action Id
         start_frame:
           anyOf:
           - type: integer
@@ -2836,15 +2942,17 @@ components:
           - type: 'null'
           title: End Frame
         pre_roll_frames:
-          type: integer
-          minimum: 0.0
+          anyOf:
+          - type: integer
+            minimum: 0.0
+          - type: 'null'
           title: Pre Roll Frames
-          default: 15
         post_roll_frames:
-          type: integer
-          minimum: 0.0
+          anyOf:
+          - type: integer
+            minimum: 0.0
+          - type: 'null'
           title: Post Roll Frames
-          default: 30
         output_dir_name:
           anyOf:
           - type: string

@@ -10,6 +10,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from football_tracking.ai_improvement import (
+    _instructions,
     approve_ai_improvement_actions,
     build_ai_improvement_context,
     build_ai_improvement_report,
@@ -39,6 +40,13 @@ class _FakeImprovementClient:
 
 
 class AiImprovementTests(unittest.TestCase):
+    def test_improvement_prompt_protects_highlight_core_window_and_tail(self) -> None:
+        instructions = _instructions(language="en")
+
+        self.assertIn("candidate.core_window", instructions)
+        self.assertIn("candidate.buffer_policy.min_tail_frames", instructions)
+        self.assertIn("do not trim result tail", instructions)
+
     def test_write_ai_improvement_report_handles_missing_artifacts(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:
             output_dir = Path(temp_name)
@@ -1331,6 +1339,126 @@ class AiImprovementTests(unittest.TestCase):
         self.assertEqual("error", report["summary"]["status"])
         self.assertIn("suggested_window", report["error"])
 
+    def test_ai_trim_tail_cannot_remove_result_tail(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_minimal_artifacts(output_dir)
+            _write_json(
+                output_dir / "event_candidates.json",
+                {
+                    "summary": {"candidate_count": 1},
+                    "candidates": [
+                        {
+                            "id": "cleaned:shot_candidate:10-20",
+                            "type": "shot_candidate",
+                            "start_frame": 10,
+                            "end_frame": 20,
+                            "core_window": {"start_frame": 10, "end_frame": 20},
+                            "render_window": {"start_frame": 0, "end_frame": 110},
+                            "buffer_policy": {
+                                "fps": 20.0,
+                                "pre_buffer_seconds": 0.75,
+                                "post_buffer_seconds": 4.5,
+                                "pre_buffer_frames": 15,
+                                "post_buffer_frames": 90,
+                                "min_post_event_frames": 90,
+                            },
+                        }
+                    ],
+                },
+            )
+            client = _FakeImprovementClient(
+                {
+                    "summary": {"status": "needs_rerun"},
+                    "improvements": [
+                        {
+                            "id": "imp_trim_tail",
+                            "priority": "P1",
+                            "area": "highlights",
+                            "failure_tags": ["post_roll_too_short"],
+                            "root_cause_module": "event_scoring",
+                            "diagnosis": "Trim the tail too aggressively.",
+                            "recommended_action": "render_suggested_highlight",
+                            "candidate_id": "cleaned:shot_candidate:10-20",
+                            "suggested_window": {"start_frame": 10, "end_frame": 50},
+                            "clip_action": "trim_tail",
+                            "confidence": 0.8,
+                        }
+                    ],
+                    "highlight_adjustments": [],
+                }
+            )
+
+            report = build_ai_improvement_report(output_dir, client=client)
+
+        self.assertEqual("error", report["summary"]["status"])
+        self.assertIn("minimum post-event tail", report["error"])
+
+    def test_approving_highlight_action_fails_fast_when_event_candidates_missing_or_corrupt(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_json(
+                output_dir / "ai_improvement_report.json",
+                {
+                    "schema_version": "1.0",
+                    "generated_at": "2026-06-22T00:00:00+00:00",
+                    "model": "gpt-improve",
+                    "summary": {"status": "needs_rerun"},
+                    "improvements": [
+                        {
+                            "id": "imp_highlight",
+                            "priority": "P1",
+                            "area": "highlights",
+                            "failure_tags": ["post_roll_too_short"],
+                            "root_cause_module": "event_scoring",
+                            "diagnosis": "Extend result tail.",
+                            "recommended_action": "render_suggested_highlight",
+                            "candidate_id": "cleaned:shot_candidate:10-20",
+                            "suggested_window": {"start_frame": 0, "end_frame": 40},
+                            "clip_action": "extend_tail",
+                            "confidence": 0.8,
+                        }
+                    ],
+                },
+            )
+
+            with self.assertRaisesRegex(ValueError, "event_candidates.json"):
+                approve_ai_improvement_actions(output_dir, run_id="run_123", improvement_ids=["imp_highlight"])
+
+            (output_dir / "event_candidates.json").write_text("{", encoding="utf-8")
+
+            with self.assertRaisesRegex(ValueError, "event_candidates.json corrupt"):
+                approve_ai_improvement_actions(output_dir, run_id="run_123", improvement_ids=["imp_highlight"])
+
+    def test_non_highlight_approval_tolerates_missing_event_candidates(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_json(
+                output_dir / "ai_improvement_report.json",
+                {
+                    "schema_version": "1.0",
+                    "generated_at": "2026-06-22T00:00:00+00:00",
+                    "model": "gpt-improve",
+                    "summary": {"status": "needs_rerun"},
+                    "improvements": [
+                        {
+                            "id": "imp_manual",
+                            "priority": "P2",
+                            "area": "tracking",
+                            "failure_tags": ["unknown"],
+                            "root_cause_module": "unknown",
+                            "diagnosis": "Manual inspection only.",
+                            "recommended_action": "manual_review",
+                            "confidence": 0.5,
+                        }
+                    ],
+                },
+            )
+
+            artifact = approve_ai_improvement_actions(output_dir, run_id="run_123", improvement_ids=["imp_manual"])
+
+        self.assertEqual("manual_review", artifact["approved_actions"][0]["approved_action"])
+
     def test_disabled_provider_returns_unavailable_without_crashing(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:
             output_dir = Path(temp_name)
@@ -1477,7 +1605,20 @@ def _write_minimal_artifacts(output_dir: Path) -> None:
                 {
                     "id": "cleaned:shot_candidate:10-20",
                     "type": "shot_candidate",
+                    "start_frame": 10,
+                    "end_frame": 20,
+                    "core_window": {"start_frame": 10, "end_frame": 20},
                     "render_window": {"start_frame": 10, "end_frame": 20},
+                    "buffer_policy": {
+                        "fps": 20.0,
+                        "fps_source": "test",
+                        "pre_buffer_seconds": 0.75,
+                        "post_buffer_seconds": 1.0,
+                        "pre_buffer_frames": 15,
+                        "post_buffer_frames": 20,
+                        "min_post_event_frames": 20,
+                        "min_tail_frames": 20,
+                    },
                 }
             ],
         },

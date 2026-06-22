@@ -331,6 +331,15 @@ export interface AIImprovementItem {
   likely_ball_region?: AILikelyBallRegion | null;
   local_search_roi?: AILocalSearchRoi | null;
   false_positive_class?: string | null;
+  candidate_id?: string | null;
+  suggested_window?: AIFrameWindow | null;
+  clip_action?:
+    | "extend_tail"
+    | "trim_head"
+    | "trim_tail"
+    | "split"
+    | "keep"
+    | null;
   camera_motion_event_id?: string | null;
   camera_motion_severity?: string | null;
   evidence_payload?: AIImprovementItemEvidencePayload;
@@ -669,8 +678,28 @@ export interface DeriveConfigRequest {
 export type EventCandidateEvidence = { [key: string]: unknown };
 
 export interface EventCandidateWindow {
+  /** @minimum 0 */
   start_frame: number;
+  /** @minimum 0 */
   end_frame: number;
+}
+
+export interface EventCandidateBufferPolicy {
+  /** @exclusiveMinimum 0 */
+  fps: number;
+  fps_source: string;
+  /** @minimum 0 */
+  pre_buffer_seconds: number;
+  /** @minimum 0 */
+  post_buffer_seconds: number;
+  /** @minimum 0 */
+  pre_buffer_frames: number;
+  /** @minimum 0 */
+  post_buffer_frames: number;
+  /** @minimum 0 */
+  min_post_event_frames: number;
+  /** @minimum 0 */
+  min_tail_frames: number;
 }
 
 export interface EventCandidate {
@@ -682,7 +711,9 @@ export interface EventCandidate {
   frame_count: number;
   score: number;
   reason: string;
+  core_window: EventCandidateWindow;
   render_window: EventCandidateWindow;
+  buffer_policy: EventCandidateBufferPolicy;
   evidence?: EventCandidateEvidence;
 }
 
@@ -708,6 +739,7 @@ export interface EventCandidateReport {
   source: EventCandidateSource;
   summary: EventCandidateSummary;
   candidates?: EventCandidate[];
+  warnings?: string[];
 }
 
 export type FieldCalibrationPayloadConfidence =
@@ -868,12 +900,11 @@ export interface HealthResponse {
 
 export type HighlightRenderRequest = unknown & {
   candidate_id?: string | null;
+  approved_action_id?: string | null;
   start_frame?: number | null;
   end_frame?: number | null;
-  /** @minimum 0 */
-  pre_roll_frames?: number;
-  /** @minimum 0 */
-  post_roll_frames?: number;
+  pre_roll_frames?: number | null;
+  post_roll_frames?: number | null;
   output_dir_name?: string | null;
   output_video_name?: string | null;
   notes?: string | null;

@@ -143,6 +143,42 @@ class MetricsTests(unittest.TestCase):
             self.assertEqual(1, report["player_tracks"]["track_count"])
             self.assertEqual({"home": 1}, report["player_tracks"]["teams"])
 
+    def test_write_run_artifacts_uses_run_fps_for_event_candidate_buffers(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            (output_dir / "ball_track.csv").write_text(
+                "\n".join(
+                    [
+                        "Frame,X,Y,Confidence,Status",
+                        "100,10,40,0.90,Detected",
+                        "101,58,40,0.90,Detected",
+                        "102,112,40,0.90,Detected",
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            write_run_artifacts(
+                output_dir=output_dir,
+                run={
+                    "run_id": "run_30fps",
+                    "source": "api",
+                    "status": "completed",
+                    "created_at": "2026-01-01T00:00:00+00:00",
+                    "input_video": "data/input.mp4",
+                    "output_dir": str(output_dir),
+                    "fps": 30.0,
+                },
+            )
+            event_candidates = json.loads((output_dir / "event_candidates.json").read_text(encoding="utf-8"))
+
+        candidate = event_candidates["candidates"][0]
+        self.assertEqual({"start_frame": 77, "end_frame": 237}, candidate["render_window"])
+        self.assertEqual("fps", candidate["buffer_policy"]["fps_source"])
+        self.assertEqual(23, candidate["buffer_policy"]["pre_buffer_frames"])
+        self.assertEqual(135, candidate["buffer_policy"]["post_buffer_frames"])
+
     def test_write_run_artifacts_preserves_manifest_when_ball_audit_fails(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:
             output_dir = Path(temp_name)

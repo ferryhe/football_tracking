@@ -78,6 +78,35 @@ class ExportOpenApiTests(unittest.TestCase):
         for field in ("camera_motion_event_id", "camera_motion_severity"):
             self.assertIn(field, zod_action)
 
+    def test_generated_clients_expose_highlight_boundary_contracts(self) -> None:
+        react_schemas = Path("lib/api-client-react/src/generated/api.schemas.ts").read_text(encoding="utf-8")
+        zod_api = Path("lib/api-zod/src/generated/api.ts").read_text(encoding="utf-8")
+        zod_candidate = Path("lib/api-zod/src/generated/types/eventCandidate.ts").read_text(encoding="utf-8")
+        zod_policy = Path("lib/api-zod/src/generated/types/eventCandidateBufferPolicy.ts").read_text(
+            encoding="utf-8"
+        )
+
+        for field in ("core_window", "render_window", "buffer_policy", "EventCandidateBufferPolicy"):
+            self.assertIn(field, react_schemas)
+            self.assertIn(field, zod_candidate)
+        for field in ("fps_source", "min_tail_frames"):
+            self.assertIn(field, react_schemas)
+            self.assertIn(field, zod_policy)
+            self.assertIn(field, zod_api)
+        self.assertIn("export interface EventCandidateReport", react_schemas)
+        self.assertIn("warnings?: string[]", react_schemas)
+        self.assertIn("CreateHighlightRenderBody", zod_api)
+        self.assertIn("superRefine", zod_api)
+        self.assertIn("exactly one of candidate_id, approved_action_id, or start_frame/end_frame", zod_api)
+        self.assertEqual(1, zod_api.count("exactly one of candidate_id, approved_action_id, or start_frame/end_frame"))
+
+    def test_generated_zod_highlight_postprocess_uses_stable_anchor(self) -> None:
+        postprocess = Path("lib/api-spec/scripts/postprocess-generated.mjs").read_text(encoding="utf-8")
+
+        self.assertIn("CreateHighlightRenderBody", postprocess)
+        self.assertIn("exactly one of candidate_id, approved_action_id, or start_frame/end_frame", postprocess)
+        self.assertNotIn("Get Player Tracks Report", postprocess)
+
 
 if __name__ == "__main__":
     unittest.main()
