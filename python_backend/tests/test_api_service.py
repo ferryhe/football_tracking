@@ -20,7 +20,7 @@ from football_tracking.api.routes import inputs as input_routes
 from football_tracking.api.routes.ai import improve as improve_route
 from football_tracking.api.routes import runs as run_routes
 from football_tracking.api.routes.artifacts import get_artifact
-from football_tracking.api.schemas import AIImproveRequest, HighlightRenderRequest
+from football_tracking.api.schemas import AIFrameWindow, AIImproveRequest, HighlightRenderRequest
 from football_tracking.api.service import ApiService
 from football_tracking.config import load_config
 from football_tracking.metrics import write_run_artifacts
@@ -1752,6 +1752,10 @@ class ApiServiceSmokeTests(unittest.TestCase):
 
         self.assertEqual("ai_improvement_report.json", response.artifact_name)
         self.assertTrue(Path(response.artifact_path).exists())
+
+    def test_ai_frame_window_requires_ordered_frames(self) -> None:
+        with self.assertRaises(ValidationError):
+            AIFrameWindow(start_frame=30, end_frame=10)
 
     def test_create_app_registers_expected_routes(self) -> None:
         app = create_app(self.repo_root)

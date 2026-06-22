@@ -475,6 +475,8 @@ def _instructions(language: str | None) -> str:
 
 def _provider_safe_context(context: dict[str, Any]) -> dict[str, Any]:
     safe = _redact_provider_paths(context)
+    if isinstance(safe, dict):
+        safe.pop("warnings", None)
     return safe if isinstance(safe, dict) else {}
 
 
@@ -498,7 +500,17 @@ def _redact_provider_paths(value: Any, key_hint: str = "") -> Any:
             return "<redacted-path>"
         if value.startswith("data:"):
             return "<redacted-data-url>"
+        return _redact_path_substrings(value)
     return value
+
+
+def _redact_path_substrings(value: str) -> str:
+    value = re.sub(r"[A-Za-z]:[\\/][^\s\"']+", "<redacted-path>", value)
+    return re.sub(
+        r"(?<!\w)/(?:Users|home|tmp|Project|workspace|workspaces|mnt|var|private)/[^\s\"']+",
+        "<redacted-path>",
+        value,
+    )
 
 
 def _read_optional_json(path: Path) -> tuple[dict[str, Any] | None, str, str | None]:
@@ -688,13 +700,18 @@ def _required_nonnegative_int(value: Any, label: str) -> int:
 def _optional_int(value: Any) -> int | None:
     if isinstance(value, bool) or value in (None, ""):
         return None
-    try:
-        parsed = float(value)
-    except (TypeError, ValueError):
-        return None
-    if not math.isfinite(parsed):
-        return None
-    return int(parsed)
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        if not math.isfinite(value) or not value.is_integer():
+            return None
+        return int(value)
+    if isinstance(value, str):
+        stripped = value.strip()
+        if not re.fullmatch(r"[+-]?\d+", stripped):
+            return None
+        return int(stripped)
+    return None
 
 
 def _safe_int(value: Any) -> int:

@@ -504,6 +504,12 @@ class AIFrameWindow(BaseModel):
     start_frame: int = Field(ge=0)
     end_frame: int = Field(ge=0)
 
+    @model_validator(mode="after")
+    def validate_order(self) -> "AIFrameWindow":
+        if self.end_frame < self.start_frame:
+            raise ValueError("end_frame must be greater than or equal to start_frame.")
+        return self
+
 
 class AILikelyBallRegion(BaseModel):
     description: str

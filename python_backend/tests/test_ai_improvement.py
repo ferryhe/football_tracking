@@ -258,6 +258,35 @@ class AiImprovementTests(unittest.TestCase):
         self.assertEqual("error", report["summary"]["status"])
         self.assertIn("non-negative", report["error"])
 
+    def test_fractional_frame_window_becomes_error_report(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_minimal_artifacts(output_dir)
+            client = _FakeImprovementClient(
+                {
+                    "summary": {"status": "needs_rerun"},
+                    "improvements": [
+                        {
+                            "id": "imp_001",
+                            "priority": "P1",
+                            "area": "tracking",
+                            "failure_tags": ["ball_lost"],
+                            "root_cause_module": "reacquisition",
+                            "diagnosis": "Bad fractional frame.",
+                            "recommended_action": "targeted_rerun",
+                            "rerun_scope": {"start_frame": 10.9, "end_frame": 30},
+                            "likely_ball_region": {"description": "not visible", "confidence": 0.0},
+                            "confidence": 0.6,
+                        }
+                    ],
+                }
+            )
+
+            report = build_ai_improvement_report(output_dir, client=client)
+
+        self.assertEqual("error", report["summary"]["status"])
+        self.assertIn("integer", report["error"])
+
     def test_invalid_local_search_roi_becomes_error_report(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:
             output_dir = Path(temp_name)
@@ -360,6 +389,7 @@ class AiImprovementTests(unittest.TestCase):
             _write_json(
                 output_dir / "review_packets.json",
                 {
+                    "warnings": [f"failed to write media under {output_dir.resolve()}"],
                     "packets": [
                         {
                             "packet_id": "packet_001",
