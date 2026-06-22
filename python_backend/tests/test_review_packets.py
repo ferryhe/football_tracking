@@ -795,6 +795,41 @@ class ReviewPacketTests(unittest.TestCase):
         ]
         self.assertTrue(any(packet["source"]["start_frame"] <= 777 <= packet["source"]["end_frame"] for packet in dense_packets))
         self.assertTrue(all(packet["window"]["frame_count"] <= 96 for packet in dense_packets))
+        anchored_packet = next(
+            packet for packet in dense_packets if packet["source"]["start_frame"] <= 777 <= packet["source"]["end_frame"]
+        )
+        self.assertEqual("dense_noise_anchor", anchored_packet["source"]["evidence"]["micro_window_strategy"])
+        self.assertEqual("cleanup_report", anchored_packet["source"]["evidence"]["micro_anchor"]["source"])
+        self.assertEqual("postprocess_action", anchored_packet["source"]["evidence"]["micro_anchor"]["type"])
+
+    def test_build_review_packet_report_marks_dense_noise_fallback_strategy(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            output_dir = Path(temp)
+            _write_detected_track(output_dir, 1300)
+            (output_dir / "ai_review_triggers.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": "1.0",
+                        "triggers": [
+                            {
+                                "id": "dense_noise_cluster:100-1199",
+                                "type": "dense_noise_cluster",
+                                "priority": "high",
+                                "start_frame": 100,
+                                "end_frame": 1199,
+                                "reason": "dense noise without anchors",
+                                "evidence": {},
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            report = build_review_packet_report(output_dir, max_packets=1, include_media=False)
+
+        self.assertEqual("fallback_centered", report["packets"][0]["source"]["evidence"]["micro_window_strategy"])
+        self.assertNotIn("micro_anchor", report["packets"][0]["source"]["evidence"])
 
     def test_build_review_packet_report_keeps_small_diagnostic_sources_within_source_window(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

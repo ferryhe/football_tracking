@@ -378,14 +378,17 @@ def _dense_noise_micro_sources(source: dict[str, Any], *, output_dir: Path, max_
         return [child]
 
     parent_window = {"start_frame": start, "end_frame": end, "frame_count": frame_count}
-    anchors = _dense_noise_anchor_frames(source, output_dir=output_dir, start_frame=start, end_frame=end)
+    anchors = _dense_noise_anchors(source, output_dir=output_dir, start_frame=start, end_frame=end)
     if anchors:
-        windows = [_micro_window_for_frame(frame, start, end) for frame in anchors[:max_packets]]
+        anchored_windows = [
+            (_micro_window_for_frame(anchor["frame"], start, end), anchor)
+            for anchor in anchors[:max_packets]
+        ]
     else:
-        windows = _fallback_micro_windows(start, end, max_packets=max_packets)
+        anchored_windows = [(window, None) for window in _fallback_micro_windows(start, end, max_packets=max_packets)]
     return [
-        _dense_noise_micro_source(source, parent_window, window, index)
-        for index, window in enumerate(_dedupe_windows(windows)[:max_packets], start=1)
+        _dense_noise_micro_source(source, parent_window, window, index, anchor)
+        for index, (window, anchor) in enumerate(_dedupe_anchored_windows(anchored_windows)[:max_packets], start=1)
     ]
 
 
@@ -394,6 +397,7 @@ def _dense_noise_micro_source(
     parent_window: dict[str, int],
     window: dict[str, int],
     index: int,
+    anchor: dict[str, Any] | None,
 ) -> dict[str, Any]:
     child = dict(source)
     child["id"] = f"{source.get('id')}:micro:{index}:{window['start_frame']}-{window['end_frame']}"
@@ -404,15 +408,23 @@ def _dense_noise_micro_source(
     child["render_window"] = {"start_frame": window["start_frame"], "end_frame": window["end_frame"]}
     evidence = dict(source.get("evidence")) if isinstance(source.get("evidence"), dict) else {}
     evidence["parent_window"] = dict(parent_window)
-    evidence.setdefault("micro_window_strategy", "dense_noise_sample")
+    if anchor is None:
+        evidence["micro_window_strategy"] = "fallback_centered"
+    else:
+        evidence["micro_window_strategy"] = "dense_noise_anchor"
+        evidence["micro_anchor"] = {
+            key: anchor[key]
+            for key in ("source", "type", "frame", "start_frame", "end_frame", "reason", "evidence")
+            if key in anchor
+        }
     child["evidence"] = evidence
     child["reason"] = f"{source.get('reason') or 'Dense noise cluster.'} Micro-window for noise diagnosis."
     return child
 
 
-def _dense_noise_anchor_frames(source: dict[str, Any], *, output_dir: Path, start_frame: int, end_frame: int) -> list[int]:
+def _dense_noise_anchors(source: dict[str, Any], *, output_dir: Path, start_frame: int, end_frame: int) -> list[dict[str, Any]]:
     evidence = source.get("evidence")
-    frames: list[int] = []
+    anchors: list[dict[str, Any]] = []
     if not isinstance(evidence, dict):
         evidence = {}
     for key in ("frames", "evidence_frames", "sample_frames", "peak_frames"):
@@ -421,11 +433,31 @@ def _dense_noise_anchor_frames(source: dict[str, Any], *, output_dir: Path, star
             for value in values:
                 frame = _parse_int(value)
                 if frame is not None and start_frame <= frame <= end_frame:
-                    frames.append(frame)
+                    anchors.append(
+                        {
+                            "source": "ai_review_triggers",
+                            "type": "dense_noise_cluster",
+                            "frame": frame,
+                            "start_frame": start_frame,
+                            "end_frame": end_frame,
+                            "reason": f"trigger evidence {key}",
+                            "evidence": {key: value},
+                        }
+                    )
     for key in ("frame", "peak_frame", "first_frame", "last_frame"):
         frame = _parse_int(evidence.get(key))
         if frame is not None and start_frame <= frame <= end_frame:
-            frames.append(frame)
+            anchors.append(
+                {
+                    "source": "ai_review_triggers",
+                    "type": "dense_noise_cluster",
+                    "frame": frame,
+                    "start_frame": start_frame,
+                    "end_frame": end_frame,
+                    "reason": f"trigger evidence {key}",
+                    "evidence": {key: evidence.get(key)},
+                }
+            )
 
     cleanup = _read_optional_json(output_dir / "cleanup_report.json")
     actions = cleanup.get("actions") if isinstance(cleanup, dict) else None
@@ -440,7 +472,7 @@ def _dense_noise_anchor_frames(source: dict[str, Any], *, output_dir: Path, star
                 start_frame=start_frame,
                 end_frame=end_frame,
             ):
-                frames.append(int(anchor["frame"]))
+                anchors.append(anchor)
 
     ball_audit = _read_optional_json(output_dir / "ball_audit.json")
     for anchor in _review_event_anchors(
@@ -450,8 +482,8 @@ def _dense_noise_anchor_frames(source: dict[str, Any], *, output_dir: Path, star
         end_frame=end_frame,
         allowed_types={"postprocess_action"},
     ):
-        frames.append(int(anchor["frame"]))
-    return sorted(set(frames))
+        anchors.append(anchor)
+    return _dedupe_anchors(anchors)
 
 
 def _is_long_lost_gap_trigger(trigger_type: str, frame_count: int) -> bool:
@@ -780,6 +812,20 @@ def _dedupe_windows(windows: list[dict[str, int]]) -> list[dict[str, int]]:
             continue
         seen.add(key)
         deduped.append(window)
+    return deduped
+
+
+def _dedupe_anchored_windows(
+    windows: list[tuple[dict[str, int], dict[str, Any] | None]],
+) -> list[tuple[dict[str, int], dict[str, Any] | None]]:
+    deduped: list[tuple[dict[str, int], dict[str, Any] | None]] = []
+    seen: set[tuple[int, int]] = set()
+    for window, anchor in windows:
+        key = (window["start_frame"], window["end_frame"])
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append((window, anchor))
     return deduped
 
 
