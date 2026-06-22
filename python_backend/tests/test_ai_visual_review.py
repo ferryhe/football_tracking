@@ -8,7 +8,11 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from football_tracking.ai_visual_review import build_ai_visual_review_report
+from football_tracking.ai_visual_review import (
+    AI_VISUAL_REVIEW_RESPONSE_SCHEMA,
+    OpenAIVisualReviewClient,
+    build_ai_visual_review_report,
+)
 
 
 def _valid_review(
@@ -16,8 +20,9 @@ def _valid_review(
     verdict: str = "accept_highlight",
     highlight_publishable: bool = True,
     recommended_action: str = "keep_highlight",
+    extra: dict[str, object] | None = None,
 ) -> dict[str, object]:
-    return {
+    payload: dict[str, object] = {
         "verdict": verdict,
         "confidence": 0.82,
         "reason": "Ball is visible across multiple frames and the marker stays on it.",
@@ -26,6 +31,29 @@ def _valid_review(
         "highlight_publishable": highlight_publishable,
         "recommended_action": recommended_action,
         "visual_evidence": ["marker remains close to a visible ball"],
+        "failure_tags": [],
+        "root_cause_module": "unknown",
+        "suggested_fixes": [],
+        "likely_ball_region": None,
+        "local_search_roi": None,
+        "best_subclip": None,
+        "tuning_direction": "none",
+    }
+    if extra is not None:
+        payload.update(extra)
+    return payload
+
+
+def _legacy_review_only() -> dict[str, object]:
+    return {
+        "verdict": "needs_human_review",
+        "confidence": 0.71,
+        "reason": "Legacy response shape without v2 diagnostics.",
+        "match_ball_visible": "unclear",
+        "marker_alignment": "unclear",
+        "highlight_publishable": False,
+        "recommended_action": "send_to_human",
+        "visual_evidence": ["legacy review evidence"],
     }
 
 
@@ -47,6 +75,16 @@ class _FakeVisualReviewClient:
 class _ExplodingClient:
     def review_packet(self, **kwargs: object) -> dict[str, object]:
         raise AssertionError("dry-run must not call the visual review client")
+
+
+class _CapturingResponsesClient:
+    def __init__(self, response: dict[str, object]) -> None:
+        self.response = response
+        self.calls: list[dict[str, object]] = []
+
+    def create_json_vision_response(self, **kwargs: object) -> dict[str, object]:
+        self.calls.append(kwargs)
+        return self.response
 
 
 class AiVisualReviewTests(unittest.TestCase):
@@ -126,8 +164,15 @@ class AiVisualReviewTests(unittest.TestCase):
         self.assertEqual(0, report["summary"]["accepted_highlight_count"])
         self.assertEqual(2, report["summary"]["needs_human_review_count"])
         for item in report["reviews"]:
+            self.assertEqual(f"visual_review:{item['packet_id']}", item["visual_review_id"])
             self.assertEqual("needs_human_review", item["review"]["verdict"])
             self.assertIn("dry-run", item["review"]["reason"])
+            self.assertEqual(["unknown"], item["review"]["failure_tags"])
+            self.assertEqual("unknown", item["review"]["root_cause_module"])
+            self.assertEqual("none", item["review"]["tuning_direction"])
+            self.assertEqual(item["packet_id"], item["review"]["source_packet_id"])
+            self.assertEqual(item["visual_review_id"], item["review"]["visual_review_id"])
+            self.assertEqual("ai_visual_review", item["review"]["provenance"]["source"])
 
     def test_bad_model_output_and_client_errors_are_recorded_without_accepting_packets(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:
@@ -221,6 +266,207 @@ class AiVisualReviewTests(unittest.TestCase):
         self.assertNotIn("sk-secret-token", error)
         self.assertNotIn("abcdef123456", error)
         self.assertIn("<redacted", error)
+
+    def test_optional_diagnostic_fields_are_validated_and_preserved(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_review_packets(output_dir, [("packet_001", "needs_ai_review")])
+            client = _FakeVisualReviewClient(
+                [
+                    _valid_review(
+                        verdict="needs_human_review",
+                        highlight_publishable=False,
+                        recommended_action="send_to_human",
+                        extra={
+                            "failure_tags": ["ball_lost", "camera_catchup_spike"],
+                            "root_cause_module": "reacquisition",
+                            "suggested_fixes": ["loosen ball recovery near the reacquire frame"],
+                            "likely_ball_region": {
+                                "frame": 14,
+                                "description": "small white ball near the right touch line",
+                                "confidence": 0.74,
+                            },
+                            "local_search_roi": {
+                                "coordinate_space": "image",
+                                "frame": 14,
+                                "x": 320,
+                                "y": 140,
+                                "width": 96,
+                                "height": 72,
+                                "confidence": 0.81,
+                            },
+                            "best_subclip": {
+                                "start_frame": 12,
+                                "end_frame": 18,
+                                "reason": "ball is visible before the marker drifts",
+                            },
+                            "tuning_direction": "retrack_segment",
+                        },
+                    )
+                ]
+            )
+
+            report = build_ai_visual_review_report(output_dir, client=client)
+
+        review = report["reviews"][0]["review"]
+        self.assertEqual(["ball_lost", "camera_catchup_spike"], review["failure_tags"])
+        self.assertEqual("reacquisition", review["root_cause_module"])
+        self.assertEqual("retrack_segment", review["tuning_direction"])
+        self.assertEqual(14, review["likely_ball_region"]["frame"])
+        self.assertEqual("image", review["local_search_roi"]["coordinate_space"])
+        self.assertEqual(12, review["best_subclip"]["start_frame"])
+        self.assertEqual("packet_001", review["source_packet_id"])
+        self.assertEqual("visual_review:packet_001", review["visual_review_id"])
+        self.assertEqual(
+            {
+                "source": "ai_visual_review",
+                "source_packet_id": "packet_001",
+                "visual_review_id": "visual_review:packet_001",
+            },
+            review["provenance"],
+        )
+
+    def test_legacy_model_response_is_backfilled_with_v2_diagnostic_defaults(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_review_packets(output_dir, [("packet_001", "needs_ai_review")])
+            client = _FakeVisualReviewClient([_legacy_review_only()])
+
+            report = build_ai_visual_review_report(output_dir, client=client)
+
+        review = report["reviews"][0]["review"]
+        self.assertEqual([], review["failure_tags"])
+        self.assertEqual("unknown", review["root_cause_module"])
+        self.assertEqual([], review["suggested_fixes"])
+        self.assertIsNone(review["likely_ball_region"])
+        self.assertIsNone(review["local_search_roi"])
+        self.assertIsNone(review["best_subclip"])
+        self.assertEqual("none", review["tuning_direction"])
+        self.assertEqual("packet_001", review["source_packet_id"])
+
+    def test_invalid_optional_diagnostic_fields_are_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_review_packets(
+                output_dir,
+                [
+                    ("packet_001", "needs_ai_review"),
+                    ("packet_002", "needs_ai_review"),
+                    ("packet_003", "needs_ai_review"),
+                    ("packet_004", "needs_ai_review"),
+                    ("packet_005", "needs_ai_review"),
+                    ("packet_006", "needs_ai_review"),
+                ],
+            )
+            client = _FakeVisualReviewClient(
+                [
+                    _valid_review(extra={"failure_tags": ["missing_ball"]}),
+                    _valid_review(extra={"root_cause_module": "tracking"}),
+                    _valid_review(extra={"tuning_direction": "speed_up"}),
+                    _valid_review(
+                        extra={
+                            "local_search_roi": {
+                                "coordinate_space": "field",
+                                "frame": 1,
+                                "x": 0,
+                                "y": 0,
+                                "width": 20,
+                                "height": 20,
+                                "confidence": 0.5,
+                            }
+                        }
+                    ),
+                    _valid_review(extra={"best_subclip": {"start_frame": 30, "end_frame": 20, "reason": "backwards"}}),
+                    _valid_review(
+                        extra={
+                            "local_search_roi": {
+                                "coordinate_space": "image",
+                                "frame": 62,
+                                "x": 620,
+                                "y": 10,
+                                "width": 40,
+                                "height": 20,
+                                "confidence": 0.5,
+                            }
+                        }
+                    ),
+                ]
+            )
+
+            report = build_ai_visual_review_report(output_dir, client=client)
+
+        self.assertEqual(6, report["summary"]["error_count"])
+        errors = " ".join(error["error"] for error in report["errors"])
+        self.assertIn("failure_tags", errors)
+        self.assertIn("root_cause_module", errors)
+        self.assertIn("tuning_direction", errors)
+        self.assertIn("local_search_roi", errors)
+        self.assertIn("best_subclip", errors)
+        self.assertIn("frame dimensions", errors)
+
+    def test_openai_visual_review_schema_and_prompt_request_localization_from_packet_media(self) -> None:
+        legacy_required = [
+            "verdict",
+            "confidence",
+            "reason",
+            "match_ball_visible",
+            "marker_alignment",
+            "highlight_publishable",
+            "recommended_action",
+            "visual_evidence",
+        ]
+        self.assertEqual(legacy_required, AI_VISUAL_REVIEW_RESPONSE_SCHEMA["required"][: len(legacy_required)])
+        self.assertEqual(
+            set(AI_VISUAL_REVIEW_RESPONSE_SCHEMA["properties"]),
+            set(AI_VISUAL_REVIEW_RESPONSE_SCHEMA["required"]),
+        )
+
+        response_client = _CapturingResponsesClient(
+            _valid_review(
+                verdict="needs_human_review",
+                highlight_publishable=False,
+                recommended_action="send_to_human",
+                extra={
+                    "failure_tags": ["ball_lost"],
+                    "root_cause_module": "reacquisition",
+                    "suggested_fixes": ["retrack the missing-ball segment"],
+                    "likely_ball_region": {"frame": 12, "description": "not visible", "confidence": 0.0},
+                    "local_search_roi": None,
+                    "best_subclip": None,
+                    "tuning_direction": "retrack_segment",
+                },
+            )
+        )
+        client = OpenAIVisualReviewClient(response_client)
+
+        client.review_packet(
+            packet={},
+            metadata={
+                "packet_id": "packet_001",
+                "packet_purpose": "diagnose_missing_ball",
+                "suspected_failure_tags": ["ball_lost"],
+                "root_cause_candidates": ["reacquisition"],
+                "frame_dimensions": {"width": 640, "height": 360},
+                "decision": {"label": "ball_not_visible"},
+            },
+            contact_sheet_data_url="data:image/jpeg;base64,contact",
+            crop_sheet_data_url="data:image/jpeg;base64,crop",
+            model="vision-test",
+        )
+
+        call = response_client.calls[0]
+        image_labels = [image["label"] for image in call["images"]]
+        self.assertEqual(["contact_sheet", "crop_sheet"], image_labels)
+        self.assertIn("failure_tags", call["json_schema"]["properties"])
+        self.assertIn("local_search_roi", call["json_schema"]["properties"])
+        self.assertEqual(
+            set(call["json_schema"]["properties"]),
+            set(call["json_schema"]["required"]),
+        )
+        prompt_text = f"{call['instructions']} {call['prompt']}"
+        self.assertIn("local_search_roi", prompt_text)
+        self.assertIn("only when the ball is visible", prompt_text)
+        self.assertIn("not visible", prompt_text)
 
     def test_run_ai_visual_review_cli_dry_run_writes_report_and_refreshes_metrics(self) -> None:
         from scripts.run_ai_visual_review import main
@@ -353,6 +599,7 @@ def _write_review_packets(
                 "window": {"start_frame": index * 10, "end_frame": index * 10 + 4, "frame_count": 5},
                 "track_summary": {"detected_ratio": 0.8, "lost_ratio": 0.0},
                 "decision": {"label": label, "confidence": 0.7, "reason": f"fixture {label}"},
+                "frame_dimensions": {"width": 640, "height": 360},
                 "media": {"contact_sheet": str(contact_media_path), "crop_sheet": str(crop_media_path)},
                 "media_warnings": [],
             }
