@@ -7,7 +7,7 @@
 import type { CreateRunRequestConfigPatch } from "./createRunRequestConfigPatch";
 
 export interface CreateRunRequest {
-  config_name: string;
+  config_name?: string | null;
   input_video?: string | null;
   parent_run_id?: string | null;
   output_dir_name?: string | null;
@@ -16,5 +16,7 @@ export interface CreateRunRequest {
   enable_follow_cam?: boolean | null;
   start_frame?: number | null;
   max_frames?: number | null;
+  approved_action_ids?: string[];
+  approved_actions_artifact_name?: string | null;
   notes?: string | null;
 }

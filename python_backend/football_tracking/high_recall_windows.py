@@ -22,6 +22,7 @@ def build_high_recall_windows(
     total_frames: int | None = None,
     mode: str = "sahi",
     approved_actions_path: Path | None = None,
+    approved_only: bool = False,
 ) -> dict[str, Any]:
     """Build high-recall rerun windows from review/audit/event reports."""
     safe_margin = max(0, int(margin_frames))
@@ -35,6 +36,7 @@ def build_high_recall_windows(
         total_frames=safe_total_frames,
         mode=str(mode or "sahi"),
         approved_actions_path=approved_actions_path,
+        approved_only=approved_only,
     )
     budgeted_candidates, budget_rejected_windows, _ = _apply_frame_budget(
         candidates,
@@ -62,6 +64,7 @@ def build_high_recall_windows(
             "total_frames": safe_total_frames,
             "mode": str(mode or "sahi"),
             "approved_actions_path": None if approved_actions_path is None else str(Path(approved_actions_path).resolve()),
+            "approved_only": bool(approved_only),
         },
         "windows": selected_windows,
         "rejected_windows": rejected_windows,
@@ -92,6 +95,16 @@ def write_high_recall_window_report(
     return report
 
 
+def approved_action_windows_from_report(report: dict[str, Any], mode: str = "sahi") -> list[dict[str, Any]]:
+    """Return executable approved targeted-rerun windows from an approved actions artifact."""
+    return _normalize_windows(
+        _approved_action_windows(report),
+        margin_frames=0,
+        total_frames=None,
+        mode=str(mode or "sahi"),
+    )
+
+
 def _collect_candidate_windows(
     *,
     output_dir: Path,
@@ -99,32 +112,34 @@ def _collect_candidate_windows(
     total_frames: int | None,
     mode: str,
     approved_actions_path: Path | None,
+    approved_only: bool,
 ) -> list[dict[str, Any]]:
     windows: list[dict[str, Any]] = []
-    windows.extend(
-        _normalize_windows(
-            _ai_review_trigger_windows(_read_optional_json(output_dir / "ai_review_triggers.json")),
-            margin_frames=margin_frames,
-            total_frames=total_frames,
-            mode=mode,
+    if not approved_only:
+        windows.extend(
+            _normalize_windows(
+                _ai_review_trigger_windows(_read_optional_json(output_dir / "ai_review_triggers.json")),
+                margin_frames=margin_frames,
+                total_frames=total_frames,
+                mode=mode,
+            )
         )
-    )
-    windows.extend(
-        _normalize_windows(
-            _ball_audit_windows(_read_optional_json(output_dir / "ball_audit.json")),
-            margin_frames=margin_frames,
-            total_frames=total_frames,
-            mode=mode,
+        windows.extend(
+            _normalize_windows(
+                _ball_audit_windows(_read_optional_json(output_dir / "ball_audit.json")),
+                margin_frames=margin_frames,
+                total_frames=total_frames,
+                mode=mode,
+            )
         )
-    )
-    windows.extend(
-        _normalize_windows(
-            _event_candidate_windows(_read_optional_json(output_dir / "event_candidates.json")),
-            margin_frames=margin_frames,
-            total_frames=total_frames,
-            mode=mode,
+        windows.extend(
+            _normalize_windows(
+                _event_candidate_windows(_read_optional_json(output_dir / "event_candidates.json")),
+                margin_frames=margin_frames,
+                total_frames=total_frames,
+                mode=mode,
+            )
         )
-    )
     if approved_actions_path is not None:
         windows.extend(
             _normalize_windows(

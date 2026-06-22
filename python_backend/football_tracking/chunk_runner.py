@@ -60,6 +60,7 @@ class _HighRecallSettings:
     mode: str = "sahi"
     output_dir_name: str = "high_recall_windows"
     approved_actions_path: Path | None = None
+    approved_only: bool = False
     max_speed_px_per_frame: float = 180.0
     max_jump_px: float = 260.0
 
@@ -251,11 +252,12 @@ def run_high_recall_windows(
         return report
 
     _raise_if_cancelled(should_cancel)
-    _remove_stale_postprocess_artifacts(config)
-    write_ball_audit_report(config.output_dir)
-    write_ai_review_trigger_report(config.output_dir)
-    event_candidate_fps, event_candidate_fps_source = _event_candidate_fps(config)
-    write_event_candidate_report(config.output_dir, fps=event_candidate_fps, fps_source=event_candidate_fps_source)
+    if not settings.approved_only:
+        _remove_stale_postprocess_artifacts(config)
+        write_ball_audit_report(config.output_dir)
+        write_ai_review_trigger_report(config.output_dir)
+        event_candidate_fps, event_candidate_fps_source = _event_candidate_fps(config)
+        write_event_candidate_report(config.output_dir, fps=event_candidate_fps, fps_source=event_candidate_fps_source)
     approved_actions_path = _resolve_configured_approved_actions_path(
         settings.approved_actions_path,
         output_dir=config.output_dir,
@@ -269,6 +271,7 @@ def run_high_recall_windows(
         total_frames=source_total_frames,
         mode=settings.mode,
         approved_actions_path=approved_actions_path,
+        approved_only=settings.approved_only,
     )
 
     windows = report.get("windows") if isinstance(report.get("windows"), list) else []
@@ -993,6 +996,7 @@ def _high_recall_settings(config: Any) -> _HighRecallSettings:
         mode=mode,
         output_dir_name=output_dir_name,
         approved_actions_path=_optional_approved_actions_path(_setting(raw, "approved_actions_path", None)),
+        approved_only=bool(_setting(raw, "approved_only", False)),
         max_speed_px_per_frame=float(_setting(raw, "max_speed_px_per_frame", 180.0)),
         max_jump_px=float(_setting(raw, "max_jump_px", 260.0)),
     )

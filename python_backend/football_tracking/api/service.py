@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import csv
+import hashlib
 import inspect
 import json
 import mimetypes
@@ -33,11 +34,12 @@ from football_tracking.ai_review_triggers import compact_ai_review_trigger_summa
 from football_tracking.api.ai_provider import OpenAIResponsesClient, load_provider_settings
 from football_tracking.ball_audit import compact_ball_audit_summary
 from football_tracking.calibration import build_pitch_calibration_from_field_polygon
-from football_tracking.chunk_runner import run_temporal_chunks
-from football_tracking.config import AppConfig, load_config
+from football_tracking.chunk_runner import run_high_recall_windows, run_temporal_chunks
+from football_tracking.config import DEFAULT_HIGH_RECALL_MAX_TOTAL_FRAMES, AppConfig, load_config
 from football_tracking.events import compact_event_candidate_summary
 from football_tracking.follow_cam import FollowCamGenerator
 from football_tracking.highlights import render_highlight_clip
+from football_tracking.high_recall_windows import approved_action_windows_from_report
 from football_tracking.metrics import build_metrics_report, compute_track_metrics, stats_from_metrics_report, write_run_artifacts
 from football_tracking.pipeline import BallTrackingPipeline
 from football_tracking.player_tracks import compact_player_tracks_summary
@@ -1504,6 +1506,11 @@ class ApiService:
         return context
 
     def create_run(self, request: dict[str, Any]) -> dict[str, Any]:
+        if self._is_approved_child_run_request(request):
+            return self._create_approved_child_run(request)
+        if not request.get("config_name"):
+            raise ValueError("Create run requires config_name.")
+
         requested_output_name = request.get("output_dir_name")
         run_id = Path(requested_output_name).name if requested_output_name else ""
         if not run_id:
@@ -1535,6 +1542,7 @@ class ApiService:
         config.output_dir = self._build_run_output_dir(run_id=run_id, input_video=config.input_video)
         if config.output_dir.exists() and any(config.output_dir.iterdir()):
             raise FileExistsError(str(config.output_dir))
+        output_created = not config.output_dir.exists()
         config.output_dir.mkdir(parents=True, exist_ok=True)
 
         run_record = {
@@ -1576,8 +1584,283 @@ class ApiService:
             )
             self._active_threads[run_id] = thread
             self._cancel_events[run_id] = cancel_event
-        thread.start()
+        self._start_thread_or_cleanup(
+            run_id,
+            thread,
+            output_dir=config.output_dir,
+            remove_output=output_created,
+        )
         return run_record
+
+    def _is_approved_child_run_request(self, request: dict[str, Any]) -> bool:
+        approved_ids = [str(item).strip() for item in request.get("approved_action_ids") or [] if str(item).strip()]
+        artifact_name = str(request.get("approved_actions_artifact_name") or "").strip()
+        return bool(approved_ids or artifact_name)
+
+    def _create_approved_child_run(self, request: dict[str, Any]) -> dict[str, Any]:
+        parent_run_id = str(request.get("parent_run_id") or "").strip()
+        if not parent_run_id:
+            raise ValueError("Approved child targeted rerun requires parent_run_id.")
+        parent_run = self.get_run(parent_run_id)
+        if parent_run.get("status") != "completed":
+            raise RuntimeError(f"Parent run must be completed before approved child rerun: {parent_run_id}")
+
+        parent_output_dir = Path(parent_run["output_dir"]).resolve()
+        artifact_path = self._resolve_approved_actions_artifact_path(
+            parent_output_dir,
+            request.get("approved_actions_artifact_name"),
+        )
+        artifact = self._load_approved_actions_artifact(artifact_path)
+        selected_artifact = self._select_approved_actions_artifact(
+            artifact,
+            request.get("approved_action_ids") or [],
+        )
+        selected_artifact["source_approved_actions_path"] = str(artifact_path)
+        executable_windows = approved_action_windows_from_report(selected_artifact, mode="sahi")
+        if not executable_windows:
+            raise ValueError("Approved child targeted rerun requires at least one executable targeted_rerun action.")
+        selected_frame_budget = sum(
+            int(window["end_frame"]) - int(window["start_frame"]) + 1 for window in executable_windows
+        )
+
+        config_path, relative_name = self._resolve_run_config_reference(parent_run)
+        config = load_config(config_path)
+        input_video = parent_run.get("input_video") or str(config.input_video)
+        if not input_video:
+            raise FileNotFoundError(f"Parent run {parent_run_id} is not linked to an input video.")
+        config.input_video = self._resolve_input_video_path(input_video)
+
+        run_id = self._validated_output_run_id(
+            request.get("output_dir_name"),
+            default=f"approved_{parent_run_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid4().hex[:6]}",
+        )
+        config.output_dir = self._build_run_output_dir(run_id=run_id, input_video=config.input_video)
+        if config.output_dir.exists():
+            raise FileExistsError(str(config.output_dir))
+
+        artifact_relative_path = APPROVED_ACTIONS_FILE_NAME
+        child_artifact_path = config.output_dir / artifact_relative_path
+        child_config_path = config.output_dir / "approved_targeted_rerun_config.yaml"
+        parent_fingerprints = self._capture_parent_run_fingerprints(
+            parent_run,
+            parent_output_dir,
+            config_path,
+            input_video_path=Path(config.input_video).resolve(),
+        )
+
+        config.postprocess.enabled = False
+        config.follow_cam.enabled = False
+        config.temporal_chunks.enabled = False
+        config.high_recall_windows.enabled = True
+        config.high_recall_windows.margin_frames = 0
+        config.high_recall_windows.merge_gap_frames = 0
+        config.high_recall_windows.approved_actions_path = artifact_relative_path
+        config.high_recall_windows.approved_only = True
+        max_approved_frames = config.high_recall_windows.max_total_frames or DEFAULT_HIGH_RECALL_MAX_TOTAL_FRAMES
+        if max_approved_frames is not None and selected_frame_budget > int(max_approved_frames):
+            raise ValueError(
+                f"Approved child targeted rerun frame budget {selected_frame_budget} exceeds "
+                f"high_recall_windows.max_total_frames {max_approved_frames}."
+            )
+        config.high_recall_windows.max_total_frames = selected_frame_budget
+
+        run_record = {
+            "run_id": run_id,
+            "source": "approved_child_rerun",
+            "status": "queued",
+            "created_at": _utc_now_iso(),
+            "started_at": None,
+            "completed_at": None,
+            "config_name": relative_name,
+            "config_path": str(child_config_path),
+            "input_video": str(config.input_video),
+            "parent_run_id": parent_run_id,
+            "output_dir": str(config.output_dir),
+            "modules_enabled": {
+                "postprocess": False,
+                "follow_cam": False,
+                "temporal_chunks": False,
+                "high_recall_windows": True,
+            },
+            "artifacts": self._collect_artifacts(config.output_dir),
+            "stats": self._collect_stats(config.output_dir),
+            "progress": self._initial_progress(),
+            "notes": request.get("notes"),
+            "error": None,
+        }
+
+        thread: threading.Thread | None = None
+        with self._lock:
+            self._assert_no_active_run_locked()
+            output_created = False
+            registry_written = False
+            if config.output_dir.exists():
+                raise FileExistsError(str(config.output_dir))
+            try:
+                config.output_dir.mkdir(parents=True, exist_ok=False)
+                output_created = True
+                self._copy_approved_child_inputs(
+                    parent_output_dir=parent_output_dir,
+                    child_output_dir=config.output_dir,
+                    child_artifact_path=child_artifact_path,
+                    selected_artifact=selected_artifact,
+                )
+                self._write_approved_child_config(child_config_path, config)
+                registry = self._read_registry()
+                registry["runs"] = [run for run in registry["runs"] if run["run_id"] != run_id]
+                registry["runs"].append(run_record)
+                self._write_registry(registry)
+                registry_written = True
+                cancel_event = threading.Event()
+                thread = threading.Thread(
+                    target=self._execute_approved_child_run,
+                    args=(run_id, config, parent_run_id, parent_fingerprints, cancel_event),
+                    name=f"football-tracking-approved-child-{run_id}",
+                    daemon=True,
+                )
+                self._active_threads[run_id] = thread
+                self._cancel_events[run_id] = cancel_event
+            except Exception:
+                self._active_threads.pop(run_id, None)
+                self._cancel_events.pop(run_id, None)
+                if registry_written:
+                    try:
+                        registry = self._read_registry()
+                        registry["runs"] = [run for run in registry["runs"] if run["run_id"] != run_id]
+                        self._write_registry(registry)
+                    except Exception:
+                        pass
+                if output_created and config.output_dir.exists():
+                    shutil.rmtree(config.output_dir, ignore_errors=True)
+                raise
+        assert thread is not None
+        self._start_thread_or_cleanup(
+            run_id,
+            thread,
+            output_dir=config.output_dir,
+            remove_output=True,
+        )
+        return run_record
+
+    def _validated_output_run_id(self, requested_name: Any, *, default: str) -> str:
+        raw_name = str(requested_name or "").strip()
+        if not raw_name:
+            return default
+        output_name = Path(raw_name).name
+        if output_name != raw_name or output_name in {".", ".."}:
+            raise ValueError("output_dir_name must be a safe single directory name.")
+        return output_name
+
+    def _resolve_approved_actions_artifact_path(self, parent_output_dir: Path, requested_name: Any) -> Path:
+        raw_name = str(requested_name or APPROVED_ACTIONS_FILE_NAME).strip()
+        if not raw_name:
+            raise ValueError("approved_actions_artifact_name must not be empty.")
+        raw_path = Path(raw_name)
+        candidate = raw_path if raw_path.is_absolute() else parent_output_dir / raw_path
+        resolved = candidate.resolve()
+        if resolved != parent_output_dir and parent_output_dir not in resolved.parents:
+            raise ValueError("approved_actions_artifact_name must stay within the parent output directory.")
+        if not resolved.is_file():
+            raise FileNotFoundError(f"Approved actions artifact not found: {raw_name}")
+        return resolved
+
+    def _load_approved_actions_artifact(self, artifact_path: Path) -> dict[str, Any]:
+        try:
+            loaded = json.loads(artifact_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"{artifact_path.name} corrupt: {exc}") from exc
+        if not isinstance(loaded, dict):
+            raise ValueError(f"{artifact_path.name} invalid: expected JSON object.")
+        if not isinstance(loaded.get("approved_actions"), list):
+            raise ValueError(f"{artifact_path.name} invalid: approved_actions must be a list.")
+        return loaded
+
+    def _select_approved_actions_artifact(self, artifact: dict[str, Any], approval_ids: list[Any]) -> dict[str, Any]:
+        actions = artifact.get("approved_actions")
+        if not isinstance(actions, list):
+            raise ValueError("Approved actions artifact invalid: approved_actions must be a list.")
+        selected_ids = [str(item).strip() for item in approval_ids if str(item).strip()]
+        if not selected_ids:
+            selected_actions = list(actions)
+        else:
+            actions_by_id = {
+                str(action.get("approval_id") or ""): action
+                for action in actions
+                if isinstance(action, dict)
+            }
+            missing = [approval_id for approval_id in selected_ids if approval_id not in actions_by_id]
+            if missing:
+                raise ValueError(f"Approved action IDs not found: {', '.join(missing)}")
+            selected_actions = [actions_by_id[approval_id] for approval_id in selected_ids]
+        selected_artifact = dict(artifact)
+        selected_artifact["approved_actions"] = selected_actions
+        return selected_artifact
+
+    def _copy_approved_child_inputs(
+        self,
+        *,
+        parent_output_dir: Path,
+        child_output_dir: Path,
+        child_artifact_path: Path,
+        selected_artifact: dict[str, Any],
+    ) -> None:
+        for name in ("ball_track.csv", "ball_track.cleaned.csv"):
+            source_path = parent_output_dir / name
+            if source_path.is_file():
+                shutil.copy2(source_path, child_output_dir / name)
+        child_artifact_path.parent.mkdir(parents=True, exist_ok=True)
+        child_artifact_path.write_text(
+            json.dumps(selected_artifact, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+
+    def _write_approved_child_config(self, config_path: Path, config: AppConfig) -> None:
+        with config_path.open("w", encoding="utf-8") as handle:
+            yaml.safe_dump(_jsonable(config), handle, sort_keys=False, allow_unicode=False)
+
+    def _capture_parent_run_fingerprints(
+        self,
+        parent_run: dict[str, Any],
+        parent_output_dir: Path,
+        config_path: Path | None,
+        *,
+        input_video_path: Path | None = None,
+    ) -> dict[str, tuple[int, str] | None]:
+        watched_paths = [
+            parent_output_dir / "ball_track.csv",
+            parent_output_dir / "ball_track.cleaned.csv",
+            parent_output_dir / "follow_cam.mp4",
+            parent_output_dir / "highlight.mp4",
+        ]
+        run_config_path = Path(parent_run["config_path"]).resolve() if parent_run.get("config_path") else config_path
+        if run_config_path is not None:
+            watched_paths.append(run_config_path)
+        if input_video_path is not None:
+            watched_paths.append(input_video_path)
+        return {
+            str(path.resolve()): self._file_fingerprint(path) if path.is_file() else None
+            for path in watched_paths
+        }
+
+    def _assert_parent_fingerprints_unchanged(self, fingerprints: dict[str, tuple[int, str] | None]) -> None:
+        for path_text, expected in fingerprints.items():
+            path = Path(path_text)
+            if expected is None:
+                if path.exists():
+                    raise RuntimeError(f"Parent run artifact changed during approved child rerun: {path.name}")
+                continue
+            if not path.is_file() or self._file_fingerprint(path) != expected:
+                raise RuntimeError(f"Parent run artifact changed during approved child rerun: {path.name}")
+
+    def _parent_fingerprint_error(self, fingerprints: dict[str, tuple[int, str] | None]) -> str | None:
+        try:
+            self._assert_parent_fingerprints_unchanged(fingerprints)
+        except RuntimeError as exc:
+            return str(exc)
+        return None
+
+    def _file_fingerprint(self, path: Path) -> tuple[int, str]:
+        return path.stat().st_size, hashlib.sha256(path.read_bytes()).hexdigest()
 
     def create_follow_cam_render(self, source_run_id: str, request: dict[str, Any]) -> dict[str, Any]:
         source_run = self.get_run(source_run_id)
@@ -1601,6 +1884,7 @@ class ApiService:
         config.output_dir = self._build_run_output_dir(run_id=run_id, input_video=config.input_video)
         if config.output_dir.exists() and any(config.output_dir.iterdir()):
             raise FileExistsError(str(config.output_dir))
+        output_created = not config.output_dir.exists()
         config.output_dir.mkdir(parents=True, exist_ok=True)
 
         config.postprocess.enabled = False
@@ -1660,7 +1944,12 @@ class ApiService:
             )
             self._active_threads[run_id] = thread
             self._cancel_events[run_id] = cancel_event
-        thread.start()
+        self._start_thread_or_cleanup(
+            run_id,
+            thread,
+            output_dir=config.output_dir,
+            remove_output=output_created,
+        )
         return run_record
 
     def create_highlight_render(self, source_run_id: str, request: dict[str, Any]) -> dict[str, Any]:
@@ -1684,6 +1973,7 @@ class ApiService:
         config.output_dir = self._build_run_output_dir(run_id=run_id, input_video=config.input_video)
         if config.output_dir.exists() and any(config.output_dir.iterdir()):
             raise FileExistsError(str(config.output_dir))
+        output_created = not config.output_dir.exists()
         config.output_dir.mkdir(parents=True, exist_ok=True)
 
         config.postprocess.enabled = False
@@ -1739,7 +2029,12 @@ class ApiService:
             )
             self._active_threads[run_id] = thread
             self._cancel_events[run_id] = cancel_event
-        thread.start()
+        self._start_thread_or_cleanup(
+            run_id,
+            thread,
+            output_dir=config.output_dir,
+            remove_output=output_created,
+        )
         return run_record
 
     def cancel_run(self, run_id: str) -> dict[str, Any]:
@@ -1859,6 +2154,126 @@ class ApiService:
                     "status": "failed",
                     "completed_at": completed_at,
                     "error": self._append_artifact_error(str(exc), artifact_error),
+                    "artifacts": self._collect_artifacts(config.output_dir),
+                    "stats": self._collect_stats(config.output_dir),
+                    "progress": self._failed_progress(existing.get("progress"), existing.get("started_at")),
+                },
+            )
+        finally:
+            with self._lock:
+                self._active_threads.pop(run_id, None)
+                self._cancel_events.pop(run_id, None)
+
+    def _execute_approved_child_run(
+        self,
+        run_id: str,
+        config: AppConfig,
+        parent_run_id: str,
+        parent_fingerprints: dict[str, tuple[int, str] | None],
+        cancel_event: threading.Event,
+    ) -> None:
+        progress_plan = self._progress_stage_plan(tracking=True, postprocess=False, render=False)
+        started_at = _utc_now_iso()
+        self._update_run(
+            run_id,
+            {
+                "status": "running",
+                "started_at": started_at,
+                "error": None,
+                "progress": self._build_progress_payload(
+                    {"stage": "high_recall_windows", "current_frame": 0, "total_frames": None},
+                    progress_plan,
+                    started_at=started_at,
+                ),
+            },
+        )
+        try:
+            def run_child_high_recall(progress_callback=None, should_cancel=None) -> None:
+                report = run_high_recall_windows(
+                    config,
+                    progress_callback=progress_callback,
+                    should_cancel=should_cancel,
+                )
+                windows = report.get("windows") if isinstance(report, dict) else None
+                execution = report.get("execution") if isinstance(report, dict) else None
+                execution_status = execution.get("status") if isinstance(execution, dict) else None
+                if not windows or execution_status == "skipped":
+                    raise RuntimeError("Approved child targeted rerun produced no executable windows.")
+
+            self._run_with_optional_progress(
+                run_child_high_recall,
+                lambda update: self._update_run_progress(run_id, update, progress_plan),
+                cancel_event.is_set,
+            )
+            self._assert_parent_fingerprints_unchanged(parent_fingerprints)
+            existing = self.get_run(run_id)
+            updated = self._build_run_snapshot(
+                run_id=run_id,
+                source="approved_child_rerun",
+                status="completed",
+                created_at=existing["created_at"],
+                config_name=existing.get("config_name"),
+                config_path=existing.get("config_path"),
+                input_video=str(config.input_video),
+                parent_run_id=parent_run_id,
+                output_dir=config.output_dir,
+                modules_enabled={
+                    "postprocess": False,
+                    "follow_cam": False,
+                    "temporal_chunks": False,
+                    "high_recall_windows": True,
+                },
+                notes=existing.get("notes"),
+                started_at=existing.get("started_at"),
+                completed_at=_utc_now_iso(),
+                progress=self._completed_progress(existing.get("progress"), existing.get("started_at")),
+            )
+            self._replace_run(run_id, updated)
+        except CancelledError:
+            existing = self.get_run(run_id)
+            completed_at = _utc_now_iso()
+            mutation_error = self._parent_fingerprint_error(parent_fingerprints)
+            status = "failed" if mutation_error else "cancelled"
+            partial_run = {
+                **existing,
+                "status": status,
+                "completed_at": completed_at,
+                "error": mutation_error,
+            }
+            artifact_error = self._write_run_artifacts(config.output_dir, partial_run)
+            self._update_run(
+                run_id,
+                {
+                    "status": status,
+                    "completed_at": completed_at,
+                    "error": self._append_artifact_error(mutation_error, artifact_error),
+                    "artifacts": self._collect_artifacts(config.output_dir),
+                    "stats": self._collect_stats(config.output_dir),
+                    "progress": (
+                        self._failed_progress(existing.get("progress"), existing.get("started_at"))
+                        if mutation_error
+                        else self._cancelled_progress(existing.get("progress"), existing.get("started_at"))
+                    ),
+                },
+            )
+        except Exception as exc:
+            existing = self.get_run(run_id)
+            completed_at = _utc_now_iso()
+            mutation_error = self._parent_fingerprint_error(parent_fingerprints)
+            error = self._append_artifact_error(str(exc), mutation_error)
+            partial_run = {
+                **existing,
+                "status": "failed",
+                "completed_at": completed_at,
+                "error": error,
+            }
+            artifact_error = self._write_run_artifacts(config.output_dir, partial_run)
+            self._update_run(
+                run_id,
+                {
+                    "status": "failed",
+                    "completed_at": completed_at,
+                    "error": self._append_artifact_error(error, artifact_error),
                     "artifacts": self._collect_artifacts(config.output_dir),
                     "stats": self._collect_stats(config.output_dir),
                     "progress": self._failed_progress(existing.get("progress"), existing.get("started_at")),
@@ -2082,9 +2497,36 @@ class ApiService:
                 self._cancel_events.pop(run_id, None)
 
     def _assert_no_active_run_locked(self) -> None:
-        running = [run_id for run_id, thread in self._active_threads.items() if thread.is_alive()]
+        running = list(self._active_threads)
         if running:
             raise RuntimeError(f"Another run is already active: {running[0]}")
+
+    def _start_thread_or_cleanup(
+        self,
+        run_id: str,
+        thread: threading.Thread,
+        *,
+        output_dir: Path | None = None,
+        remove_output: bool = False,
+    ) -> None:
+        try:
+            thread.start()
+        except Exception as exc:
+            cleanup_error: str | None = None
+            with self._lock:
+                self._active_threads.pop(run_id, None)
+                self._cancel_events.pop(run_id, None)
+                try:
+                    registry = self._read_registry()
+                    registry["runs"] = [run for run in registry["runs"] if run["run_id"] != run_id]
+                    self._write_registry(registry)
+                except Exception as registry_exc:
+                    cleanup_error = f"Failed to clean queued run registry after thread start failure: {registry_exc}"
+            if remove_output and output_dir is not None and output_dir.exists():
+                shutil.rmtree(output_dir, ignore_errors=True)
+            if cleanup_error:
+                raise RuntimeError(f"{exc} | {cleanup_error}") from exc
+            raise
 
     def _run_with_optional_progress(self, runner, progress_callback, should_cancel) -> None:
         parameters = inspect.signature(runner).parameters

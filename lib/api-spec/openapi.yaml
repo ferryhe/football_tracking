@@ -2301,7 +2301,9 @@ components:
     CreateRunRequest:
       properties:
         config_name:
-          type: string
+          anyOf:
+          - type: string
+          - type: 'null'
           title: Config Name
         input_video:
           anyOf:
@@ -2342,14 +2344,22 @@ components:
           - type: integer
           - type: 'null'
           title: Max Frames
+        approved_action_ids:
+          items:
+            type: string
+          type: array
+          title: Approved Action Ids
+        approved_actions_artifact_name:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Approved Actions Artifact Name
         notes:
           anyOf:
           - type: string
           - type: 'null'
           title: Notes
       type: object
-      required:
-      - config_name
       title: CreateRunRequest
     DeleteResourceResponse:
       properties:

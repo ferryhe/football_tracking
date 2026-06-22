@@ -10,6 +10,7 @@ from unittest.mock import patch
 from football_tracking.chunk_runner import build_high_recall_window_config, run_high_recall_windows
 from football_tracking.config import load_config
 from football_tracking.high_recall_windows import (
+    approved_action_windows_from_report,
     build_high_recall_windows,
     write_high_recall_window_report,
 )
@@ -594,6 +595,78 @@ class HighRecallWindowTests(unittest.TestCase):
         self.assertEqual("imp_001", window["approval_provenance"][0]["improvement_id"])
         self.assertEqual(120, window["approval_provenance"][0]["local_search_roi"]["x"])
 
+    def test_approved_action_windows_from_report_returns_executable_normalized_windows(self) -> None:
+        report = {
+            "schema_version": "1.0",
+            "approved_actions": [
+                {
+                    "approval_id": "approval_001",
+                    "improvement_id": "imp_001",
+                    "approved_action": "targeted_rerun",
+                    "approval_source": "api",
+                    "rerun_scope": {"start_frame": 10, "end_frame": 12},
+                },
+                {
+                    "approval_id": "approval_manual",
+                    "improvement_id": "imp_manual",
+                    "approved_action": "manual_review",
+                },
+            ],
+        }
+
+        windows = approved_action_windows_from_report(report, mode="sahi")
+
+        self.assertEqual(1, len(windows))
+        self.assertEqual({"start_frame": 10, "end_frame": 12}, windows[0]["rerun_scope"])
+        self.assertEqual("approval_001", windows[0]["approval_id"])
+        self.assertEqual("sahi", windows[0]["mode"])
+
+    def test_approved_only_ignores_deterministic_windows(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_json(
+                output_dir / "ai_review_triggers.json",
+                {
+                    "triggers": [
+                        {
+                            "type": "large_jump",
+                            "priority": "high",
+                            "start_frame": 100,
+                            "end_frame": 104,
+                            "reason": "deterministic high",
+                        }
+                    ],
+                },
+            )
+            approved_path = output_dir / "ai_improvement_approved_actions.json"
+            _write_json(
+                approved_path,
+                {
+                    "schema_version": "1.0",
+                    "approved_actions": [
+                        {
+                            "approval_id": "approval_001",
+                            "improvement_id": "imp_001",
+                            "approved_action": "targeted_rerun",
+                            "rerun_scope": {"start_frame": 10, "end_frame": 12},
+                        }
+                    ],
+                },
+            )
+
+            report = build_high_recall_windows(
+                output_dir,
+                margin_frames=0,
+                merge_gap_frames=0,
+                max_total_frames=100,
+                approved_actions_path=approved_path,
+                approved_only=True,
+            )
+
+        self.assertTrue(report["settings"]["approved_only"])
+        self.assertEqual([(10, 12)], [(item["start_frame"], item["end_frame"]) for item in report["windows"]])
+        self.assertEqual(1, report["summary"]["candidate_window_count"])
+
 
 class HighRecallChunkRunnerHookTests(unittest.TestCase):
     def test_high_recall_sahi_window_disables_half_precision(self) -> None:
@@ -775,6 +848,47 @@ class HighRecallChunkRunnerHookTests(unittest.TestCase):
 
         self.assertEqual(approved_path, write_windows.call_args.kwargs["approved_actions_path"])
 
+    def test_runner_approved_only_skips_deterministic_report_generation(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            approved_path = output_dir / "ai_improvement_approved_actions.json"
+            _write_json(approved_path, {"schema_version": "1.0", "approved_actions": []})
+            config = SimpleNamespace(
+                output_dir=output_dir,
+                output=SimpleNamespace(csv_name="ball_track.csv", debug_jsonl_name="debug.jsonl"),
+                detector=SimpleNamespace(inference_mode="direct_full_frame"),
+                runtime=SimpleNamespace(start_frame=0, max_frames=None),
+                high_recall_windows=SimpleNamespace(
+                    enabled=True,
+                    margin_frames=0,
+                    merge_gap_frames=0,
+                    max_total_frames=100,
+                    mode="sahi",
+                    output_dir_name="high_recall_windows",
+                    approved_actions_path=approved_path,
+                    approved_only=True,
+                    max_speed_px_per_frame=120.0,
+                    max_jump_px=180.0,
+                ),
+            )
+
+            with (
+                patch("football_tracking.chunk_runner.write_ball_audit_report") as write_audit,
+                patch("football_tracking.chunk_runner.write_ai_review_trigger_report") as write_ai_review,
+                patch("football_tracking.chunk_runner.write_event_candidate_report") as write_events,
+                patch(
+                    "football_tracking.chunk_runner.write_high_recall_window_report",
+                    return_value={"windows": [], "summary": {"selected_window_count": 0}},
+                ) as write_windows,
+            ):
+                run_high_recall_windows(config, source_total_frames=20)
+
+        write_audit.assert_not_called()
+        write_ai_review.assert_not_called()
+        write_events.assert_not_called()
+        self.assertTrue(write_windows.call_args.kwargs["approved_only"])
+        self.assertEqual(approved_path, write_windows.call_args.kwargs["approved_actions_path"])
+
     def test_runner_clears_stale_reconcile_report_when_no_windows_are_selected(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:
             output_dir = Path(temp_name)
@@ -879,6 +993,7 @@ high_recall_windows:
   mode: sahi
   output_dir_name: high_recall_windows
   approved_actions_path: ai_improvement_approved_actions.json
+  approved_only: true
   max_speed_px_per_frame: 140.0
   max_jump_px: 220.0
 """.strip()
@@ -895,6 +1010,7 @@ high_recall_windows:
         self.assertEqual("sahi", config.high_recall_windows.mode)
         self.assertEqual("high_recall_windows", config.high_recall_windows.output_dir_name)
         self.assertEqual("ai_improvement_approved_actions.json", config.high_recall_windows.approved_actions_path)
+        self.assertTrue(config.high_recall_windows.approved_only)
         self.assertEqual(140.0, config.high_recall_windows.max_speed_px_per_frame)
         self.assertEqual(220.0, config.high_recall_windows.max_jump_px)
 

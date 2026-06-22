@@ -428,6 +428,7 @@ class HighRecallWindowConfig:
     mode: str = "sahi"
     output_dir_name: str = "high_recall_windows"
     approved_actions_path: str | None = None
+    approved_only: bool = False
     max_speed_px_per_frame: float = 180.0
     max_jump_px: float = 260.0
 
@@ -888,6 +889,7 @@ def _to_high_recall_windows(raw_high_recall_windows: Any) -> HighRecallWindowCon
         "mode": str(raw_high_recall_windows.get("mode", "sahi")),
         "output_dir_name": str(raw_high_recall_windows.get("output_dir_name", "high_recall_windows")),
         "approved_actions_path": raw_high_recall_windows.get("approved_actions_path"),
+        "approved_only": bool(raw_high_recall_windows.get("approved_only", False)),
         "max_speed_px_per_frame": float(raw_high_recall_windows.get("max_speed_px_per_frame", 180.0)),
         "max_jump_px": float(raw_high_recall_windows.get("max_jump_px", 260.0)),
     }
