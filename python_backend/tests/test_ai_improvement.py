@@ -629,7 +629,12 @@ class AiImprovementTests(unittest.TestCase):
                                 "height": 520,
                                 "confidence": 0.74,
                             },
-                            "evidence": ["visual packet shows a likely ball near the corner arc"],
+                            "evidence": [
+                                {
+                                    "source_packet_id": "packet_001",
+                                    "reason": "visual packet shows a likely ball near the corner arc",
+                                }
+                            ],
                             "confidence": 0.78,
                         }
                     ],
@@ -641,6 +646,119 @@ class AiImprovementTests(unittest.TestCase):
         self.assertEqual("needs_rerun", report["summary"]["status"])
         self.assertEqual("localize_ball_roi", report["improvements"][0]["recommended_action"])
         self.assertEqual(4300.0, report["improvements"][0]["local_search_roi"]["x"])
+
+    def test_localize_ball_roi_without_packet_or_visual_provenance_becomes_error_report(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_minimal_artifacts(output_dir)
+            client = _FakeImprovementClient(
+                {
+                    "summary": {"status": "needs_rerun"},
+                    "improvements": [
+                        {
+                            "id": "imp_001",
+                            "priority": "P0",
+                            "area": "tracking",
+                            "failure_tags": ["ball_lost"],
+                            "root_cause_module": "reacquisition",
+                            "diagnosis": "Ball is likely in the right corner, but no packet evidence is cited.",
+                            "recommended_action": "localize_ball_roi",
+                            "local_search_roi": {
+                                "coordinate_space": "image",
+                                "frame": 2088,
+                                "x": 4300,
+                                "y": 760,
+                                "width": 900,
+                                "height": 520,
+                                "confidence": 0.74,
+                            },
+                            "evidence": ["unlinked visual impression"],
+                            "confidence": 0.78,
+                        }
+                    ],
+                }
+            )
+
+            report = build_ai_improvement_report(output_dir, client=client)
+
+        self.assertEqual("error", report["summary"]["status"])
+        self.assertIn("source_packet_id or visual_review_id", report["error"])
+
+    def test_localize_ball_roi_rejects_unknown_packet_provenance(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_minimal_artifacts(output_dir)
+            client = _FakeImprovementClient(
+                {
+                    "summary": {"status": "needs_rerun"},
+                    "improvements": [
+                        {
+                            "id": "imp_001",
+                            "priority": "P0",
+                            "area": "tracking",
+                            "failure_tags": ["ball_lost"],
+                            "root_cause_module": "reacquisition",
+                            "diagnosis": "Model cites a packet id that is not in review_packets.json.",
+                            "recommended_action": "localize_ball_roi",
+                            "source_packet_id": "packet_does_not_exist",
+                            "local_search_roi": {
+                                "coordinate_space": "image",
+                                "frame": 2088,
+                                "x": 4300,
+                                "y": 760,
+                                "width": 900,
+                                "height": 520,
+                                "confidence": 0.74,
+                            },
+                            "evidence": [{"source_packet_id": "packet_does_not_exist"}],
+                            "confidence": 0.78,
+                        }
+                    ],
+                }
+            )
+
+            report = build_ai_improvement_report(output_dir, client=client)
+
+        self.assertEqual("error", report["summary"]["status"])
+        self.assertIn("matches review_packets.json or ai_visual_review.json", report["error"])
+
+    def test_targeted_rerun_with_local_search_roi_requires_traceable_provenance(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_minimal_artifacts(output_dir)
+            client = _FakeImprovementClient(
+                {
+                    "summary": {"status": "needs_rerun"},
+                    "improvements": [
+                        {
+                            "id": "imp_001",
+                            "priority": "P0",
+                            "area": "tracking",
+                            "failure_tags": ["ball_lost"],
+                            "root_cause_module": "reacquisition",
+                            "diagnosis": "A targeted rerun carries an ROI without packet evidence.",
+                            "recommended_action": "targeted_rerun",
+                            "rerun_scope": {"start_frame": 2060, "end_frame": 2110},
+                            "local_search_roi": {
+                                "coordinate_space": "image",
+                                "frame": 2088,
+                                "x": 4300,
+                                "y": 760,
+                                "width": 900,
+                                "height": 520,
+                                "confidence": 0.74,
+                            },
+                            "evidence": ["unlinked visual impression"],
+                            "confidence": 0.78,
+                        }
+                    ],
+                }
+            )
+
+            report = build_ai_improvement_report(output_dir, client=client)
+
+        self.assertEqual("error", report["summary"]["status"])
+        self.assertIn("local_search_roi requires traceable packet or visual review provenance", report["error"])
 
     def test_noise_filter_adjustment_requires_actionable_scope_and_patch(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:
@@ -676,6 +794,73 @@ class AiImprovementTests(unittest.TestCase):
         self.assertEqual("noise_filter_adjustment", improvement["recommended_action"])
         self.assertEqual("shoe_confusion", improvement["false_positive_class"])
         self.assertEqual({"selection": {"min_accept_score": 0.62}}, improvement["config_patch"])
+
+    def test_unknown_noise_class_is_normalized_with_warning(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_minimal_artifacts(output_dir)
+            client = _FakeImprovementClient(
+                {
+                    "summary": {"status": "needs_rerun", "primary_issue": "noise"},
+                    "improvements": [
+                        {
+                            "id": "imp_noise",
+                            "priority": "P1",
+                            "area": "tracking",
+                            "failure_tags": ["unknown"],
+                            "root_cause_module": "selection",
+                            "start_frame": 120,
+                            "end_frame": 142,
+                            "diagnosis": "The dense-noise packet cites a class outside the shared vocabulary.",
+                            "recommended_action": "noise_filter_adjustment",
+                            "false_positive_class": "spectator_hat",
+                            "config_patch": {"selection": {"min_accept_score": 0.62}},
+                            "evidence": ["dense-noise packet has repeated off-ball detections"],
+                            "confidence": 0.73,
+                        }
+                    ],
+                }
+            )
+
+            report = build_ai_improvement_report(output_dir, client=client)
+
+        improvement = report["improvements"][0]
+        self.assertEqual("needs_rerun", report["summary"]["status"])
+        self.assertEqual("unknown", improvement["false_positive_class"])
+        self.assertTrue(any("false_positive_class normalized to unknown" in warning for warning in report["warnings"]))
+
+    def test_known_extra_ball_noise_class_is_preserved(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_minimal_artifacts(output_dir)
+            client = _FakeImprovementClient(
+                {
+                    "summary": {"status": "needs_rerun", "primary_issue": "noise"},
+                    "improvements": [
+                        {
+                            "id": "imp_noise",
+                            "priority": "P1",
+                            "area": "tracking",
+                            "failure_tags": ["unknown"],
+                            "root_cause_module": "selection",
+                            "start_frame": 120,
+                            "end_frame": 142,
+                            "diagnosis": "Packet shows a spare ball outside the active play.",
+                            "recommended_action": "noise_filter_adjustment",
+                            "false_positive_class": "extra_ball",
+                            "config_patch": {"selection": {"min_accept_score": 0.62}},
+                            "evidence": ["dense-noise packet shows non-match ball"],
+                            "confidence": 0.73,
+                        }
+                    ],
+                }
+            )
+
+            report = build_ai_improvement_report(output_dir, client=client)
+
+        improvement = report["improvements"][0]
+        self.assertEqual("extra_ball", improvement["false_positive_class"])
+        self.assertFalse(any("false_positive_class normalized to unknown" in warning for warning in report["warnings"]))
 
     def test_camera_actions_are_validated_and_strip_invalid_follow_cam_patch_names(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:
@@ -1100,6 +1285,97 @@ class AiImprovementTests(unittest.TestCase):
         self.assertEqual("visual_review:packet_001", action["visual_review_id"])
         self.assertEqual({"start_frame": 10, "end_frame": 20}, action["rerun_scope"])
         self.assertEqual("gpt-improve", action["provenance"]["model"])
+
+    def test_approval_rejects_localize_ball_roi_without_traceable_provenance(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_minimal_artifacts(output_dir)
+            _write_json(
+                output_dir / "ai_improvement_report.json",
+                {
+                    "schema_version": "1.0",
+                    "generated_at": "2026-06-22T00:00:00+00:00",
+                    "model": "gpt-improve",
+                    "summary": {"status": "needs_rerun"},
+                    "improvements": [
+                        {
+                            "id": "imp_001",
+                            "priority": "P0",
+                            "area": "tracking",
+                            "failure_tags": ["ball_lost"],
+                            "root_cause_module": "reacquisition",
+                            "diagnosis": "Manually edited report removed source ids.",
+                            "recommended_action": "localize_ball_roi",
+                            "local_search_roi": {
+                                "coordinate_space": "image",
+                                "frame": 15,
+                                "x": 120,
+                                "y": 40,
+                                "width": 80,
+                                "height": 50,
+                                "confidence": 0.72,
+                            },
+                            "evidence_payload": {"local_search_roi_provenance": {"source": "ai_visual_review"}},
+                            "confidence": 0.82,
+                        }
+                    ],
+                },
+            )
+
+            with self.assertRaisesRegex(ValueError, "traceable packet or visual review provenance"):
+                approve_ai_improvement_actions(
+                    output_dir,
+                    run_id="run_123",
+                    improvement_ids=["imp_001"],
+                    approved_by="operator-a",
+                )
+
+    def test_approval_accepts_localize_ball_roi_with_evidence_list_provenance(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_minimal_artifacts(output_dir)
+            _write_json(
+                output_dir / "ai_improvement_report.json",
+                {
+                    "schema_version": "1.0",
+                    "generated_at": "2026-06-22T00:00:00+00:00",
+                    "model": "gpt-improve",
+                    "summary": {"status": "needs_rerun"},
+                    "improvements": [
+                        {
+                            "id": "imp_001",
+                            "priority": "P0",
+                            "area": "tracking",
+                            "failure_tags": ["ball_lost"],
+                            "root_cause_module": "reacquisition",
+                            "diagnosis": "Evidence list carries the packet id.",
+                            "recommended_action": "localize_ball_roi",
+                            "local_search_roi": {
+                                "coordinate_space": "image",
+                                "frame": 15,
+                                "x": 120,
+                                "y": 40,
+                                "width": 80,
+                                "height": 50,
+                                "confidence": 0.72,
+                            },
+                            "evidence": [{"source_packet_id": "packet_001"}],
+                            "confidence": 0.82,
+                        }
+                    ],
+                },
+            )
+
+            artifact = approve_ai_improvement_actions(
+                output_dir,
+                run_id="run_123",
+                improvement_ids=["imp_001"],
+                approved_by="operator-a",
+            )
+
+        action = artifact["approved_actions"][0]
+        self.assertEqual("localize_ball_roi", action["approved_action"])
+        self.assertEqual(120.0, action["local_search_roi"]["x"])
 
     def test_approval_config_patch_strips_invalid_paths_and_writes_derived_patch(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:
