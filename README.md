@@ -68,6 +68,7 @@ Highlights of the new Baseline page:
 Review and highlight outputs:
 
 - **Run metrics and manifest** — each run writes reproducible summaries for raw/cleaned tracks, audit reports, AI review triggers, player tracks, event candidates, and generated renders.
+- **Camera motion audit** — follow-cam renders also write `camera_motion_audit.json`, a standalone review report for abrupt pan, acceleration, or zoom changes in the final camera path.
 - **Event candidates** — completed runs can expose `event_candidates.json` with shot and goal candidates. These are review candidates, not confirmed football events.
 - **Highlight clips** — the Deliverable page can render a short `highlight.mp4` from a selected event candidate; the child run writes `highlight_report.json` and appears in History as a highlight job.
 
@@ -124,7 +125,7 @@ These are stored as Replit Secrets. **Do not** create `.env` files for them.
 - A Node.js Express **reverse proxy** sits in front of FastAPI to fit Replit's path-routed proxy and to simplify local dev URLs.
 - The frontend gained: 5 pages with sidebar nav, Dashboard overview, dark/light mode, EN/中文 i18n, mobile responsive layout.
 - Frame-range partial-clip runs (`start_frame` / `max_frames`) were added to the baseline UI; the backend already accepted these fields.
-- The backend now writes review artifacts (`ball_audit.json`, `ai_review_triggers.json`, `event_candidates.json`, `player_tracks.json`) and supports child render jobs for follow-cam deliverables and highlight clips.
+- The backend now writes review artifacts (`ball_audit.json`, `ai_review_triggers.json`, `camera_motion_audit.json`, `event_candidates.json`, `player_tracks.json`) and supports child render jobs for follow-cam deliverables and highlight clips.
 
 ---
 
@@ -192,6 +193,7 @@ These are stored as Replit Secrets. **Do not** create `.env` files for them.
 审核与集锦输出：
 
 - **指标与运行清单** —— 每次任务都会写出 raw/cleaned 轨迹、审核报告、AI 审核触发、球员轨迹、事件候选和渲染结果摘要。
+- **镜头运动审核** —— follow-cam 渲染会额外写出 `camera_motion_audit.json`，专门复核最终镜头路径里的突然平移、突然加速或突然缩放。
 - **事件候选** —— 已完成任务可生成 `event_candidates.json`，其中包含射门和进球候选；这些是待复核候选，不是已确认事件。
 - **集锦短片** —— 「成品任务」页可以从某个事件候选渲染 `highlight.mp4`；子任务会写 `highlight_report.json`，并在「历史」页显示为集锦任务。
 
@@ -248,4 +250,4 @@ curl -s -X POST -H "Content-Type: application/json" \
 - 在 FastAPI 前面加了一个 Node.js Express **反向代理**，匹配 Replit 的路径路由模型，也方便本地调用。
 - 前端新增了：5 个页面 + 侧边栏、概览页、暗黑/明亮主题、中英切换、移动端响应式布局。
 - 「跑基线」UI 增加了 `start_frame` / `max_frames` 帧范围（后端早已支持，只是 UI 没暴露）。
-- 后端新增审核产物（`ball_audit.json`、`ai_review_triggers.json`、`event_candidates.json`、`player_tracks.json`），并支持跟随镜头成品和集锦短片两类子渲染任务。
+- 后端新增审核产物（`ball_audit.json`、`ai_review_triggers.json`、`camera_motion_audit.json`、`event_candidates.json`、`player_tracks.json`），并支持跟随镜头成品和集锦短片两类子渲染任务。

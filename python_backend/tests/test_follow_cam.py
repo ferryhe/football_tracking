@@ -5,6 +5,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import numpy as np
 import yaml
@@ -47,6 +48,26 @@ class DummyWriter:
 
     def write(self, frame: np.ndarray) -> None:
         self.frames.append(frame)
+
+    def release(self) -> None:
+        pass
+
+
+class DummyVideoCapture:
+    def isOpened(self) -> bool:
+        return True
+
+    def get(self, prop_id: int) -> float:
+        if prop_id == 5:
+            return 20.0
+        if prop_id == 3:
+            return 1280.0
+        if prop_id == 4:
+            return 720.0
+        return 0.0
+
+    def release(self) -> None:
+        pass
 
 
 class FollowCamTests(unittest.TestCase):
@@ -368,6 +389,52 @@ class FollowCamTests(unittest.TestCase):
 
         self.assertEqual({3: [(12.0, 34.0)]}, points_by_frame)
 
+    def test_run_writes_camera_motion_audit_and_report_summary(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            track_csv = output_dir / "ball_track.csv"
+            generator = FollowCamGenerator(
+                self.make_app_config(
+                    FollowCamConfig(
+                        enabled=True,
+                        draw_ball_marker=False,
+                        draw_frame_text=False,
+                    ),
+                    output_dir=output_dir,
+                )
+            )
+            frames = [
+                FollowCamFrame(0, 100.0, 100.0, 0.9, OutputStatus.DETECTED),
+                FollowCamFrame(1, 180.0, 100.0, 0.9, OutputStatus.DETECTED),
+            ]
+            path_entries = [
+                self.camera_path_entry(0, center_x=100.0, pan_mode="glide"),
+                self.camera_path_entry(1, center_x=180.0, pan_mode="glide"),
+            ]
+
+            with (
+                mock.patch("football_tracking.follow_cam.cv2.VideoCapture", return_value=DummyVideoCapture()),
+                mock.patch.object(generator, "_resolve_track_csv", return_value=(track_csv, "raw")),
+                mock.patch.object(generator, "_load_frames", return_value=frames),
+                mock.patch.object(generator, "_open_writer", return_value=DummyWriter()),
+                mock.patch.object(generator, "_render_follow_cam", return_value=path_entries),
+            ):
+                generator.run()
+
+            with (output_dir / "camera_motion_audit.json").open("r", encoding="utf-8") as handle:
+                audit_payload = json.load(handle)
+            with (output_dir / "follow_cam_report.json").open("r", encoding="utf-8") as handle:
+                report_payload = json.load(handle)
+
+        self.assertEqual("fail", audit_payload["summary"]["status"])
+        self.assertEqual(
+            {
+                "report": "camera_motion_audit.json",
+                "summary": audit_payload["summary"],
+            },
+            report_payload["camera_motion_audit"],
+        )
+
     def write_yaml(self, repo_root: Path, payload: object) -> Path:
         config_path = repo_root / "config" / "default.yaml"
         config_path.parent.mkdir(parents=True, exist_ok=True)
@@ -391,6 +458,32 @@ class FollowCamTests(unittest.TestCase):
             follow_cam=follow_cam,
             runtime=RuntimeConfig(use_gpu_if_available=False),
             mock=MockConfig(enabled=True),
+        )
+
+    def camera_path_entry(self, frame_index: int, *, center_x: float, pan_mode: str) -> CameraPathEntry:
+        return CameraPathEntry(
+            frame_index=frame_index,
+            center_x=center_x,
+            center_y=100.0,
+            crop_x1=0,
+            crop_y1=0,
+            crop_x2=960,
+            crop_y2=540,
+            crop_width=960,
+            crop_height=540,
+            source_status=OutputStatus.DETECTED.value,
+            track_x=center_x,
+            track_y=100.0,
+            confidence=0.9,
+            speed=0.0,
+            zoom_out_ratio=0.0,
+            pan_mode=pan_mode,
+            profile="custom",
+            action_center_enabled=False,
+            action_center_x=center_x,
+            action_center_y=100.0,
+            action_center_source="raw_track",
+            action_center_player_count=0,
         )
 
 

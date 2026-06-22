@@ -176,6 +176,7 @@ Follow-cam adds:
 
 - `follow_cam.mp4`
 - `camera_path.csv`
+- `camera_motion_audit.json`
 - `follow_cam_report.json`
 
 Temporal chunk runs add:
@@ -189,6 +190,7 @@ Review and highlight artifacts add:
 
 - `ball_audit.json`
 - `ai_review_triggers.json`
+- `camera_motion_audit.json`
 - `player_tracks.json`
 - `event_candidates.json`
 - `highlight.mp4`
@@ -397,6 +399,7 @@ outputs/runs/<input_slug>/<run_id>/
 
 - `follow_cam.mp4`
 - `camera_path.csv`
+- `camera_motion_audit.json`
 - `follow_cam_report.json`
 
 启用时间分块后还会输出：
@@ -410,6 +413,7 @@ outputs/runs/<input_slug>/<run_id>/
 
 - `ball_audit.json`
 - `ai_review_triggers.json`
+- `camera_motion_audit.json`
 - `player_tracks.json`
 - `event_candidates.json`
 - `highlight.mp4`

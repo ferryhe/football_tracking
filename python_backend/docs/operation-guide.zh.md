@@ -196,6 +196,14 @@ outputs/runs/<input_slug>/<run_id>/
 - 文字标注关闭
 - 优先使用清洗轨迹开启
 
+每次 follow-cam 渲染还会写出：
+
+- `camera_path.csv`
+- `camera_motion_audit.json`
+- `follow_cam_report.json`
+
+`camera_motion_audit.json` 审核的是最终镜头路径，不是球轨迹本身。它会把输出画面中的突然平移、速度突变或裁剪高度突变标记为 AI / 人工复核点。
+
 ### 候选集锦短片
 
 有轨迹数据的已完成任务会写出 `event_candidates.json`。里面的候选只是射门或进球的复核线索，不代表已经确认事件。

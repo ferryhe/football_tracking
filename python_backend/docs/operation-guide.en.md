@@ -193,6 +193,14 @@ Default recommendation:
 - keep frame text off
 - prefer cleaned track on
 
+Each follow-cam render also writes:
+
+- `camera_path.csv`
+- `camera_motion_audit.json`
+- `follow_cam_report.json`
+
+`camera_motion_audit.json` reviews the final camera path, not the ball track itself. It flags abrupt output-space pan steps, velocity changes, or crop-height jumps as review points for AI or manual inspection.
+
 ### Candidate Highlight Clips
 
 Completed runs now write `event_candidates.json` when track data is available. The candidates are review hints for likely shots or goals; they are not confirmed match events.
