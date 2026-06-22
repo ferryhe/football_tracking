@@ -17,6 +17,7 @@ class ExportOpenApiTests(unittest.TestCase):
             "/configs",
             "/inputs",
             "/ai/recommend",
+            "/ai/improve",
         }
 
         self.assertTrue(expected_paths.issubset(paths))

@@ -20,6 +20,8 @@ import type {
   AIConfigDiffResponse,
   AIExplainRequest,
   AIExplainResponse,
+  AIImproveRequest,
+  AIImproveResponse,
   AIRecommendRequest,
   AIReviewTriggerReport,
   AISuggestion,
@@ -237,6 +239,92 @@ export const useExplain = <
   TContext
 > => {
   return useMutation(getExplainMutationOptions(options));
+};
+
+/**
+ * @summary Improve
+ */
+export const getImproveUrl = () => {
+  return `/api/ai/improve`;
+};
+
+export const improve = async (
+  aIImproveRequest: AIImproveRequest,
+  options?: RequestInit,
+): Promise<AIImproveResponse> => {
+  return customFetch<AIImproveResponse>(getImproveUrl(), {
+    ...options,
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...options?.headers },
+    body: JSON.stringify(aIImproveRequest),
+  });
+};
+
+export const getImproveMutationOptions = <
+  TError = ErrorType<HTTPValidationError>,
+  TContext = unknown,
+>(options?: {
+  mutation?: UseMutationOptions<
+    Awaited<ReturnType<typeof improve>>,
+    TError,
+    { data: BodyType<AIImproveRequest> },
+    TContext
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}): UseMutationOptions<
+  Awaited<ReturnType<typeof improve>>,
+  TError,
+  { data: BodyType<AIImproveRequest> },
+  TContext
+> => {
+  const mutationKey = ["improve"];
+  const { mutation: mutationOptions, request: requestOptions } = options
+    ? options.mutation &&
+      "mutationKey" in options.mutation &&
+      options.mutation.mutationKey
+      ? options
+      : { ...options, mutation: { ...options.mutation, mutationKey } }
+    : { mutation: { mutationKey }, request: undefined };
+
+  const mutationFn: MutationFunction<
+    Awaited<ReturnType<typeof improve>>,
+    { data: BodyType<AIImproveRequest> }
+  > = (props) => {
+    const { data } = props ?? {};
+
+    return improve(data, requestOptions);
+  };
+
+  return { mutationFn, ...mutationOptions };
+};
+
+export type ImproveMutationResult = NonNullable<
+  Awaited<ReturnType<typeof improve>>
+>;
+export type ImproveMutationBody = BodyType<AIImproveRequest>;
+export type ImproveMutationError = ErrorType<HTTPValidationError>;
+
+/**
+ * @summary Improve
+ */
+export const useImprove = <
+  TError = ErrorType<HTTPValidationError>,
+  TContext = unknown,
+>(options?: {
+  mutation?: UseMutationOptions<
+    Awaited<ReturnType<typeof improve>>,
+    TError,
+    { data: BodyType<AIImproveRequest> },
+    TContext
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}): UseMutationResult<
+  Awaited<ReturnType<typeof improve>>,
+  TError,
+  { data: BodyType<AIImproveRequest> },
+  TContext
+> => {
+  return useMutation(getImproveMutationOptions(options));
 };
 
 /**

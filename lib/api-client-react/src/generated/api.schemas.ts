@@ -41,6 +41,180 @@ export interface AIExplainResponse {
   evidence?: string[];
 }
 
+export interface AIFrameWindow {
+  /** @minimum 0 */
+  start_frame: number;
+  /** @minimum 0 */
+  end_frame: number;
+}
+
+export interface AIHighlightAdjustment {
+  candidate_id: string;
+  current_window: AIFrameWindow;
+  suggested_window: AIFrameWindow;
+  reason: string;
+  /**
+   * @minimum 0
+   * @maximum 1
+   */
+  confidence: number;
+  clip_action?:
+    | "extend_tail"
+    | "trim_head"
+    | "trim_tail"
+    | "split"
+    | "keep"
+    | null;
+  [key: string]: unknown;
+}
+
+export type AIImproveRequestLanguage =
+  (typeof AIImproveRequestLanguage)[keyof typeof AIImproveRequestLanguage];
+
+export const AIImproveRequestLanguage = {
+  en: "en",
+  zh: "zh",
+} as const;
+
+export interface AIImproveRequest {
+  run_id: string;
+  objective?: string | null;
+  model?: string | null;
+  dry_run?: boolean;
+  /**
+   * @minimum 1
+   * @maximum 100
+   */
+  max_items?: number;
+  language?: AIImproveRequestLanguage;
+}
+
+export type AIImproveSummaryStatus =
+  (typeof AIImproveSummaryStatus)[keyof typeof AIImproveSummaryStatus];
+
+export const AIImproveSummaryStatus = {
+  ok: "ok",
+  needs_rerun: "needs_rerun",
+  unavailable: "unavailable",
+  error: "error",
+} as const;
+
+export interface AIImproveSummary {
+  status: AIImproveSummaryStatus;
+  primary_issue?: string | null;
+  improvement_count?: number;
+  targeted_rerun_count?: number;
+  config_patch_count?: number;
+  highlight_adjustment_count?: number;
+}
+
+export type AIImprovementItemFailureTagsItem =
+  (typeof AIImprovementItemFailureTagsItem)[keyof typeof AIImprovementItemFailureTagsItem];
+
+export const AIImprovementItemFailureTagsItem = {
+  ball_lost: "ball_lost",
+  foot_confusion: "foot_confusion",
+  shoe_confusion: "shoe_confusion",
+  sideline_confusion: "sideline_confusion",
+  wall_background_drift: "wall_background_drift",
+  large_jump_after_reacquire: "large_jump_after_reacquire",
+  camera_catchup_spike: "camera_catchup_spike",
+  black_frames: "black_frames",
+  post_roll_too_short: "post_roll_too_short",
+  highlight_boundary_unclear: "highlight_boundary_unclear",
+  unknown: "unknown",
+} as const;
+
+export type AIImprovementItemRootCauseModule =
+  (typeof AIImprovementItemRootCauseModule)[keyof typeof AIImprovementItemRootCauseModule];
+
+export const AIImprovementItemRootCauseModule = {
+  detection: "detection",
+  selection: "selection",
+  reacquisition: "reacquisition",
+  postprocess: "postprocess",
+  stitching: "stitching",
+  packetization: "packetization",
+  event_scoring: "event_scoring",
+  follow_cam: "follow_cam",
+  rendering: "rendering",
+  unknown: "unknown",
+} as const;
+
+export type AIImprovementItemRecommendedAction =
+  (typeof AIImprovementItemRecommendedAction)[keyof typeof AIImprovementItemRecommendedAction];
+
+export const AIImprovementItemRecommendedAction = {
+  targeted_rerun: "targeted_rerun",
+  tighten_noise_filter: "tighten_noise_filter",
+  loosen_ball_recovery: "loosen_ball_recovery",
+  split_packet: "split_packet",
+  manual_review: "manual_review",
+  reject_noise: "reject_noise",
+  adjust_highlight_window: "adjust_highlight_window",
+  adjust_follow_cam: "adjust_follow_cam",
+  tracking_rerun_before_follow_cam: "tracking_rerun_before_follow_cam",
+  render_suggested_highlight: "render_suggested_highlight",
+} as const;
+
+export interface AILikelyBallRegion {
+  description: string;
+  frame?: number | null;
+  confidence?: number | null;
+}
+
+export interface AILocalSearchRoi {
+  coordinate_space: "image";
+  /** @minimum 0 */
+  frame: number;
+  /** @minimum 0 */
+  x: number;
+  /** @minimum 0 */
+  y: number;
+  /** @exclusiveMinimum 0 */
+  width: number;
+  /** @exclusiveMinimum 0 */
+  height: number;
+  /**
+   * @minimum 0
+   * @maximum 1
+   */
+  confidence: number;
+}
+
+export type AIImprovementItemConfigPatch = { [key: string]: unknown };
+
+export interface AIImprovementItem {
+  id: string;
+  priority: string;
+  area: string;
+  failure_tags?: AIImprovementItemFailureTagsItem[];
+  root_cause_module: AIImprovementItemRootCauseModule;
+  diagnosis?: string;
+  recommended_action: AIImprovementItemRecommendedAction;
+  config_patch?: AIImprovementItemConfigPatch;
+  evidence?: unknown[];
+  /**
+   * @minimum 0
+   * @maximum 1
+   */
+  confidence: number;
+  start_frame?: number | null;
+  end_frame?: number | null;
+  rerun_scope?: AIFrameWindow | null;
+  likely_ball_region?: AILikelyBallRegion | null;
+  local_search_roi?: AILocalSearchRoi | null;
+  [key: string]: unknown;
+}
+
+export interface AIImproveResponse {
+  summary: AIImproveSummary;
+  artifact_name: string;
+  artifact_path: string;
+  improvements: AIImprovementItem[];
+  highlight_adjustments: AIHighlightAdjustment[];
+}
+
 export type AIRecommendRequestLanguage =
   (typeof AIRecommendRequestLanguage)[keyof typeof AIRecommendRequestLanguage];
 

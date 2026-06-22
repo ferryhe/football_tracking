@@ -8,6 +8,8 @@ from football_tracking.api.schemas import (
     AIConfigDiffResponse,
     AIExplainRequest,
     AIExplainResponse,
+    AIImproveRequest,
+    AIImproveResponse,
     AIRecommendRequest,
     AISuggestion,
 )
@@ -38,6 +40,23 @@ def recommend(request: AIRecommendRequest, service: ApiService = Depends(get_ser
             **service.ai_recommend(
                 run_id=request.run_id,
                 objective=request.objective,
+                language=request.language,
+            )
+        )
+    except (KeyError, FileNotFoundError) as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.post("/ai/improve", response_model=AIImproveResponse)
+def improve(request: AIImproveRequest, service: ApiService = Depends(get_service)) -> AIImproveResponse:
+    try:
+        return AIImproveResponse(
+            **service.ai_improve(
+                run_id=request.run_id,
+                objective=request.objective,
+                model=request.model,
+                dry_run=request.dry_run,
+                max_items=request.max_items,
                 language=request.language,
             )
         )

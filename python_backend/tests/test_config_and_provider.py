@@ -364,6 +364,39 @@ class ConfigAndProviderTests(unittest.TestCase):
         self.assertEqual("json_object", payload["text"]["format"]["type"])
         self.assertNotIsInstance(payload["input"], list)
 
+    def test_create_json_response_accepts_model_override(self) -> None:
+        captured: dict[str, object] = {}
+
+        class FakeHTTPResponse:
+            def __enter__(self) -> "FakeHTTPResponse":
+                return self
+
+            def __exit__(self, *args: object) -> None:
+                return None
+
+            def read(self) -> bytes:
+                return json.dumps({"output_text": json.dumps({"ok": True})}).encode("utf-8")
+
+        def fake_urlopen(request: object, timeout: int) -> FakeHTTPResponse:
+            captured["payload"] = json.loads(request.data.decode("utf-8"))
+            captured["auth"] = request.headers.get("Authorization")
+            return FakeHTTPResponse()
+
+        client = OpenAIResponsesClient(OpenAIProviderSettings(api_key="secret", chat_model="gpt-default"))
+
+        with patch("urllib.request.urlopen", side_effect=fake_urlopen):
+            result = client.create_json_response(
+                instructions="Return JSON.",
+                prompt="plain prompt",
+                model="gpt-override",
+            )
+
+        payload = captured["payload"]
+        self.assertEqual({"ok": True}, result)
+        self.assertEqual("gpt-override", payload["model"])
+        self.assertNotIn("secret", json.dumps(payload))
+        self.assertEqual("Bearer secret", captured["auth"])
+
     def test_provider_http_errors_are_redacted(self) -> None:
         def fake_urlopen(request: object, timeout: int) -> object:
             raise urllib.error.HTTPError(

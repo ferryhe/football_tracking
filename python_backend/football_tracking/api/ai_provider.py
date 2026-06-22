@@ -64,13 +64,14 @@ class OpenAIResponsesClient:
         *,
         instructions: str,
         prompt: str,
+        model: str | None = None,
         temperature: float = 0.2,
     ) -> dict[str, Any]:
         if not self.settings.enabled:
             raise RuntimeError("OpenAI provider is not configured.")
 
         payload = {
-            "model": self.settings.chat_model,
+            "model": model or self.settings.chat_model,
             "instructions": instructions,
             "input": prompt,
             "temperature": temperature,

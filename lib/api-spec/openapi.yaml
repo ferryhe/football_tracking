@@ -53,6 +53,31 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/HTTPValidationError'
+  /ai/improve:
+    post:
+      tags:
+      - ai
+      summary: Improve
+      operationId: improve
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AIImproveRequest'
+        required: true
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AIImproveResponse'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
   /ai/recommend:
     post:
       tags:
@@ -937,6 +962,327 @@ components:
       required:
       - summary
       title: AIExplainResponse
+    AIFrameWindow:
+      properties:
+        start_frame:
+          type: integer
+          minimum: 0.0
+          title: Start Frame
+        end_frame:
+          type: integer
+          minimum: 0.0
+          title: End Frame
+      type: object
+      required:
+      - start_frame
+      - end_frame
+      title: AIFrameWindow
+    AIHighlightAdjustment:
+      properties:
+        candidate_id:
+          type: string
+          title: Candidate Id
+        current_window:
+          $ref: '#/components/schemas/AIFrameWindow'
+        suggested_window:
+          $ref: '#/components/schemas/AIFrameWindow'
+        reason:
+          type: string
+          title: Reason
+        confidence:
+          type: number
+          maximum: 1.0
+          minimum: 0.0
+          title: Confidence
+        clip_action:
+          anyOf:
+          - type: string
+            enum:
+            - extend_tail
+            - trim_head
+            - trim_tail
+            - split
+            - keep
+          - type: 'null'
+          title: Clip Action
+      additionalProperties: true
+      type: object
+      required:
+      - candidate_id
+      - current_window
+      - suggested_window
+      - reason
+      - confidence
+      title: AIHighlightAdjustment
+    AIImproveRequest:
+      properties:
+        run_id:
+          type: string
+          title: Run Id
+        objective:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Objective
+        model:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Model
+        dry_run:
+          type: boolean
+          title: Dry Run
+          default: false
+        max_items:
+          type: integer
+          maximum: 100.0
+          minimum: 1.0
+          title: Max Items
+          default: 20
+        language:
+          type: string
+          enum:
+          - en
+          - zh
+          title: Language
+          default: en
+      type: object
+      required:
+      - run_id
+      title: AIImproveRequest
+    AIImproveResponse:
+      properties:
+        summary:
+          $ref: '#/components/schemas/AIImproveSummary'
+        artifact_name:
+          type: string
+          title: Artifact Name
+        artifact_path:
+          type: string
+          title: Artifact Path
+        improvements:
+          items:
+            $ref: '#/components/schemas/AIImprovementItem'
+          type: array
+          title: Improvements
+        highlight_adjustments:
+          items:
+            $ref: '#/components/schemas/AIHighlightAdjustment'
+          type: array
+          title: Highlight Adjustments
+      type: object
+      required:
+      - summary
+      - artifact_name
+      - artifact_path
+      - improvements
+      - highlight_adjustments
+      title: AIImproveResponse
+    AIImproveSummary:
+      properties:
+        status:
+          type: string
+          enum:
+          - ok
+          - needs_rerun
+          - unavailable
+          - error
+          title: Status
+        primary_issue:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Primary Issue
+        improvement_count:
+          type: integer
+          title: Improvement Count
+          default: 0
+        targeted_rerun_count:
+          type: integer
+          title: Targeted Rerun Count
+          default: 0
+        config_patch_count:
+          type: integer
+          title: Config Patch Count
+          default: 0
+        highlight_adjustment_count:
+          type: integer
+          title: Highlight Adjustment Count
+          default: 0
+      type: object
+      required:
+      - status
+      title: AIImproveSummary
+    AIImprovementItem:
+      properties:
+        id:
+          type: string
+          title: Id
+        priority:
+          type: string
+          title: Priority
+        area:
+          type: string
+          title: Area
+        failure_tags:
+          items:
+            type: string
+            enum:
+            - ball_lost
+            - foot_confusion
+            - shoe_confusion
+            - sideline_confusion
+            - wall_background_drift
+            - large_jump_after_reacquire
+            - camera_catchup_spike
+            - black_frames
+            - post_roll_too_short
+            - highlight_boundary_unclear
+            - unknown
+          type: array
+          title: Failure Tags
+        root_cause_module:
+          type: string
+          enum:
+          - detection
+          - selection
+          - reacquisition
+          - postprocess
+          - stitching
+          - packetization
+          - event_scoring
+          - follow_cam
+          - rendering
+          - unknown
+          title: Root Cause Module
+        diagnosis:
+          type: string
+          title: Diagnosis
+          default: ''
+        recommended_action:
+          type: string
+          enum:
+          - targeted_rerun
+          - tighten_noise_filter
+          - loosen_ball_recovery
+          - split_packet
+          - manual_review
+          - reject_noise
+          - adjust_highlight_window
+          - adjust_follow_cam
+          - tracking_rerun_before_follow_cam
+          - render_suggested_highlight
+          title: Recommended Action
+        config_patch:
+          additionalProperties: true
+          type: object
+          title: Config Patch
+        evidence:
+          items: {}
+          type: array
+          title: Evidence
+        confidence:
+          type: number
+          maximum: 1.0
+          minimum: 0.0
+          title: Confidence
+        start_frame:
+          anyOf:
+          - type: integer
+            minimum: 0.0
+          - type: 'null'
+          title: Start Frame
+        end_frame:
+          anyOf:
+          - type: integer
+            minimum: 0.0
+          - type: 'null'
+          title: End Frame
+        rerun_scope:
+          anyOf:
+          - $ref: '#/components/schemas/AIFrameWindow'
+          - type: 'null'
+        likely_ball_region:
+          anyOf:
+          - $ref: '#/components/schemas/AILikelyBallRegion'
+          - type: 'null'
+        local_search_roi:
+          anyOf:
+          - $ref: '#/components/schemas/AILocalSearchRoi'
+          - type: 'null'
+      additionalProperties: true
+      type: object
+      required:
+      - id
+      - priority
+      - area
+      - root_cause_module
+      - recommended_action
+      - confidence
+      title: AIImprovementItem
+    AILikelyBallRegion:
+      properties:
+        description:
+          type: string
+          title: Description
+        frame:
+          anyOf:
+          - type: integer
+            minimum: 0.0
+          - type: 'null'
+          title: Frame
+        confidence:
+          anyOf:
+          - type: number
+            maximum: 1.0
+            minimum: 0.0
+          - type: 'null'
+          title: Confidence
+      type: object
+      required:
+      - description
+      title: AILikelyBallRegion
+    AILocalSearchRoi:
+      properties:
+        coordinate_space:
+          type: string
+          const: image
+          title: Coordinate Space
+        frame:
+          type: integer
+          minimum: 0.0
+          title: Frame
+        x:
+          type: number
+          minimum: 0.0
+          title: X
+        y:
+          type: number
+          minimum: 0.0
+          title: Y
+        width:
+          type: number
+          exclusiveMinimum: 0.0
+          title: Width
+        height:
+          type: number
+          exclusiveMinimum: 0.0
+          title: Height
+        confidence:
+          type: number
+          maximum: 1.0
+          minimum: 0.0
+          title: Confidence
+      type: object
+      required:
+      - coordinate_space
+      - frame
+      - x
+      - y
+      - width
+      - height
+      - confidence
+      title: AILocalSearchRoi
     AIRecommendRequest:
       properties:
         run_id:

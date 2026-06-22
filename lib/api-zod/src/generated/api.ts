@@ -40,6 +40,280 @@ export const ExplainResponse = zod.object({
 });
 
 /**
+ * @summary Improve
+ */
+export const improveBodyDryRunDefault = false;
+export const improveBodyMaxItemsDefault = 20;
+export const improveBodyMaxItemsMax = 100;
+
+export const improveBodyLanguageDefault = `en`;
+
+export const ImproveBody = zod.object({
+  run_id: zod.string(),
+  objective: zod.union([zod.string(), zod.null()]).optional(),
+  model: zod.union([zod.string(), zod.null()]).optional(),
+  dry_run: zod.boolean().default(improveBodyDryRunDefault),
+  max_items: zod
+    .number()
+    .min(1)
+    .max(improveBodyMaxItemsMax)
+    .default(improveBodyMaxItemsDefault),
+  language: zod.enum(["en", "zh"]).default(improveBodyLanguageDefault),
+});
+
+export const improveResponseSummaryImprovementCountDefault = 0;
+export const improveResponseSummaryTargetedRerunCountDefault = 0;
+export const improveResponseSummaryConfigPatchCountDefault = 0;
+export const improveResponseSummaryHighlightAdjustmentCountDefault = 0;
+export const improveResponseImprovementsItemDiagnosisDefault = ``;
+export const improveResponseImprovementsItemConfidenceMin = 0;
+export const improveResponseImprovementsItemConfidenceMax = 1;
+
+export const improveResponseImprovementsItemStartFrameOneMin = 0;
+
+export const improveResponseImprovementsItemEndFrameOneMin = 0;
+
+export const improveResponseImprovementsItemRerunScopeOneStartFrameMin = 0;
+
+export const improveResponseImprovementsItemRerunScopeOneEndFrameMin = 0;
+
+export const improveResponseImprovementsItemLikelyBallRegionOneFrameOneMin = 0;
+
+export const improveResponseImprovementsItemLikelyBallRegionOneConfidenceOneMin = 0;
+export const improveResponseImprovementsItemLikelyBallRegionOneConfidenceOneMax = 1;
+
+export const improveResponseImprovementsItemLocalSearchRoiOneFrameMin = 0;
+
+export const improveResponseImprovementsItemLocalSearchRoiOneXMin = 0;
+
+export const improveResponseImprovementsItemLocalSearchRoiOneYMin = 0;
+
+export const improveResponseImprovementsItemLocalSearchRoiOneWidthExclusiveMin = 0;
+
+export const improveResponseImprovementsItemLocalSearchRoiOneHeightExclusiveMin = 0;
+
+export const improveResponseImprovementsItemLocalSearchRoiOneConfidenceMin = 0;
+export const improveResponseImprovementsItemLocalSearchRoiOneConfidenceMax = 1;
+
+export const improveResponseHighlightAdjustmentsItemCurrentWindowStartFrameMin = 0;
+
+export const improveResponseHighlightAdjustmentsItemCurrentWindowEndFrameMin = 0;
+
+export const improveResponseHighlightAdjustmentsItemSuggestedWindowStartFrameMin = 0;
+
+export const improveResponseHighlightAdjustmentsItemSuggestedWindowEndFrameMin = 0;
+
+export const improveResponseHighlightAdjustmentsItemConfidenceMin = 0;
+export const improveResponseHighlightAdjustmentsItemConfidenceMax = 1;
+
+export const ImproveResponse = zod.object({
+  summary: zod.object({
+    status: zod.enum(["ok", "needs_rerun", "unavailable", "error"]),
+    primary_issue: zod.union([zod.string(), zod.null()]).optional(),
+    improvement_count: zod
+      .number()
+      .default(improveResponseSummaryImprovementCountDefault),
+    targeted_rerun_count: zod
+      .number()
+      .default(improveResponseSummaryTargetedRerunCountDefault),
+    config_patch_count: zod
+      .number()
+      .default(improveResponseSummaryConfigPatchCountDefault),
+    highlight_adjustment_count: zod
+      .number()
+      .default(improveResponseSummaryHighlightAdjustmentCountDefault),
+  }),
+  artifact_name: zod.string(),
+  artifact_path: zod.string(),
+  improvements: zod.array(
+    zod.object({
+      id: zod.string(),
+      priority: zod.string(),
+      area: zod.string(),
+      failure_tags: zod
+        .array(
+          zod.enum([
+            "ball_lost",
+            "foot_confusion",
+            "shoe_confusion",
+            "sideline_confusion",
+            "wall_background_drift",
+            "large_jump_after_reacquire",
+            "camera_catchup_spike",
+            "black_frames",
+            "post_roll_too_short",
+            "highlight_boundary_unclear",
+            "unknown",
+          ]),
+        )
+        .optional(),
+      root_cause_module: zod.enum([
+        "detection",
+        "selection",
+        "reacquisition",
+        "postprocess",
+        "stitching",
+        "packetization",
+        "event_scoring",
+        "follow_cam",
+        "rendering",
+        "unknown",
+      ]),
+      diagnosis: zod
+        .string()
+        .default(improveResponseImprovementsItemDiagnosisDefault),
+      recommended_action: zod.enum([
+        "targeted_rerun",
+        "tighten_noise_filter",
+        "loosen_ball_recovery",
+        "split_packet",
+        "manual_review",
+        "reject_noise",
+        "adjust_highlight_window",
+        "adjust_follow_cam",
+        "tracking_rerun_before_follow_cam",
+        "render_suggested_highlight",
+      ]),
+      config_patch: zod.record(zod.string(), zod.unknown()).optional(),
+      evidence: zod.array(zod.unknown()).optional(),
+      confidence: zod
+        .number()
+        .min(improveResponseImprovementsItemConfidenceMin)
+        .max(improveResponseImprovementsItemConfidenceMax),
+      start_frame: zod
+        .union([
+          zod.number().min(improveResponseImprovementsItemStartFrameOneMin),
+          zod.null(),
+        ])
+        .optional(),
+      end_frame: zod
+        .union([
+          zod.number().min(improveResponseImprovementsItemEndFrameOneMin),
+          zod.null(),
+        ])
+        .optional(),
+      rerun_scope: zod
+        .union([
+          zod.object({
+            start_frame: zod
+              .number()
+              .min(improveResponseImprovementsItemRerunScopeOneStartFrameMin),
+            end_frame: zod
+              .number()
+              .min(improveResponseImprovementsItemRerunScopeOneEndFrameMin),
+          }),
+          zod.null(),
+        ])
+        .optional(),
+      likely_ball_region: zod
+        .union([
+          zod.object({
+            description: zod.string(),
+            frame: zod
+              .union([
+                zod
+                  .number()
+                  .min(
+                    improveResponseImprovementsItemLikelyBallRegionOneFrameOneMin,
+                  ),
+                zod.null(),
+              ])
+              .optional(),
+            confidence: zod
+              .union([
+                zod
+                  .number()
+                  .min(
+                    improveResponseImprovementsItemLikelyBallRegionOneConfidenceOneMin,
+                  )
+                  .max(
+                    improveResponseImprovementsItemLikelyBallRegionOneConfidenceOneMax,
+                  ),
+                zod.null(),
+              ])
+              .optional(),
+          }),
+          zod.null(),
+        ])
+        .optional(),
+      local_search_roi: zod
+        .union([
+          zod.object({
+            coordinate_space: zod.literal("image"),
+            frame: zod
+              .number()
+              .min(improveResponseImprovementsItemLocalSearchRoiOneFrameMin),
+            x: zod
+              .number()
+              .min(improveResponseImprovementsItemLocalSearchRoiOneXMin),
+            y: zod
+              .number()
+              .min(improveResponseImprovementsItemLocalSearchRoiOneYMin),
+            width: zod
+              .number()
+              .gt(
+                improveResponseImprovementsItemLocalSearchRoiOneWidthExclusiveMin,
+              ),
+            height: zod
+              .number()
+              .gt(
+                improveResponseImprovementsItemLocalSearchRoiOneHeightExclusiveMin,
+              ),
+            confidence: zod
+              .number()
+              .min(
+                improveResponseImprovementsItemLocalSearchRoiOneConfidenceMin,
+              )
+              .max(
+                improveResponseImprovementsItemLocalSearchRoiOneConfidenceMax,
+              ),
+          }),
+          zod.null(),
+        ])
+        .optional(),
+    }),
+  ),
+  highlight_adjustments: zod.array(
+    zod.object({
+      candidate_id: zod.string(),
+      current_window: zod.object({
+        start_frame: zod
+          .number()
+          .min(
+            improveResponseHighlightAdjustmentsItemCurrentWindowStartFrameMin,
+          ),
+        end_frame: zod
+          .number()
+          .min(improveResponseHighlightAdjustmentsItemCurrentWindowEndFrameMin),
+      }),
+      suggested_window: zod.object({
+        start_frame: zod
+          .number()
+          .min(
+            improveResponseHighlightAdjustmentsItemSuggestedWindowStartFrameMin,
+          ),
+        end_frame: zod
+          .number()
+          .min(
+            improveResponseHighlightAdjustmentsItemSuggestedWindowEndFrameMin,
+          ),
+      }),
+      reason: zod.string(),
+      confidence: zod
+        .number()
+        .min(improveResponseHighlightAdjustmentsItemConfidenceMin)
+        .max(improveResponseHighlightAdjustmentsItemConfidenceMax),
+      clip_action: zod
+        .union([
+          zod.enum(["extend_tail", "trim_head", "trim_tail", "split", "keep"]),
+          zod.null(),
+        ])
+        .optional(),
+    }),
+  ),
+});
+
+/**
  * @summary Recommend
  */
 export const recommendBodyLanguageDefault = `en`;

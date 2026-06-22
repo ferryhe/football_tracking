@@ -4,6 +4,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from football_tracking.ai_contracts import AIFailureTag, AIClipAction, AIRecommendedAction, AIRootCauseModule
+
 RunStatus = Literal["queued", "running", "completed", "failed", "cancelled"]
 AIResponseLanguage = Literal["en", "zh"]
 QualityStatus = Literal["pass", "warn", "fail"]
@@ -480,6 +482,82 @@ class AIRecommendRequest(BaseModel):
     language: AIResponseLanguage = "en"
 
 
+class AIImproveRequest(BaseModel):
+    run_id: str
+    objective: str | None = None
+    model: str | None = None
+    dry_run: bool = False
+    max_items: int = Field(default=20, ge=1, le=100)
+    language: AIResponseLanguage = "en"
+
+
+class AIImproveSummary(BaseModel):
+    status: Literal["ok", "needs_rerun", "unavailable", "error"]
+    primary_issue: str | None = None
+    improvement_count: int = 0
+    targeted_rerun_count: int = 0
+    config_patch_count: int = 0
+    highlight_adjustment_count: int = 0
+
+
+class AIFrameWindow(BaseModel):
+    start_frame: int = Field(ge=0)
+    end_frame: int = Field(ge=0)
+
+    @model_validator(mode="after")
+    def validate_order(self) -> "AIFrameWindow":
+        if self.end_frame < self.start_frame:
+            raise ValueError("end_frame must be greater than or equal to start_frame.")
+        return self
+
+
+class AILikelyBallRegion(BaseModel):
+    description: str
+    frame: int | None = Field(default=None, ge=0)
+    confidence: float | None = Field(default=None, ge=0.0, le=1.0)
+
+
+class AILocalSearchRoi(BaseModel):
+    coordinate_space: Literal["image"]
+    frame: int = Field(ge=0)
+    x: float = Field(ge=0.0)
+    y: float = Field(ge=0.0)
+    width: float = Field(gt=0.0)
+    height: float = Field(gt=0.0)
+    confidence: float = Field(ge=0.0, le=1.0)
+
+
+class AIImprovementItem(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    id: str
+    priority: str
+    area: str
+    failure_tags: list[AIFailureTag] = Field(default_factory=list)
+    root_cause_module: AIRootCauseModule
+    diagnosis: str = ""
+    recommended_action: AIRecommendedAction
+    config_patch: dict[str, Any] = Field(default_factory=dict)
+    evidence: list[Any] = Field(default_factory=list)
+    confidence: float = Field(ge=0.0, le=1.0)
+    start_frame: int | None = Field(default=None, ge=0)
+    end_frame: int | None = Field(default=None, ge=0)
+    rerun_scope: AIFrameWindow | None = None
+    likely_ball_region: AILikelyBallRegion | None = None
+    local_search_roi: AILocalSearchRoi | None = None
+
+
+class AIHighlightAdjustment(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    candidate_id: str
+    current_window: AIFrameWindow
+    suggested_window: AIFrameWindow
+    reason: str
+    confidence: float = Field(ge=0.0, le=1.0)
+    clip_action: AIClipAction | None = None
+
+
 class AIConfigDiffRequest(BaseModel):
     base_config_name: str
     patch: dict[str, Any] = Field(default_factory=dict)
@@ -507,3 +585,11 @@ class AIConfigDiffResponse(BaseModel):
     output_name: str
     patch: dict[str, Any] = Field(default_factory=dict)
     patch_preview: list[str] = Field(default_factory=list)
+
+
+class AIImproveResponse(BaseModel):
+    summary: AIImproveSummary
+    artifact_name: str
+    artifact_path: str
+    improvements: list[AIImprovementItem]
+    highlight_adjustments: list[AIHighlightAdjustment]

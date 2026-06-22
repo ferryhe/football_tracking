@@ -21,6 +21,7 @@ import cv2
 import numpy as np
 import yaml
 
+from football_tracking.ai_improvement import compact_ai_improvement_summary, write_ai_improvement_report
 from football_tracking.ai_review_triggers import compact_ai_review_trigger_summary
 from football_tracking.api.ai_provider import OpenAIResponsesClient, load_provider_settings
 from football_tracking.ball_audit import compact_ball_audit_summary
@@ -30,7 +31,7 @@ from football_tracking.config import AppConfig, load_config
 from football_tracking.events import compact_event_candidate_summary
 from football_tracking.follow_cam import FollowCamGenerator
 from football_tracking.highlights import render_highlight_clip
-from football_tracking.metrics import compute_track_metrics, stats_from_metrics_report, write_run_artifacts
+from football_tracking.metrics import build_metrics_report, compute_track_metrics, stats_from_metrics_report, write_run_artifacts
 from football_tracking.pipeline import BallTrackingPipeline
 from football_tracking.player_tracks import compact_player_tracks_summary
 from football_tracking.quality import assess_video_quality
@@ -891,6 +892,43 @@ class ApiService:
             except Exception:
                 pass
         return self._ai_recommend_heuristic(run_id=run_id, objective=objective, language=resolved_language)
+
+    def ai_improve(
+        self,
+        run_id: str,
+        objective: str | None = None,
+        model: str | None = None,
+        dry_run: bool = False,
+        max_items: int = 20,
+        language: str | None = None,
+    ) -> dict[str, Any]:
+        run = self.get_run(run_id)
+        output_dir = Path(run["output_dir"]).resolve()
+        resolved_language = _normalize_ai_language(language)
+        report = write_ai_improvement_report(
+            output_dir,
+            client=self.ai_client,
+            model=model,
+            dry_run=dry_run,
+            max_items=max_items,
+            objective=objective,
+            language=resolved_language,
+        )
+        (output_dir / "metrics_report.json").write_text(
+            json.dumps(build_metrics_report(output_dir), ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        self._refresh_run_artifacts_and_stats(run_id, output_dir)
+        artifact_path = (output_dir / "ai_improvement_report.json").resolve()
+        return {
+            "summary": compact_ai_improvement_summary(report) or {},
+            "artifact_name": "ai_improvement_report.json",
+            "artifact_path": str(artifact_path),
+            "improvements": report.get("improvements") if isinstance(report.get("improvements"), list) else [],
+            "highlight_adjustments": (
+                report.get("highlight_adjustments") if isinstance(report.get("highlight_adjustments"), list) else []
+            ),
+        }
 
     def _ai_explain_heuristic(
         self,
@@ -2082,6 +2120,18 @@ class ApiService:
                     return
         raise KeyError(run_id)
 
+    def _refresh_run_artifacts_and_stats(self, run_id: str, output_dir: Path) -> None:
+        with self._lock:
+            registry = self._read_registry()
+            for run in registry["runs"]:
+                if run["run_id"] != run_id:
+                    continue
+                run["artifacts"] = self._collect_artifacts(output_dir)
+                run["stats"] = self._collect_stats(output_dir)
+                self._write_registry(registry)
+                return
+        raise KeyError(run_id)
+
     def _ensure_registry_file(self) -> None:
         self.registry_path.parent.mkdir(parents=True, exist_ok=True)
         if not self.registry_path.exists():
@@ -3148,6 +3198,7 @@ class ApiService:
         ai_review_trigger_report = self._read_optional_json(output_dir / "ai_review_triggers.json")
         event_candidate_report = self._read_optional_json(output_dir / "event_candidates.json")
         player_tracks_report = self._read_optional_json(output_dir / "player_tracks.json")
+        ai_improvement_report = self._read_optional_json(output_dir / "ai_improvement_report.json")
         if raw_summary is not None:
             stats["raw"] = raw_summary
         if cleaned_summary is not None:
@@ -3172,6 +3223,10 @@ class ApiService:
             player_tracks_summary = compact_player_tracks_summary(player_tracks_report)
             if player_tracks_summary is not None:
                 stats["player_tracks"] = player_tracks_summary
+        if ai_improvement_report is not None and "ai_improvement" not in stats:
+            ai_improvement_summary = compact_ai_improvement_summary(ai_improvement_report)
+            if ai_improvement_summary is not None:
+                stats["ai_improvement"] = ai_improvement_summary
         return stats
 
     def _summarize_track_csv(self, csv_path: Path) -> dict[str, Any] | None:
