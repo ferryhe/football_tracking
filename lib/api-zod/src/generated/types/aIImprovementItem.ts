@@ -6,7 +6,9 @@
  */
 import type { AIFrameWindow } from "./aIFrameWindow";
 import type { AIImprovementItemConfigPatch } from "./aIImprovementItemConfigPatch";
+import type { AIImprovementItemEvidencePayload } from "./aIImprovementItemEvidencePayload";
 import type { AIImprovementItemFailureTagsItem } from "./aIImprovementItemFailureTagsItem";
+import type { AIImprovementItemFollowCamRerenderPlan } from "./aIImprovementItemFollowCamRerenderPlan";
 import type { AIImprovementItemRecommendedAction } from "./aIImprovementItemRecommendedAction";
 import type { AIImprovementItemRootCauseModule } from "./aIImprovementItemRootCauseModule";
 import type { AILikelyBallRegion } from "./aILikelyBallRegion";
@@ -33,5 +35,9 @@ export interface AIImprovementItem {
   likely_ball_region?: AILikelyBallRegion | null;
   local_search_roi?: AILocalSearchRoi | null;
   false_positive_class?: string | null;
+  camera_motion_event_id?: string | null;
+  camera_motion_severity?: string | null;
+  evidence_payload?: AIImprovementItemEvidencePayload;
+  follow_cam_rerender_plan?: AIImprovementItemFollowCamRerenderPlan;
   [key: string]: unknown;
 }

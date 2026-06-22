@@ -936,6 +936,7 @@ components:
           - adjust_highlight_window
           - adjust_follow_cam
           - tracking_rerun_before_follow_cam
+          - human_review_camera_motion
           - render_suggested_highlight
           title: Approved Action
         approval_source:
@@ -1004,6 +1005,16 @@ components:
           - type: string
           - type: 'null'
           title: False Positive Class
+        camera_motion_event_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Camera Motion Event Id
+        camera_motion_severity:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Camera Motion Severity
         start_frame:
           anyOf:
           - type: integer
@@ -1245,6 +1256,16 @@ components:
           - type: string
           - type: 'null'
           title: Config Patch Artifact Path
+        follow_cam_rerender_plan_artifact_name:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Follow Cam Rerender Plan Artifact Name
+        follow_cam_rerender_plan_artifact_path:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Follow Cam Rerender Plan Artifact Path
         approved_actions:
           items:
             $ref: '#/components/schemas/AIApprovedAction'
@@ -1361,6 +1382,20 @@ components:
           type: integer
           title: Highlight Adjustment Count
           default: 0
+        camera_improvement_count:
+          type: integer
+          title: Camera Improvement Count
+          default: 0
+        camera_severity_counts:
+          additionalProperties:
+            type: integer
+          type: object
+          title: Camera Severity Counts
+        camera_action_counts:
+          additionalProperties:
+            type: integer
+          type: object
+          title: Camera Action Counts
       type: object
       required:
       - status
@@ -1425,6 +1460,7 @@ components:
           - adjust_highlight_window
           - adjust_follow_cam
           - tracking_rerun_before_follow_cam
+          - human_review_camera_motion
           - render_suggested_highlight
           title: Recommended Action
         config_patch:
@@ -1469,6 +1505,26 @@ components:
           - type: string
           - type: 'null'
           title: False Positive Class
+        camera_motion_event_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Camera Motion Event Id
+        camera_motion_severity:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Camera Motion Severity
+        evidence_payload:
+          additionalProperties: true
+          type: object
+          title: Evidence Payload
+        follow_cam_rerender_plan:
+          anyOf:
+          - additionalProperties: true
+            type: object
+          - type: 'null'
+          title: Follow Cam Rerender Plan
       additionalProperties: true
       type: object
       required:

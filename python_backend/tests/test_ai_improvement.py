@@ -87,6 +87,161 @@ class AiImprovementTests(unittest.TestCase):
         self.assertNotIn("data:image", json.dumps(context, ensure_ascii=False))
         self.assertTrue(any("ball_audit.json" in warning and "corrupt" in warning for warning in context["warnings"]))
 
+    def test_context_enriches_camera_motion_events_with_nearby_track_status(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_camera_motion_event(output_dir, frame=50, severity="fail", max_step_px=155.0)
+            _write_ball_track(
+                output_dir,
+                [
+                    (38, "Detected", 100, 100),
+                    (49, "Predicted", 120, 100),
+                    (50, "Lost", "", ""),
+                    (51, "Detected", 130, 100),
+                    (62, "Detected", 140, 100),
+                ],
+            )
+
+            context = build_ai_improvement_context(output_dir)
+
+        event = context["artifacts"]["camera_motion_audit"]["review_events"][0]
+        track_window = event["nearby_ball_track"]
+        self.assertEqual({"start_frame": 38, "end_frame": 62}, track_window["window"])
+        self.assertEqual({"Detected": 3, "Predicted": 1, "Lost": 1}, track_window["status_counts"])
+        self.assertEqual("tracking_issue", track_window["classification"])
+        self.assertTrue(track_window["has_tracking_issue"])
+
+    def test_dry_run_camera_event_overlapping_lost_track_recommends_tracking_rerun_first(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_camera_motion_event(output_dir, frame=40, severity="fail", max_step_px=150.0)
+            _write_ball_track(
+                output_dir,
+                [
+                    (28, "Detected", 100, 100),
+                    (39, "Detected", 120, 100),
+                    (40, "Lost", "", ""),
+                    (41, "Predicted", 130, 100),
+                    (52, "Detected", 140, 100),
+                ],
+            )
+
+            report = build_ai_improvement_report(output_dir, dry_run=True)
+
+        improvement = report["improvements"][0]
+        self.assertEqual("tracking_rerun_before_follow_cam", improvement["recommended_action"])
+        self.assertEqual("follow_cam", improvement["root_cause_module"])
+        self.assertEqual("cam_event_001", improvement["camera_motion_event_id"])
+        self.assertEqual(
+            {"Detected": 3, "Predicted": 1, "Lost": 1},
+            improvement["evidence_payload"]["nearby_ball_track"]["status_counts"],
+        )
+
+    def test_dry_run_stable_detected_camera_spike_recommends_adjust_follow_cam(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_camera_motion_event(output_dir, frame=40, severity="warn", max_step_px=100.0)
+            _write_ball_track(
+                output_dir,
+                [
+                    (28, "Detected", 100, 100),
+                    (36, "Detected", 102, 100),
+                    (40, "Detected", 105, 100),
+                    (44, "Detected", 108, 100),
+                    (52, "Detected", 110, 100),
+                ],
+            )
+
+            report = build_ai_improvement_report(output_dir, dry_run=True)
+
+        improvement = report["improvements"][0]
+        self.assertEqual("adjust_follow_cam", improvement["recommended_action"])
+        self.assertEqual({"follow_cam": {"glide_pan_smoothing": 0.18}}, improvement["config_patch"])
+        self.assertFalse(improvement["follow_cam_rerender_plan"]["requires_tracking_rerun"])
+
+    def test_dry_run_stable_high_speed_camera_event_is_evidence_not_auto_fail(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_camera_motion_event(output_dir, frame=40, severity="warn", max_step_px=105.0)
+            _write_ball_track(
+                output_dir,
+                [
+                    (28, "Detected", 100, 100),
+                    (34, "Detected", 210, 100),
+                    (40, "Detected", 330, 100),
+                    (46, "Detected", 455, 100),
+                    (52, "Detected", 570, 100),
+                ],
+            )
+
+            report = build_ai_improvement_report(output_dir, dry_run=True)
+            context = build_ai_improvement_context(output_dir)
+
+        self.assertEqual("ok", report["summary"]["status"])
+        self.assertEqual([], report["improvements"])
+        event = context["artifacts"]["camera_motion_audit"]["review_events"][0]
+        self.assertEqual("acceptable_fast_play", event["nearby_ball_track"]["classification"])
+
+    def test_dry_run_stable_detected_large_track_jump_requires_human_review(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_camera_motion_event(output_dir, frame=40, severity="fail", max_step_px=150.0)
+            _write_ball_track(
+                output_dir,
+                [
+                    (28, "Detected", 100, 100),
+                    (34, "Detected", 120, 100),
+                    (40, "Detected", 310, 100),
+                    (46, "Detected", 330, 100),
+                    (52, "Detected", 350, 100),
+                ],
+            )
+
+            report = build_ai_improvement_report(output_dir, dry_run=True)
+            context = build_ai_improvement_context(output_dir)
+
+        improvement = report["improvements"][0]
+        self.assertEqual("human_review_camera_motion", improvement["recommended_action"])
+        self.assertEqual("track_jump_review", improvement["evidence_payload"]["nearby_ball_track"]["classification"])
+        event = context["artifacts"]["camera_motion_audit"]["review_events"][0]
+        self.assertEqual("track_jump_review", event["nearby_ball_track"]["classification"])
+
+    def test_dry_run_camera_event_without_track_context_requires_human_review(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_camera_motion_event(output_dir, frame=40, severity="warn", max_step_px=120.0)
+
+            report = build_ai_improvement_report(output_dir, dry_run=True)
+
+        improvement = report["improvements"][0]
+        self.assertEqual("human_review_camera_motion", improvement["recommended_action"])
+        self.assertEqual("no_track_context", improvement["evidence_payload"]["nearby_ball_track"]["classification"])
+        self.assertEqual(0, improvement["evidence_payload"]["nearby_ball_track"]["frame_count"])
+
+    def test_camera_track_status_is_normalized_and_unknown_status_is_ambiguous(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_camera_motion_event(output_dir, frame=40, severity="warn", max_step_px=115.0)
+            (output_dir / "ball_track.csv").write_text(
+                "Frame,X,Y,Status\n"
+                "28,100,100, detected \n"
+                "36,102,100,DETECTED\n"
+                "40,104,100,\n"
+                "44,106,100,maybe\n"
+                "52,108,100,Detected\n",
+                encoding="utf-8",
+            )
+
+            context = build_ai_improvement_context(output_dir)
+            report = build_ai_improvement_report(output_dir, dry_run=True)
+
+        event = context["artifacts"]["camera_motion_audit"]["review_events"][0]
+        self.assertEqual({"Detected": 3, "unknown": 2}, event["nearby_ball_track"]["status_counts"])
+        self.assertEqual("ambiguous_status", event["nearby_ball_track"]["classification"])
+        improvement = report["improvements"][0]
+        self.assertEqual("human_review_camera_motion", improvement["recommended_action"])
+        self.assertEqual("ambiguous_status", improvement["evidence_payload"]["nearby_ball_track"]["classification"])
+
     def test_context_rejects_excessive_max_items(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:
             with self.assertRaisesRegex(ValueError, "at most 100"):
@@ -435,6 +590,69 @@ class AiImprovementTests(unittest.TestCase):
         self.assertEqual("noise_filter_adjustment", improvement["recommended_action"])
         self.assertEqual("shoe_confusion", improvement["false_positive_class"])
         self.assertEqual({"selection": {"min_accept_score": 0.62}}, improvement["config_patch"])
+
+    def test_camera_actions_are_validated_and_strip_invalid_follow_cam_patch_names(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_minimal_artifacts(output_dir)
+            client = _FakeImprovementClient(
+                {
+                    "summary": {"status": "needs_rerun", "primary_issue": "camera_motion"},
+                    "improvements": [
+                        {
+                            "id": "imp_camera",
+                            "priority": "P1",
+                            "area": "camera_motion",
+                            "failure_tags": ["camera_catchup_spike"],
+                            "root_cause_module": "follow_cam",
+                            "start_frame": 40,
+                            "end_frame": 40,
+                            "diagnosis": "Stable detected tracking with a follow-cam catch-up spike.",
+                            "recommended_action": "adjust_follow_cam",
+                            "camera_motion_event_id": "cam_event_001",
+                            "config_patch": {
+                                "follow_cam": {
+                                    "glide_pan_smoothing": 0.2,
+                                    "max_zoom_out_per_frame": 24.0,
+                                    "dead_zone_ratio_x": 0.9,
+                                    "max_pan_per_frame_x": -1,
+                                    "unknown_knob": 3,
+                                },
+                                "detector": {"confidence_threshold": 0.01},
+                            },
+                            "follow_cam_rerender_plan": {"reason": "rerender after smoothing change"},
+                            "confidence": 0.73,
+                        },
+                        {
+                            "id": "imp_review",
+                            "priority": "P2",
+                            "area": "camera_motion",
+                            "failure_tags": ["camera_catchup_spike"],
+                            "root_cause_module": "follow_cam",
+                            "start_frame": 44,
+                            "end_frame": 46,
+                            "diagnosis": "Ambiguous camera motion source.",
+                            "recommended_action": "human_review_camera_motion",
+                            "camera_motion_event_id": "cam_event_002",
+                            "evidence": ["ambiguous camera spike"],
+                            "confidence": 0.51,
+                        },
+                    ],
+                }
+            )
+
+            report = build_ai_improvement_report(output_dir, client=client)
+
+        self.assertEqual("adjust_follow_cam", report["improvements"][0]["recommended_action"])
+        self.assertEqual(
+            {"follow_cam": {"glide_pan_smoothing": 0.2, "max_zoom_out_per_frame": 24.0}},
+            report["improvements"][0]["config_patch"],
+        )
+        self.assertEqual("human_review_camera_motion", report["improvements"][1]["recommended_action"])
+        self.assertTrue(any("follow_cam.dead_zone_ratio_x" in warning for warning in report["warnings"]))
+        self.assertTrue(any("follow_cam.max_pan_per_frame_x" in warning for warning in report["warnings"]))
+        self.assertTrue(any("follow_cam.unknown_knob" in warning for warning in report["warnings"]))
+        self.assertTrue(any("detector.confidence_threshold" in warning for warning in report["warnings"]))
 
     def test_noise_filter_adjustment_without_false_positive_class_becomes_error_report(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:
@@ -848,6 +1066,150 @@ class AiImprovementTests(unittest.TestCase):
         self.assertTrue(any("detector.confidence_threshold" in warning for warning in artifact["warnings"]))
         self.assertTrue(any("tracking.max_lost_frames" in warning for warning in artifact["warnings"]))
 
+    def test_approving_adjust_follow_cam_writes_follow_cam_rerender_plan(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_json(
+                output_dir / "ai_improvement_report.json",
+                {
+                    "schema_version": "1.0",
+                    "generated_at": "2026-06-22T00:00:00+00:00",
+                    "model": "gpt-improve",
+                    "summary": {"status": "needs_rerun"},
+                    "improvements": [
+                        {
+                            "id": "imp_camera",
+                            "priority": "P1",
+                            "area": "camera_motion",
+                            "failure_tags": ["camera_catchup_spike"],
+                            "root_cause_module": "follow_cam",
+                            "start_frame": 40,
+                            "end_frame": 40,
+                            "diagnosis": "Stable tracking but follow-cam jumped.",
+                            "recommended_action": "adjust_follow_cam",
+                            "config_patch": {
+                                "follow_cam": {"glide_pan_smoothing": 0.2},
+                                "detector": {"confidence_threshold": 0.01},
+                            },
+                            "confidence": 0.74,
+                        }
+                    ],
+                },
+            )
+
+            artifact = approve_ai_improvement_actions(
+                output_dir,
+                run_id="run_123",
+                improvement_ids=["imp_camera"],
+                approved_by="operator-a",
+            )
+            plan = json.loads((output_dir / "follow_cam_rerender_plan.json").read_text(encoding="utf-8"))
+
+        action = artifact["approved_actions"][0]
+        self.assertEqual("adjust_follow_cam", action["approved_action"])
+        self.assertEqual("approval_001", plan["approval_id"])
+        self.assertEqual("imp_camera", plan["improvement_id"])
+        self.assertEqual("ai_improvement_approved_action", plan["source"])
+        self.assertEqual("ai_improvement_approved_actions.json", plan["source_approved_actions"])
+        self.assertEqual({"follow_cam": {"glide_pan_smoothing": 0.2}}, plan["recommended_config_patch"])
+        self.assertFalse(plan["requires_tracking_rerun"])
+        self.assertIn("Stable tracking", plan["reason"])
+        self.assertTrue(any("detector.confidence_threshold" in warning for warning in artifact["warnings"]))
+
+    def test_approving_tracking_rerun_before_follow_cam_writes_rerun_required_plan(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_json(
+                output_dir / "ai_improvement_report.json",
+                {
+                    "schema_version": "1.0",
+                    "generated_at": "2026-06-22T00:00:00+00:00",
+                    "model": "gpt-improve",
+                    "summary": {"status": "needs_rerun"},
+                    "improvements": [
+                        {
+                            "id": "imp_camera_track",
+                            "priority": "P0",
+                            "area": "camera_motion",
+                            "failure_tags": ["camera_catchup_spike", "ball_lost"],
+                            "root_cause_module": "follow_cam",
+                            "start_frame": 40,
+                            "end_frame": 42,
+                            "diagnosis": "Camera jump is track-driven.",
+                            "recommended_action": "tracking_rerun_before_follow_cam",
+                            "rerun_scope": {"start_frame": 28, "end_frame": 54},
+                            "confidence": 0.8,
+                        }
+                    ],
+                },
+            )
+
+            approve_ai_improvement_actions(output_dir, run_id="run_123", improvement_ids=["imp_camera_track"])
+            plan = json.loads((output_dir / "follow_cam_rerender_plan.json").read_text(encoding="utf-8"))
+
+        self.assertTrue(plan["requires_tracking_rerun"])
+        self.assertEqual("ai_improvement_approved_action", plan["source"])
+        self.assertEqual({"start_frame": 28, "end_frame": 54}, plan["tracking_rerun_scope"])
+        self.assertEqual({}, plan["recommended_config_patch"])
+        self.assertIn("Track rerun is required", plan["reason"])
+
+    def test_approving_mixed_camera_actions_prioritizes_tracking_rerun_plan(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_json(
+                output_dir / "ai_improvement_report.json",
+                {
+                    "schema_version": "1.0",
+                    "generated_at": "2026-06-22T00:00:00+00:00",
+                    "model": "gpt-improve",
+                    "summary": {"status": "needs_rerun"},
+                    "improvements": [
+                        {
+                            "id": "imp_camera_adjust",
+                            "priority": "P1",
+                            "area": "camera_motion",
+                            "failure_tags": ["camera_catchup_spike"],
+                            "root_cause_module": "follow_cam",
+                            "start_frame": 40,
+                            "end_frame": 40,
+                            "diagnosis": "Stable tracking but follow-cam jumped.",
+                            "recommended_action": "adjust_follow_cam",
+                            "config_patch": {"follow_cam": {"glide_pan_smoothing": 0.2}},
+                            "camera_motion_event_id": "cam_event_001",
+                            "confidence": 0.7,
+                        },
+                        {
+                            "id": "imp_camera_track",
+                            "priority": "P0",
+                            "area": "camera_motion",
+                            "failure_tags": ["camera_catchup_spike", "ball_lost"],
+                            "root_cause_module": "follow_cam",
+                            "start_frame": 44,
+                            "end_frame": 46,
+                            "diagnosis": "Camera jump is track-driven.",
+                            "recommended_action": "tracking_rerun_before_follow_cam",
+                            "rerun_scope": {"start_frame": 32, "end_frame": 58},
+                            "camera_motion_event_id": "cam_event_002",
+                            "confidence": 0.8,
+                        },
+                    ],
+                },
+            )
+
+            approve_ai_improvement_actions(
+                output_dir,
+                run_id="run_123",
+                improvement_ids=["imp_camera_adjust", "imp_camera_track"],
+            )
+            plan = json.loads((output_dir / "follow_cam_rerender_plan.json").read_text(encoding="utf-8"))
+
+        self.assertEqual("tracking_rerun_before_follow_cam", plan["approved_action"])
+        self.assertTrue(plan["requires_tracking_rerun"])
+        self.assertEqual(2, plan["approved_camera_action_count"])
+        self.assertEqual("imp_camera_track", plan["improvement_id"])
+        self.assertEqual({"start_frame": 32, "end_frame": 58}, plan["tracking_rerun_scope"])
+        self.assertEqual({}, plan["recommended_config_patch"])
+
     def test_approval_without_config_patch_clears_stale_derived_patch_artifact(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:
             output_dir = Path(temp_name)
@@ -1059,6 +1421,9 @@ class AiImprovementTests(unittest.TestCase):
                         "targeted_rerun_count": 1,
                         "config_patch_count": 1,
                         "highlight_adjustment_count": 1,
+                        "camera_improvement_count": 2,
+                        "camera_severity_counts": {"fail": 1, "warn": 1},
+                        "camera_action_counts": {"adjust_follow_cam": 1, "tracking_rerun_before_follow_cam": 1},
                     },
                 },
             )
@@ -1067,6 +1432,9 @@ class AiImprovementTests(unittest.TestCase):
             stats = stats_from_metrics_report(metrics)
 
         self.assertEqual("needs_rerun", metrics["ai_improvement"]["status"])
+        self.assertEqual(2, metrics["ai_improvement"]["camera_improvement_count"])
+        self.assertEqual({"fail": 1, "warn": 1}, metrics["ai_improvement"]["camera_severity_counts"])
+        self.assertEqual(1, metrics["ai_improvement"]["camera_action_counts"]["adjust_follow_cam"])
         self.assertEqual(metrics["ai_improvement"], stats["ai_improvement"])
 
 
@@ -1114,6 +1482,34 @@ def _write_minimal_artifacts(output_dir: Path) -> None:
             ],
         },
     )
+
+
+def _write_camera_motion_event(output_dir: Path, *, frame: int, severity: str, max_step_px: float) -> None:
+    _write_json(
+        output_dir / "camera_motion_audit.json",
+        {
+            "schema_version": "1.0",
+            "summary": {"status": severity, "review_event_count": 1},
+            "review_events": [
+                {
+                    "type": "camera_motion_spike",
+                    "severity": severity,
+                    "start_frame": frame,
+                    "end_frame": frame,
+                    "frame_count": 1,
+                    "reason": "Output-space camera pan step exceeds the review threshold.",
+                    "evidence": {"max_step_px": max_step_px},
+                }
+            ],
+        },
+    )
+
+
+def _write_ball_track(output_dir: Path, rows: list[tuple[int, str, object, object]]) -> None:
+    lines = ["Frame,X,Y,Status"]
+    for frame, status, x, y in rows:
+        lines.append(f"{frame},{x},{y},{status}")
+    (output_dir / "ball_track.csv").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 def _write_json(path: Path, payload: object) -> None:

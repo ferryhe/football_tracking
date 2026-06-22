@@ -25,13 +25,15 @@ Additional product rules:
 - AI suggestions are advisory until approved.
 - AI must not silently edit `ball_track.csv`, `ball_track.cleaned.csv`, active configs, or rendered highlights.
 - Every actionable suggestion must include `improvement_id`, affected frame window, evidence, confidence, and source provenance.
+- Pipeline stages must not auto-apply `ai_improvement_report.json` or `ai_improvement_approved_actions.json` just because those files exist. Track changes, high-recall reruns, follow-cam rerenders, highlight renders, and config patches require an explicit approve/apply API call or an explicit CLI argument.
 
 ## Current State
 
 - **PR1 merged:** AI improvement core exists: `ai_improvement_report.json`, CLI, API `POST /api/v1/ai/improve`, metrics, OpenAPI/client support.
 - **PR2 merged:** Review packets and visual review are richer: dense-noise/high-recall micro packets, failure tags, packet purpose, ROI/localization fields, source packet IDs, and visual-review provenance.
-- **PR3 local implementation pending controller review:** Approved recovery action flow has been implemented by a worker but is not yet committed, pushed, reviewed, or merged. It adds `ai_improvement_approved_actions.json`, approval API, approved targeted high-recall planning, ROI merge, config-patch artifact, reconcile provenance, and generated clients. Before publishing, verify the local branch baseline against current `origin/main`; if the branch is stale or includes unrelated work, reapply only the approved PR3 scope onto a fresh branch from latest `origin/main`.
-- **Remaining gaps:** Camera-motion AI improvement, highlight boundary improvement, UI/operator workflow, docs, and full real-video validation still need PRs.
+- **PR3 merged:** Approved recovery action flow has landed. It adds `ai_improvement_approved_actions.json`, approval API, approved targeted high-recall planning, ROI merge, config-patch artifact, reconcile provenance, generated clients, and provider/model routing for AI improvement.
+- **PR4 in progress:** Camera-motion AI improvement is implemented on `feat/ai-camera-improvement` but still needs review-finding fixes before publishing: stable detected large track jumps must not be dismissed as fast play, missing/malformed `ball_track.csv` must produce an ambiguous camera review item, mixed camera approvals must prioritize `tracking_rerun_before_follow_cam`, and API schemas/generated clients must preserve camera summary and evidence fields.
+- **Remaining gaps:** Finish PR4, then implement highlight boundary improvement, operator UI/docs, and full real-video validation.
 
 ## Deliverable Map
 
@@ -62,7 +64,7 @@ Required fields:
 
 Each improvement should include:
 
-- `id`
+- `id`, used as `improvement_id` by approval requests and approval artifacts
 - `priority`
 - `area`
 - `failure_tags`
@@ -94,6 +96,27 @@ Required behavior:
 - Approving `tracking_rerun_before_follow_cam` records that tracking must be rerun before rerender.
 - Approving `adjust_highlight_window` or `render_suggested_highlight` can render a suggested explicit frame window.
 - Approving config-like actions writes a derived config patch artifact but does not mutate active config.
+- Approved actions are not auto-discovered by default rerun/render paths. The caller must explicitly pass the approved-action artifact or use a dedicated approval/apply endpoint.
+
+## AI Usage And Prompt Mechanism
+
+AI has two different jobs and they should use different prompts and, when available, different model strength:
+
+1. **Packet-level review:** low-cost triage of small visual packets. This can answer whether the ball is visible, whether a candidate is likely noise, and whether a highlight packet is publishable.
+2. **Run-level improvement:** stronger diagnosis over artifacts plus selected packet evidence. This must produce bounded actions, not just "good/bad" labels.
+
+The run-level improvement prompt must require:
+
+- strict JSON with `summary`, `improvements`, and `highlight_adjustments`;
+- affected `start_frame` and `end_frame` for every action;
+- explicit `not visible` when the ball cannot be localized, instead of inventing an ROI;
+- `local_search_roi` only when visual evidence supports it;
+- false-positive class for noise actions, such as `foot_confusion`, `shoe_confusion`, `sideline_confusion`, or `wall_background_drift`;
+- camera diagnosis that distinguishes tracking-driven camera jumps, follow-cam tuning problems, and acceptable fast play;
+- highlight suggestions that protect the shot/result tail, especially the frames after the shot or goal event;
+- confidence and provenance for every actionable suggestion.
+
+The system prompt should say that AI advice is advisory until approval. The model must not claim it edited tracks, configs, rerenders, or highlights; it can only propose actions that the approval flow may apply later.
 
 ## PR Plan
 
@@ -101,7 +124,7 @@ Required behavior:
 
 **Branch:** `feat/ai-approved-recovery-actions`
 
-**Current status:** Worker implementation exists locally and must be controller-reviewed before commit/PR. Before publishing, verify that the branch was created from current `origin/main`, identify unrelated changes, and if needed cherry-pick or reapply only approved PR3 scope onto a fresh branch from latest `origin/main`.
+**Current status:** Complete and merged as GitHub PR #30. Keep this section as historical scope and regression coverage for later PRs.
 
 **Build:**
 
@@ -151,6 +174,14 @@ Required behavior:
 
 **Branch:** `feat/ai-camera-improvement`
 
+**Current status:** In progress. Implementation must resolve the review findings listed in "Current State" before commit, PR creation, or merge.
+
+**Preflight:**
+
+- Sync from latest `origin/main`.
+- Confirm current working-tree changes are only PR4 scope.
+- If the in-progress branch is stale or polluted, rebuild a fresh branch and reapply only the camera-motion AI improvement changes.
+
 **Build:**
 
 - Extend AI improvement context to read `camera_motion_audit.json`.
@@ -165,14 +196,22 @@ Required behavior:
   - `human_review_camera_motion`
 - Add approval handling for `follow_cam_rerender_plan.json`.
 - Add metrics summary for camera improvement severity and action counts.
+- Validate follow-cam config patches by both path and value:
+  - allowed root: `follow_cam`
+  - allowed keys: `pan_smoothing`, `zoom_smoothing`, `glide_pan_smoothing`, `glide_max_pan_per_frame_x`, `glide_max_pan_per_frame_y`, `catch_up_pan_smoothing`, `catch_up_max_pan_per_frame_x`, `catch_up_max_pan_per_frame_y`, `predicted_pan_decay`, `max_pan_per_frame_x`, `max_pan_per_frame_y`, `max_zoom_in_per_frame`, `max_zoom_out_per_frame`, `zoom_out_confirm_frames`, `zoom_in_confirm_frames`, `zoom_hold_frames_after_change`, `dead_zone_ratio_x`, `dead_zone_ratio_y`, `enabled`
+  - reject negative pan/zoom limits, non-numeric values, and dead-zone ratios outside 0.0-0.8
 
 **Test:**
 
 - Smooth camera path produces no camera improvement item.
 - Camera event overlapping Lost/Predicted creates `tracking_rerun_before_follow_cam`.
 - Camera event with stable detected tracking creates `adjust_follow_cam`.
+- Camera event with stable detected tracking but an extreme nearby ball-track jump creates `human_review_camera_motion`, not "acceptable fast play".
+- Camera event without readable `ball_track.csv` creates `human_review_camera_motion` with unavailable/ambiguous track context.
+- Approving mixed camera actions prioritizes `tracking_rerun_before_follow_cam` in `follow_cam_rerender_plan.json`.
 - Invalid follow-cam patch names are stripped.
 - Approval writes `follow_cam_rerender_plan.json`.
+- API schemas, OpenAPI, and generated clients preserve camera summary fields, `camera_motion_event_id`, `camera_motion_severity`, and evidence payload fields.
 - Metrics include camera improvement counts.
 
 **Commands:**
@@ -183,6 +222,9 @@ $env:PYTHONPATH='python_backend'
 .\.venv\Scripts\python.exe -m pytest python_backend/tests/test_follow_cam.py -q
 .\.venv\Scripts\python.exe -m pytest python_backend/tests/test_ai_improvement.py -q
 .\.venv\Scripts\python.exe -m pytest python_backend/tests/test_api_service.py -q
+.\.venv\Scripts\python.exe -m pytest python_backend/tests/test_export_openapi.py -q
+.\.venv\Scripts\python.exe python_backend\scripts\export_openapi.py --check
+corepack pnpm run typecheck:libs
 ```
 
 **Deliver:**
@@ -209,6 +251,11 @@ $env:PYTHONPATH='python_backend'
 - Add explicit override mode for manual pre/post roll.
 - Add AI `highlight_adjustments` with `clip_action`, `suggested_window`, reason, confidence.
 - Allow approved AI highlight windows to render as explicit frame windows with provenance.
+- Validate every AI suggested highlight window:
+  - it must include the candidate `core_window`;
+  - it must preserve at least the event-type minimum tail after the shot/result anchor;
+  - it must be clamped to video boundaries;
+  - if a human override violates those invariants, record a warning in `highlight_report.json`.
 
 **Test:**
 
@@ -217,6 +264,7 @@ $env:PYTHONPATH='python_backend'
 - Buffer seconds convert correctly at two frame rates, for example 20fps and 30fps.
 - Manual override still works for explicit operator choices.
 - AI highlight adjustment validates `candidate_id`, `suggested_window`, and `clip_action`.
+- AI `trim_tail` cannot remove the shot/result tail below the configured minimum post-event frames.
 - Approved suggested highlight writes `highlight_report.json` with approval provenance.
 - OpenAPI and generated clients stay current.
 
@@ -226,6 +274,7 @@ $env:PYTHONPATH='python_backend'
 $env:PYTHONPATH='python_backend'
 .\.venv\Scripts\python.exe -m pytest python_backend/tests/test_events.py -q
 .\.venv\Scripts\python.exe -m pytest python_backend/tests/test_review_packets.py -q
+.\.venv\Scripts\python.exe -m pytest python_backend/tests/test_highlights.py -q
 .\.venv\Scripts\python.exe -m pytest python_backend/tests/test_api_service.py -q
 .\.venv\Scripts\python.exe -m pytest python_backend/tests/test_high_recall_windows.py -q
 .\.venv\Scripts\python.exe python_backend\scripts\export_openapi.py --check
@@ -236,6 +285,7 @@ $env:PYTHONPATH='python_backend'
 - Highlight candidates with safe default buffers.
 - AI suggested clip boundaries.
 - Approved AI-suggested highlight rendering path.
+- Tests proving shot/goal render windows include enough post-event frames so the final shot result is not clipped away.
 
 ### PR6: Operator UI And Documentation
 
@@ -308,12 +358,18 @@ pnpm exec tsc --noEmit
 - Add optional before/after quality comparison for approved actions:
   - camera spike counts before and after an approved follow-cam rerender plan
   - highlight windows containing enough post-shot/result frames after default or AI-adjusted boundaries
+- Quality gate pass/fail fields:
+  - `track_hash_unchanged`: pass only when review/improvement-only phases leave track CSV hashes unchanged.
+  - `camera_regression`: fail if approved rerender increases `review_event_count`, `max_pan_step_px`, or `p95_pan_step_px` by more than 5%.
+  - `highlight_tail_ok`: pass only when each rendered candidate ends at or after `event_anchor_frame + min_post_frames`.
+  - `provider_status`: pass with `unavailable` only in dry-run/fake-client mode; real AI runs must record the selected model.
 
 **Test:**
 
 - Script runs without a real API key in dry-run/fake-client mode.
 - Script records unavailable provider status instead of failing hard.
 - Track hashes are unchanged by review/improvement-only phases.
+- Malformed AI responses produce stable error/unavailable reports without mutating tracks or renders.
 - When an approved action file exists, targeted high-recall planning consumes it and records provenance.
 - Camera quality-gate comparison reports whether spike count or worst spike improved after approved rerender planning.
 - Highlight quality-gate comparison reports whether render windows include the configured post-event duration.
@@ -332,6 +388,7 @@ $env:PYTHONPATH='python_backend'
 - One repeatable real-video validation recipe.
 - Stable output quality-gate artifact.
 - Final docs showing how to reproduce the AI improvement loop.
+- A comparison report that tells the operator whether the AI-approved rerun/rerender actually improved the visible result, instead of only proving that artifacts exist.
 
 ## End-To-End Acceptance Criteria
 
@@ -358,7 +415,7 @@ $env:PYTHONPATH='python_backend'
 - Wait for CI and Copilot/comments.
 - Fix valid remote feedback.
 - Merge only after checks and valid feedback are resolved.
-- Delete merged local and remote branches.
+- Delete merged local and remote branches after the PR is merged and this project/user authorization applies.
 
 ## Independent Review Request
 
@@ -371,12 +428,22 @@ Ask a separate agent to review this plan for:
 - Whether tests cover unit, API, generated clients, real-video smoke, and provider-unavailable cases.
 - Whether deliverables are concrete enough for acceptance.
 
-## Independent Review Incorporated
+## Prior Independent Review Incorporated
 
-The independent reviewer found no critical gaps. The plan was updated for five points:
+A prior independent reviewer found no critical gaps. The plan was updated for five points:
 
 - Model routing is now concrete: improvement diagnosis must use a configured improvement-capable model when available, while lightweight packet triage can stay on a smaller model.
 - PR3 now requires actionable missing-ball and noise schemas, including `localize_ball_roi`, `noise_filter_adjustment`, `false_positive_class`, bounded scope, evidence, confidence, and provenance.
 - PR3 execution now explicitly protects managed PR hygiene: local worker changes must be reviewed against latest `origin/main`, and reapplied to a fresh branch if the branch baseline is stale or polluted.
 - Highlight buffers are now duration-based and converted from FPS, with tests at multiple frame rates.
 - The real-video quality gate now checks user-visible quality deltas for camera smoothness and highlight boundary coverage, not only artifact existence.
+
+## 2026-06-22 Independent Review Incorporated
+
+The latest independent reviewer found no critical gaps and recommended five refinements. This plan now includes them:
+
+- Approved action artifacts are never auto-applied by file presence; callers must explicitly approve/apply or pass the artifact path.
+- PR5 highlight validation now protects `core_window` and the post-shot/result tail, including a test against bad `trim_tail` suggestions.
+- PR4 now includes fresh-branch preflight, OpenAPI/generated-client gates, and follow-cam patch value validation.
+- PR7 now defines concrete quality-gate pass/fail fields for track hash safety, camera regression, highlight tails, and provider status.
+- The plan clarifies the report `id` versus approval `improvement_id` linkage and marks the earlier review section as historical.

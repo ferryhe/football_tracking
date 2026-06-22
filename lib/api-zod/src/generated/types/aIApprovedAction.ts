@@ -35,6 +35,8 @@ export interface AIApprovedAction {
   visual_review_id?: string | null;
   candidate_id?: string | null;
   false_positive_class?: string | null;
+  camera_motion_event_id?: string | null;
+  camera_motion_severity?: string | null;
   start_frame?: number | null;
   end_frame?: number | null;
   [key: string]: unknown;

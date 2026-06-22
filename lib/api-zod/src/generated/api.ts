@@ -65,6 +65,7 @@ export const improveResponseSummaryImprovementCountDefault = 0;
 export const improveResponseSummaryTargetedRerunCountDefault = 0;
 export const improveResponseSummaryConfigPatchCountDefault = 0;
 export const improveResponseSummaryHighlightAdjustmentCountDefault = 0;
+export const improveResponseSummaryCameraImprovementCountDefault = 0;
 export const improveResponseImprovementsItemDiagnosisDefault = ``;
 export const improveResponseImprovementsItemConfidenceMin = 0;
 export const improveResponseImprovementsItemConfidenceMax = 1;
@@ -122,6 +123,11 @@ export const ImproveResponse = zod.object({
     highlight_adjustment_count: zod
       .number()
       .default(improveResponseSummaryHighlightAdjustmentCountDefault),
+    camera_improvement_count: zod
+      .number()
+      .default(improveResponseSummaryCameraImprovementCountDefault),
+    camera_severity_counts: zod.record(zod.string(), zod.number()).optional(),
+    camera_action_counts: zod.record(zod.string(), zod.number()).optional(),
   }),
   artifact_name: zod.string(),
   artifact_path: zod.string(),
@@ -174,6 +180,7 @@ export const ImproveResponse = zod.object({
         "adjust_highlight_window",
         "adjust_follow_cam",
         "tracking_rerun_before_follow_cam",
+        "human_review_camera_motion",
         "render_suggested_highlight",
       ]),
       config_patch: zod.record(zod.string(), zod.unknown()).optional(),
@@ -274,6 +281,12 @@ export const ImproveResponse = zod.object({
         ])
         .optional(),
       false_positive_class: zod.union([zod.string(), zod.null()]).optional(),
+      camera_motion_event_id: zod.union([zod.string(), zod.null()]).optional(),
+      camera_motion_severity: zod.union([zod.string(), zod.null()]).optional(),
+      evidence_payload: zod.record(zod.string(), zod.unknown()).optional(),
+      follow_cam_rerender_plan: zod
+        .union([zod.record(zod.string(), zod.unknown()), zod.null()])
+        .optional(),
     }),
   ),
   highlight_adjustments: zod.array(
@@ -446,6 +459,12 @@ export const ApproveImprovementsResponse = zod.object({
   artifact_path: zod.string(),
   config_patch_artifact_name: zod.union([zod.string(), zod.null()]).optional(),
   config_patch_artifact_path: zod.union([zod.string(), zod.null()]).optional(),
+  follow_cam_rerender_plan_artifact_name: zod
+    .union([zod.string(), zod.null()])
+    .optional(),
+  follow_cam_rerender_plan_artifact_path: zod
+    .union([zod.string(), zod.null()])
+    .optional(),
   approved_actions: zod.array(
     zod.object({
       approval_id: zod.string(),
@@ -462,6 +481,7 @@ export const ApproveImprovementsResponse = zod.object({
         "adjust_highlight_window",
         "adjust_follow_cam",
         "tracking_rerun_before_follow_cam",
+        "human_review_camera_motion",
         "render_suggested_highlight",
       ]),
       approval_source: zod.string(),
@@ -557,6 +577,8 @@ export const ApproveImprovementsResponse = zod.object({
       visual_review_id: zod.union([zod.string(), zod.null()]).optional(),
       candidate_id: zod.union([zod.string(), zod.null()]).optional(),
       false_positive_class: zod.union([zod.string(), zod.null()]).optional(),
+      camera_motion_event_id: zod.union([zod.string(), zod.null()]).optional(),
+      camera_motion_severity: zod.union([zod.string(), zod.null()]).optional(),
       start_frame: zod
         .union([
           zod
