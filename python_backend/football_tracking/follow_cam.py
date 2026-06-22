@@ -11,6 +11,7 @@ from typing import Any, Callable
 
 import cv2
 
+from football_tracking.camera_motion_audit import write_camera_motion_audit_report
 from football_tracking.config import AppConfig
 from football_tracking.types import OutputStatus
 
@@ -105,7 +106,19 @@ class FollowCamGenerator:
             capture.release()
 
         self._write_camera_path(output_dir / self.config.camera_path_name, path_entries)
-        self._write_report(output_dir / self.config.report_name, track_csv_path, track_source, path_entries)
+        camera_motion_audit = write_camera_motion_audit_report(
+            output_dir,
+            target_width=self.config.target_width,
+            target_height=self.config.target_height,
+            camera_path_name=self.config.camera_path_name,
+        )
+        self._write_report(
+            output_dir / self.config.report_name,
+            track_csv_path,
+            track_source,
+            path_entries,
+            camera_motion_audit=camera_motion_audit,
+        )
 
     def _resolve_track_csv(self, output_dir: Path) -> tuple[Path, str]:
         cleaned_csv = output_dir / self.app_config.postprocess.cleaned_csv_name
@@ -841,6 +854,7 @@ class FollowCamGenerator:
         track_csv_path: Path,
         track_source: str,
         path_entries: list[CameraPathEntry],
+        camera_motion_audit: dict[str, Any] | None = None,
     ) -> None:
         if not path_entries:
             payload = {
@@ -866,6 +880,11 @@ class FollowCamGenerator:
                     status.value: sum(1 for entry in path_entries if entry.source_status == status.value)
                     for status in OutputStatus
                 },
+            }
+        if camera_motion_audit is not None:
+            payload["camera_motion_audit"] = {
+                "report": "camera_motion_audit.json",
+                "summary": camera_motion_audit.get("summary", {}),
             }
         with path.open("w", encoding="utf-8") as report_file:
             json.dump(payload, report_file, ensure_ascii=False, indent=2)
