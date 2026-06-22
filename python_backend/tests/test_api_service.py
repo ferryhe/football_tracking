@@ -2124,6 +2124,19 @@ class ApiServiceSmokeTests(unittest.TestCase):
     def test_ai_improvement_approve_writes_approved_actions(self) -> None:
         output_dir = self.create_output_bundle("approve_baseline")
         self.write_json(
+            "outputs/approve_baseline/review_packets.json",
+            {
+                "summary": {"packet_count": 1},
+                "packets": [
+                    {
+                        "packet_id": "packet_001",
+                        "source": {"kind": "trigger", "type": "lost_gap", "start_frame": 10, "end_frame": 20},
+                        "window": {"start_frame": 0, "end_frame": 35},
+                    }
+                ],
+            },
+        )
+        self.write_json(
             "outputs/approve_baseline/ai_improvement_report.json",
             {
                 "schema_version": "1.0",
@@ -2149,6 +2162,7 @@ class ApiServiceSmokeTests(unittest.TestCase):
                             "height": 50,
                             "confidence": 0.72,
                         },
+                        "evidence_payload": {"source_packet_id": "packet_001"},
                         "confidence": 0.82,
                     }
                 ],
