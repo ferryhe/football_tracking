@@ -164,6 +164,8 @@ export const ImproveResponse = zod.object({
         .default(improveResponseImprovementsItemDiagnosisDefault),
       recommended_action: zod.enum([
         "targeted_rerun",
+        "localize_ball_roi",
+        "noise_filter_adjustment",
         "tighten_noise_filter",
         "loosen_ball_recovery",
         "split_packet",
@@ -271,6 +273,7 @@ export const ImproveResponse = zod.object({
           zod.null(),
         ])
         .optional(),
+      false_positive_class: zod.union([zod.string(), zod.null()]).optional(),
     }),
   ),
   highlight_adjustments: zod.array(
@@ -311,6 +314,270 @@ export const ImproveResponse = zod.object({
         .optional(),
     }),
   ),
+});
+
+/**
+ * @summary Approve Improvements
+ */
+export const ApproveImprovementsParams = zod.object({
+  run_id: zod.coerce.string(),
+});
+
+export const approveImprovementsBodyApprovedByDefault = `operator`;
+export const approveImprovementsBodyRerunScopeOverridesStartFrameMin = 0;
+
+export const approveImprovementsBodyRerunScopeOverridesEndFrameMin = 0;
+
+export const approveImprovementsBodyLocalSearchRoiOverridesFrameMin = 0;
+
+export const approveImprovementsBodyLocalSearchRoiOverridesXMin = 0;
+
+export const approveImprovementsBodyLocalSearchRoiOverridesYMin = 0;
+
+export const approveImprovementsBodyLocalSearchRoiOverridesWidthExclusiveMin = 0;
+
+export const approveImprovementsBodyLocalSearchRoiOverridesHeightExclusiveMin = 0;
+
+export const approveImprovementsBodyLocalSearchRoiOverridesConfidenceMin = 0;
+export const approveImprovementsBodyLocalSearchRoiOverridesConfidenceMax = 1;
+
+export const approveImprovementsBodySuggestedWindowOverridesStartFrameMin = 0;
+
+export const approveImprovementsBodySuggestedWindowOverridesEndFrameMin = 0;
+
+export const ApproveImprovementsBody = zod.object({
+  improvement_ids: zod.array(zod.string()).min(1),
+  approved_by: zod.string().default(approveImprovementsBodyApprovedByDefault),
+  rerun_scope_overrides: zod
+    .record(
+      zod.string(),
+      zod.object({
+        start_frame: zod
+          .number()
+          .min(approveImprovementsBodyRerunScopeOverridesStartFrameMin),
+        end_frame: zod
+          .number()
+          .min(approveImprovementsBodyRerunScopeOverridesEndFrameMin),
+      }),
+    )
+    .optional(),
+  local_search_roi_overrides: zod
+    .record(
+      zod.string(),
+      zod.object({
+        coordinate_space: zod.literal("image"),
+        frame: zod
+          .number()
+          .min(approveImprovementsBodyLocalSearchRoiOverridesFrameMin),
+        x: zod.number().min(approveImprovementsBodyLocalSearchRoiOverridesXMin),
+        y: zod.number().min(approveImprovementsBodyLocalSearchRoiOverridesYMin),
+        width: zod
+          .number()
+          .gt(approveImprovementsBodyLocalSearchRoiOverridesWidthExclusiveMin),
+        height: zod
+          .number()
+          .gt(approveImprovementsBodyLocalSearchRoiOverridesHeightExclusiveMin),
+        confidence: zod
+          .number()
+          .min(approveImprovementsBodyLocalSearchRoiOverridesConfidenceMin)
+          .max(approveImprovementsBodyLocalSearchRoiOverridesConfidenceMax),
+      }),
+    )
+    .optional(),
+  config_patch_overrides: zod
+    .record(zod.string(), zod.record(zod.string(), zod.unknown()))
+    .optional(),
+  suggested_window_overrides: zod
+    .record(
+      zod.string(),
+      zod.object({
+        start_frame: zod
+          .number()
+          .min(approveImprovementsBodySuggestedWindowOverridesStartFrameMin),
+        end_frame: zod
+          .number()
+          .min(approveImprovementsBodySuggestedWindowOverridesEndFrameMin),
+      }),
+    )
+    .optional(),
+  clip_action_overrides: zod
+    .record(
+      zod.string(),
+      zod.enum(["extend_tail", "trim_head", "trim_tail", "split", "keep"]),
+    )
+    .optional(),
+  follow_cam_rerender_plan_overrides: zod
+    .record(zod.string(), zod.record(zod.string(), zod.unknown()))
+    .optional(),
+});
+
+export const approveImprovementsResponseApprovedActionsItemRerunScopeOneStartFrameMin = 0;
+
+export const approveImprovementsResponseApprovedActionsItemRerunScopeOneEndFrameMin = 0;
+
+export const approveImprovementsResponseApprovedActionsItemLocalSearchRoiOneFrameMin = 0;
+
+export const approveImprovementsResponseApprovedActionsItemLocalSearchRoiOneXMin = 0;
+
+export const approveImprovementsResponseApprovedActionsItemLocalSearchRoiOneYMin = 0;
+
+export const approveImprovementsResponseApprovedActionsItemLocalSearchRoiOneWidthExclusiveMin = 0;
+
+export const approveImprovementsResponseApprovedActionsItemLocalSearchRoiOneHeightExclusiveMin = 0;
+
+export const approveImprovementsResponseApprovedActionsItemLocalSearchRoiOneConfidenceMin = 0;
+export const approveImprovementsResponseApprovedActionsItemLocalSearchRoiOneConfidenceMax = 1;
+
+export const approveImprovementsResponseApprovedActionsItemSuggestedWindowOneStartFrameMin = 0;
+
+export const approveImprovementsResponseApprovedActionsItemSuggestedWindowOneEndFrameMin = 0;
+
+export const approveImprovementsResponseApprovedActionsItemStartFrameOneMin = 0;
+
+export const approveImprovementsResponseApprovedActionsItemEndFrameOneMin = 0;
+
+export const ApproveImprovementsResponse = zod.object({
+  schema_version: zod.string(),
+  generated_at: zod.string(),
+  run_id: zod.string(),
+  source_report: zod.string(),
+  approved_by: zod.string(),
+  artifact_name: zod.string(),
+  artifact_path: zod.string(),
+  config_patch_artifact_name: zod.union([zod.string(), zod.null()]).optional(),
+  config_patch_artifact_path: zod.union([zod.string(), zod.null()]).optional(),
+  approved_actions: zod.array(
+    zod.object({
+      approval_id: zod.string(),
+      improvement_id: zod.string(),
+      approved_action: zod.enum([
+        "targeted_rerun",
+        "localize_ball_roi",
+        "noise_filter_adjustment",
+        "tighten_noise_filter",
+        "loosen_ball_recovery",
+        "split_packet",
+        "manual_review",
+        "reject_noise",
+        "adjust_highlight_window",
+        "adjust_follow_cam",
+        "tracking_rerun_before_follow_cam",
+        "render_suggested_highlight",
+      ]),
+      approval_source: zod.string(),
+      approved_at: zod.string(),
+      approved_by: zod.string(),
+      provenance: zod.record(zod.string(), zod.unknown()).optional(),
+      rerun_scope: zod
+        .union([
+          zod.object({
+            start_frame: zod
+              .number()
+              .min(
+                approveImprovementsResponseApprovedActionsItemRerunScopeOneStartFrameMin,
+              ),
+            end_frame: zod
+              .number()
+              .min(
+                approveImprovementsResponseApprovedActionsItemRerunScopeOneEndFrameMin,
+              ),
+          }),
+          zod.null(),
+        ])
+        .optional(),
+      local_search_roi: zod
+        .union([
+          zod.object({
+            coordinate_space: zod.literal("image"),
+            frame: zod
+              .number()
+              .min(
+                approveImprovementsResponseApprovedActionsItemLocalSearchRoiOneFrameMin,
+              ),
+            x: zod
+              .number()
+              .min(
+                approveImprovementsResponseApprovedActionsItemLocalSearchRoiOneXMin,
+              ),
+            y: zod
+              .number()
+              .min(
+                approveImprovementsResponseApprovedActionsItemLocalSearchRoiOneYMin,
+              ),
+            width: zod
+              .number()
+              .gt(
+                approveImprovementsResponseApprovedActionsItemLocalSearchRoiOneWidthExclusiveMin,
+              ),
+            height: zod
+              .number()
+              .gt(
+                approveImprovementsResponseApprovedActionsItemLocalSearchRoiOneHeightExclusiveMin,
+              ),
+            confidence: zod
+              .number()
+              .min(
+                approveImprovementsResponseApprovedActionsItemLocalSearchRoiOneConfidenceMin,
+              )
+              .max(
+                approveImprovementsResponseApprovedActionsItemLocalSearchRoiOneConfidenceMax,
+              ),
+          }),
+          zod.null(),
+        ])
+        .optional(),
+      config_patch: zod.record(zod.string(), zod.unknown()).optional(),
+      suggested_window: zod
+        .union([
+          zod.object({
+            start_frame: zod
+              .number()
+              .min(
+                approveImprovementsResponseApprovedActionsItemSuggestedWindowOneStartFrameMin,
+              ),
+            end_frame: zod
+              .number()
+              .min(
+                approveImprovementsResponseApprovedActionsItemSuggestedWindowOneEndFrameMin,
+              ),
+          }),
+          zod.null(),
+        ])
+        .optional(),
+      clip_action: zod
+        .union([
+          zod.enum(["extend_tail", "trim_head", "trim_tail", "split", "keep"]),
+          zod.null(),
+        ])
+        .optional(),
+      follow_cam_rerender_plan: zod
+        .union([zod.record(zod.string(), zod.unknown()), zod.null()])
+        .optional(),
+      source_packet_id: zod.union([zod.string(), zod.null()]).optional(),
+      visual_review_id: zod.union([zod.string(), zod.null()]).optional(),
+      candidate_id: zod.union([zod.string(), zod.null()]).optional(),
+      false_positive_class: zod.union([zod.string(), zod.null()]).optional(),
+      start_frame: zod
+        .union([
+          zod
+            .number()
+            .min(
+              approveImprovementsResponseApprovedActionsItemStartFrameOneMin,
+            ),
+          zod.null(),
+        ])
+        .optional(),
+      end_frame: zod
+        .union([
+          zod
+            .number()
+            .min(approveImprovementsResponseApprovedActionsItemEndFrameOneMin),
+          zod.null(),
+        ])
+        .optional(),
+    }),
+  ),
+  warnings: zod.array(zod.string()).optional(),
 });
 
 /**

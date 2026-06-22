@@ -21,6 +21,7 @@ def build_high_recall_windows(
     max_total_frames: int | None = DEFAULT_MAX_TOTAL_FRAMES,
     total_frames: int | None = None,
     mode: str = "sahi",
+    approved_actions_path: Path | None = None,
 ) -> dict[str, Any]:
     """Build high-recall rerun windows from review/audit/event reports."""
     safe_margin = max(0, int(margin_frames))
@@ -33,6 +34,7 @@ def build_high_recall_windows(
         margin_frames=safe_margin,
         total_frames=safe_total_frames,
         mode=str(mode or "sahi"),
+        approved_actions_path=approved_actions_path,
     )
     budgeted_candidates, budget_rejected_windows, _ = _apply_frame_budget(
         candidates,
@@ -59,6 +61,7 @@ def build_high_recall_windows(
             "max_total_frames": safe_max_total_frames,
             "total_frames": safe_total_frames,
             "mode": str(mode or "sahi"),
+            "approved_actions_path": None if approved_actions_path is None else str(Path(approved_actions_path).resolve()),
         },
         "windows": selected_windows,
         "rejected_windows": rejected_windows,
@@ -95,6 +98,7 @@ def _collect_candidate_windows(
     margin_frames: int,
     total_frames: int | None,
     mode: str,
+    approved_actions_path: Path | None,
 ) -> list[dict[str, Any]]:
     windows: list[dict[str, Any]] = []
     windows.extend(
@@ -121,6 +125,15 @@ def _collect_candidate_windows(
             mode=mode,
         )
     )
+    if approved_actions_path is not None:
+        windows.extend(
+            _normalize_windows(
+                _approved_action_windows(_read_optional_json(Path(approved_actions_path))),
+                margin_frames=margin_frames,
+                total_frames=total_frames,
+                mode=mode,
+            )
+        )
     return sorted(windows, key=lambda item: (item["start_frame"], item["end_frame"], -_priority_rank(item["priority"])))
 
 
@@ -227,14 +240,65 @@ def _event_candidate_windows(report: dict[str, Any] | None) -> list[dict[str, An
     return windows
 
 
+def _approved_action_windows(report: dict[str, Any] | None) -> list[dict[str, Any]]:
+    if not isinstance(report, dict):
+        return []
+    actions = report.get("approved_actions")
+    if not isinstance(actions, list):
+        return []
+
+    windows: list[dict[str, Any]] = []
+    for action in actions:
+        if not isinstance(action, dict) or action.get("approved_action") != "targeted_rerun":
+            continue
+        rerun_scope = action.get("rerun_scope")
+        if not isinstance(rerun_scope, dict):
+            continue
+        raw_payload = dict(rerun_scope)
+        raw_payload.update(
+            {
+                "approval_id": action.get("approval_id"),
+                "improvement_id": action.get("improvement_id"),
+                "approval_source": action.get("approval_source"),
+                "approved_action": action.get("approved_action"),
+                "source_packet_id": action.get("source_packet_id"),
+                "visual_review_id": action.get("visual_review_id"),
+                "local_search_roi": action.get("local_search_roi"),
+                "provenance": action.get("provenance"),
+            }
+        )
+        windows.append(
+            _raw_window(
+                raw_payload,
+                source="ai_improvement",
+                priority="none",
+                reason=f"ai_improvement: approved targeted_rerun:{action.get('improvement_id') or 'unknown'}",
+            )
+        )
+    return windows
+
+
 def _raw_window(item: dict[str, Any], *, source: str, priority: str, reason: str) -> dict[str, Any]:
-    return {
+    window = {
         "start_frame": item.get("start_frame"),
         "end_frame": item.get("end_frame"),
         "source": source,
         "priority": priority,
         "reason": reason,
     }
+    for key in (
+        "approval_id",
+        "improvement_id",
+        "approval_source",
+        "approved_action",
+        "source_packet_id",
+        "visual_review_id",
+        "local_search_roi",
+        "provenance",
+    ):
+        if item.get(key) not in (None, "", {}):
+            window[key] = item[key]
+    return window
 
 
 def _normalize_windows(
@@ -276,9 +340,49 @@ def _normalize_windows(
                 "mode": mode,
                 "priority": _normalize_priority(raw_window.get("priority"), "medium"),
                 "sources": [source],
+                **_window_metadata(raw_window),
             }
         )
     return normalized
+
+
+def _window_metadata(raw_window: dict[str, Any]) -> dict[str, Any]:
+    metadata: dict[str, Any] = {}
+    for key in (
+        "approval_id",
+        "improvement_id",
+        "approval_source",
+        "approved_action",
+        "source_packet_id",
+        "visual_review_id",
+        "local_search_roi",
+        "provenance",
+    ):
+        if raw_window.get(key) not in (None, "", {}):
+            metadata[key] = raw_window[key]
+    approval_entry = _approval_provenance_entry(raw_window)
+    if approval_entry:
+        metadata["approval_provenance"] = [approval_entry]
+    return metadata
+
+
+def _approval_provenance_entry(window: dict[str, Any]) -> dict[str, Any] | None:
+    if window.get("approval_id") in (None, "") and window.get("improvement_id") in (None, ""):
+        return None
+    entry: dict[str, Any] = {}
+    for key in (
+        "approval_id",
+        "improvement_id",
+        "approval_source",
+        "approved_action",
+        "source_packet_id",
+        "visual_review_id",
+        "local_search_roi",
+        "provenance",
+    ):
+        if window.get(key) not in (None, "", {}):
+            entry[key] = window[key]
+    return entry or None
 
 
 def _merge_windows(
@@ -305,8 +409,40 @@ def _merge_windows(
         previous["priority"] = _max_priority(previous["priority"], window["priority"])
         previous["reason"] = _join_unique_reasons(previous["reason"], window["reason"])
         previous["sources"] = _append_unique(previous["sources"], window["sources"])
+        _merge_window_metadata(previous, window)
         if previous.get("mode") != window.get("mode"):
             previous["mode"] = f"{previous.get('mode')},{window.get('mode')}"
+    return merged
+
+
+def _merge_window_metadata(target: dict[str, Any], incoming: dict[str, Any]) -> None:
+    target["approval_provenance"] = _merge_approval_provenance(
+        target.get("approval_provenance"),
+        incoming.get("approval_provenance"),
+    )
+    if not target["approval_provenance"]:
+        target.pop("approval_provenance", None)
+    elif not isinstance(target.get("approval_id"), str):
+        first = target["approval_provenance"][0]
+        for key in ("approval_id", "improvement_id", "approval_source", "approved_action", "local_search_roi", "provenance"):
+            if first.get(key) not in (None, "", {}):
+                target[key] = first[key]
+
+
+def _merge_approval_provenance(existing: Any, incoming: Any) -> list[dict[str, Any]]:
+    merged: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for source in (existing, incoming):
+        if not isinstance(source, list):
+            continue
+        for item in source:
+            if not isinstance(item, dict):
+                continue
+            key = (str(item.get("approval_id") or ""), str(item.get("improvement_id") or ""))
+            if key in seen:
+                continue
+            seen.add(key)
+            merged.append(dict(item))
     return merged
 
 
@@ -349,6 +485,10 @@ def _plan_status(selected: list[dict[str, Any]], rejected: list[dict[str, Any]])
 def _copy_window(window: dict[str, Any]) -> dict[str, Any]:
     copied = dict(window)
     copied["sources"] = list(window.get("sources") or [])
+    if isinstance(window.get("approval_provenance"), list):
+        copied["approval_provenance"] = [
+            dict(item) for item in window["approval_provenance"] if isinstance(item, dict)
+        ]
     return copied
 
 

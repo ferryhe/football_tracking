@@ -5,10 +5,10 @@
  * OpenAPI spec version: 0.1.0
  */
 
-export type AIImprovementItemRecommendedAction =
-  (typeof AIImprovementItemRecommendedAction)[keyof typeof AIImprovementItemRecommendedAction];
+export type AIApprovedActionApprovedAction =
+  (typeof AIApprovedActionApprovedAction)[keyof typeof AIApprovedActionApprovedAction];
 
-export const AIImprovementItemRecommendedAction = {
+export const AIApprovedActionApprovedAction = {
   targeted_rerun: "targeted_rerun",
   localize_ball_roi: "localize_ball_roi",
   noise_filter_adjustment: "noise_filter_adjustment",

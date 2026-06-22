@@ -4,6 +4,87 @@
  * Api
  * OpenAPI spec version: 0.1.0
  */
+export type AIApprovedActionApprovedAction =
+  (typeof AIApprovedActionApprovedAction)[keyof typeof AIApprovedActionApprovedAction];
+
+export const AIApprovedActionApprovedAction = {
+  targeted_rerun: "targeted_rerun",
+  localize_ball_roi: "localize_ball_roi",
+  noise_filter_adjustment: "noise_filter_adjustment",
+  tighten_noise_filter: "tighten_noise_filter",
+  loosen_ball_recovery: "loosen_ball_recovery",
+  split_packet: "split_packet",
+  manual_review: "manual_review",
+  reject_noise: "reject_noise",
+  adjust_highlight_window: "adjust_highlight_window",
+  adjust_follow_cam: "adjust_follow_cam",
+  tracking_rerun_before_follow_cam: "tracking_rerun_before_follow_cam",
+  render_suggested_highlight: "render_suggested_highlight",
+} as const;
+
+export type AIApprovedActionProvenance = { [key: string]: unknown };
+
+export type AIApprovedActionConfigPatch = { [key: string]: unknown };
+
+export type AIApprovedActionFollowCamRerenderPlan = {
+  [key: string]: unknown;
+} | null;
+
+export interface AIFrameWindow {
+  /** @minimum 0 */
+  start_frame: number;
+  /** @minimum 0 */
+  end_frame: number;
+}
+
+export interface AILocalSearchRoi {
+  coordinate_space: "image";
+  /** @minimum 0 */
+  frame: number;
+  /** @minimum 0 */
+  x: number;
+  /** @minimum 0 */
+  y: number;
+  /** @exclusiveMinimum 0 */
+  width: number;
+  /** @exclusiveMinimum 0 */
+  height: number;
+  /**
+   * @minimum 0
+   * @maximum 1
+   */
+  confidence: number;
+}
+
+export interface AIApprovedAction {
+  approval_id: string;
+  improvement_id: string;
+  approved_action: AIApprovedActionApprovedAction;
+  approval_source: string;
+  approved_at: string;
+  approved_by: string;
+  provenance?: AIApprovedActionProvenance;
+  rerun_scope?: AIFrameWindow | null;
+  local_search_roi?: AILocalSearchRoi | null;
+  config_patch?: AIApprovedActionConfigPatch;
+  suggested_window?: AIFrameWindow | null;
+  clip_action?:
+    | "extend_tail"
+    | "trim_head"
+    | "trim_tail"
+    | "split"
+    | "keep"
+    | null;
+  follow_cam_rerender_plan?: AIApprovedActionFollowCamRerenderPlan;
+  source_packet_id?: string | null;
+  visual_review_id?: string | null;
+  candidate_id?: string | null;
+  false_positive_class?: string | null;
+  start_frame?: number | null;
+  end_frame?: number | null;
+  [key: string]: unknown;
+}
+
 export type AIConfigDiffRequestPatch = { [key: string]: unknown };
 
 export interface AIConfigDiffRequest {
@@ -41,13 +122,6 @@ export interface AIExplainResponse {
   evidence?: string[];
 }
 
-export interface AIFrameWindow {
-  /** @minimum 0 */
-  start_frame: number;
-  /** @minimum 0 */
-  end_frame: number;
-}
-
 export interface AIHighlightAdjustment {
   candidate_id: string;
   current_window: AIFrameWindow;
@@ -66,6 +140,56 @@ export interface AIHighlightAdjustment {
     | "keep"
     | null;
   [key: string]: unknown;
+}
+
+export type AIImproveApprovalRequestRerunScopeOverrides = {
+  [key: string]: AIFrameWindow;
+};
+
+export type AIImproveApprovalRequestLocalSearchRoiOverrides = {
+  [key: string]: AILocalSearchRoi;
+};
+
+export type AIImproveApprovalRequestConfigPatchOverrides = {
+  [key: string]: { [key: string]: unknown };
+};
+
+export type AIImproveApprovalRequestSuggestedWindowOverrides = {
+  [key: string]: AIFrameWindow;
+};
+
+export type AIImproveApprovalRequestClipActionOverrides = {
+  [key: string]: "extend_tail" | "trim_head" | "trim_tail" | "split" | "keep";
+};
+
+export type AIImproveApprovalRequestFollowCamRerenderPlanOverrides = {
+  [key: string]: { [key: string]: unknown };
+};
+
+export interface AIImproveApprovalRequest {
+  /** @minItems 1 */
+  improvement_ids: string[];
+  approved_by?: string;
+  rerun_scope_overrides?: AIImproveApprovalRequestRerunScopeOverrides;
+  local_search_roi_overrides?: AIImproveApprovalRequestLocalSearchRoiOverrides;
+  config_patch_overrides?: AIImproveApprovalRequestConfigPatchOverrides;
+  suggested_window_overrides?: AIImproveApprovalRequestSuggestedWindowOverrides;
+  clip_action_overrides?: AIImproveApprovalRequestClipActionOverrides;
+  follow_cam_rerender_plan_overrides?: AIImproveApprovalRequestFollowCamRerenderPlanOverrides;
+}
+
+export interface AIImproveApprovalResponse {
+  schema_version: string;
+  generated_at: string;
+  run_id: string;
+  source_report: string;
+  approved_by: string;
+  artifact_name: string;
+  artifact_path: string;
+  config_patch_artifact_name?: string | null;
+  config_patch_artifact_path?: string | null;
+  approved_actions: AIApprovedAction[];
+  warnings?: string[];
 }
 
 export type AIImproveRequestLanguage =
@@ -146,6 +270,8 @@ export type AIImprovementItemRecommendedAction =
 
 export const AIImprovementItemRecommendedAction = {
   targeted_rerun: "targeted_rerun",
+  localize_ball_roi: "localize_ball_roi",
+  noise_filter_adjustment: "noise_filter_adjustment",
   tighten_noise_filter: "tighten_noise_filter",
   loosen_ball_recovery: "loosen_ball_recovery",
   split_packet: "split_packet",
@@ -161,25 +287,6 @@ export interface AILikelyBallRegion {
   description: string;
   frame?: number | null;
   confidence?: number | null;
-}
-
-export interface AILocalSearchRoi {
-  coordinate_space: "image";
-  /** @minimum 0 */
-  frame: number;
-  /** @minimum 0 */
-  x: number;
-  /** @minimum 0 */
-  y: number;
-  /** @exclusiveMinimum 0 */
-  width: number;
-  /** @exclusiveMinimum 0 */
-  height: number;
-  /**
-   * @minimum 0
-   * @maximum 1
-   */
-  confidence: number;
 }
 
 export type AIImprovementItemConfigPatch = { [key: string]: unknown };
@@ -204,6 +311,7 @@ export interface AIImprovementItem {
   rerun_scope?: AIFrameWindow | null;
   likely_ball_region?: AILikelyBallRegion | null;
   local_search_roi?: AILocalSearchRoi | null;
+  false_positive_class?: string | null;
   [key: string]: unknown;
 }
 

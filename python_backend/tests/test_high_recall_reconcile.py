@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from football_tracking.high_recall_reconcile import reconcile_high_recall_window, write_track_csv
+from football_tracking.high_recall_reconcile import reconcile_high_recall_outputs, reconcile_high_recall_window, write_track_csv
 
 
 def _row(frame: int, x: float | None, y: float | None, status: str, confidence: float = 0.9) -> dict[str, str]:
@@ -229,6 +229,78 @@ class HighRecallReconcileTests(unittest.TestCase):
         self.assertEqual("0.9000", by_frame[0]["Confidence"])
         self.assertEqual("20.00", by_frame[2]["X"])
         self.assertEqual("10.0", by_frame[1]["X"])
+
+    def test_reconcile_reports_ai_improvement_provenance_for_approved_window(self) -> None:
+        main_rows = [
+            _row(0, 0, 0, "Detected"),
+            _row(1, None, None, "Lost", 0.0),
+            _row(2, 20, 0, "Detected"),
+        ]
+        high_recall_rows = [_row(1, 10, 0, "Detected", 0.8)]
+
+        result = reconcile_high_recall_window(
+            main_rows,
+            high_recall_rows,
+            {
+                "start_frame": 1,
+                "end_frame": 1,
+                "reason": "ai_improvement: approved targeted_rerun",
+                "priority": "medium",
+                "sources": ["ai_improvement"],
+                "improvement_id": "imp_001",
+                "approval_source": "api",
+                "approval_provenance": [
+                    {
+                        "approval_id": "approval_001",
+                        "improvement_id": "imp_001",
+                        "approval_source": "api",
+                    }
+                ],
+            },
+            max_speed_px_per_frame=15.0,
+            max_jump_px=20.0,
+        )
+
+        self.assertTrue(result["accepted"])
+        self.assertEqual("ai_improvement", result["source"])
+        self.assertEqual("imp_001", result["improvement_id"])
+        self.assertEqual("api", result["approval_source"])
+        self.assertEqual("approval_001", result["approval_provenance"][0]["approval_id"])
+        self.assertEqual(1, result["changed_frame_count"])
+
+    def test_reconcile_outputs_preserve_ai_provenance_when_window_csv_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            high_recall_root = output_dir / "high_recall_windows"
+            write_track_csv(output_dir / "ball_track.csv", [_row(0, 0, 0, "Detected")])
+
+            report = reconcile_high_recall_outputs(
+                output_dir,
+                [
+                    {
+                        "start_frame": 1,
+                        "end_frame": 1,
+                        "reason": "ai_improvement: approved targeted_rerun",
+                        "priority": "medium",
+                        "sources": ["ai_improvement"],
+                        "improvement_id": "imp_001",
+                        "approval_source": "api",
+                        "approval_provenance": [
+                            {
+                                "approval_id": "approval_001",
+                                "improvement_id": "imp_001",
+                                "approval_source": "api",
+                            }
+                        ],
+                    }
+                ],
+                high_recall_root=high_recall_root,
+            )
+
+        window = report["windows"][0]
+        self.assertFalse(window["accepted"])
+        self.assertEqual("ai_improvement", window["source"])
+        self.assertEqual("approval_001", window["approval_provenance"][0]["approval_id"])
 
     def test_write_track_csv_uses_atomic_replace(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:

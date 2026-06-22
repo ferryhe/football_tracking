@@ -20,6 +20,8 @@ import type {
   AIConfigDiffResponse,
   AIExplainRequest,
   AIExplainResponse,
+  AIImproveApprovalRequest,
+  AIImproveApprovalResponse,
   AIImproveRequest,
   AIImproveResponse,
   AIRecommendRequest,
@@ -325,6 +327,97 @@ export const useImprove = <
   TContext
 > => {
   return useMutation(getImproveMutationOptions(options));
+};
+
+/**
+ * @summary Approve Improvements
+ */
+export const getApproveImprovementsUrl = (runId: string) => {
+  return `/api/ai/improve/${encodePathSegmented(runId)}/approve`;
+};
+
+export const approveImprovements = async (
+  runId: string,
+  aIImproveApprovalRequest: AIImproveApprovalRequest,
+  options?: RequestInit,
+): Promise<AIImproveApprovalResponse> => {
+  return customFetch<AIImproveApprovalResponse>(
+    getApproveImprovementsUrl(runId),
+    {
+      ...options,
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...options?.headers },
+      body: JSON.stringify(aIImproveApprovalRequest),
+    },
+  );
+};
+
+export const getApproveImprovementsMutationOptions = <
+  TError = ErrorType<HTTPValidationError>,
+  TContext = unknown,
+>(options?: {
+  mutation?: UseMutationOptions<
+    Awaited<ReturnType<typeof approveImprovements>>,
+    TError,
+    { runId: string; data: BodyType<AIImproveApprovalRequest> },
+    TContext
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}): UseMutationOptions<
+  Awaited<ReturnType<typeof approveImprovements>>,
+  TError,
+  { runId: string; data: BodyType<AIImproveApprovalRequest> },
+  TContext
+> => {
+  const mutationKey = ["approveImprovements"];
+  const { mutation: mutationOptions, request: requestOptions } = options
+    ? options.mutation &&
+      "mutationKey" in options.mutation &&
+      options.mutation.mutationKey
+      ? options
+      : { ...options, mutation: { ...options.mutation, mutationKey } }
+    : { mutation: { mutationKey }, request: undefined };
+
+  const mutationFn: MutationFunction<
+    Awaited<ReturnType<typeof approveImprovements>>,
+    { runId: string; data: BodyType<AIImproveApprovalRequest> }
+  > = (props) => {
+    const { runId, data } = props ?? {};
+
+    return approveImprovements(runId, data, requestOptions);
+  };
+
+  return { mutationFn, ...mutationOptions };
+};
+
+export type ApproveImprovementsMutationResult = NonNullable<
+  Awaited<ReturnType<typeof approveImprovements>>
+>;
+export type ApproveImprovementsMutationBody =
+  BodyType<AIImproveApprovalRequest>;
+export type ApproveImprovementsMutationError = ErrorType<HTTPValidationError>;
+
+/**
+ * @summary Approve Improvements
+ */
+export const useApproveImprovements = <
+  TError = ErrorType<HTTPValidationError>,
+  TContext = unknown,
+>(options?: {
+  mutation?: UseMutationOptions<
+    Awaited<ReturnType<typeof approveImprovements>>,
+    TError,
+    { runId: string; data: BodyType<AIImproveApprovalRequest> },
+    TContext
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}): UseMutationResult<
+  Awaited<ReturnType<typeof approveImprovements>>,
+  TError,
+  { runId: string; data: BodyType<AIImproveApprovalRequest> },
+  TContext
+> => {
+  return useMutation(getApproveImprovementsMutationOptions(options));
 };
 
 /**
