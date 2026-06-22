@@ -10,6 +10,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Sequence
 
+from football_tracking.ai_contracts import AI_FAILURE_TAGS, AI_ROOT_CAUSE_MODULES
+
 SCHEMA_VERSION = "1.0"
 
 VERDICT_ACCEPT_HIGHLIGHT = "accept_highlight"
@@ -47,22 +49,50 @@ RECOMMENDED_ACTIONS = (
     RECOMMENDED_ACTION_SEND_TO_HUMAN,
     RECOMMENDED_ACTION_DISCARD,
 )
+TUNING_DIRECTIONS = ("tighten", "loosen", "split_packets", "rerank_events", "retrack_segment", "none")
+OPTIONAL_RESPONSE_FIELDS = (
+    "failure_tags",
+    "root_cause_module",
+    "suggested_fixes",
+    "likely_ball_region",
+    "local_search_roi",
+    "best_subclip",
+    "tuning_direction",
+)
+LEGACY_REQUIRED_RESPONSE_FIELDS = (
+    "verdict",
+    "confidence",
+    "reason",
+    "match_ball_visible",
+    "marker_alignment",
+    "highlight_publishable",
+    "recommended_action",
+    "visual_evidence",
+)
+STRICT_RESPONSE_FIELDS = (*LEGACY_REQUIRED_RESPONSE_FIELDS, *OPTIONAL_RESPONSE_FIELDS)
 
 AI_VISUAL_REVIEW_INSTRUCTIONS = (
     "You are a conservative football highlight visual review agent. "
     "Review the contact sheet, crop sheet, and packet metadata. "
-    "Return strict JSON only with keys: verdict, confidence, reason, match_ball_visible, "
+    "Return strict JSON with every schema key. Core keys are verdict, confidence, reason, match_ball_visible, "
     "marker_alignment, highlight_publishable, recommended_action, visual_evidence. "
+    "Diagnostic keys are failure_tags, root_cause_module, suggested_fixes, "
+    "likely_ball_region, local_search_roi, best_subclip, tuning_direction; use empty arrays, null, "
+    "unknown, or none when the evidence is unavailable. "
     "Allowed verdict values: accept_highlight, needs_human_review, reject_noise. "
     "Allowed match_ball_visible values: yes, partial, no, unclear. "
     "Allowed marker_alignment values: good, mixed, off, unclear. "
     "Allowed recommended_action values: keep_highlight, send_to_human, discard. "
+    "Use failure_tags and root_cause_module only from the shared packet metadata vocabulary. "
     "Do not treat the packet decision label highlight_worthy as ground truth. "
     "Only choose accept_highlight when the match ball is visible in multiple frames, the marker "
     "stays consistently close to the real match ball, and the candidate clip appears publishable. "
     "If the ball is occluded, the marker drifts, or the target could be a shoe, line, sideline object, "
     "ad board, spectator item, or other non-ball object, choose needs_human_review. "
-    "Choose reject_noise only when the packet is clearly not tracking a real match ball."
+    "Choose reject_noise only when the packet is clearly not tracking a real match ball. "
+    "For missing-ball or reacquire packets, use the contact sheet and crop sheet to localize the real ball "
+    "only when the ball is visible; if it is not visible, set likely_ball_region.description to 'not visible' "
+    "and set local_search_roi to null."
 )
 
 AI_VISUAL_REVIEW_RESPONSE_SCHEMA: dict[str, Any] = {
@@ -79,17 +109,67 @@ AI_VISUAL_REVIEW_RESPONSE_SCHEMA: dict[str, Any] = {
             "type": "array",
             "items": {"type": "string"},
         },
+        "failure_tags": {
+            "type": "array",
+            "items": {"type": "string", "enum": sorted(AI_FAILURE_TAGS)},
+        },
+        "root_cause_module": {"type": "string", "enum": sorted(AI_ROOT_CAUSE_MODULES)},
+        "suggested_fixes": {
+            "type": "array",
+            "items": {"type": "string"},
+        },
+        "likely_ball_region": {
+            "anyOf": [
+                {
+                    "type": "object",
+                    "properties": {
+                        "frame": {"type": "integer", "minimum": 0},
+                        "description": {"type": "string"},
+                        "confidence": {"type": "number", "minimum": 0.0, "maximum": 1.0},
+                    },
+                    "required": ["frame", "description", "confidence"],
+                    "additionalProperties": False,
+                },
+                {"type": "null"},
+            ]
+        },
+        "local_search_roi": {
+            "anyOf": [
+                {
+                    "type": "object",
+                    "properties": {
+                        "coordinate_space": {"type": "string", "enum": ["image"]},
+                        "frame": {"type": "integer", "minimum": 0},
+                        "x": {"type": "number", "minimum": 0.0},
+                        "y": {"type": "number", "minimum": 0.0},
+                        "width": {"type": "number", "exclusiveMinimum": 0.0},
+                        "height": {"type": "number", "exclusiveMinimum": 0.0},
+                        "confidence": {"type": "number", "minimum": 0.0, "maximum": 1.0},
+                    },
+                    "required": ["coordinate_space", "frame", "x", "y", "width", "height", "confidence"],
+                    "additionalProperties": False,
+                },
+                {"type": "null"},
+            ]
+        },
+        "best_subclip": {
+            "anyOf": [
+                {
+                    "type": "object",
+                    "properties": {
+                        "start_frame": {"type": "integer", "minimum": 0},
+                        "end_frame": {"type": "integer", "minimum": 0},
+                        "reason": {"type": "string"},
+                    },
+                    "required": ["start_frame", "end_frame", "reason"],
+                    "additionalProperties": False,
+                },
+                {"type": "null"},
+            ]
+        },
+        "tuning_direction": {"type": "string", "enum": list(TUNING_DIRECTIONS)},
     },
-    "required": [
-        "verdict",
-        "confidence",
-        "reason",
-        "match_ball_visible",
-        "marker_alignment",
-        "highlight_publishable",
-        "recommended_action",
-        "visual_evidence",
-    ],
+    "required": list(STRICT_RESPONSE_FIELDS),
     "additionalProperties": False,
 }
 
@@ -147,10 +227,11 @@ def build_ai_visual_review_report(
     errors: list[dict[str, Any]] = []
     for index, packet in enumerate(selected_packets, start=1):
         packet_id = _packet_id(packet, index)
-        review_item = _base_review_item(packet, packet_id)
+        visual_review_id = _visual_review_id(packet_id)
+        review_item = _base_review_item(packet, packet_id, visual_review_id)
         try:
             if dry_run:
-                review_item["review"] = _dry_run_review()
+                review_item["review"] = _with_review_linkage(_dry_run_review(), packet_id, visual_review_id)
             else:
                 contact_sheet = _packet_media_path(output_dir, packet, "contact_sheet")
                 crop_sheet = _packet_media_path(output_dir, packet, "crop_sheet")
@@ -162,7 +243,15 @@ def build_ai_visual_review_report(
                     crop_sheet_data_url=_image_data_url(crop_sheet),
                     model=model,
                 )
-                review_item["review"] = _validate_review_response(response)
+                review_item["review"] = _with_review_linkage(
+                    _validate_review_response(
+                        response,
+                        frame_dimensions=_packet_frame_dimensions(packet),
+                        window=packet.get("window") if isinstance(packet.get("window"), dict) else None,
+                    ),
+                    packet_id,
+                    visual_review_id,
+                )
         except Exception as exc:
             error = {
                 "packet_id": packet_id,
@@ -185,7 +274,7 @@ def build_ai_visual_review_report(
             "only_labels": list(only_labels) if only_labels is not None else None,
             "max_packets": max_packets,
         },
-        "prompt_version": "visual-review-v1",
+        "prompt_version": "visual-review-v2",
         "summary": summary,
         "reviews": reviews,
         "errors": errors,
@@ -249,9 +338,10 @@ def _select_packets(
     return selected
 
 
-def _base_review_item(packet: dict[str, Any], packet_id: str) -> dict[str, Any]:
+def _base_review_item(packet: dict[str, Any], packet_id: str, visual_review_id: str) -> dict[str, Any]:
     return {
         "packet_id": packet_id,
+        "visual_review_id": visual_review_id,
         "packet_label": _packet_label(packet),
         "source": packet.get("source") if isinstance(packet.get("source"), dict) else {},
         "window": packet.get("window") if isinstance(packet.get("window"), dict) else {},
@@ -268,6 +358,15 @@ def _packet_metadata(packet: dict[str, Any], packet_id: str) -> dict[str, Any]:
         "source": packet.get("source") if isinstance(packet.get("source"), dict) else {},
         "window": packet.get("window") if isinstance(packet.get("window"), dict) else {},
         "track_summary": packet.get("track_summary") if isinstance(packet.get("track_summary"), dict) else {},
+        "suspected_failure_tags": packet.get("suspected_failure_tags")
+        if isinstance(packet.get("suspected_failure_tags"), list)
+        else [],
+        "root_cause_candidates": packet.get("root_cause_candidates")
+        if isinstance(packet.get("root_cause_candidates"), list)
+        else [],
+        "packet_purpose": packet.get("packet_purpose") if isinstance(packet.get("packet_purpose"), str) else "",
+        "frame_dimensions": _packet_frame_dimensions(packet) or {},
+        "media": packet.get("media") if isinstance(packet.get("media"), dict) else {},
         "media_warnings": packet.get("media_warnings") if isinstance(packet.get("media_warnings"), list) else [],
     }
 
@@ -287,6 +386,34 @@ def _packet_id(packet: dict[str, Any], index: int) -> str:
     return f"packet_{index:03d}"
 
 
+def _packet_frame_dimensions(packet: dict[str, Any]) -> dict[str, int] | None:
+    dimensions = packet.get("frame_dimensions")
+    if not isinstance(dimensions, dict):
+        return None
+    width = _safe_int(dimensions.get("width"))
+    height = _safe_int(dimensions.get("height"))
+    if width <= 0 or height <= 0:
+        return None
+    return {"width": width, "height": height}
+
+
+def _visual_review_id(packet_id: str) -> str:
+    safe_packet_id = "".join(ch if ch.isalnum() or ch in {"_", "-", ":"} else "_" for ch in packet_id).strip("_")
+    return f"visual_review:{safe_packet_id or 'packet'}"
+
+
+def _with_review_linkage(review: dict[str, Any], packet_id: str, visual_review_id: str) -> dict[str, Any]:
+    linked = dict(review)
+    linked["source_packet_id"] = packet_id
+    linked["visual_review_id"] = visual_review_id
+    linked["provenance"] = {
+        "source": "ai_visual_review",
+        "source_packet_id": packet_id,
+        "visual_review_id": visual_review_id,
+    }
+    return linked
+
+
 def _dry_run_review() -> dict[str, Any]:
     return {
         "verdict": VERDICT_NEEDS_HUMAN_REVIEW,
@@ -297,26 +424,33 @@ def _dry_run_review() -> dict[str, Any]:
         "highlight_publishable": False,
         "recommended_action": RECOMMENDED_ACTION_SEND_TO_HUMAN,
         "visual_evidence": ["dry-run default; no visual model was called."],
+        "failure_tags": ["unknown"],
+        "root_cause_module": "unknown",
+        "suggested_fixes": [],
+        "likely_ball_region": {"frame": 0, "description": "not visible", "confidence": 0.0},
+        "local_search_roi": None,
+        "best_subclip": None,
+        "tuning_direction": "none",
     }
 
 
-def _validate_review_response(response: Any) -> dict[str, Any]:
+def _validate_review_response(
+    response: Any,
+    *,
+    frame_dimensions: dict[str, int] | None = None,
+    window: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     if not isinstance(response, dict):
         raise ValueError("Model response must be a JSON object.")
 
-    required = (
-        "verdict",
-        "confidence",
-        "reason",
-        "match_ball_visible",
-        "marker_alignment",
-        "highlight_publishable",
-        "recommended_action",
-        "visual_evidence",
-    )
+    required = LEGACY_REQUIRED_RESPONSE_FIELDS
     missing = [key for key in required if key not in response]
     if missing:
         raise ValueError(f"Model response missing required fields: {', '.join(missing)}")
+    allowed_fields = {*required, *OPTIONAL_RESPONSE_FIELDS}
+    unexpected = [key for key in response if key not in allowed_fields]
+    if unexpected:
+        raise ValueError(f"Model response has unsupported fields: {', '.join(sorted(unexpected))}")
 
     verdict = _enum_value(response, "verdict", VERDICTS)
     match_ball_visible = _enum_value(response, "match_ball_visible", MATCH_BALL_VISIBLE_VALUES)
@@ -338,7 +472,7 @@ def _validate_review_response(response: Any) -> dict[str, Any]:
             raise ValueError("Model response visual_evidence must contain non-empty strings.")
         evidence_items.append(item.strip())
 
-    return {
+    validated = {
         "verdict": verdict,
         "confidence": confidence,
         "reason": reason.strip(),
@@ -348,6 +482,39 @@ def _validate_review_response(response: Any) -> dict[str, Any]:
         "recommended_action": recommended_action,
         "visual_evidence": evidence_items,
     }
+    if "failure_tags" in response:
+        validated["failure_tags"] = _failure_tags(response.get("failure_tags"))
+    else:
+        validated["failure_tags"] = []
+    if "root_cause_module" in response:
+        validated["root_cause_module"] = _enum_value(response, "root_cause_module", tuple(sorted(AI_ROOT_CAUSE_MODULES)))
+    else:
+        validated["root_cause_module"] = "unknown"
+    if "suggested_fixes" in response:
+        validated["suggested_fixes"] = _string_list(response.get("suggested_fixes"), "suggested_fixes")
+    else:
+        validated["suggested_fixes"] = []
+    if "likely_ball_region" in response:
+        validated["likely_ball_region"] = _likely_ball_region(response.get("likely_ball_region"))
+    else:
+        validated["likely_ball_region"] = None
+    if "local_search_roi" in response:
+        validated["local_search_roi"] = _local_search_roi(
+            response.get("local_search_roi"),
+            frame_dimensions=frame_dimensions,
+            window=window,
+        )
+    else:
+        validated["local_search_roi"] = None
+    if "best_subclip" in response:
+        validated["best_subclip"] = _best_subclip(response.get("best_subclip"))
+    else:
+        validated["best_subclip"] = None
+    if "tuning_direction" in response:
+        validated["tuning_direction"] = _enum_value(response, "tuning_direction", TUNING_DIRECTIONS)
+    else:
+        validated["tuning_direction"] = "none"
+    return validated
 
 
 def _enum_value(response: dict[str, Any], key: str, allowed: tuple[str, ...]) -> str:
@@ -355,6 +522,138 @@ def _enum_value(response: dict[str, Any], key: str, allowed: tuple[str, ...]) ->
     if not isinstance(value, str) or value not in allowed:
         raise ValueError(f"Model response {key} must be one of: {', '.join(allowed)}")
     return value
+
+
+def _failure_tags(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        raise ValueError("Model response failure_tags must be a list.")
+    tags: list[str] = []
+    for item in value:
+        if not isinstance(item, str) or item not in AI_FAILURE_TAGS:
+            raise ValueError(f"Model response failure_tags must use known tags: {', '.join(sorted(AI_FAILURE_TAGS))}")
+        tags.append(item)
+    return tags
+
+
+def _string_list(value: Any, key: str) -> list[str]:
+    if not isinstance(value, list):
+        raise ValueError(f"Model response {key} must be a list.")
+    strings: list[str] = []
+    for item in value:
+        if not isinstance(item, str) or not item.strip():
+            raise ValueError(f"Model response {key} must contain non-empty strings.")
+        strings.append(item.strip())
+    return strings
+
+
+def _likely_ball_region(value: Any) -> dict[str, Any] | None:
+    if value is None:
+        return None
+    region = _object_with_fields(value, "likely_ball_region", ("frame", "description", "confidence"))
+    description = region["description"]
+    if not isinstance(description, str) or not description.strip():
+        raise ValueError("Model response likely_ball_region.description must be a non-empty string.")
+    return {
+        "frame": _nonnegative_int(region["frame"], "likely_ball_region.frame"),
+        "description": description.strip(),
+        "confidence": _bounded_number(region["confidence"], "likely_ball_region.confidence", minimum=0.0, maximum=1.0),
+    }
+
+
+def _local_search_roi(
+    value: Any,
+    *,
+    frame_dimensions: dict[str, int] | None,
+    window: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    if value is None:
+        return None
+    roi = _object_with_fields(
+        value,
+        "local_search_roi",
+        ("coordinate_space", "frame", "x", "y", "width", "height", "confidence"),
+    )
+    if roi["coordinate_space"] != "image":
+        raise ValueError("Model response local_search_roi.coordinate_space must be image.")
+    frame = _nonnegative_int(roi["frame"], "local_search_roi.frame")
+    x = _bounded_number(roi["x"], "local_search_roi.x", minimum=0.0)
+    y = _bounded_number(roi["y"], "local_search_roi.y", minimum=0.0)
+    width = _bounded_number(roi["width"], "local_search_roi.width", minimum=0.0, exclusive_minimum=True)
+    height = _bounded_number(roi["height"], "local_search_roi.height", minimum=0.0, exclusive_minimum=True)
+    if frame_dimensions is not None:
+        frame_width = frame_dimensions["width"]
+        frame_height = frame_dimensions["height"]
+        if x + width > frame_width or y + height > frame_height:
+            raise ValueError("Model response local_search_roi must fit inside known frame dimensions.")
+    if window is not None:
+        start_frame = _safe_int(window.get("start_frame"))
+        end_frame = _safe_int(window.get("end_frame"))
+        if end_frame >= start_frame and (frame < start_frame or frame > end_frame):
+            raise ValueError("Model response local_search_roi.frame must fall inside the packet window.")
+    return {
+        "coordinate_space": "image",
+        "frame": frame,
+        "x": x,
+        "y": y,
+        "width": width,
+        "height": height,
+        "confidence": _bounded_number(roi["confidence"], "local_search_roi.confidence", minimum=0.0, maximum=1.0),
+    }
+
+
+def _best_subclip(value: Any) -> dict[str, Any] | None:
+    if value is None:
+        return None
+    subclip = _object_with_fields(value, "best_subclip", ("start_frame", "end_frame", "reason"))
+    start_frame = _nonnegative_int(subclip["start_frame"], "best_subclip.start_frame")
+    end_frame = _nonnegative_int(subclip["end_frame"], "best_subclip.end_frame")
+    if end_frame < start_frame:
+        raise ValueError("Model response best_subclip.end_frame must be greater than or equal to start_frame.")
+    reason = subclip["reason"]
+    if not isinstance(reason, str) or not reason.strip():
+        raise ValueError("Model response best_subclip.reason must be a non-empty string.")
+    return {"start_frame": start_frame, "end_frame": end_frame, "reason": reason.strip()}
+
+
+def _object_with_fields(value: Any, key: str, required: tuple[str, ...]) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise ValueError(f"Model response {key} must be an object or null.")
+    missing = [field for field in required if field not in value]
+    if missing:
+        raise ValueError(f"Model response {key} missing fields: {', '.join(missing)}")
+    unexpected = [field for field in value if field not in required]
+    if unexpected:
+        raise ValueError(f"Model response {key} has unsupported fields: {', '.join(sorted(unexpected))}")
+    return value
+
+
+def _nonnegative_int(value: Any, key: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ValueError(f"Model response {key} must be a nonnegative integer.")
+    return value
+
+
+def _bounded_number(
+    value: Any,
+    key: str,
+    *,
+    minimum: float | None = None,
+    maximum: float | None = None,
+    exclusive_minimum: bool = False,
+) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"Model response {key} must be a number.")
+    parsed = float(value)
+    if not math.isfinite(parsed):
+        raise ValueError(f"Model response {key} must be finite.")
+    if minimum is not None:
+        if exclusive_minimum and parsed <= minimum:
+            raise ValueError(f"Model response {key} must be greater than {minimum}.")
+        if not exclusive_minimum and parsed < minimum:
+            raise ValueError(f"Model response {key} must be at least {minimum}.")
+    if maximum is not None and parsed > maximum:
+        raise ValueError(f"Model response {key} must be at most {maximum}.")
+    return parsed
 
 
 def _confidence(value: Any) -> float:
@@ -431,7 +730,10 @@ def _image_data_url(path: Path) -> str:
 def _build_prompt(metadata: dict[str, Any]) -> str:
     return (
         "Review this packet using the supplied images and metadata. "
-        "The deterministic decision label is only a routing hint, not truth.\n\n"
+        "The deterministic decision label is only a routing hint, not truth. "
+        "For missing-ball or reacquire diagnosis packets, inspect the contact_sheet and crop_sheet media. "
+        "Return likely_ball_region and local_search_roi only when the ball is visible; if the ball is not visible, "
+        "use likely_ball_region.description='not visible' and local_search_roi=null.\n\n"
         f"{json.dumps({'metadata': metadata}, ensure_ascii=False, indent=2)}"
     )
 

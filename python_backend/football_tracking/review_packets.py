@@ -8,12 +8,17 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from football_tracking.ai_contracts import AI_FAILURE_TAGS, AI_ROOT_CAUSE_MODULES
+
 SCHEMA_VERSION = "1.0"
 DEFAULT_PRE_ROLL_FRAMES = 30
 DEFAULT_POST_ROLL_FRAMES = 30
 MAX_TRIGGER_WINDOW_FRAMES = 600
 LONG_LOST_GAP_MIN_FRAMES = 120
 LONG_LOST_GAP_RESERVED_PACKETS = 1
+MICRO_PACKET_MIN_FRAMES = 24
+MICRO_PACKET_TARGET_FRAMES = 64
+MICRO_PACKET_MAX_FRAMES = 96
 FRAME_SAMPLES_PER_PACKET = 5
 CONTACT_SHEET_SEEK_PREROLL_FRAMES = 120
 
@@ -50,7 +55,7 @@ def build_review_packet_report(
         decision = _decision_for_source(source, track_summary)
         packet_id = _packet_id(index, source)
         packet_dir = packet_root / packet_id
-        media, media_warnings = (
+        media, media_warnings, media_frame_dimensions = (
             _write_packet_media(
                 packet_dir=packet_dir,
                 packet_id=packet_id,
@@ -61,7 +66,7 @@ def build_review_packet_report(
                 end_frame=window["end_frame"],
             )
             if include_media
-            else ({}, [])
+            else ({}, [], None)
         )
         packet = {
             "packet_id": packet_id,
@@ -69,9 +74,14 @@ def build_review_packet_report(
             "window": window,
             "track_summary": track_summary,
             "decision": decision,
+            **_packet_diagnosis(source, track_summary),
             "media": media,
             "media_warnings": media_warnings,
         }
+        frame_dimensions = _source_frame_dimensions(source) or media_frame_dimensions
+        if frame_dimensions is not None:
+            packet["frame_dimensions"] = frame_dimensions
+        packet.update(_packet_lineage(source))
         packets.append(packet)
 
     return {
@@ -131,25 +141,38 @@ def _packet_sources(output_dir: Path, *, max_packets: int) -> list[dict[str, Any
     if max_packets <= 0:
         return []
     event_sources = _event_candidate_sources(output_dir)
-    trigger_sources = [*_trigger_sources(output_dir), *_high_recall_rejection_sources(output_dir)]
+    trigger_sources = [
+        *_trigger_sources(output_dir, max_packets=max_packets),
+        *_high_recall_rejection_sources(output_dir, max_packets=max_packets),
+    ]
     reserved_sources = _reserved_long_lost_gap_sources(trigger_sources, max_packets=max_packets)
     reserved_keys = {_source_key(source) for source in reserved_sources}
     trigger_sources = [source for source in trigger_sources if _source_key(source) not in reserved_keys]
+    trigger_sources = _interleave_source_groups(trigger_sources)
     remaining_slots = max(0, max_packets - len(reserved_sources))
     if remaining_slots <= 0:
         return _dedupe_sources(reserved_sources)[:max_packets]
 
+    required_trigger_sources = _required_trigger_sources(trigger_sources, remaining_slots=remaining_slots)
+    required_keys = {_source_key(source) for source in required_trigger_sources}
+    trigger_sources = [source for source in trigger_sources if _source_key(source) not in required_keys]
+    fill_slots = max(0, remaining_slots - len(required_trigger_sources))
+
     if not event_sources or not trigger_sources:
-        selected = _dedupe_sources([*event_sources, *trigger_sources])[:remaining_slots]
+        selected = [
+            *required_trigger_sources,
+            *_dedupe_sources([*event_sources, *trigger_sources])[:fill_slots],
+        ]
         return _dedupe_sources([*selected, *reserved_sources])[:max_packets]
 
-    trigger_quota = min(len(trigger_sources), max(1, remaining_slots // 2))
-    event_quota = remaining_slots - trigger_quota
+    trigger_quota = min(len(trigger_sources), max(1, fill_slots // 2)) if fill_slots > 0 else 0
+    event_quota = fill_slots - trigger_quota
     if event_quota <= 0 and event_sources:
         event_quota = 1
-        trigger_quota = max(0, remaining_slots - event_quota)
+        trigger_quota = max(0, fill_slots - event_quota)
 
     selected = [
+        *required_trigger_sources,
         *event_sources[:event_quota],
         *trigger_sources[:trigger_quota],
         *event_sources[event_quota:],
@@ -160,7 +183,7 @@ def _packet_sources(output_dir: Path, *, max_packets: int) -> list[dict[str, Any
 
 def _dedupe_sources(sources: list[dict[str, Any]]) -> list[dict[str, Any]]:
     deduped: list[dict[str, Any]] = []
-    seen: set[tuple[str, int | None, int | None]] = set()
+    seen: set[tuple[str, str, int | None, int | None]] = set()
     for source in sources:
         key = _source_key(source)
         if key in seen:
@@ -170,8 +193,75 @@ def _dedupe_sources(sources: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return deduped
 
 
-def _source_key(source: dict[str, Any]) -> tuple[str, int | None, int | None]:
-    return (str(source.get("kind")), source.get("start_frame"), source.get("end_frame"))
+def _source_key(source: dict[str, Any]) -> tuple[str, str, int | None, int | None]:
+    return (str(source.get("kind")), str(source.get("type") or ""), source.get("start_frame"), source.get("end_frame"))
+
+
+def _interleave_source_groups(sources: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for source in sources:
+        groups.setdefault(_source_group_key(source), []).append(source)
+    ordered_groups = sorted(
+        groups.values(),
+        key=lambda group: (
+            -max(_priority_rank(str(item.get("priority") or "none")) for item in group),
+            min(_parse_int(item.get("start_frame")) or 0 for item in group),
+            str(group[0].get("kind") or ""),
+        ),
+    )
+    interleaved: list[dict[str, Any]] = []
+    index = 0
+    while True:
+        added = False
+        for group in ordered_groups:
+            if index < len(group):
+                interleaved.append(group[index])
+                added = True
+        if not added:
+            break
+        index += 1
+    return interleaved
+
+
+def _source_group_key(source: dict[str, Any]) -> str:
+    source_packet_id = source.get("source_packet_id")
+    if isinstance(source_packet_id, str) and source_packet_id:
+        return source_packet_id
+    source_id = source.get("id")
+    if isinstance(source_id, str) and source_id:
+        return source_id
+    return ":".join(str(part) for part in _source_key(source))
+
+
+def _required_trigger_sources(sources: list[dict[str, Any]], *, remaining_slots: int) -> list[dict[str, Any]]:
+    if remaining_slots <= 0:
+        return []
+    required: list[dict[str, Any]] = []
+    high_recall = [source for source in sources if str(source.get("kind") or "") == "high_recall_rejection"]
+    if high_recall:
+        high_recall.sort(
+            key=lambda item: (
+                -_priority_rank(str(item.get("priority") or "none")),
+                _parse_int(item.get("start_frame")) or 0,
+            )
+        )
+        required.append(high_recall[0])
+    if len(required) >= remaining_slots:
+        return required[:remaining_slots]
+    dense_noise = [
+        source
+        for source in sources
+        if str(source.get("kind") or "") == "trigger" and str(source.get("type") or "") == "dense_noise_cluster"
+    ]
+    if high_recall and dense_noise:
+        dense_noise.sort(
+            key=lambda item: (
+                -_priority_rank(str(item.get("priority") or "none")),
+                _parse_int(item.get("start_frame")) or 0,
+            )
+        )
+        required.append(dense_noise[0])
+    return required[:remaining_slots]
 
 
 def _reserved_long_lost_gap_sources(sources: list[dict[str, Any]], *, max_packets: int) -> list[dict[str, Any]]:
@@ -234,7 +324,7 @@ def _event_candidate_sources(output_dir: Path) -> list[dict[str, Any]]:
     )
 
 
-def _trigger_sources(output_dir: Path) -> list[dict[str, Any]]:
+def _trigger_sources(output_dir: Path, *, max_packets: int) -> list[dict[str, Any]]:
     report = _read_optional_json(output_dir / "ai_review_triggers.json")
     triggers = report.get("triggers") if isinstance(report, dict) else None
     if not isinstance(triggers, list):
@@ -244,28 +334,28 @@ def _trigger_sources(output_dir: Path) -> list[dict[str, Any]]:
         if not isinstance(trigger, dict):
             continue
         trigger_type = str(trigger.get("type") or "")
-        if trigger_type == "dense_noise_cluster":
-            continue
         start = _parse_int(trigger.get("start_frame"))
         end = _parse_int(trigger.get("end_frame"))
         if start is None or end is None:
             continue
         frame_count = _frame_count(start, end)
+        source = {
+            "kind": "trigger",
+            "id": str(trigger.get("id") or f"trigger:{trigger_type}:{start}-{end}"),
+            "type": trigger_type,
+            "priority": str(trigger.get("priority") or "none"),
+            "start_frame": start,
+            "end_frame": end,
+            "score": _priority_rank(str(trigger.get("priority") or "none")),
+            "reason": str(trigger.get("reason") or "Audit trigger selected for review."),
+            "evidence": trigger.get("evidence") if isinstance(trigger.get("evidence"), dict) else {},
+        }
+        if trigger_type == "dense_noise_cluster":
+            sources.extend(_dense_noise_micro_sources(source, output_dir=output_dir, max_packets=max_packets))
+            continue
         if frame_count > MAX_TRIGGER_WINDOW_FRAMES and not _is_long_lost_gap_trigger(trigger_type, frame_count):
             continue
-        sources.append(
-            {
-                "kind": "trigger",
-                "id": str(trigger.get("id") or f"trigger:{trigger_type}:{start}-{end}"),
-                "type": trigger_type,
-                "priority": str(trigger.get("priority") or "none"),
-                "start_frame": start,
-                "end_frame": end,
-                "score": _priority_rank(str(trigger.get("priority") or "none")),
-                "reason": str(trigger.get("reason") or "Audit trigger selected for review."),
-                "evidence": trigger.get("evidence") if isinstance(trigger.get("evidence"), dict) else {},
-            }
-        )
+        sources.append(source)
     return sorted(
         sources,
         key=lambda item: (
@@ -276,11 +366,99 @@ def _trigger_sources(output_dir: Path) -> list[dict[str, Any]]:
     )
 
 
+def _dense_noise_micro_sources(source: dict[str, Any], *, output_dir: Path, max_packets: int) -> list[dict[str, Any]]:
+    start = _parse_int(source.get("start_frame"))
+    end = _parse_int(source.get("end_frame"))
+    if start is None or end is None:
+        return []
+    frame_count = _frame_count(start, end)
+    if frame_count <= MICRO_PACKET_MAX_FRAMES:
+        child = dict(source)
+        child["render_window"] = {"start_frame": start, "end_frame": end}
+        return [child]
+
+    parent_window = {"start_frame": start, "end_frame": end, "frame_count": frame_count}
+    anchors = _dense_noise_anchor_frames(source, output_dir=output_dir, start_frame=start, end_frame=end)
+    if anchors:
+        windows = [_micro_window_for_frame(frame, start, end) for frame in anchors[:max_packets]]
+    else:
+        windows = _fallback_micro_windows(start, end, max_packets=max_packets)
+    return [
+        _dense_noise_micro_source(source, parent_window, window, index)
+        for index, window in enumerate(_dedupe_windows(windows)[:max_packets], start=1)
+    ]
+
+
+def _dense_noise_micro_source(
+    source: dict[str, Any],
+    parent_window: dict[str, int],
+    window: dict[str, int],
+    index: int,
+) -> dict[str, Any]:
+    child = dict(source)
+    child["id"] = f"{source.get('id')}:micro:{index}:{window['start_frame']}-{window['end_frame']}"
+    child["source_packet_id"] = str(source.get("id") or "")
+    child["parent_window"] = dict(parent_window)
+    child["start_frame"] = window["start_frame"]
+    child["end_frame"] = window["end_frame"]
+    child["render_window"] = {"start_frame": window["start_frame"], "end_frame": window["end_frame"]}
+    evidence = dict(source.get("evidence")) if isinstance(source.get("evidence"), dict) else {}
+    evidence["parent_window"] = dict(parent_window)
+    evidence.setdefault("micro_window_strategy", "dense_noise_sample")
+    child["evidence"] = evidence
+    child["reason"] = f"{source.get('reason') or 'Dense noise cluster.'} Micro-window for noise diagnosis."
+    return child
+
+
+def _dense_noise_anchor_frames(source: dict[str, Any], *, output_dir: Path, start_frame: int, end_frame: int) -> list[int]:
+    evidence = source.get("evidence")
+    frames: list[int] = []
+    if not isinstance(evidence, dict):
+        evidence = {}
+    for key in ("frames", "evidence_frames", "sample_frames", "peak_frames"):
+        values = evidence.get(key)
+        if isinstance(values, list):
+            for value in values:
+                frame = _parse_int(value)
+                if frame is not None and start_frame <= frame <= end_frame:
+                    frames.append(frame)
+    for key in ("frame", "peak_frame", "first_frame", "last_frame"):
+        frame = _parse_int(evidence.get(key))
+        if frame is not None and start_frame <= frame <= end_frame:
+            frames.append(frame)
+
+    cleanup = _read_optional_json(output_dir / "cleanup_report.json")
+    actions = cleanup.get("actions") if isinstance(cleanup, dict) else None
+    if isinstance(actions, list):
+        for action in actions:
+            if not isinstance(action, dict):
+                continue
+            for anchor in _event_frame_anchors(
+                action,
+                source="cleanup_report",
+                event_type="postprocess_action",
+                start_frame=start_frame,
+                end_frame=end_frame,
+            ):
+                frames.append(int(anchor["frame"]))
+
+    ball_audit = _read_optional_json(output_dir / "ball_audit.json")
+    for anchor in _review_event_anchors(
+        ball_audit.get("review_events") if isinstance(ball_audit, dict) else None,
+        source="ball_audit",
+        start_frame=start_frame,
+        end_frame=end_frame,
+        allowed_types={"postprocess_action"},
+    ):
+        frames.append(int(anchor["frame"]))
+    return sorted(set(frames))
+
+
 def _is_long_lost_gap_trigger(trigger_type: str, frame_count: int) -> bool:
     return trigger_type == "lost_gap" and frame_count >= LONG_LOST_GAP_MIN_FRAMES
 
 
-def _high_recall_rejection_sources(output_dir: Path) -> list[dict[str, Any]]:
+def _high_recall_rejection_sources(output_dir: Path, *, max_packets: int) -> list[dict[str, Any]]:
     clues: list[dict[str, Any]] = []
     for report_root in _high_recall_report_roots(output_dir):
         wrapper = _read_optional_json(report_root / "report.json") or {}
@@ -340,13 +518,269 @@ def _high_recall_rejection_sources(output_dir: Path) -> list[dict[str, Any]]:
                 },
             }
         )
-    return sorted(
+    sorted_sources = sorted(
         sources,
         key=lambda item: (
             -_priority_rank(str(item.get("priority") or "none")),
             int(item["start_frame"]),
         ),
     )
+    return _split_high_recall_rejection_sources(sorted_sources, output_dir=output_dir, max_packets=max_packets)
+
+
+def _split_high_recall_rejection_sources(
+    sources: list[dict[str, Any]],
+    *,
+    output_dir: Path,
+    max_packets: int,
+) -> list[dict[str, Any]]:
+    if max_packets <= 0:
+        return []
+    split_sources: list[dict[str, Any]] = []
+    for source in sources:
+        split_sources.extend(_micro_sources_for_high_recall_rejection(source, output_dir=output_dir, max_packets=max_packets))
+    return _dedupe_sources(split_sources)
+
+
+def _micro_sources_for_high_recall_rejection(
+    source: dict[str, Any],
+    *,
+    output_dir: Path,
+    max_packets: int,
+) -> list[dict[str, Any]]:
+    start = _parse_int(source.get("start_frame"))
+    end = _parse_int(source.get("end_frame"))
+    if start is None or end is None:
+        return [source]
+
+    parent_count = _frame_count(start, end)
+    if parent_count <= MICRO_PACKET_MAX_FRAMES:
+        child = dict(source)
+        child["render_window"] = {"start_frame": start, "end_frame": end}
+        return [child]
+    if _source_is_explicit_long_lost_gap(source) and parent_count >= LONG_LOST_GAP_MIN_FRAMES:
+        child = dict(source)
+        child["render_window"] = {"start_frame": start, "end_frame": end}
+        return [child]
+
+    parent_window = {"start_frame": start, "end_frame": end, "frame_count": parent_count}
+    anchors = _micro_packet_anchors(output_dir, start, end)
+    if anchors:
+        children = [
+            _high_recall_micro_source(source, parent_window, _micro_window_for_frame(anchor["frame"], start, end), index, anchor)
+            for index, anchor in enumerate(anchors[:max_packets], start=1)
+        ]
+        return _dedupe_sources(children)[:max_packets]
+
+    windows = _fallback_micro_windows(start, end, max_packets=max_packets)
+    return [
+        _high_recall_micro_source(source, parent_window, window, index, None)
+        for index, window in enumerate(windows, start=1)
+    ]
+
+
+def _source_is_explicit_long_lost_gap(source: dict[str, Any]) -> bool:
+    evidence = source.get("evidence")
+    if not isinstance(evidence, dict):
+        return False
+    return str(evidence.get("window_reason") or "").casefold() == "ball_audit: lost_gap"
+
+
+def _high_recall_micro_source(
+    source: dict[str, Any],
+    parent_window: dict[str, int],
+    window: dict[str, int],
+    index: int,
+    anchor: dict[str, Any] | None,
+) -> dict[str, Any]:
+    child = dict(source)
+    child["id"] = f"{source.get('id')}:micro:{index}:{window['start_frame']}-{window['end_frame']}"
+    child["source_packet_id"] = str(source.get("id") or "")
+    child["parent_window"] = dict(parent_window)
+    child["start_frame"] = window["start_frame"]
+    child["end_frame"] = window["end_frame"]
+    child["render_window"] = {"start_frame": window["start_frame"], "end_frame": window["end_frame"]}
+    evidence = dict(source.get("evidence")) if isinstance(source.get("evidence"), dict) else {}
+    evidence["parent_window"] = dict(parent_window)
+    if anchor is None:
+        evidence["micro_window_strategy"] = "fallback_centered"
+        child["reason"] = f"{source.get('reason') or 'High-recall window rejected.'} Micro-window sampled across parent span."
+    else:
+        evidence["micro_window_strategy"] = "failure_anchor"
+        evidence["micro_anchor"] = {
+            key: anchor[key]
+            for key in ("source", "type", "frame", "start_frame", "end_frame", "reason", "evidence")
+            if key in anchor
+        }
+        child["reason"] = (
+            f"{source.get('reason') or 'High-recall window rejected.'} "
+            f"Micro-window around {anchor.get('source')}:{anchor.get('type')} at frame {anchor.get('frame')}."
+        )
+    child["evidence"] = evidence
+    return child
+
+
+def _micro_packet_anchors(output_dir: Path, start_frame: int, end_frame: int) -> list[dict[str, Any]]:
+    anchors: list[dict[str, Any]] = []
+    ball_audit = _read_optional_json(output_dir / "ball_audit.json")
+    anchors.extend(
+        _review_event_anchors(
+            ball_audit.get("review_events") if isinstance(ball_audit, dict) else None,
+            source="ball_audit",
+            start_frame=start_frame,
+            end_frame=end_frame,
+            allowed_types={"large_jump", "lost_gap", "postprocess_action"},
+        )
+    )
+
+    cleanup = _read_optional_json(output_dir / "cleanup_report.json")
+    actions = cleanup.get("actions") if isinstance(cleanup, dict) else None
+    if isinstance(actions, list):
+        for action in actions:
+            if not isinstance(action, dict):
+                continue
+            anchors.extend(
+                _event_frame_anchors(
+                    action,
+                    source="cleanup_report",
+                    event_type="postprocess_action",
+                    start_frame=start_frame,
+                    end_frame=end_frame,
+                )
+            )
+
+    camera_motion = _read_optional_json(output_dir / "camera_motion_audit.json")
+    anchors.extend(
+        _review_event_anchors(
+            camera_motion.get("review_events") if isinstance(camera_motion, dict) else None,
+            source="camera_motion_audit",
+            start_frame=start_frame,
+            end_frame=end_frame,
+            allowed_types=None,
+        )
+    )
+    return _dedupe_anchors(anchors)
+
+
+def _review_event_anchors(
+    events: Any,
+    *,
+    source: str,
+    start_frame: int,
+    end_frame: int,
+    allowed_types: set[str] | None,
+) -> list[dict[str, Any]]:
+    if not isinstance(events, list):
+        return []
+    anchors: list[dict[str, Any]] = []
+    for event in events:
+        if not isinstance(event, dict):
+            continue
+        event_type = str(event.get("type") or "")
+        if allowed_types is not None and event_type not in allowed_types:
+            continue
+        if source == "camera_motion_audit" and not event_type.startswith("camera_"):
+            continue
+        anchors.extend(
+            _event_frame_anchors(
+                event,
+                source=source,
+                event_type=event_type,
+                start_frame=start_frame,
+                end_frame=end_frame,
+            )
+        )
+    return anchors
+
+
+def _event_frame_anchors(
+    event: dict[str, Any],
+    *,
+    source: str,
+    event_type: str,
+    start_frame: int,
+    end_frame: int,
+) -> list[dict[str, Any]]:
+    event_start = _parse_int(event.get("start_frame"))
+    if event_start is None:
+        event_start = _parse_int(event.get("frame"))
+    event_end = _parse_int(event.get("end_frame"))
+    if event_end is None:
+        event_end = event_start
+    if event_start is None or event_end is None or event_end < start_frame or event_start > end_frame:
+        return []
+    overlap_start = max(start_frame, event_start)
+    overlap_end = min(end_frame, event_end)
+    frames = [overlap_start]
+    if overlap_end != overlap_start:
+        frames.append(overlap_end)
+    anchors: list[dict[str, Any]] = []
+    for frame in frames:
+        anchors.append(
+            {
+                "source": source,
+                "type": event_type,
+                "frame": frame,
+                "start_frame": event_start,
+                "end_frame": event_end,
+                "reason": str(event.get("reason") or event.get("action") or event_type),
+                "evidence": event.get("evidence") if isinstance(event.get("evidence"), dict) else {},
+            }
+        )
+    return anchors
+
+
+def _dedupe_anchors(anchors: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    deduped: list[dict[str, Any]] = []
+    seen: set[tuple[int, str, str]] = set()
+    for anchor in sorted(anchors, key=lambda item: (int(item["frame"]), str(item["source"]), str(item["type"]))):
+        key = (int(anchor["frame"]), str(anchor["source"]), str(anchor["type"]))
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(anchor)
+    return deduped
+
+
+def _micro_window_for_frame(frame: int, start_frame: int, end_frame: int) -> dict[str, int]:
+    parent_count = _frame_count(start_frame, end_frame)
+    target_count = min(MICRO_PACKET_TARGET_FRAMES, MICRO_PACKET_MAX_FRAMES, parent_count)
+    target_count = max(min(MICRO_PACKET_MIN_FRAMES, parent_count), target_count)
+    start = int(frame) - target_count // 2
+    end = start + target_count - 1
+    if start < start_frame:
+        end += start_frame - start
+        start = start_frame
+    if end > end_frame:
+        start -= end - end_frame
+        end = end_frame
+    start = max(start_frame, start)
+    end = min(end_frame, max(start, end))
+    return {"start_frame": int(start), "end_frame": int(end), "frame_count": _frame_count(start, end)}
+
+
+def _fallback_micro_windows(start_frame: int, end_frame: int, *, max_packets: int) -> list[dict[str, int]]:
+    if max_packets <= 0:
+        return []
+    parent_count = _frame_count(start_frame, end_frame)
+    window_count = min(max_packets, max(1, math.ceil(parent_count / MICRO_PACKET_TARGET_FRAMES)))
+    windows: list[dict[str, int]] = []
+    for index in range(window_count):
+        center = start_frame + round((parent_count - 1) * float(index + 1) / float(window_count + 1))
+        windows.append(_micro_window_for_frame(center, start_frame, end_frame))
+    return _dedupe_windows(windows)
+
+
+def _dedupe_windows(windows: list[dict[str, int]]) -> list[dict[str, int]]:
+    deduped: list[dict[str, int]] = []
+    seen: set[tuple[int, int]] = set()
+    for window in windows:
+        key = (window["start_frame"], window["end_frame"])
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(window)
+    return deduped
 
 
 def _high_recall_report_roots(output_dir: Path) -> list[Path]:
@@ -431,6 +865,8 @@ def _decision_for_source(source: dict[str, Any], track_summary: dict[str, Any]) 
         return _decision("ball_not_visible", 0.74, f"Lost ratio {lost_ratio:.2f} dominates this review window.")
     if source_type == "postprocess_action":
         return _decision("reject_noise", 0.70, "Postprocess replaced this segment, so treat it as likely noise.")
+    if source_type == "dense_noise_cluster":
+        return _decision("needs_ai_review", 0.76, str(source.get("reason") or "Dense noise cluster needs diagnosis."))
     if source_type in {"large_jump", "candidate_ambiguity", "suspicious_tracklet"}:
         return _decision("needs_ai_review", 0.76, f"{source_type} trigger with max step {max_step:.2f}px.")
     if source_kind == "high_recall_rejection":
@@ -448,6 +884,143 @@ def _decision(label: str, confidence: float, reason: str) -> dict[str, Any]:
     }
 
 
+def _packet_diagnosis(source: dict[str, Any], track_summary: dict[str, Any]) -> dict[str, Any]:
+    tags: set[str] = set()
+    roots: set[str] = set()
+    source_kind = str(source.get("kind") or "")
+    source_type = str(source.get("type") or "")
+    lost_ratio = float(track_summary.get("lost_ratio") or 0.0)
+    text = _source_text(source)
+    anchor = _micro_anchor(source)
+    anchor_type = str(anchor.get("type") or "") if isinstance(anchor, dict) else ""
+    anchor_source = str(anchor.get("source") or "") if isinstance(anchor, dict) else ""
+
+    if source_type == "lost_gap" or anchor_type == "lost_gap" or "lost_gap" in text or lost_ratio >= 0.45:
+        tags.add("ball_lost")
+        roots.update({"detection", "reacquisition"})
+    if source_type == "large_jump" or anchor_type == "large_jump" or "large_jump" in text:
+        tags.add("large_jump_after_reacquire")
+        roots.add("reacquisition")
+    if source_type == "postprocess_action" or anchor_type == "postprocess_action" or "postprocess" in text:
+        roots.add("postprocess")
+        if "short" in text or "post_roll" in text:
+            tags.add("post_roll_too_short")
+    if source_type == "dense_noise_cluster":
+        roots.add("detection")
+        if "foot" not in text and "shoe" not in text and "sideline" not in text and "line" not in text and "wall" not in text and "background" not in text:
+            tags.add("unknown")
+    if source_type.startswith("camera_") or anchor_type.startswith("camera_") or anchor_source == "camera_motion_audit":
+        tags.add("camera_catchup_spike")
+        roots.add("follow_cam")
+    if "foot" in text:
+        tags.add("foot_confusion")
+        roots.add("detection")
+    if "shoe" in text:
+        tags.add("shoe_confusion")
+        roots.add("detection")
+    if "sideline" in text or "line" in text:
+        tags.add("sideline_confusion")
+        roots.add("detection")
+    if "wall" in text or "background" in text or "ad board" in text:
+        tags.add("wall_background_drift")
+        roots.add("detection")
+    if "black frame" in text or "black_frames" in text:
+        tags.add("black_frames")
+        roots.add("rendering")
+    if source_kind == "high_recall_rejection" and "max_total_frames_exceeded" in text:
+        roots.add("packetization")
+
+    valid_tags = [tag for tag in sorted(tags) if tag in AI_FAILURE_TAGS]
+    valid_roots = [root for root in sorted(roots) if root in AI_ROOT_CAUSE_MODULES]
+    if not valid_tags:
+        valid_tags = ["unknown"]
+    if not valid_roots:
+        valid_roots = ["unknown"]
+    return {
+        "suspected_failure_tags": valid_tags,
+        "root_cause_candidates": valid_roots,
+        "packet_purpose": _packet_purpose(valid_tags, valid_roots, source_kind, source_type),
+    }
+
+
+def _packet_purpose(tags: list[str], roots: list[str], source_kind: str, source_type: str) -> str:
+    if "ball_lost" in tags:
+        return "diagnose_missing_ball"
+    if source_type == "dense_noise_cluster":
+        return "diagnose_noise"
+    if any(tag in tags for tag in ("foot_confusion", "shoe_confusion", "sideline_confusion", "wall_background_drift")):
+        return "diagnose_noise"
+    if "camera_catchup_spike" in tags:
+        return "diagnose_camera_motion"
+    if "postprocess" in roots:
+        return "diagnose_postprocess_cleanup"
+    if source_kind == "high_recall_rejection":
+        return "diagnose_high_recall_rejection"
+    return "diagnose_tracking_quality"
+
+
+def _packet_lineage(source: dict[str, Any]) -> dict[str, Any]:
+    lineage: dict[str, Any] = {}
+    source_packet_id = source.get("source_packet_id")
+    if isinstance(source_packet_id, str) and source_packet_id:
+        lineage["source_packet_id"] = source_packet_id
+    parent_window = source.get("parent_window")
+    if isinstance(parent_window, dict):
+        lineage["parent_window"] = {
+            "start_frame": _parse_int(parent_window.get("start_frame")),
+            "end_frame": _parse_int(parent_window.get("end_frame")),
+            "frame_count": _parse_int(parent_window.get("frame_count")),
+        }
+    return lineage
+
+
+def _source_frame_dimensions(source: dict[str, Any]) -> dict[str, int] | None:
+    dimensions = source.get("frame_dimensions")
+    if not isinstance(dimensions, dict):
+        return None
+    width = _parse_int(dimensions.get("width"))
+    height = _parse_int(dimensions.get("height"))
+    if width is None or height is None or width <= 0 or height <= 0:
+        return None
+    return {"width": width, "height": height}
+
+
+def _source_text(source: dict[str, Any]) -> str:
+    values: list[str] = []
+    for key in ("kind", "type", "reason", "id"):
+        value = source.get(key)
+        if value is not None:
+            values.append(str(value))
+    evidence = source.get("evidence")
+    if isinstance(evidence, dict):
+        values.extend(_text_values(evidence))
+    return " ".join(values).casefold()
+
+
+def _text_values(value: Any) -> list[str]:
+    if isinstance(value, dict):
+        values: list[str] = []
+        for nested in value.values():
+            values.extend(_text_values(nested))
+        return values
+    if isinstance(value, list):
+        values = []
+        for nested in value:
+            values.extend(_text_values(nested))
+        return values
+    if value is None:
+        return []
+    return [str(value)]
+
+
+def _micro_anchor(source: dict[str, Any]) -> dict[str, Any] | None:
+    evidence = source.get("evidence")
+    if not isinstance(evidence, dict):
+        return None
+    anchor = evidence.get("micro_anchor")
+    return anchor if isinstance(anchor, dict) else None
+
+
 def _write_packet_media(
     *,
     packet_dir: Path,
@@ -457,25 +1030,28 @@ def _write_packet_media(
     track_rows: list[dict[str, Any]],
     start_frame: int,
     end_frame: int,
-) -> tuple[dict[str, str], list[str]]:
+) -> tuple[dict[str, str], list[str], dict[str, int] | None]:
     packet_dir.mkdir(parents=True, exist_ok=True)
     media: dict[str, str] = {}
     warnings: list[str] = []
     if input_video is not None and input_video.exists():
         contact_path = packet_dir / "contact_sheet.jpg"
         crop_path = packet_dir / "crop_sheet.jpg"
-        if _write_contact_sheets(
+        contact_ok, frame_dimensions = _write_contact_sheets(
             video_path=input_video,
             track_rows=track_rows,
             start_frame=start_frame,
             end_frame=end_frame,
             contact_path=contact_path,
             crop_path=crop_path,
-        ):
+        )
+        if contact_ok:
             media["contact_sheet"] = str(contact_path)
             media["crop_sheet"] = str(crop_path)
         else:
             warnings.append("contact_sheet_failed")
+    else:
+        frame_dimensions = None
     clip_source = follow_cam_video if follow_cam_video is not None and follow_cam_video.exists() else input_video
     if clip_source is not None and clip_source.exists():
         clip_path = packet_dir / f"{packet_id}.mp4"
@@ -483,7 +1059,7 @@ def _write_packet_media(
             media["clip"] = str(clip_path)
         else:
             warnings.append("clip_failed")
-    return media, warnings
+    return media, warnings, frame_dimensions
 
 
 def _write_contact_sheets(
@@ -494,14 +1070,17 @@ def _write_contact_sheets(
     end_frame: int,
     contact_path: Path,
     crop_path: Path,
-) -> bool:
+) -> tuple[bool, dict[str, int] | None]:
     import cv2
 
     samples = _sample_frames(start_frame, end_frame, FRAME_SAMPLES_PER_PACKET)
     row_by_frame = {row["frame"]: row for row in track_rows}
     capture = cv2.VideoCapture(str(video_path))
     if not capture.isOpened():
-        return False
+        return False, None
+    width = int(capture.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
+    height = int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
+    frame_dimensions = {"width": width, "height": height} if width > 0 and height > 0 else None
     thumbs: list[Any] = []
     crops: list[Any] = []
     sample_set = set(samples)
@@ -536,7 +1115,7 @@ def _write_contact_sheets(
             break
     capture.release()
     if not thumbs:
-        return False
+        return False, frame_dimensions
     contact_ok = cv2.imwrite(str(contact_path), cv2.vconcat(thumbs))
     crop_rows: list[Any] = []
     for index in range(0, len(crops), 2):
@@ -548,8 +1127,8 @@ def _write_contact_sheets(
     if not contact_ok or not crop_ok or not _is_nonempty_file(contact_path) or not _is_nonempty_file(crop_path):
         contact_path.unlink(missing_ok=True)
         crop_path.unlink(missing_ok=True)
-        return False
-    return True
+        return False, frame_dimensions
+    return True, frame_dimensions
 
 
 def _write_clip(video_path: Path, output_path: Path, start_frame: int, end_frame: int) -> bool:

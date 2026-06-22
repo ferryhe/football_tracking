@@ -10,7 +10,7 @@
 
 ---
 
-## Current Baseline
+## Current Repo State And Remaining Work
 
 - Already landed:
   - `ball_audit.json` detects lost gaps, large jumps, suspicious tracklets, low-confidence islands, and postprocess actions.
@@ -19,12 +19,14 @@
   - `ai_visual_review.json` can ask a vision model whether highlight packets are publishable.
   - `camera_motion_audit.json` flags abrupt final follow-cam pan, acceleration, and zoom events.
   - `event_candidates.json` creates shot/goal candidates with a single `render_window`.
+  - `ai_contracts.py`, `ai_improvement.py`, `scripts/run_ai_improvement.py`, `POST /api/v1/ai/improve`, and metrics support for `ai_improvement_report.json` landed in PR 1 (`feat/ai-improvement-core`, merged as GitHub PR #28).
   - `/api/v1/ai/recommend` exists, but it is a broad config recommendation endpoint, not a run-artifact-specific improvement loop.
   - `ai_review_recommendations.json` was produced during manual experimentation as a one-off report; it is useful evidence for prompt shape, but it is not a durable program artifact or API contract.
+- Remaining managed PR execution should start at PR 2 from latest `main` after PR #28, unless a branch already contains equivalent reviewed changes.
 - Main gaps:
   - AI review is too focused on pass/fail, not "how to improve the next run".
   - Missed-ball recovery packets do not ask AI to localize where the ball likely is.
-  - Noise review lacks stable failure tags such as `foot_confusion`, `sideline_confusion`, or `wall_background_drift`.
+  - Noise review lacks stable failure tags such as `foot_confusion`, `sideline_confusion`, or `wall_background_drift`, and long `dense_noise_cluster` ranges are not yet split into useful AI windows.
   - Camera motion warnings are not tied back to tracking/follow-cam parameter suggestions.
   - Highlight generation still uses simple pre/post roll defaults and does not let AI recommend better start/end frames.
 
@@ -35,7 +37,7 @@ This program changes the AI role from "review the output" to "suggest the next i
 | User need | Current state | Planned solution | Main PR | Tests | Deliverables |
 | --- | --- | --- | --- | --- | --- |
 | Ball is missing and AI should help find it | `lost_gap` and high-recall windows exist, but AI does not return a likely ball location | Add missing-ball improvement items with `likely_ball_region`, `local_search_roi`, and `rerun_scope`; approved suggestions can feed targeted high-recall planning | PR 1, PR 2, PR 3 | `test_ai_improvement.py`, `test_ai_visual_review.py`, `test_high_recall_windows.py`, `test_high_recall_reconcile.py` | `ai_improvement_report.json`, `ai_improvement_approved_actions.json`, reconcile provenance |
-| Too many noise detections and AI should help classify them | Ball audit can flag bad segments, but packets do not carry enough root-cause labels | Split large review windows into micro-windows and add failure tags such as `foot_confusion`, `shoe_confusion`, `sideline_confusion`, `wall_background_drift` | PR 2, PR 3 | `test_review_packets.py`, `test_ai_visual_review.py`, `test_ai_improvement.py` | Better `review_packets.json`, enhanced `ai_visual_review.json`, noise-focused improvement actions |
+| Too many noise detections and AI should help classify them | Ball audit can flag bad segments, but packets do not carry enough root-cause labels; `dense_noise_cluster` is skipped too aggressively for diagnosis | Split high-recall rejections and dense-noise ranges into micro-windows; add failure tags such as `foot_confusion`, `shoe_confusion`, `sideline_confusion`, `wall_background_drift` | PR 2, PR 3 | `test_review_packets.py`, `test_ai_visual_review.py`, `test_ai_improvement.py` | Better `review_packets.json`, enhanced `ai_visual_review.json`, noise-focused improvement actions |
 | Follow-cam is too jumpy and AI should help adjust tracking or camera settings | `camera_motion_audit.json` exists, but it only flags camera-path problems after render | Join camera motion events with nearby track status, then suggest `adjust_follow_cam` or `tracking_rerun_before_follow_cam` | PR 4 | `test_camera_motion_audit.py`, `test_follow_cam.py`, `test_ai_improvement.py` | Camera-specific improvement actions, metrics release gate summary |
 | Highlight clips need default buffer and AI should adjust clip boundaries | Event candidates have render windows, but defaults can miss post-shot/result frames and AI does not tune boundaries | Separate core event window from render window, extend default post-roll, and let AI suggest `highlight_adjustments` | PR 5 | `test_events.py`, `test_review_packets.py`, `test_api_service.py`, `test_high_recall_windows.py` | `event_candidates.json` with `core_window`/`render_window`, `highlight_report.json`, AI boundary suggestions |
 | Operator needs one stable place to see and apply suggestions | Existing AI endpoints are config recommendation or visual review, not run-specific improvement plans | Add CLI/API/UI for run-level AI improvement; keep suggestions advisory unless explicitly approved | PR 1, PR 3, PR 6 | `test_api_service.py`, `test_export_openapi.py`, frontend type checks | `POST /api/v1/ai/improve`, `POST /api/v1/ai/improve/{run_id}/approve`, frontend AI Improvement panel, docs |
@@ -106,6 +108,21 @@ Approval artifact shape:
 
 Approved actions can be consumed by high-recall planning, follow-cam rerender planning, or highlight rendering. Default behavior remains unchanged when this artifact is absent.
 
+Action-specific approval fields:
+- `targeted_rerun` requires `rerun_scope` and may include `local_search_roi`.
+- `adjust_highlight_window` and `render_suggested_highlight` require `candidate_id`, `suggested_window`, and `clip_action`.
+- `adjust_follow_cam` requires either a validated `config_patch` under the `follow_cam` root or a `follow_cam_rerender_plan`.
+- `tighten_noise_filter` and `loosen_ball_recovery` may produce a derived config patch artifact, but remain advisory unless explicitly applied by the operator.
+- `manual_review` and `reject_noise` do not mutate tracks, configs, or renders; they only record operator intent and provenance.
+- PR 4 may extend the shared enum with `human_review_camera_motion` while implementing camera-specific approvals.
+
+Approval artifact entries must preserve stable linkage:
+- `improvement_id`
+- `source_packet_id` when the suggestion came from a packet
+- `visual_review_id` when the suggestion came from `ai_visual_review.json`
+- `candidate_id` when the suggestion targets a highlight
+- `provenance.source`, `provenance.model`, and `provenance.confidence`
+
 ## Target AI Capabilities
 
 1. **Ball Missing Assistance**
@@ -122,7 +139,7 @@ Approved actions can be consumed by high-recall planning, follow-cam rerender pl
 
 4. **Highlight Boundary Assistance**
    - The system creates a default clip buffer, then AI recommends whether to extend, trim, or split.
-   - Output includes `suggested_start_frame`, `suggested_end_frame`, and why.
+   - Output includes `suggested_window`, `clip_action`, and why.
 
 5. **Run-Level Improvement Plan**
    - AI produces a ranked list of actions: config patch, targeted rerun windows, packet split improvements, or manual review.
@@ -133,9 +150,9 @@ Approved actions can be consumed by high-recall planning, follow-cam rerender pl
 
 | Order | Branch | Depends on | Main deliverable | Required gates |
 | --- | --- | --- | --- | --- |
-| PR 1 | `feat/ai-improvement-core` | latest `main` | `ai_improvement_report.json`, CLI, API, metrics summary | Focused backend tests, OpenAPI export/check, generated clients, spec review, code-quality review, GitHub checks/Copilot comments |
-| PR 2 | `feat/ai-packet-vision-tags` | PR 1 merged | micro review packets, failure tags, visual ROI fields | Packet/visual-review tests, real-output packet smoke run, reviewers, remote checks |
-| PR 3 | `feat/ai-approved-recovery-actions` | PR 2 merged | approved action artifact/API and targeted rerun planning | AI improvement/high-recall/reconcile tests, approval-flow tests, reviewers, remote checks |
+| PR 1 | `feat/ai-improvement-core` | merged as PR #28 | `ai_improvement_report.json`, CLI, API, metrics summary | Complete; keep as historical scope, do not re-implement unless regression is found |
+| PR 2 | `feat/ai-packet-vision-tags` | latest `main` after PR #28 | micro review packets, dense-noise packets, failure tags, visual ROI fields | Packet/visual-review tests, real-output packet smoke run, reviewers, remote checks |
+| PR 3 | `feat/ai-approved-recovery-actions` | PR 2 merged | approved action artifact/API, targeted rerun planning, derived config-patch artifact | AI improvement/high-recall/reconcile tests, approval-flow tests, OpenAPI/client updates, reviewers, remote checks |
 | PR 4 | `feat/ai-camera-improvement` | PR 3 merged | camera-motion-to-improvement suggestions and release metrics | camera/follow-cam/AI tests, dry-run smoke, reviewers, remote checks |
 | PR 5 | `feat/highlight-boundary-improvement` | PR 4 merged | core/render windows, roll policy, AI highlight boundary render path | event/review/API/highlight tests, OpenAPI export/check, generated clients, reviewers, remote checks |
 | PR 6 | `feat/ai-improvement-ui-docs` | PR 5 merged | operator UI and docs | frontend typecheck, API schema tests, docs review, reviewers, remote checks |
@@ -143,6 +160,8 @@ Approved actions can be consumed by high-recall planning, follow-cam rerender pl
 Every PR follows the managed PR loop: refresh `main`, create a fresh branch, implement through a worker agent, run spec and code-quality review agents, fix valid findings, push PR, wait for remote comments/checks, merge only after accepted feedback is handled, then delete local and remote branches.
 
 ### PR 1: AI Improvement Report Core
+
+**Status:** Complete. This scope landed in GitHub PR #28 and remains in the plan only as historical context for the remaining PRs. Managed PR execution should resume at PR 2 unless tests show a regression in the PR 1 surface.
 
 **Purpose:** Add the structured improvement report layer without changing tracking behavior.
 
@@ -390,7 +409,17 @@ Expected:
 - Generated packets preserve source evidence with `parent_window`.
 - Packet IDs include the narrowed window, not only the original giant window.
 
-- [ ] **Step 2: Implement high-recall rejection splitting**
+- [ ] **Step 2: Add dense-noise packet tests**
+
+Add a test where `ai_review_triggers.json` contains a long `dense_noise_cluster`.
+
+Expected:
+- Long dense-noise ranges generate multiple diagnostic packets instead of being skipped.
+- Each dense-noise packet is no longer than 96 frames unless an explicit safety limit requires dropping lower-priority packets.
+- Dense-noise packets include `packet_purpose = "diagnose_noise"` and a likely `suspected_failure_tags` value such as `foot_confusion`, `shoe_confusion`, `sideline_confusion`, or `wall_background_drift`.
+- Dense-noise packet sources preserve `parent_window` and the original trigger id.
+
+- [ ] **Step 3: Implement high-recall and dense-noise splitting**
 
 In `review_packets.py`:
 - Add constants:
@@ -402,14 +431,23 @@ In `review_packets.py`:
   - lost gap starts/ends
   - postprocess actions
   - camera motion events when available
+- Split `dense_noise_cluster` sources by:
+  - local density peaks when evidence frames exist
+  - postprocess actions that replaced nearby detections
+  - centered target windows when no better anchor exists
 - If no anchor exists, use centered target windows across the source span, capped by `max_packets`.
+- Do not globally skip `dense_noise_cluster`; only drop lower-priority dense packets when the packet budget is exhausted after preserving higher-priority lost-gap and large-jump packets.
 
-- [ ] **Step 3: Add packet evidence tags**
+- [ ] **Step 4: Add packet evidence tags and stable linkage**
 
 Each packet should include:
 - `suspected_failure_tags`
 - `root_cause_candidates`
 - `packet_purpose`
+- `packet_id`
+- `source_packet_id` when derived from a parent packet/window
+- `parent_window` when split from a larger source
+- `frame_dimensions` when known from packet media generation
 
 Example tags:
 - `ball_lost`
@@ -422,7 +460,7 @@ Example tags:
 - `black_frames`
 - `post_roll_too_short`
 
-- [ ] **Step 4: Extend AI visual review schema without breaking existing reports**
+- [ ] **Step 5: Extend AI visual review schema without breaking existing reports**
 
 Add optional fields to `ai_visual_review.py`:
 - `failure_tags`
@@ -457,19 +495,23 @@ Allowed optional values:
 - `likely_ball_region`: object with `frame`, `description`, and `confidence`, or `null`.
 - `local_search_roi`: image-space object with `coordinate_space = "image"`, `frame`, `x`, `y`, `width`, `height`, and `confidence`, or `null`.
 - `best_subclip`: object with `start_frame`, `end_frame`, and `reason`, or `null`.
+- `source_packet_id`: packet id from `review_packets.json`.
+- `visual_review_id`: stable id for this visual review item.
 
 Clarification:
 - `high_recall_rejection` is the packet source kind.
 - `high_recall_rejected` is the packet/event type shown to the reviewer.
 
-- [ ] **Step 5: Ensure packet images can drive localization**
+- [ ] **Step 6: Ensure packet images can drive localization**
 
 For missing-ball and reacquire packets, the visual review prompt must attach existing packet media such as contact sheets or crop sheets and ask for localization only when the ball is visible. If the ball is not visible, it should return `likely_ball_region.description = "not visible"` and `local_search_roi = null`.
 
 Tests must use a fake vision client response and verify:
 - valid ROI fields are persisted in `ai_visual_review.json`.
+- valid ROI fields include `source_packet_id`, `visual_review_id`, and `provenance.source = "ai_visual_review"`.
 - non-image coordinate spaces are rejected.
 - impossible negative frame or ROI coordinates are rejected.
+- ROI values outside known frame dimensions are rejected or clipped with an explicit warning.
 - missing-ball packets can return `not visible` without creating a fake ROI.
 
 **Tests:**
@@ -491,11 +533,14 @@ Copy-Item -Recurse python_backend\outputs\full_workflow_latest_review_20260622_0
 
 Expected:
 - No normal high-recall rejection packet spans thousands of frames.
+- No normal dense-noise diagnostic packet spans thousands of frames.
 - Packet manifests include `parent_window` when they were split from a larger source.
+- Packet manifests include stable packet ids that can be joined to `ai_visual_review.json`.
 
 **Deliverables:**
 - Review packets suitable for AI improvement.
 - No huge `high_recall_rejected` packet in normal review flows.
+- Dense-noise packets that AI can classify instead of one unusable giant noise range.
 - Structured failure tags and optional localization ROI flowing into `review_packets.json` and `ai_visual_review.json`.
 
 ---
@@ -512,10 +557,14 @@ Expected:
 - Modify: `python_backend/football_tracking/api/routes/ai.py`
 - Modify: `python_backend/football_tracking/api/service.py`
 - Modify: `python_backend/football_tracking/metrics.py`
+- Modify generated API artifacts after OpenAPI export:
+  - `lib/api-zod/src/generated/*`
+  - `lib/api-client-react/src/generated/*`
 - Test: `python_backend/tests/test_ai_improvement.py`
 - Test: `python_backend/tests/test_high_recall_windows.py`
 - Test: `python_backend/tests/test_high_recall_reconcile.py`
 - Test: `python_backend/tests/test_api_service.py`
+- Test: `python_backend/tests/test_export_openapi.py`
 
 **Implementation Tasks:**
 
@@ -546,6 +595,8 @@ Rules:
 - If a missing-ball packet has `local_search_roi`, the corresponding improvement should include that ROI unless the model proposes a better valid ROI.
 - If visual review says `not visible`, the improvement should not invent an ROI.
 - The final report must show whether `local_search_roi` came from `ai_visual_review`, the model response, or dry-run heuristic under `provenance`.
+- Join visual evidence by `source_packet_id` / `packet_id`, not only by approximate frame range.
+- Preserve `visual_review_id`, `source_packet_id`, `frame_dimensions`, and ROI provenance in `evidence_payload`.
 
 - [ ] **Step 3: Link improvements to rerun windows**
 
@@ -576,9 +627,10 @@ Do not let `high_recall_windows.py` automatically read `ai_improvement_report.js
 Implement the concrete approval contract from this plan:
 - Write `ai_improvement_approved_actions.json`.
 - Add `POST /api/v1/ai/improve/{run_id}/approve`.
-- The request accepts a list of `improvement_id` values plus optional operator overrides for `rerun_scope`, `local_search_roi`, and `config_patch`.
+- The request accepts a list of `improvement_id` values plus optional operator overrides for `rerun_scope`, `local_search_roi`, `config_patch`, `suggested_window`, `clip_action`, and `follow_cam_rerender_plan`.
 - The service validates each selected improvement against `ai_improvement_report.json`.
 - The service writes the approval artifact and refreshes run artifacts/metrics.
+- Config-producing approvals write a derived patch artifact such as `ai_improvement_config_patch.yaml` or `ai_improvement_config_patch.json`; they do not overwrite the active config.
 
 Rules:
 - Only use AI windows with `recommended_action = "targeted_rerun"`.
@@ -587,6 +639,7 @@ Rules:
 - Preserve deterministic sources as higher priority than low-confidence AI suggestions.
 - Record `approval_source`, `approved_at`, and `approved_by` when the API path is used.
 - Default behavior remains unchanged when no approved AI improvement plan is supplied.
+- Approval validation covers all action families even when only `targeted_rerun` feeds high-recall planning in this PR.
 
 - [ ] **Step 5: Consume approved actions in high-recall planning**
 
@@ -607,6 +660,10 @@ When a high-recall run accepts or rejects a segment that came from AI improvemen
 - `reason`
 - `changed_frame_count`
 
+- [ ] **Step 7: Export OpenAPI and regenerate generated clients**
+
+Because this PR adds the approval API and new approval schemas, run OpenAPI export and regenerate the generated API clients in the same PR.
+
 **Tests:**
 
 Run:
@@ -617,12 +674,18 @@ $env:PYTHONPATH='python_backend'
 .\.venv\Scripts\python.exe -m pytest python_backend/tests/test_high_recall_windows.py -q
 .\.venv\Scripts\python.exe -m pytest python_backend/tests/test_high_recall_reconcile.py -q
 .\.venv\Scripts\python.exe -m pytest python_backend/tests/test_api_service.py::ApiServiceTests::test_ai_improvement_approve_writes_approved_actions -q
+.\.venv\Scripts\python.exe -m pytest python_backend/tests/test_export_openapi.py -q
+.\.venv\Scripts\python.exe python_backend\scripts\export_openapi.py --check
 ```
 
 Specific approval-flow coverage:
 - approving a targeted-rerun improvement writes `ai_improvement_approved_actions.json`.
+- approving highlight actions validates `candidate_id`, `suggested_window`, and `clip_action`.
+- approving follow-cam actions validates config patch paths and/or `follow_cam_rerender_plan`.
+- approving noise/config actions writes a derived patch artifact without changing the active config.
 - approving a non-rerun action for high-recall planning does not create a window.
 - API overrides are validated and cannot introduce invalid `config_patch` paths.
+- ROI from `ai_visual_review.json` is merged into `ai_improvement_report.json` by `source_packet_id`; `not visible` does not create a fake ROI.
 - no approved artifact means high-recall planning output is unchanged.
 
 **Deliverables:**
@@ -630,6 +693,8 @@ Specific approval-flow coverage:
 - Noise-heavy windows can be turned into tighten-filter recommendations.
 - High-recall planning can consume `ai_improvement_approved_actions.json` only after explicit operator opt-in, in a bounded and auditable way.
 - `POST /api/v1/ai/improve/{run_id}/approve`.
+- Generated OpenAPI/client updates for the approval endpoint.
+- Derived config patch artifact for approved config suggestions.
 - Reconcile provenance for approved AI windows.
 - No AI suggestion can silently modify `ball_track.csv` or `ball_track.cleaned.csv`.
 
@@ -644,9 +709,11 @@ Specific approval-flow coverage:
 - Modify: `python_backend/football_tracking/follow_cam.py`
 - Modify: `python_backend/football_tracking/camera_motion_audit.py`
 - Modify: `python_backend/football_tracking/metrics.py`
+- Modify: `python_backend/football_tracking/api/service.py`
 - Test: `python_backend/tests/test_camera_motion_audit.py`
 - Test: `python_backend/tests/test_follow_cam.py`
 - Test: `python_backend/tests/test_ai_improvement.py`
+- Test: `python_backend/tests/test_api_service.py`
 
 **Implementation Tasks:**
 
@@ -679,7 +746,21 @@ Example config patch fields:
 
 Do not introduce invented config names. If an existing validator still accepts `follow_cam.dead_zone_ratio`, replace it with `dead_zone_ratio_x` and `dead_zone_ratio_y` in this PR.
 
-- [ ] **Step 3: Add camera release gate summary**
+- [ ] **Step 3: Add follow-cam rerender planning**
+
+Approved `adjust_follow_cam` suggestions should write a lightweight `follow_cam_rerender_plan.json` instead of silently rerendering.
+
+Plan fields:
+- `source = "ai_improvement_approved_action"`
+- `approval_id`
+- `improvement_id`
+- `recommended_config_patch`
+- `requires_tracking_rerun = false`
+- `reason`
+
+Approved `tracking_rerun_before_follow_cam` suggestions should set `requires_tracking_rerun = true` and should not create a direct follow-cam rerender.
+
+- [ ] **Step 4: Add camera release gate summary**
 
 Metrics should expose:
 - `camera_motion.status`
@@ -696,12 +777,15 @@ $env:PYTHONPATH='python_backend'
 .\.venv\Scripts\python.exe -m pytest python_backend/tests/test_camera_motion_audit.py -q
 .\.venv\Scripts\python.exe -m pytest python_backend/tests/test_follow_cam.py -q
 .\.venv\Scripts\python.exe -m pytest python_backend/tests/test_ai_improvement.py -q
+.\.venv\Scripts\python.exe -m pytest python_backend/tests/test_api_service.py::ApiServiceTests::test_ai_follow_cam_approval_writes_rerender_plan -q
 ```
 
 Additional fake-client coverage:
 - a camera motion event overlapping Lost/Predicted status produces `tracking_rerun_before_follow_cam`.
 - a camera motion event with stable Detected tracking produces `adjust_follow_cam`.
 - invalid follow-cam config patch names are stripped with warnings.
+- approving `adjust_follow_cam` writes `follow_cam_rerender_plan.json`.
+- approving `tracking_rerun_before_follow_cam` records that tracking must be rerun before follow-cam rerender.
 
 Real-output smoke validation:
 
@@ -716,6 +800,7 @@ Expected:
 
 **Deliverables:**
 - `ai_improvement_report.json` contains camera-specific root cause and action suggestions.
+- `follow_cam_rerender_plan.json` for approved follow-cam-only adjustments.
 - Follow-cam release quality can be judged from metrics without manually opening every file.
 
 ---
@@ -781,6 +866,7 @@ Integration tests must cover:
 - candidate render with `roll_policy = "manual_roll"` uses explicit pre/post roll.
 - explicit `start_frame`/`end_frame` render remains manual and does not require a candidate.
 - `highlight_report.json` records `core_window`, `render_window`, `roll_policy`, and whether the window came from candidate default or operator override.
+- The old service behavior of taking a candidate core window and applying the legacy 15/30 roll is rejected by tests; candidate-based highlights must default to `candidate.render_window`.
 
 - [ ] **Step 4: Add AI highlight adjustment output**
 
@@ -799,6 +885,7 @@ Use the same `ai_improvement_approved_actions.json` contract from PR 3 for highl
 Rules:
 - `approved_action = "render_suggested_highlight"` or `approved_action = "adjust_highlight_window"` can create a highlight render request.
 - The renderer uses `suggested_window` as an explicit frame window and records `source = "ai_improvement_approved_action"` in `highlight_report.json`.
+- The approval item must include `candidate_id`, `suggested_window`, `clip_action`, `approval_id`, and `improvement_id`.
 - The UI/API must still allow manual edits before render.
 
 **Tests:**
@@ -908,9 +995,14 @@ After all PRs merge, run on the known real video output flow:
 
 ```powershell
 $env:PYTHONPATH='python_backend'
+$beforeTrack = Get-FileHash python_backend\outputs\full_workflow_latest_review_20260622_060600\ball_track.csv
+$beforeCleaned = Get-FileHash python_backend\outputs\full_workflow_latest_review_20260622_060600\ball_track.cleaned.csv
 .\.venv\Scripts\python.exe python_backend\scripts\build_review_packets.py python_backend\outputs\full_workflow_latest_review_20260622_060600 --input-video python_backend\data\raw5760x144020fps.mp4 --follow-cam-video python_backend\outputs\full_workflow_latest_review_20260622_060600\follow_cam.latest_review.mp4 --max-packets 10
 .\.venv\Scripts\python.exe python_backend\scripts\run_ai_visual_review.py python_backend\outputs\full_workflow_latest_review_20260622_060600 --max-packets 10
 .\.venv\Scripts\python.exe python_backend\scripts\run_ai_improvement.py python_backend\outputs\full_workflow_latest_review_20260622_060600
+$afterTrack = Get-FileHash python_backend\outputs\full_workflow_latest_review_20260622_060600\ball_track.csv
+$afterCleaned = Get-FileHash python_backend\outputs\full_workflow_latest_review_20260622_060600\ball_track.cleaned.csv
+if ($beforeTrack.Hash -ne $afterTrack.Hash -or $beforeCleaned.Hash -ne $afterCleaned.Hash) { throw "AI improvement flow modified track CSV files" }
 ```
 
 Use the provider-configured model by default. Override the model only when the environment supports the requested model and the run is meant to compare model quality.
@@ -926,11 +1018,14 @@ Expected final artifacts:
 
 Expected quality outcomes:
 - No normal `high_recall_rejected` packet covers thousands of frames.
+- No normal dense-noise diagnostic packet covers thousands of frames.
 - `ai_visual_review.json` can carry packet-level failure tags and image-space ROI evidence when the ball is visible.
 - `ai_improvement_report.json` lists actionable suggestions for missing balls, noise, camera motion, and highlight boundaries.
 - Approved actions can create targeted high-recall windows or render AI-suggested highlight windows with provenance.
+- Approved follow-cam-only actions can create `follow_cam_rerender_plan.json`; tracking-dependent camera actions require a rerun first.
 - At least one highlight candidate has a render window that extends materially beyond the core shot/goal window.
 - Camera motion warnings overlapping Lost/Predicted frames are reflected in AI improvement suggestions.
+- Track CSV checksums are unchanged by packet building, visual review, and AI improvement report generation.
 
 ## Agent Review Checklist
 
@@ -944,13 +1039,17 @@ Ask a separate reviewer agent to verify:
 
 ## Independent Agent Review Incorporated
 
-The plan was reviewed by a separate agent before finalization. The review found two blocking gaps and several important fixes, all addressed in this revision:
+The plan was reviewed by a separate agent before finalization. The review found several important execution gaps, all addressed in this revision:
+- The current repo state is now explicit: PR 1 has already landed as GitHub PR #28, and managed PR execution should resume with PR 2.
 - Missing-ball localization now has a real vision path: PR 2 attaches packet media and allows `ai_visual_review.json` to emit `likely_ball_region` / `local_search_roi`; PR 3 consumes that visual evidence in `ai_improvement_report.json`.
-- The approval/apply loop now has one concrete contract: `ai_improvement_approved_actions.json` and `POST /api/v1/ai/improve/{run_id}/approve`.
+- Dense-noise ranges are now part of PR 2 micro-window packetization instead of being skipped as one unusable giant range.
+- Packet-to-visual-review-to-improvement linkage now requires stable ids, ROI provenance, and frame-dimension validation.
+- The approval/apply loop now has one concrete contract: `ai_improvement_approved_actions.json` and `POST /api/v1/ai/improve/{run_id}/approve`, with action-specific fields for rerun, highlight, follow-cam, and config-patch approvals.
 - `config_patch` validation now explicitly strips unknown paths, dotted flat keys, invalid values, and unsupported roots.
 - Follow-cam suggested patch names now use current config fields such as `glide_pan_smoothing`, `catch_up_pan_smoothing`, `dead_zone_ratio_x`, and `dead_zone_ratio_y`.
-- Highlight work now tests actual render selection behavior, including candidate `render_window`, manual roll override, and approved AI suggested windows.
+- Highlight work now tests actual render selection behavior, including candidate `render_window`, manual roll override, and approved AI suggested windows; the old 15/30 default cannot silently override a candidate render window.
 - The UI plan now includes approve/render actions, not only passive display.
+- End-to-end validation now hashes track CSV files before and after AI report generation to prove AI does not silently mutate tracking outputs.
 
 ## Execution Notes For Managed PR
 
