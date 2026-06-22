@@ -1007,10 +1007,10 @@ def _setting(raw: Any, key: str, default: Any) -> Any:
 def _optional_approved_actions_path(value: Any) -> Path | None:
     if value in (None, ""):
         return None
-    path = Path(str(value))
-    if not str(path).strip():
+    path_text = str(value).strip()
+    if not path_text:
         return None
-    return path
+    return Path(path_text)
 
 
 def _resolve_configured_approved_actions_path(path: Path | None, *, output_dir: Path) -> Path | None:

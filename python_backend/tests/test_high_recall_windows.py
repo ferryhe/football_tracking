@@ -376,6 +376,15 @@ class HighRecallWindowTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "ai_improvement_approved_actions.json.*corrupt"):
                 build_high_recall_windows(output_dir, approved_actions_path=approved_path)
 
+    def test_explicit_approved_actions_path_reports_generic_shape_errors_for_custom_path(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            approved_path = output_dir / "custom-approved-actions.json"
+            _write_json(approved_path, {"schema_version": "1.0", "approved_actions": ["not-an-action"]})
+
+            with self.assertRaisesRegex(ValueError, "approved actions artifact invalid"):
+                build_high_recall_windows(output_dir, approved_actions_path=approved_path)
+
     def test_explicit_approved_actions_path_rejects_stale_targeted_rerun_without_scope(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:
             output_dir = Path(temp_name)
@@ -747,7 +756,7 @@ class HighRecallChunkRunnerHookTests(unittest.TestCase):
                     max_total_frames=100,
                     mode="sahi",
                     output_dir_name="high_recall_windows",
-                    approved_actions_path=str(approved_path),
+                    approved_actions_path=f"  {approved_path}  ",
                     max_speed_px_per_frame=120.0,
                     max_jump_px=180.0,
                 ),

@@ -245,12 +245,12 @@ def _approved_action_windows(report: dict[str, Any] | None) -> list[dict[str, An
         return []
     actions = report.get("approved_actions")
     if not isinstance(actions, list):
-        raise ValueError("ai_improvement_approved_actions.json invalid: approved_actions must be a list.")
+        raise ValueError("approved actions artifact invalid: approved_actions must be a list.")
 
     windows: list[dict[str, Any]] = []
     for index, action in enumerate(actions, start=1):
         if not isinstance(action, dict):
-            raise ValueError(f"ai_improvement_approved_actions.json invalid: approved_actions[{index}] must be an object.")
+            raise ValueError(f"approved actions artifact invalid: approved_actions[{index}] must be an object.")
         if action.get("approved_action") != "targeted_rerun":
             continue
         action_label = str(action.get("approval_id") or action.get("improvement_id") or index)
