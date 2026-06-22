@@ -17,9 +17,10 @@ from pydantic import ValidationError
 
 from football_tracking.api.app import create_app
 from football_tracking.api.routes import inputs as input_routes
+from football_tracking.api.routes.ai import improve as improve_route
 from football_tracking.api.routes import runs as run_routes
 from football_tracking.api.routes.artifacts import get_artifact
-from football_tracking.api.schemas import HighlightRenderRequest
+from football_tracking.api.schemas import AIImproveRequest, HighlightRenderRequest
 from football_tracking.api.service import ApiService
 from football_tracking.config import load_config
 from football_tracking.metrics import write_run_artifacts
@@ -1688,6 +1689,70 @@ class ApiServiceSmokeTests(unittest.TestCase):
         self.assertIn("\u5e73\u79fb", recommendation["recommendation"])
         self.assertTrue(any("\u8ddf\u968f\u955c\u5934" in item for item in recommendation["evidence"]))
 
+    def test_ai_improve_writes_report_and_updates_run_artifacts(self) -> None:
+        output_dir = self.create_output_bundle("improve_baseline")
+        self.write_json(
+            "outputs/improve_baseline/ball_audit.json",
+            {
+                "schema_version": "1.0",
+                "summary": {
+                    "frame_count": 30,
+                    "source_count": 1,
+                    "tracklet_count": 1,
+                    "suspicious_tracklet_count": 0,
+                    "review_event_count": 1,
+                    "lost_gap_count": 1,
+                },
+                "sources": [],
+                "tracklets": [],
+                "review_events": [
+                    {
+                        "source": "cleaned",
+                        "type": "lost_gap",
+                        "severity": "fail",
+                        "start_frame": 10,
+                        "end_frame": 20,
+                        "frame_count": 11,
+                        "reason": "Ball track is lost between tracklets.",
+                    }
+                ],
+            },
+        )
+        run = self.service.list_runs()[0]
+
+        response = self.service.ai_improve(
+            run_id=run["run_id"],
+            objective="recover the missing ball",
+            model="gpt-improve",
+            dry_run=True,
+            max_items=1,
+            language="en",
+        )
+
+        refreshed = self.service.get_run(run["run_id"])
+        artifact_names = {artifact["name"] for artifact in refreshed["artifacts"]}
+        self.assertEqual("ai_improvement_report.json", response["artifact_name"])
+        self.assertEqual(str((output_dir / "ai_improvement_report.json").resolve()), response["artifact_path"])
+        self.assertEqual("needs_rerun", response["summary"]["status"])
+        self.assertEqual("targeted_rerun", response["improvements"][0]["recommended_action"])
+        self.assertIn("ai_improvement_report.json", artifact_names)
+        self.assertIn("metrics_report.json", artifact_names)
+        self.assertEqual("needs_rerun", refreshed["stats"]["ai_improvement"]["status"])
+        metrics_report = json.loads((output_dir / "metrics_report.json").read_text(encoding="utf-8"))
+        self.assertEqual("needs_rerun", metrics_report["ai_improvement"]["status"])
+
+    def test_ai_improve_route_writes_report(self) -> None:
+        self.create_output_bundle("improve_route_baseline")
+        run = self.service.list_runs()[0]
+
+        response = improve_route(
+            AIImproveRequest(run_id=run["run_id"], dry_run=True, max_items=1),
+            service=self.service,
+        )
+
+        self.assertEqual("ai_improvement_report.json", response.artifact_name)
+        self.assertTrue(Path(response.artifact_path).exists())
+
     def test_create_app_registers_expected_routes(self) -> None:
         app = create_app(self.repo_root)
         route_paths = {route.path for route in app.routes}
@@ -1716,6 +1781,7 @@ class ApiServiceSmokeTests(unittest.TestCase):
             "/api/v1/runs/{run_id}/camera-path",
             "/api/v1/ai/explain",
             "/api/v1/ai/recommend",
+            "/api/v1/ai/improve",
             "/api/v1/ai/config-diff",
         }
 
@@ -1800,6 +1866,19 @@ class ApiServiceSmokeTests(unittest.TestCase):
         self.assertEqual(
             "#/components/schemas/ApiErrorResponse",
             operation["responses"]["409"]["content"]["application/json"]["schema"]["$ref"],
+        )
+
+    def test_create_app_documents_ai_improve_schema(self) -> None:
+        app = create_app(self.repo_root)
+        operation = app.openapi()["paths"]["/api/v1/ai/improve"]["post"]
+
+        self.assertEqual(
+            "#/components/schemas/AIImproveRequest",
+            operation["requestBody"]["content"]["application/json"]["schema"]["$ref"],
+        )
+        self.assertEqual(
+            "#/components/schemas/AIImproveResponse",
+            operation["responses"]["200"]["content"]["application/json"]["schema"]["$ref"],
         )
 
 

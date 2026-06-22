@@ -14,6 +14,7 @@ from football_tracking.accepted_highlights import (
 from football_tracking.accepted_highlights import (
     compact_accepted_highlights_summary,
 )
+from football_tracking.ai_improvement import compact_ai_improvement_summary
 from football_tracking.ai_review_triggers import (
     compact_ai_review_trigger_summary,
     write_ai_review_trigger_report,
@@ -143,6 +144,11 @@ def build_metrics_report(output_dir: Path) -> dict[str, Any]:
         ai_visual_review_summary = compact_ai_visual_review_summary(ai_visual_review_report)
         if ai_visual_review_summary is not None:
             report["ai_visual_review"] = ai_visual_review_summary
+    ai_improvement_report = _read_optional_json(output_dir / "ai_improvement_report.json")
+    if ai_improvement_report is not None:
+        ai_improvement_summary = compact_ai_improvement_summary(ai_improvement_report)
+        if ai_improvement_summary is not None:
+            report["ai_improvement"] = ai_improvement_summary
     accepted_highlights_report = _read_optional_json(_accepted_highlights_report_path(output_dir))
     if accepted_highlights_report is not None:
         accepted_highlights_summary = compact_accepted_highlights_summary(accepted_highlights_report)
@@ -257,6 +263,9 @@ def stats_from_metrics_report(report: dict[str, Any]) -> dict[str, Any]:
     ai_visual_review = report.get("ai_visual_review")
     if isinstance(ai_visual_review, dict):
         stats["ai_visual_review"] = ai_visual_review
+    ai_improvement = report.get("ai_improvement")
+    if isinstance(ai_improvement, dict):
+        stats["ai_improvement"] = ai_improvement
     accepted_highlights = report.get("accepted_highlights")
     if isinstance(accepted_highlights, dict):
         stats["accepted_highlights"] = accepted_highlights
