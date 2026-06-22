@@ -659,6 +659,51 @@ class ChunkRunnerConfigTests(unittest.TestCase):
         self.assertEqual("direct_full_frame_no_roi", window["sahi_policy"])
         self.assertEqual("executable", window["execution_status"])
 
+    def test_approved_roi_window_records_direct_full_frame_roi_policy_when_not_using_sahi(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            base_dir = Path(temp_name)
+            config = make_app_config(base_dir)
+            config.high_recall_windows.mode = "direct_full_frame"
+            window = {
+                "start_frame": 10,
+                "end_frame": 12,
+                "approved_action": "targeted_rerun",
+                "approved_roi": [120, 40, 200, 90],
+                "mode": "direct_full_frame",
+            }
+
+            window_config = build_high_recall_window_config(
+                config,
+                window,
+                base_dir / "outputs" / "source" / "high_recall_windows" / "window_000",
+            )
+
+        self.assertEqual("direct_full_frame", window_config.detector.inference_mode)
+        self.assertEqual("direct_full_frame_roi", window["sahi_policy"])
+
+    def test_approved_base_roi_without_ai_roi_records_direct_full_frame_policy(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            base_dir = Path(temp_name)
+            config = make_app_config(base_dir)
+            config.filtering.roi = (100, 50, 160, 110)
+            config.high_recall_windows.mode = "direct_full_frame"
+            window = {
+                "start_frame": 10,
+                "end_frame": 12,
+                "approved_action": "targeted_rerun",
+                "mode": "direct_full_frame",
+            }
+
+            window_config = build_high_recall_window_config(
+                config,
+                window,
+                base_dir / "outputs" / "source" / "high_recall_windows" / "window_000",
+            )
+
+        self.assertEqual("direct_full_frame", window_config.detector.inference_mode)
+        self.assertEqual((100, 50, 160, 110), window_config.filtering.roi)
+        self.assertEqual("direct_full_frame_base_roi_no_ai_roi", window["sahi_policy"])
+
 
 class ChunkRunnerExecutionTests(unittest.TestCase):
     def test_run_chunk_loads_config_and_runs_pipeline(self) -> None:

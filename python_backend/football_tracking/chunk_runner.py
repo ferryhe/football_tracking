@@ -23,15 +23,12 @@ from football_tracking.config import AppConfig, load_config
 from football_tracking.events import write_event_candidate_report
 from football_tracking.follow_cam import FollowCamGenerator
 from football_tracking.high_recall_reconcile import reconcile_high_recall_outputs
-from football_tracking.high_recall_windows import write_high_recall_window_report
+from football_tracking.high_recall_windows import DEFAULT_APPROVED_ROI_PADDING_PX, write_high_recall_window_report
 from football_tracking.pipeline import BallTrackingPipeline
 from football_tracking.postprocess import TrackPostprocessor
 from football_tracking.temporal_chunks import TemporalChunk, plan_temporal_chunks
 
 logger = logging.getLogger(__name__)
-
-DEFAULT_APPROVED_ROI_PADDING_PX = 32
-
 
 @dataclass(frozen=True, slots=True)
 class _ChunkJob:
@@ -1018,7 +1015,7 @@ def _prepare_high_recall_window_for_execution(config: Any, window: dict[str, Any
         if base_roi is not None:
             effective_roi = list(base_roi)
             window["effective_roi"] = effective_roi
-            window["sahi_policy"] = "sahi_base_roi_no_ai_roi"
+            window["sahi_policy"] = _roi_policy_for_mode(requested_mode, "base_roi_no_ai_roi")
             window["execution_status"] = "executable"
             return True
         window["mode"] = "direct_full_frame"
@@ -1040,7 +1037,7 @@ def _prepare_high_recall_window_for_execution(config: Any, window: dict[str, Any
         return False
 
     window["effective_roi"] = list(effective_roi)
-    window["sahi_policy"] = "sahi_roi"
+    window["sahi_policy"] = _roi_policy_for_mode(requested_mode, "roi")
     window["execution_status"] = "executable"
     return True
 
@@ -1050,6 +1047,12 @@ def _mark_manual_resolution(window: dict[str, Any], policy: str) -> None:
     window["needs_manual_resolution"] = True
     window["sahi_policy"] = policy
     window["effective_roi"] = None
+
+
+def _roi_policy_for_mode(mode: str, suffix: str) -> str:
+    normalized_mode = str(mode or "direct_full_frame").strip().lower()
+    prefix = "sahi" if normalized_mode == "sahi" else "direct_full_frame"
+    return f"{prefix}_{suffix}"
 
 
 def _is_approved_targeted_rerun_window(window: dict[str, Any]) -> bool:
