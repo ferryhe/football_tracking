@@ -9,6 +9,7 @@ from typing import Any
 SCHEMA_VERSION = "1.0"
 DEFAULT_MERGE_GAP_FRAMES = 30
 DEFAULT_MAX_TOTAL_FRAMES = 1800
+DEFAULT_APPROVED_ROI_PADDING_PX = 32
 LONG_LOST_GAP_MIN_FRAMES = 120
 PRIORITY_RANK = {"none": 0, "low": 1, "medium": 2, "high": 3}
 
@@ -279,6 +280,10 @@ def _approved_action_windows(report: dict[str, Any] | None) -> list[dict[str, An
             rerun_scope,
             f"approved targeted_rerun action {action_label} rerun_scope",
         )
+        roi_metadata = _approved_roi_metadata(
+            action,
+            f"approved targeted_rerun action {action_label} local_search_roi",
+        )
         raw_payload = dict(rerun_window)
         raw_payload.update(
             {
@@ -291,6 +296,7 @@ def _approved_action_windows(report: dict[str, Any] | None) -> list[dict[str, An
                 "visual_review_id": action.get("visual_review_id"),
                 "local_search_roi": action.get("local_search_roi"),
                 "provenance": action.get("provenance"),
+                **roi_metadata,
             }
         )
         windows.append(
@@ -321,6 +327,10 @@ def _raw_window(item: dict[str, Any], *, source: str, priority: str, reason: str
         "source_packet_id",
         "visual_review_id",
         "local_search_roi",
+        "approved_roi",
+        "padded_roi",
+        "effective_roi",
+        "sahi_policy",
         "provenance",
     ):
         if item.get(key) not in (None, "", {}):
@@ -384,6 +394,10 @@ def _window_metadata(raw_window: dict[str, Any]) -> dict[str, Any]:
         "source_packet_id",
         "visual_review_id",
         "local_search_roi",
+        "approved_roi",
+        "padded_roi",
+        "effective_roi",
+        "sahi_policy",
         "provenance",
     ):
         if raw_window.get(key) not in (None, "", {}):
@@ -407,6 +421,10 @@ def _approval_provenance_entry(window: dict[str, Any]) -> dict[str, Any] | None:
         "source_packet_id",
         "visual_review_id",
         "local_search_roi",
+        "approved_roi",
+        "padded_roi",
+        "effective_roi",
+        "sahi_policy",
         "provenance",
     ):
         if window.get(key) not in (None, "", {}):
@@ -427,11 +445,12 @@ def _merge_windows(
             continue
         previous = merged[-1]
         gap = window["start_frame"] - previous["end_frame"] - 1
-        if gap > merge_gap_frames:
-            merged.append(_copy_window(window))
-            continue
         merged_end = max(previous["end_frame"], window["end_frame"])
-        if max_window_frames is not None and merged_end - previous["start_frame"] + 1 > max_window_frames:
+        if (
+            gap > merge_gap_frames
+            or not _windows_can_merge(previous, window)
+            or (max_window_frames is not None and merged_end - previous["start_frame"] + 1 > max_window_frames)
+        ):
             merged.append(_copy_window(window))
             continue
         previous["end_frame"] = max(previous["end_frame"], window["end_frame"])
@@ -442,6 +461,44 @@ def _merge_windows(
         if previous.get("mode") != window.get("mode"):
             previous["mode"] = f"{previous.get('mode')},{window.get('mode')}"
     return merged
+
+
+def _windows_can_merge(first: dict[str, Any], second: dict[str, Any]) -> bool:
+    first_has_approval = _has_approval_metadata(first)
+    second_has_approval = _has_approval_metadata(second)
+    if not first_has_approval and not second_has_approval:
+        return True
+    if first_has_approval != second_has_approval:
+        return False
+    return _approval_roi_signature(first) == _approval_roi_signature(second)
+
+
+def _has_approval_metadata(window: dict[str, Any]) -> bool:
+    return (
+        window.get("approved_action") not in (None, "")
+        or window.get("approval_id") not in (None, "")
+        or bool(window.get("approval_provenance"))
+    )
+
+
+def _approval_roi_signature(window: dict[str, Any]) -> tuple[int, int, int, int] | None:
+    roi = window.get("approved_roi")
+    if isinstance(roi, list) and len(roi) == 4:
+        try:
+            values = [int(value) for value in roi]
+            return (values[0], values[1], values[2], values[3])
+        except (TypeError, ValueError):
+            return None
+    provenance = window.get("approval_provenance")
+    if isinstance(provenance, list) and len(provenance) == 1 and isinstance(provenance[0], dict):
+        roi = provenance[0].get("approved_roi")
+        if isinstance(roi, list) and len(roi) == 4:
+            try:
+                values = [int(value) for value in roi]
+                return (values[0], values[1], values[2], values[3])
+            except (TypeError, ValueError):
+                return None
+    return None
 
 
 def _merge_window_metadata(target: dict[str, Any], incoming: dict[str, Any]) -> None:
@@ -462,10 +519,54 @@ def _merge_window_metadata(target: dict[str, Any], incoming: dict[str, Any]) -> 
             "source_packet_id",
             "visual_review_id",
             "local_search_roi",
+            "approved_roi",
+            "padded_roi",
+            "effective_roi",
+            "sahi_policy",
             "provenance",
         ):
             if first.get(key) not in (None, "", {}):
                 target[key] = first[key]
+
+
+def _approved_roi_metadata(action: dict[str, Any], label: str) -> dict[str, Any]:
+    value = action.get("local_search_roi")
+    if value in (None, "", {}):
+        return {}
+    if action.get("source_packet_id") in (None, "") and action.get("visual_review_id") in (None, ""):
+        raise ValueError(f"{label} requires source_packet_id or visual_review_id provenance.")
+    roi = _roi_from_local_search_roi(value, label)
+    padded_roi = _pad_roi(roi, DEFAULT_APPROVED_ROI_PADDING_PX)
+    return {
+        "approved_roi": roi,
+        "padded_roi": padded_roi,
+        "effective_roi": padded_roi,
+        "sahi_policy": "sahi_roi",
+    }
+
+
+def _roi_from_local_search_roi(value: Any, label: str) -> list[int]:
+    if not isinstance(value, dict):
+        raise ValueError(f"{label} must be an object.")
+    coordinate_space = str(value.get("coordinate_space") or "image").strip().lower()
+    if coordinate_space != "image":
+        raise ValueError(f"{label}.coordinate_space must be image.")
+    x = _finite_number(value.get("x"), f"{label}.x")
+    y = _finite_number(value.get("y"), f"{label}.y")
+    width = _positive_number(value.get("width"), f"{label}.width")
+    height = _positive_number(value.get("height"), f"{label}.height")
+    x1 = int(round(x))
+    y1 = int(round(y))
+    x2 = int(round(x + width))
+    y2 = int(round(y + height))
+    if x2 <= x1 or y2 <= y1:
+        raise ValueError(f"{label} must describe a non-empty ROI.")
+    return [x1, y1, x2, y2]
+
+
+def _pad_roi(roi: list[int], padding_px: int) -> list[int]:
+    pad = max(0, int(padding_px))
+    return [roi[0] - pad, roi[1] - pad, roi[2] + pad, roi[3] + pad]
 
 
 def _merge_approval_provenance(existing: Any, incoming: Any) -> list[dict[str, Any]]:
@@ -714,6 +815,20 @@ def _parse_float(value: Any) -> float | None:
     except (OverflowError, TypeError, ValueError):
         return None
     return parsed if math.isfinite(parsed) else None
+
+
+def _finite_number(value: Any, label: str) -> float:
+    parsed = _parse_float(value)
+    if parsed is None:
+        raise ValueError(f"{label} must be a finite number.")
+    return parsed
+
+
+def _positive_number(value: Any, label: str) -> float:
+    parsed = _finite_number(value, label)
+    if parsed <= 0:
+        raise ValueError(f"{label} must be greater than 0.")
+    return parsed
 
 
 def _utc_now_iso() -> str:

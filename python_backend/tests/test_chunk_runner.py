@@ -13,12 +13,15 @@ from unittest.mock import Mock, patch
 import yaml
 
 from football_tracking.chunk_runner import (
+    build_high_recall_window_config,
     build_chunk_config,
     effective_worker_count,
     enforce_raw_chunk_config,
     run_chunk,
     run_temporal_chunks,
+    run_high_recall_windows,
     write_chunk_config,
+    write_high_recall_window_config,
 )
 from football_tracking.config import (
     AppConfig,
@@ -441,6 +444,220 @@ class ChunkRunnerConfigTests(unittest.TestCase):
         self.assertTrue(loaded.output.save_csv)
         self.assertTrue(loaded.output.save_debug_jsonl)
         self.assertTrue(loaded.logging.save_debug_jsonl)
+
+    def test_high_recall_window_config_writes_effective_roi_to_child_yaml_without_mutating_parent(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            base_dir = Path(temp_name)
+            config = make_app_config(base_dir)
+            config.detector.inference_mode = "direct_full_frame"
+            window = {
+                "start_frame": 10,
+                "end_frame": 20,
+                "approved_action": "targeted_rerun",
+                "approved_roi": [120, 40, 200, 90],
+                "padded_roi": [88, 8, 232, 122],
+                "effective_roi": [88, 8, 232, 122],
+                "mode": "sahi",
+            }
+
+            config_path = write_high_recall_window_config(
+                config,
+                window,
+                0,
+                base_dir / "outputs" / "source" / "high_recall_windows",
+            )
+            payload = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+
+        self.assertEqual([88, 8, 232, 122], payload["filtering"]["roi"])
+        self.assertEqual([88, 8, 232, 122], window["effective_roi"])
+        self.assertEqual("sahi_roi", window["sahi_policy"])
+        self.assertIsNone(config.filtering.roi)
+
+    def test_high_recall_roi_padding_clamps_to_known_mock_frame_bounds(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            base_dir = Path(temp_name)
+            config = make_app_config(base_dir)
+            config.mock.frame_width = 40
+            config.mock.frame_height = 30
+            window = {
+                "start_frame": 10,
+                "end_frame": 20,
+                "approved_action": "targeted_rerun",
+                "approved_roi": [5, 6, 20, 18],
+                "mode": "sahi",
+            }
+
+            window_config = build_high_recall_window_config(
+                config,
+                window,
+                base_dir / "outputs" / "source" / "high_recall_windows" / "window_000",
+            )
+
+        self.assertEqual((0, 0, 40, 30), window_config.filtering.roi)
+        self.assertEqual([0, 0, 40, 30], window["effective_roi"])
+
+    def test_high_recall_window_config_intersects_base_filtering_roi_with_ai_roi(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            base_dir = Path(temp_name)
+            config = make_app_config(base_dir)
+            config.filtering.roi = (100, 50, 160, 110)
+            window = {
+                "start_frame": 10,
+                "end_frame": 20,
+                "approved_action": "targeted_rerun",
+                "approved_roi": [120, 40, 200, 90],
+                "mode": "sahi",
+            }
+
+            window_config = build_high_recall_window_config(
+                config,
+                window,
+                base_dir / "outputs" / "source" / "high_recall_windows" / "window_000",
+            )
+
+        self.assertEqual((100, 50, 160, 110), window_config.filtering.roi)
+        self.assertEqual([100, 50, 160, 110], window["effective_roi"])
+        self.assertEqual((100, 50, 160, 110), config.filtering.roi)
+
+    def test_high_recall_empty_roi_intersection_marks_manual_resolution_and_does_not_run_sahi(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            base_dir = Path(temp_name)
+            config = make_app_config(base_dir)
+            config.output_dir = base_dir / "outputs" / "source"
+            config.filtering.roi = (300, 300, 320, 320)
+            config.high_recall_windows.enabled = True
+            config.high_recall_windows.mode = "sahi"
+            window = {
+                "start_frame": 10,
+                "end_frame": 20,
+                "approved_action": "targeted_rerun",
+                "approved_roi": [20, 20, 40, 40],
+                "mode": "sahi",
+            }
+            window_report = {"windows": [window], "summary": {"selected_window_count": 1}}
+
+            with (
+                patch("football_tracking.chunk_runner.write_ball_audit_report", return_value={}),
+                patch("football_tracking.chunk_runner.write_ai_review_trigger_report", return_value={}),
+                patch("football_tracking.chunk_runner.write_event_candidate_report", return_value={}),
+                patch("football_tracking.chunk_runner.write_high_recall_window_report", return_value=window_report),
+                patch("football_tracking.chunk_runner.write_high_recall_window_config") as write_config,
+                patch("football_tracking.chunk_runner.run_high_recall_chunk") as run_chunk_mock,
+                patch("football_tracking.chunk_runner.reconcile_high_recall_outputs") as reconcile,
+            ):
+                report = run_high_recall_windows(config, source_total_frames=100)
+
+        write_config.assert_not_called()
+        run_chunk_mock.assert_not_called()
+        reconcile.assert_not_called()
+        blocked = report["windows"][0]
+        self.assertEqual("needs_manual_resolution", blocked["execution_status"])
+        self.assertEqual("blocked_empty_roi_intersection", blocked["sahi_policy"])
+        self.assertEqual("skipped", report["execution"]["status"])
+
+    def test_high_recall_skipped_window_does_not_shift_executable_window_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            base_dir = Path(temp_name)
+            config = make_app_config(base_dir)
+            config.output_dir = base_dir / "outputs" / "source"
+            config.filtering.roi = (300, 300, 360, 360)
+            config.high_recall_windows.enabled = True
+            config.high_recall_windows.mode = "sahi"
+            blocked_window = {
+                "start_frame": 10,
+                "end_frame": 20,
+                "approved_action": "targeted_rerun",
+                "approved_roi": [20, 20, 40, 40],
+                "mode": "sahi",
+            }
+            executable_window = {
+                "start_frame": 30,
+                "end_frame": 35,
+                "approved_action": "targeted_rerun",
+                "approved_roi": [310, 310, 330, 330],
+                "mode": "sahi",
+            }
+            window_report = {
+                "windows": [blocked_window, executable_window],
+                "summary": {"selected_window_count": 2},
+            }
+
+            def fake_write_config(config_arg, window_arg, window_index, root_arg):
+                window_dir = root_arg / f"window_{window_index:03d}"
+                window_dir.mkdir(parents=True, exist_ok=True)
+                config_path = window_dir / "chunk_config.yaml"
+                config_path.write_text("mock: true\n", encoding="utf-8")
+                return config_path
+
+            with (
+                patch("football_tracking.chunk_runner.write_ball_audit_report", return_value={}),
+                patch("football_tracking.chunk_runner.write_ai_review_trigger_report", return_value={}),
+                patch("football_tracking.chunk_runner.write_event_candidate_report", return_value={}),
+                patch("football_tracking.chunk_runner.write_high_recall_window_report", return_value=window_report),
+                patch(
+                    "football_tracking.chunk_runner.write_high_recall_window_config",
+                    side_effect=fake_write_config,
+                ) as write_config,
+                patch("football_tracking.chunk_runner.run_high_recall_chunk", return_value=0),
+                patch(
+                    "football_tracking.chunk_runner.reconcile_high_recall_outputs",
+                    return_value={"summary": {"accepted_count": 0}},
+                ) as reconcile,
+            ):
+                report = run_high_recall_windows(config, source_total_frames=100)
+
+        write_config.assert_called_once()
+        self.assertEqual(0, write_config.call_args.args[2])
+        self.assertEqual("needs_manual_resolution", report["windows"][0]["execution_status"])
+        self.assertEqual(1, len(reconcile.call_args.args[1]))
+        self.assertEqual(0, reconcile.call_args.args[1][0]["execution_window_index"])
+        self.assertEqual(1, reconcile.call_args.args[1][0]["source_window_index"])
+
+    def test_approved_no_roi_window_uses_direct_full_frame_policy_instead_of_whole_frame_sahi(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            base_dir = Path(temp_name)
+            config = make_app_config(base_dir)
+            config.detector.inference_mode = "direct_full_frame"
+            config.high_recall_windows.mode = "sahi"
+            window = {
+                "start_frame": 10,
+                "end_frame": 12,
+                "approved_action": "targeted_rerun",
+                "mode": "sahi",
+            }
+
+            window_config = build_high_recall_window_config(
+                config,
+                window,
+                base_dir / "outputs" / "source" / "high_recall_windows" / "window_000",
+            )
+
+        self.assertEqual("direct_full_frame", window_config.detector.inference_mode)
+        self.assertIsNone(window_config.filtering.roi)
+        self.assertEqual("direct_full_frame_no_roi", window["sahi_policy"])
+        self.assertEqual("sahi", config.high_recall_windows.mode)
+
+    def test_approved_no_roi_window_records_policy_when_already_direct_full_frame(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            base_dir = Path(temp_name)
+            config = make_app_config(base_dir)
+            config.high_recall_windows.mode = "direct_full_frame"
+            window = {
+                "start_frame": 10,
+                "end_frame": 12,
+                "approved_action": "targeted_rerun",
+                "mode": "direct_full_frame",
+            }
+
+            window_config = build_high_recall_window_config(
+                config,
+                window,
+                base_dir / "outputs" / "source" / "high_recall_windows" / "window_000",
+            )
+
+        self.assertEqual("direct_full_frame", window_config.detector.inference_mode)
+        self.assertEqual("direct_full_frame_no_roi", window["sahi_policy"])
+        self.assertEqual("executable", window["execution_status"])
 
 
 class ChunkRunnerExecutionTests(unittest.TestCase):

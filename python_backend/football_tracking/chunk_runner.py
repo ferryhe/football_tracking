@@ -30,6 +30,8 @@ from football_tracking.temporal_chunks import TemporalChunk, plan_temporal_chunk
 
 logger = logging.getLogger(__name__)
 
+DEFAULT_APPROVED_ROI_PADDING_PX = 32
+
 
 @dataclass(frozen=True, slots=True)
 class _ChunkJob:
@@ -121,6 +123,8 @@ def build_high_recall_window_config(
 ) -> AppConfig:
     """Copy an AppConfig for one high-recall rerun window."""
     settings = _high_recall_settings(config)
+    if not _prepare_high_recall_window_for_execution(config, window, mode=settings.mode):
+        raise ValueError(f"High-recall window is not executable: {window.get('sahi_policy') or window}")
     window_config = deepcopy(config)
     start_frame = _coerce_int(window.get("start_frame"))
     end_frame = _coerce_int(window.get("end_frame"))
@@ -131,7 +135,10 @@ def build_high_recall_window_config(
     window_config.output_dir = window_output_dir.resolve()
     window_config.runtime.start_frame = start_frame
     window_config.runtime.max_frames = end_frame - start_frame + 1
-    window_config.detector.inference_mode = settings.mode
+    window_config.detector.inference_mode = str(window.get("mode") or settings.mode)
+    effective_roi = _coerce_roi(window.get("effective_roi"))
+    if effective_roi is not None:
+        window_config.filtering.roi = effective_roi
     return enforce_high_recall_chunk_config(window_config)
 
 
@@ -281,16 +288,29 @@ def run_high_recall_windows(
         _write_high_recall_report(high_recall_root, report)
         return report
 
+    executable_windows: list[dict[str, Any]] = []
+    for source_index, window in enumerate(windows):
+        if _prepare_high_recall_window_for_execution(config, window, mode=settings.mode):
+            window["source_window_index"] = source_index
+            window["execution_window_index"] = len(executable_windows)
+            executable_windows.append(window)
+
+    if not executable_windows:
+        execution = {"status": "skipped", "reason": "no_executable_windows", "results": []}
+        report["execution"] = execution
+        _write_high_recall_report(high_recall_root, report)
+        return report
+
     results: list[dict[str, Any]] = []
     try:
-        for index, window in enumerate(windows):
+        for index, window in enumerate(executable_windows):
             _raise_if_cancelled(should_cancel)
             _emit_progress(
                 progress_callback,
                 {
                     "stage": "high_recall_windows",
                     "window_index": index,
-                    "window_count": len(windows),
+                    "window_count": len(executable_windows),
                     "current_frame": window.get("start_frame"),
                     "total_frames": source_total_frames,
                 },
@@ -305,6 +325,7 @@ def run_high_recall_windows(
             end_time = time.time()
             result = {
                 "window_index": index,
+                "source_window_index": window.get("source_window_index"),
                 "window_dir": str(high_recall_root / f"window_{index:03d}"),
                 "config_path": str(config_path),
                 "start_time": start_time,
@@ -336,7 +357,7 @@ def run_high_recall_windows(
     try:
         reconcile_report = reconcile_high_recall_outputs(
             config.output_dir,
-            windows,
+            executable_windows,
             high_recall_root=high_recall_root,
             csv_name=config.output.csv_name,
             max_speed_px_per_frame=settings.max_speed_px_per_frame,
@@ -975,6 +996,198 @@ def _optional_positive_float(value: Any) -> float | None:
     except (TypeError, ValueError):
         return None
     return parsed if parsed > 0 and parsed == parsed and parsed not in (float("inf"), float("-inf")) else None
+
+
+def _prepare_high_recall_window_for_execution(config: Any, window: dict[str, Any], *, mode: str) -> bool:
+    if window.get("execution_status") == "needs_manual_resolution":
+        return False
+    if window.get("execution_status") == "executable":
+        return True
+
+    requested_mode = str(window.get("mode") or mode or "sahi").strip().lower()
+    if requested_mode not in {"sahi", "direct_full_frame"}:
+        requested_mode = str(mode or "sahi").strip().lower()
+    window["mode"] = requested_mode
+
+    if not _is_approved_targeted_rerun_window(window):
+        return True
+
+    base_roi = _coerce_roi(getattr(getattr(config, "filtering", None), "roi", None))
+    approved_roi = _approved_roi_from_window(window)
+    if approved_roi is None:
+        if base_roi is not None:
+            effective_roi = list(base_roi)
+            window["effective_roi"] = effective_roi
+            window["sahi_policy"] = "sahi_base_roi_no_ai_roi"
+            window["execution_status"] = "executable"
+            return True
+        window["mode"] = "direct_full_frame"
+        window["sahi_policy"] = "direct_full_frame_no_roi"
+        window["execution_status"] = "executable"
+        return True
+
+    window["approved_roi"] = list(approved_roi)
+    padded_roi = _pad_roi(approved_roi, DEFAULT_APPROVED_ROI_PADDING_PX)
+    clamped_padded_roi = _clamp_roi_to_frame(padded_roi, _frame_bounds(config))
+    if clamped_padded_roi is None:
+        _mark_manual_resolution(window, "blocked_empty_roi_intersection")
+        return False
+
+    window["padded_roi"] = list(clamped_padded_roi)
+    effective_roi = _intersect_rois(clamped_padded_roi, base_roi) if base_roi is not None else clamped_padded_roi
+    if effective_roi is None:
+        _mark_manual_resolution(window, "blocked_empty_roi_intersection")
+        return False
+
+    window["effective_roi"] = list(effective_roi)
+    window["sahi_policy"] = "sahi_roi"
+    window["execution_status"] = "executable"
+    return True
+
+
+def _mark_manual_resolution(window: dict[str, Any], policy: str) -> None:
+    window["execution_status"] = "needs_manual_resolution"
+    window["needs_manual_resolution"] = True
+    window["sahi_policy"] = policy
+    window["effective_roi"] = None
+
+
+def _is_approved_targeted_rerun_window(window: dict[str, Any]) -> bool:
+    if window.get("approved_action") == "targeted_rerun":
+        return True
+    provenance = window.get("approval_provenance")
+    if not isinstance(provenance, list):
+        return False
+    return any(isinstance(item, dict) and item.get("approved_action") == "targeted_rerun" for item in provenance)
+
+
+def _approved_roi_from_window(window: dict[str, Any]) -> tuple[int, int, int, int] | None:
+    roi = _coerce_roi(window.get("approved_roi"))
+    if roi is not None:
+        return roi
+    roi = _roi_from_local_search_roi(window.get("local_search_roi"))
+    if roi is not None:
+        return roi
+    provenance = window.get("approval_provenance")
+    if isinstance(provenance, list):
+        for item in provenance:
+            if not isinstance(item, dict):
+                continue
+            roi = _coerce_roi(item.get("approved_roi")) or _roi_from_local_search_roi(item.get("local_search_roi"))
+            if roi is not None:
+                return roi
+    return None
+
+
+def _roi_from_local_search_roi(value: Any) -> tuple[int, int, int, int] | None:
+    if not isinstance(value, dict):
+        return None
+    coordinate_space = str(value.get("coordinate_space") or "image").strip().lower()
+    if coordinate_space != "image":
+        return None
+    x = _finite_float(value.get("x"))
+    y = _finite_float(value.get("y"))
+    width = _positive_float(value.get("width"))
+    height = _positive_float(value.get("height"))
+    if x is None or y is None or width is None or height is None:
+        return None
+    roi = (int(round(x)), int(round(y)), int(round(x + width)), int(round(y + height)))
+    return roi if _roi_has_area(roi) else None
+
+
+def _coerce_roi(value: Any) -> tuple[int, int, int, int] | None:
+    if value in (None, "", []):
+        return None
+    if not isinstance(value, (list, tuple)) or len(value) != 4:
+        return None
+    try:
+        roi = tuple(int(item) for item in value)
+    except (TypeError, ValueError):
+        return None
+    return roi if _roi_has_area(roi) else None
+
+
+def _pad_roi(roi: tuple[int, int, int, int], padding_px: int) -> tuple[int, int, int, int]:
+    pad = max(0, int(padding_px))
+    return (roi[0] - pad, roi[1] - pad, roi[2] + pad, roi[3] + pad)
+
+
+def _intersect_rois(
+    first: tuple[int, int, int, int],
+    second: tuple[int, int, int, int] | None,
+) -> tuple[int, int, int, int] | None:
+    if second is None:
+        return first
+    roi = (max(first[0], second[0]), max(first[1], second[1]), min(first[2], second[2]), min(first[3], second[3]))
+    return roi if _roi_has_area(roi) else None
+
+
+def _clamp_roi_to_frame(
+    roi: tuple[int, int, int, int],
+    frame_bounds: tuple[int, int] | None,
+) -> tuple[int, int, int, int] | None:
+    if frame_bounds is None:
+        return roi if _roi_has_area(roi) else None
+    frame_width, frame_height = frame_bounds
+    clamped = (
+        max(0, min(frame_width, roi[0])),
+        max(0, min(frame_height, roi[1])),
+        max(0, min(frame_width, roi[2])),
+        max(0, min(frame_height, roi[3])),
+    )
+    return clamped if _roi_has_area(clamped) else None
+
+
+def _roi_has_area(roi: tuple[int, int, int, int]) -> bool:
+    return roi[2] > roi[0] and roi[3] > roi[1]
+
+
+def _frame_bounds(config: Any) -> tuple[int, int] | None:
+    mock_config = getattr(config, "mock", None)
+    if bool(getattr(mock_config, "enabled", False)):
+        width = _positive_int_value(getattr(mock_config, "frame_width", None))
+        height = _positive_int_value(getattr(mock_config, "frame_height", None))
+        if width is not None and height is not None:
+            return width, height
+
+    input_video = getattr(config, "input_video", None)
+    if not isinstance(input_video, Path) or not input_video.exists():
+        return None
+    runtime = getattr(config, "runtime", None)
+    capture_backend_name = str(getattr(runtime, "capture_backend", "CAP_ANY") or "CAP_ANY")
+    capture_backend = getattr(cv2, capture_backend_name, cv2.CAP_ANY)
+    capture = cv2.VideoCapture(str(input_video.resolve()), capture_backend)
+    try:
+        if not capture.isOpened():
+            return None
+        width = _positive_int_value(capture.get(cv2.CAP_PROP_FRAME_WIDTH))
+        height = _positive_int_value(capture.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        return (width, height) if width is not None and height is not None else None
+    finally:
+        capture.release()
+
+
+def _finite_float(value: Any) -> float | None:
+    if isinstance(value, bool) or value in (None, ""):
+        return None
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed == parsed and parsed not in (float("inf"), float("-inf")) else None
+
+
+def _positive_float(value: Any) -> float | None:
+    parsed = _finite_float(value)
+    return parsed if parsed is not None and parsed > 0 else None
+
+
+def _positive_int_value(value: Any) -> int | None:
+    parsed = _finite_float(value)
+    if parsed is None:
+        return None
+    value_int = int(parsed)
+    return value_int if value_int > 0 else None
 
 
 def _high_recall_settings(config: Any) -> _HighRecallSettings:
