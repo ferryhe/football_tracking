@@ -698,6 +698,27 @@ class AIApprovedAction(BaseModel):
     end_frame: int | None = Field(default=None, ge=0)
 
 
+class AIApprovalArtifactSummary(BaseModel):
+    name: str | None = None
+    path: str | None = None
+    exists: bool = False
+
+
+class AIImproveApprovalSummary(BaseModel):
+    approved_action_count: int = 0
+    approved_action_counts: dict[str, int] = Field(default_factory=dict)
+    targeted_rerun_count: int = 0
+    config_patch_count: int = 0
+    highlight_action_count: int = 0
+    follow_cam_action_count: int = 0
+    requires_execution: bool = False
+    requires_high_recall_rerun: bool = False
+    requires_tracking_rerun: bool = False
+    requires_follow_cam_rerender: bool = False
+    requires_highlight_render: bool = False
+    artifacts: dict[str, AIApprovalArtifactSummary] = Field(default_factory=dict)
+
+
 class AIImproveApprovalResponse(BaseModel):
     schema_version: str
     generated_at: str
@@ -711,4 +732,5 @@ class AIImproveApprovalResponse(BaseModel):
     follow_cam_rerender_plan_artifact_name: str | None = None
     follow_cam_rerender_plan_artifact_path: str | None = None
     approved_actions: list[AIApprovedAction]
+    summary: AIImproveApprovalSummary
     warnings: list[str] = Field(default_factory=list)

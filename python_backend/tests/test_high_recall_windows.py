@@ -338,6 +338,7 @@ class HighRecallWindowTests(unittest.TestCase):
                                 "height": 50,
                                 "confidence": 0.72,
                             },
+                            "provenance": {"source": "ai_improvement", "model": "gpt-improve"},
                         }
                     ],
                 },
@@ -360,8 +361,110 @@ class HighRecallWindowTests(unittest.TestCase):
         self.assertEqual("packet_001", window["source_packet_id"])
         self.assertEqual("visual_review:packet_001", window["visual_review_id"])
         self.assertEqual(120, window["local_search_roi"]["x"])
+        self.assertEqual({"start_frame": 10, "end_frame": 20}, window["rerun_scope"])
         self.assertEqual("approval_001", window["approval_provenance"][0]["approval_id"])
         self.assertEqual("imp_001", window["approval_provenance"][0]["improvement_id"])
+        self.assertEqual({"start_frame": 10, "end_frame": 20}, window["approval_provenance"][0]["rerun_scope"])
+        self.assertEqual("gpt-improve", window["approval_provenance"][0]["provenance"]["model"])
+
+    def test_explicit_approved_actions_path_rejects_corrupt_artifact(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            approved_path = output_dir / "ai_improvement_approved_actions.json"
+            approved_path.write_text("{", encoding="utf-8")
+
+            with self.assertRaisesRegex(ValueError, "ai_improvement_approved_actions.json.*corrupt"):
+                build_high_recall_windows(output_dir, approved_actions_path=approved_path)
+
+    def test_explicit_approved_actions_path_reports_generic_shape_errors_for_custom_path(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            approved_path = output_dir / "custom-approved-actions.json"
+            _write_json(approved_path, {"schema_version": "1.0", "approved_actions": ["not-an-action"]})
+
+            with self.assertRaisesRegex(ValueError, "approved actions artifact invalid"):
+                build_high_recall_windows(output_dir, approved_actions_path=approved_path)
+
+    def test_explicit_approved_actions_path_rejects_stale_targeted_rerun_without_scope(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            approved_path = output_dir / "ai_improvement_approved_actions.json"
+            _write_json(
+                approved_path,
+                {
+                    "schema_version": "1.0",
+                    "approved_actions": [
+                        {
+                            "approval_id": "approval_001",
+                            "improvement_id": "imp_001",
+                            "approved_action": "targeted_rerun",
+                        }
+                    ],
+                },
+            )
+
+            with self.assertRaisesRegex(ValueError, "targeted_rerun.*rerun_scope"):
+                build_high_recall_windows(output_dir, approved_actions_path=approved_path)
+
+    def test_explicit_approved_actions_path_rejects_malformed_targeted_rerun_provenance(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            approved_path = output_dir / "ai_improvement_approved_actions.json"
+            _write_json(
+                approved_path,
+                {
+                    "schema_version": "1.0",
+                    "approved_actions": [
+                        {
+                            "approved_action": "targeted_rerun",
+                            "improvement_id": "imp_001",
+                            "rerun_scope": {"start_frame": 10, "end_frame": 20},
+                        }
+                    ],
+                },
+            )
+
+            with self.assertRaisesRegex(ValueError, "approval_id is required"):
+                build_high_recall_windows(output_dir, approved_actions_path=approved_path)
+
+            _write_json(
+                approved_path,
+                {
+                    "schema_version": "1.0",
+                    "approved_actions": [
+                        {
+                            "approval_id": "approval_001",
+                            "approved_action": "targeted_rerun",
+                            "rerun_scope": {"start_frame": 10, "end_frame": 20},
+                        }
+                    ],
+                },
+            )
+
+            with self.assertRaisesRegex(ValueError, "improvement_id is required"):
+                build_high_recall_windows(output_dir, approved_actions_path=approved_path)
+
+    def test_explicit_approved_actions_path_rejects_fractional_targeted_rerun_frames(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            approved_path = output_dir / "ai_improvement_approved_actions.json"
+            _write_json(
+                approved_path,
+                {
+                    "schema_version": "1.0",
+                    "approved_actions": [
+                        {
+                            "approval_id": "approval_001",
+                            "improvement_id": "imp_001",
+                            "approved_action": "targeted_rerun",
+                            "rerun_scope": {"start_frame": 10.9, "end_frame": 20},
+                        }
+                    ],
+                },
+            )
+
+            with self.assertRaisesRegex(ValueError, "integer start_frame"):
+                build_high_recall_windows(output_dir, approved_actions_path=approved_path)
 
     def test_approved_non_rerun_action_does_not_create_window(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:
@@ -598,7 +701,7 @@ class HighRecallChunkRunnerHookTests(unittest.TestCase):
         )
         self.assertEqual("succeeded", report["execution"]["status"])
 
-    def test_runner_passes_approved_actions_path_when_artifact_exists(self) -> None:
+    def test_runner_does_not_pass_approved_actions_path_when_artifact_only_exists(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:
             output_dir = Path(temp_name)
             _write_json(
@@ -633,7 +736,44 @@ class HighRecallChunkRunnerHookTests(unittest.TestCase):
             ):
                 run_high_recall_windows(config, source_total_frames=20)
 
-        self.assertEqual(output_dir / "ai_improvement_approved_actions.json", write_windows.call_args.kwargs["approved_actions_path"])
+        self.assertIsNone(write_windows.call_args.kwargs["approved_actions_path"])
+
+    def test_runner_passes_configured_approved_actions_path(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            approved_path = output_dir / "approved" / "ai_improvement_approved_actions.json"
+            approved_path.parent.mkdir()
+            _write_json(approved_path, {"schema_version": "1.0", "approved_actions": []})
+            config = SimpleNamespace(
+                output_dir=output_dir,
+                output=SimpleNamespace(csv_name="ball_track.csv", debug_jsonl_name="debug.jsonl"),
+                detector=SimpleNamespace(inference_mode="direct_full_frame"),
+                runtime=SimpleNamespace(start_frame=0, max_frames=None),
+                high_recall_windows=SimpleNamespace(
+                    enabled=True,
+                    margin_frames=0,
+                    merge_gap_frames=0,
+                    max_total_frames=100,
+                    mode="sahi",
+                    output_dir_name="high_recall_windows",
+                    approved_actions_path=f"  {approved_path}  ",
+                    max_speed_px_per_frame=120.0,
+                    max_jump_px=180.0,
+                ),
+            )
+
+            with (
+                patch("football_tracking.chunk_runner.write_ball_audit_report", return_value={}),
+                patch("football_tracking.chunk_runner.write_ai_review_trigger_report", return_value={}),
+                patch("football_tracking.chunk_runner.write_event_candidate_report", return_value={}),
+                patch(
+                    "football_tracking.chunk_runner.write_high_recall_window_report",
+                    return_value={"windows": [], "summary": {"selected_window_count": 0}},
+                ) as write_windows,
+            ):
+                run_high_recall_windows(config, source_total_frames=20)
+
+        self.assertEqual(approved_path, write_windows.call_args.kwargs["approved_actions_path"])
 
     def test_runner_clears_stale_reconcile_report_when_no_windows_are_selected(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:
@@ -738,6 +878,7 @@ high_recall_windows:
   max_total_frames: 300
   mode: sahi
   output_dir_name: high_recall_windows
+  approved_actions_path: ai_improvement_approved_actions.json
   max_speed_px_per_frame: 140.0
   max_jump_px: 220.0
 """.strip()
@@ -753,6 +894,7 @@ high_recall_windows:
         self.assertEqual(300, config.high_recall_windows.max_total_frames)
         self.assertEqual("sahi", config.high_recall_windows.mode)
         self.assertEqual("high_recall_windows", config.high_recall_windows.output_dir_name)
+        self.assertEqual("ai_improvement_approved_actions.json", config.high_recall_windows.approved_actions_path)
         self.assertEqual(140.0, config.high_recall_windows.max_speed_px_per_frame)
         self.assertEqual(220.0, config.high_recall_windows.max_jump_px)
 

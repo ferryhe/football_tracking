@@ -128,7 +128,7 @@ def _collect_candidate_windows(
     if approved_actions_path is not None:
         windows.extend(
             _normalize_windows(
-                _approved_action_windows(_read_optional_json(Path(approved_actions_path))),
+                _approved_action_windows(_read_required_approved_actions(Path(approved_actions_path))),
                 margin_frames=margin_frames,
                 total_frames=total_frames,
                 mode=mode,
@@ -245,22 +245,33 @@ def _approved_action_windows(report: dict[str, Any] | None) -> list[dict[str, An
         return []
     actions = report.get("approved_actions")
     if not isinstance(actions, list):
-        return []
+        raise ValueError("approved actions artifact invalid: approved_actions must be a list.")
 
     windows: list[dict[str, Any]] = []
-    for action in actions:
-        if not isinstance(action, dict) or action.get("approved_action") != "targeted_rerun":
+    for index, action in enumerate(actions, start=1):
+        if not isinstance(action, dict):
+            raise ValueError(f"approved actions artifact invalid: approved_actions[{index}] must be an object.")
+        if action.get("approved_action") != "targeted_rerun":
             continue
+        action_label = str(action.get("approval_id") or action.get("improvement_id") or index)
+        approval_id = _required_string(action.get("approval_id"), f"approved targeted_rerun action {action_label} approval_id")
+        improvement_id = _required_string(
+            action.get("improvement_id"),
+            f"approved targeted_rerun action {action_label} improvement_id",
+        )
         rerun_scope = action.get("rerun_scope")
-        if not isinstance(rerun_scope, dict):
-            continue
-        raw_payload = dict(rerun_scope)
+        rerun_window = _required_frame_window(
+            rerun_scope,
+            f"approved targeted_rerun action {action_label} rerun_scope",
+        )
+        raw_payload = dict(rerun_window)
         raw_payload.update(
             {
-                "approval_id": action.get("approval_id"),
-                "improvement_id": action.get("improvement_id"),
+                "approval_id": approval_id,
+                "improvement_id": improvement_id,
                 "approval_source": action.get("approval_source"),
                 "approved_action": action.get("approved_action"),
+                "rerun_scope": rerun_window,
                 "source_packet_id": action.get("source_packet_id"),
                 "visual_review_id": action.get("visual_review_id"),
                 "local_search_roi": action.get("local_search_roi"),
@@ -291,6 +302,7 @@ def _raw_window(item: dict[str, Any], *, source: str, priority: str, reason: str
         "improvement_id",
         "approval_source",
         "approved_action",
+        "rerun_scope",
         "source_packet_id",
         "visual_review_id",
         "local_search_roi",
@@ -353,6 +365,7 @@ def _window_metadata(raw_window: dict[str, Any]) -> dict[str, Any]:
         "improvement_id",
         "approval_source",
         "approved_action",
+        "rerun_scope",
         "source_packet_id",
         "visual_review_id",
         "local_search_roi",
@@ -375,6 +388,7 @@ def _approval_provenance_entry(window: dict[str, Any]) -> dict[str, Any] | None:
         "improvement_id",
         "approval_source",
         "approved_action",
+        "rerun_scope",
         "source_packet_id",
         "visual_review_id",
         "local_search_roi",
@@ -424,7 +438,17 @@ def _merge_window_metadata(target: dict[str, Any], incoming: dict[str, Any]) -> 
         target.pop("approval_provenance", None)
     elif not isinstance(target.get("approval_id"), str):
         first = target["approval_provenance"][0]
-        for key in ("approval_id", "improvement_id", "approval_source", "approved_action", "local_search_roi", "provenance"):
+        for key in (
+            "approval_id",
+            "improvement_id",
+            "approval_source",
+            "approved_action",
+            "rerun_scope",
+            "source_packet_id",
+            "visual_review_id",
+            "local_search_roi",
+            "provenance",
+        ):
             if first.get(key) not in (None, "", {}):
                 target[key] = first[key]
 
@@ -587,6 +611,52 @@ def _read_optional_json(path: Path) -> dict[str, Any] | None:
     except (OSError, UnicodeDecodeError, json.JSONDecodeError):
         return None
     return loaded if isinstance(loaded, dict) else None
+
+
+def _read_required_approved_actions(path: Path) -> dict[str, Any]:
+    try:
+        loaded = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        raise ValueError(f"{path.name} missing: pass an existing approved actions artifact path.") from None
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError(f"{path.name} corrupt: {exc}") from exc
+    if not isinstance(loaded, dict):
+        raise ValueError(f"{path.name} invalid: expected JSON object.")
+    if not isinstance(loaded.get("approved_actions"), list):
+        raise ValueError(f"{path.name} invalid: approved_actions must be a list.")
+    return loaded
+
+
+def _required_frame_window(value: Any, label: str) -> dict[str, int]:
+    if not isinstance(value, dict):
+        raise ValueError(f"{label} requires rerun_scope with start_frame and end_frame.")
+    start_frame = _strict_int(value.get("start_frame"))
+    end_frame = _strict_int(value.get("end_frame"))
+    if start_frame is None or end_frame is None:
+        raise ValueError(f"{label} requires integer start_frame and end_frame.")
+    if start_frame < 0 or end_frame < 0:
+        raise ValueError(f"{label} frames must be non-negative.")
+    if end_frame < start_frame:
+        raise ValueError(f"{label}.end_frame must be greater than or equal to start_frame.")
+    return {"start_frame": start_frame, "end_frame": end_frame}
+
+
+def _required_string(value: Any, label: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{label} is required.")
+    return value.strip()
+
+
+def _strict_int(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        stripped = value.strip()
+        if stripped and stripped.lstrip("-").isdigit():
+            return int(stripped)
+    return None
 
 
 def _positive_int_or_none(value: int | None) -> int | None:

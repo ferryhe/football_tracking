@@ -914,6 +914,24 @@ paths:
                 $ref: '#/components/schemas/HealthStatus'
 components:
   schemas:
+    AIApprovalArtifactSummary:
+      properties:
+        name:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Name
+        path:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Path
+        exists:
+          type: boolean
+          title: Exists
+          default: false
+      type: object
+      title: AIApprovalArtifactSummary
     AIApprovedAction:
       properties:
         approval_id:
@@ -1271,6 +1289,8 @@ components:
             $ref: '#/components/schemas/AIApprovedAction'
           type: array
           title: Approved Actions
+        summary:
+          $ref: '#/components/schemas/AIImproveApprovalSummary'
         warnings:
           items:
             type: string
@@ -1286,7 +1306,62 @@ components:
       - artifact_name
       - artifact_path
       - approved_actions
+      - summary
       title: AIImproveApprovalResponse
+    AIImproveApprovalSummary:
+      properties:
+        approved_action_count:
+          type: integer
+          title: Approved Action Count
+          default: 0
+        approved_action_counts:
+          additionalProperties:
+            type: integer
+          type: object
+          title: Approved Action Counts
+        targeted_rerun_count:
+          type: integer
+          title: Targeted Rerun Count
+          default: 0
+        config_patch_count:
+          type: integer
+          title: Config Patch Count
+          default: 0
+        highlight_action_count:
+          type: integer
+          title: Highlight Action Count
+          default: 0
+        follow_cam_action_count:
+          type: integer
+          title: Follow Cam Action Count
+          default: 0
+        requires_execution:
+          type: boolean
+          title: Requires Execution
+          default: false
+        requires_high_recall_rerun:
+          type: boolean
+          title: Requires High Recall Rerun
+          default: false
+        requires_tracking_rerun:
+          type: boolean
+          title: Requires Tracking Rerun
+          default: false
+        requires_follow_cam_rerender:
+          type: boolean
+          title: Requires Follow Cam Rerender
+          default: false
+        requires_highlight_render:
+          type: boolean
+          title: Requires Highlight Render
+          default: false
+        artifacts:
+          additionalProperties:
+            $ref: '#/components/schemas/AIApprovalArtifactSummary'
+          type: object
+          title: Artifacts
+      type: object
+      title: AIImproveApprovalSummary
     AIImproveRequest:
       properties:
         run_id:

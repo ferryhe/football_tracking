@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import tempfile
 import threading
@@ -109,6 +110,9 @@ class ApiServiceSmokeTests(unittest.TestCase):
         for row in rows:
             lines.append(",".join(str(row[key]) for key in headers))
         return self.write_text(relative_path, "\n".join(lines) + "\n")
+
+    def file_fingerprint(self, path: Path) -> tuple[str, int]:
+        return hashlib.sha256(path.read_bytes()).hexdigest(), path.stat().st_mtime_ns
 
     def write_video(self, relative_path: str) -> Path:
         path = self.repo_root / relative_path
@@ -1175,6 +1179,47 @@ class ApiServiceSmokeTests(unittest.TestCase):
         self.assertTrue((Path(completed_run["output_dir"]) / "metrics_report.json").exists())
         self.assertIn("/outputs/runs/input/", Path(completed_run["output_dir"]).resolve().as_posix())
 
+    def test_create_follow_cam_render_rejects_tracking_rerun_required_plan(self) -> None:
+        self.create_output_bundle("kept_baseline")
+        self.write_json(
+            "outputs/kept_baseline/follow_cam_rerender_plan.json",
+            {
+                "schema_version": "1.0",
+                "source": "ai_improvement_approved_action",
+                "approval_id": "approval_001",
+                "improvement_id": "imp_camera_track",
+                "approved_action": "tracking_rerun_before_follow_cam",
+                "requires_tracking_rerun": True,
+                "tracking_rerun_scope": {"start_frame": 28, "end_frame": 54},
+                "reason": "Track rerun is required before follow-cam rerender.",
+            },
+        )
+        source_run = self.service.list_runs()[0]
+
+        with self.assertRaisesRegex(RuntimeError, "requires tracking rerun"):
+            self.service.create_follow_cam_render(
+                source_run["run_id"],
+                {"output_dir_name": "blocked_follow_cam_only"},
+            )
+
+        blocked_dir = self.repo_root / "outputs" / "runs" / "input" / "blocked_follow_cam_only"
+        self.assertFalse(blocked_dir.exists())
+
+    def test_create_follow_cam_render_rejects_corrupt_rerender_plan(self) -> None:
+        self.create_output_bundle("kept_baseline")
+        output_dir = self.repo_root / "outputs" / "kept_baseline"
+        (output_dir / "follow_cam_rerender_plan.json").write_text("{", encoding="utf-8")
+        source_run = self.service.list_runs()[0]
+
+        with self.assertRaisesRegex(RuntimeError, "follow_cam_rerender_plan.json is corrupt"):
+            self.service.create_follow_cam_render(
+                source_run["run_id"],
+                {"output_dir_name": "blocked_follow_cam_corrupt_plan"},
+            )
+
+        blocked_dir = self.repo_root / "outputs" / "runs" / "input" / "blocked_follow_cam_corrupt_plan"
+        self.assertFalse(blocked_dir.exists())
+
     def test_create_highlight_render_creates_child_task_from_event_candidate(self) -> None:
         self.create_output_bundle("kept_baseline")
         source_run = self.service.list_runs()[0]
@@ -2002,6 +2047,38 @@ class ApiServiceSmokeTests(unittest.TestCase):
         self.assertEqual("ai_improvement_report.json", response.artifact_name)
         self.assertTrue(Path(response.artifact_path).exists())
 
+    def test_ai_improve_preserves_tracks_and_does_not_create_apply_artifacts(self) -> None:
+        output_dir = self.create_output_bundle("improve_only_baseline")
+        run = self.service.list_runs()[0]
+        raw_path = output_dir / "ball_track.csv"
+        cleaned_path = output_dir / "ball_track.cleaned.csv"
+        before = {
+            raw_path.name: self.file_fingerprint(raw_path),
+            cleaned_path.name: self.file_fingerprint(cleaned_path),
+        }
+
+        response = self.service.ai_improve(
+            run_id=run["run_id"],
+            dry_run=True,
+            max_items=1,
+            language="en",
+        )
+
+        after = {
+            raw_path.name: self.file_fingerprint(raw_path),
+            cleaned_path.name: self.file_fingerprint(cleaned_path),
+        }
+        refreshed = self.service.get_run(run["run_id"])
+        artifact_names = {artifact["name"] for artifact in refreshed["artifacts"]}
+
+        self.assertEqual(before, after)
+        self.assertEqual("ai_improvement_report.json", response["artifact_name"])
+        self.assertIn("ai_improvement_report.json", artifact_names)
+        self.assertNotIn("ai_improvement_approved_config_patch.json", artifact_names)
+        self.assertNotIn("follow_cam_rerender_plan.json", artifact_names)
+        self.assertNotIn("highlight_report.json", artifact_names)
+        self.assertFalse((output_dir / "highlight.mp4").exists())
+
     def test_ai_improve_route_preserves_camera_summary_and_item_fields(self) -> None:
         output_dir = self.create_output_bundle("improve_camera_route_baseline")
         self.write_json(
@@ -2091,6 +2168,12 @@ class ApiServiceSmokeTests(unittest.TestCase):
         self.assertEqual("ai_improvement_approved_actions.json", response["artifact_name"])
         self.assertEqual(response["approved_actions"], written["approved_actions"])
         self.assertEqual("targeted_rerun", response["approved_actions"][0]["approved_action"])
+        self.assertEqual(1, response["summary"]["approved_action_count"])
+        self.assertEqual({"targeted_rerun": 1}, response["summary"]["approved_action_counts"])
+        self.assertTrue(response["summary"]["requires_execution"])
+        self.assertTrue(response["summary"]["requires_high_recall_rerun"])
+        self.assertFalse(response["summary"]["requires_tracking_rerun"])
+        self.assertEqual("ai_improvement_approved_actions.json", response["summary"]["artifacts"]["approved_actions"]["name"])
         self.assertIn("ai_improvement_approved_actions.json", artifact_names)
 
     def test_ai_improvement_approve_route_validates_config_patch_overrides(self) -> None:
@@ -2138,6 +2221,9 @@ class ApiServiceSmokeTests(unittest.TestCase):
 
         self.assertEqual({"selection": {"min_accept_score": 0.6}}, response.approved_actions[0].config_patch)
         self.assertEqual("foot_confusion", response.approved_actions[0].false_positive_class)
+        self.assertEqual(1, response.summary.approved_action_count)
+        self.assertEqual({"noise_filter_adjustment": 1}, response.summary.approved_action_counts)
+        self.assertEqual("ai_improvement_approved_config_patch.json", response.summary.artifacts["config_patch"].name)
         self.assertTrue((output_dir / "ai_improvement_approved_config_patch.json").exists())
         self.assertTrue(any("detector.confidence_threshold" in warning for warning in response.warnings))
 
@@ -2183,6 +2269,47 @@ class ApiServiceSmokeTests(unittest.TestCase):
         self.assertIn("follow_cam_rerender_plan.json", artifact_names)
         self.assertFalse(plan["requires_tracking_rerun"])
         self.assertEqual({"follow_cam": {"glide_pan_smoothing": 0.2}}, plan["recommended_config_patch"])
+
+    def test_ai_improvement_approve_tracking_rerun_plan_is_not_follow_cam_only(self) -> None:
+        output_dir = self.create_output_bundle("approve_tracking_rerun_baseline")
+        self.write_json(
+            "outputs/approve_tracking_rerun_baseline/ai_improvement_report.json",
+            {
+                "schema_version": "1.0",
+                "generated_at": "2026-06-22T00:00:00+00:00",
+                "model": "gpt-improve",
+                "summary": {"status": "needs_rerun"},
+                "improvements": [
+                    {
+                        "id": "imp_camera_track",
+                        "priority": "P0",
+                        "area": "camera_motion",
+                        "failure_tags": ["camera_catchup_spike", "ball_lost"],
+                        "root_cause_module": "follow_cam",
+                        "start_frame": 40,
+                        "end_frame": 42,
+                        "diagnosis": "Camera jump is track-driven.",
+                        "recommended_action": "tracking_rerun_before_follow_cam",
+                        "rerun_scope": {"start_frame": 28, "end_frame": 54},
+                        "confidence": 0.8,
+                    }
+                ],
+            },
+        )
+        run = self.service.list_runs()[0]
+
+        response = self.service.ai_improvement_approve(
+            run_id=run["run_id"],
+            improvement_ids=["imp_camera_track"],
+            approved_by="operator-a",
+        )
+
+        plan = json.loads((output_dir / "follow_cam_rerender_plan.json").read_text(encoding="utf-8"))
+        self.assertTrue(plan["requires_tracking_rerun"])
+        self.assertEqual({"start_frame": 28, "end_frame": 54}, plan["tracking_rerun_scope"])
+        self.assertTrue(response["summary"]["requires_tracking_rerun"])
+        self.assertFalse(response["summary"]["requires_follow_cam_rerender"])
+        self.assertEqual("tracking_rerun_before_follow_cam", response["approved_actions"][0]["approved_action"])
 
     def test_ai_improvement_approve_clears_stale_config_patch_artifact_from_response(self) -> None:
         output_dir = self.create_output_bundle("approve_no_patch_baseline")

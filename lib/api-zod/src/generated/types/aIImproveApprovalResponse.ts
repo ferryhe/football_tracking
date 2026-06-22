@@ -5,6 +5,7 @@
  * OpenAPI spec version: 0.1.0
  */
 import type { AIApprovedAction } from "./aIApprovedAction";
+import type { AIImproveApprovalSummary } from "./aIImproveApprovalSummary";
 
 export interface AIImproveApprovalResponse {
   schema_version: string;
@@ -19,5 +20,6 @@ export interface AIImproveApprovalResponse {
   follow_cam_rerender_plan_artifact_name?: string | null;
   follow_cam_rerender_plan_artifact_path?: string | null;
   approved_actions: AIApprovedAction[];
+  summary: AIImproveApprovalSummary;
   warnings?: string[];
 }

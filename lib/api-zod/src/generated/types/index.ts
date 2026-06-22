@@ -5,6 +5,7 @@
  * OpenAPI spec version: 0.1.0
  */
 
+export * from "./aIApprovalArtifactSummary";
 export * from "./aIApprovedAction";
 export * from "./aIApprovedActionApprovedAction";
 export * from "./aIApprovedActionConfigPatch";
@@ -27,6 +28,9 @@ export * from "./aIImproveApprovalRequestLocalSearchRoiOverrides";
 export * from "./aIImproveApprovalRequestRerunScopeOverrides";
 export * from "./aIImproveApprovalRequestSuggestedWindowOverrides";
 export * from "./aIImproveApprovalResponse";
+export * from "./aIImproveApprovalSummary";
+export * from "./aIImproveApprovalSummaryApprovedActionCounts";
+export * from "./aIImproveApprovalSummaryArtifacts";
 export * from "./aIImprovementItem";
 export * from "./aIImprovementItemConfigPatch";
 export * from "./aIImprovementItemEvidencePayload";

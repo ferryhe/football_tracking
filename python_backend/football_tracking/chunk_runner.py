@@ -59,6 +59,7 @@ class _HighRecallSettings:
     max_total_frames: int | None = 1800
     mode: str = "sahi"
     output_dir_name: str = "high_recall_windows"
+    approved_actions_path: Path | None = None
     max_speed_px_per_frame: float = 180.0
     max_jump_px: float = 260.0
 
@@ -255,7 +256,10 @@ def run_high_recall_windows(
     write_ai_review_trigger_report(config.output_dir)
     event_candidate_fps, event_candidate_fps_source = _event_candidate_fps(config)
     write_event_candidate_report(config.output_dir, fps=event_candidate_fps, fps_source=event_candidate_fps_source)
-    approved_actions_path = config.output_dir / "ai_improvement_approved_actions.json"
+    approved_actions_path = _resolve_configured_approved_actions_path(
+        settings.approved_actions_path,
+        output_dir=config.output_dir,
+    )
     report = write_high_recall_window_report(
         config.output_dir,
         output_dir_name=settings.output_dir_name,
@@ -264,7 +268,7 @@ def run_high_recall_windows(
         max_total_frames=settings.max_total_frames,
         total_frames=source_total_frames,
         mode=settings.mode,
-        approved_actions_path=approved_actions_path if approved_actions_path.exists() else None,
+        approved_actions_path=approved_actions_path,
     )
 
     windows = report.get("windows") if isinstance(report.get("windows"), list) else []
@@ -988,6 +992,7 @@ def _high_recall_settings(config: Any) -> _HighRecallSettings:
         max_total_frames=_positive_int(_setting(raw, "max_total_frames", 1800)),
         mode=mode,
         output_dir_name=output_dir_name,
+        approved_actions_path=_optional_approved_actions_path(_setting(raw, "approved_actions_path", None)),
         max_speed_px_per_frame=float(_setting(raw, "max_speed_px_per_frame", 180.0)),
         max_jump_px=float(_setting(raw, "max_jump_px", 260.0)),
     )
@@ -997,6 +1002,21 @@ def _setting(raw: Any, key: str, default: Any) -> Any:
     if isinstance(raw, dict):
         return raw.get(key, default)
     return getattr(raw, key, default)
+
+
+def _optional_approved_actions_path(value: Any) -> Path | None:
+    if value in (None, ""):
+        return None
+    path_text = str(value).strip()
+    if not path_text:
+        return None
+    return Path(path_text)
+
+
+def _resolve_configured_approved_actions_path(path: Path | None, *, output_dir: Path) -> Path | None:
+    if path is None:
+        return None
+    return path if path.is_absolute() else output_dir / path
 
 
 def _positive_int(value: Any) -> int | None:
