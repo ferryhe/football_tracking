@@ -425,7 +425,7 @@ class AssetGroup(BaseModel):
 
 
 class CreateRunRequest(BaseModel):
-    config_name: str
+    config_name: str | None = None
     input_video: str | None = None
     parent_run_id: str | None = None
     output_dir_name: str | None = None
@@ -434,7 +434,29 @@ class CreateRunRequest(BaseModel):
     enable_follow_cam: bool | None = None
     start_frame: int | None = None
     max_frames: int | None = None
+    approved_action_ids: list[str] = Field(default_factory=list)
+    approved_actions_artifact_name: str | None = None
     notes: str | None = None
+
+    @model_validator(mode="after")
+    def validate_create_mode(self) -> "CreateRunRequest":
+        if self.config_name is not None:
+            self.config_name = self.config_name.strip() or None
+        if self.parent_run_id is not None:
+            self.parent_run_id = self.parent_run_id.strip() or None
+        if self.approved_actions_artifact_name is not None:
+            self.approved_actions_artifact_name = self.approved_actions_artifact_name.strip() or None
+        approved_ids = [str(item).strip() for item in self.approved_action_ids if str(item).strip()]
+        self.approved_action_ids = approved_ids
+        has_approved_artifact = bool(self.approved_actions_artifact_name)
+        is_approved_child = bool(approved_ids or has_approved_artifact)
+        if is_approved_child:
+            if not self.parent_run_id:
+                raise ValueError("Approved child targeted rerun requires parent_run_id.")
+            return self
+        if not self.config_name:
+            raise ValueError("Create run requires config_name unless approved child targeted rerun fields are provided.")
+        return self
 
 
 class FollowCamRenderRequest(BaseModel):

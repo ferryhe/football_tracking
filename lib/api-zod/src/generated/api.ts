@@ -1086,7 +1086,7 @@ export const DeleteRunOutputResponse = zod.object({
  * @summary Create Run
  */
 export const CreateRunBody = zod.object({
-  config_name: zod.string(),
+  config_name: zod.union([zod.string(), zod.null()]).optional(),
   input_video: zod.union([zod.string(), zod.null()]).optional(),
   parent_run_id: zod.union([zod.string(), zod.null()]).optional(),
   output_dir_name: zod.union([zod.string(), zod.null()]).optional(),
@@ -1095,6 +1095,10 @@ export const CreateRunBody = zod.object({
   enable_follow_cam: zod.union([zod.boolean(), zod.null()]).optional(),
   start_frame: zod.union([zod.number(), zod.null()]).optional(),
   max_frames: zod.union([zod.number(), zod.null()]).optional(),
+  approved_action_ids: zod.array(zod.string()).optional(),
+  approved_actions_artifact_name: zod
+    .union([zod.string(), zod.null()])
+    .optional(),
   notes: zod.union([zod.string(), zod.null()]).optional(),
 });
 

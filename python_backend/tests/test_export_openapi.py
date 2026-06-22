@@ -107,6 +107,14 @@ class ExportOpenApiTests(unittest.TestCase):
         self.assertIn("exactly one of candidate_id, approved_action_id, or start_frame/end_frame", postprocess)
         self.assertNotIn("Get Player Tracks Report", postprocess)
 
+    def test_generated_clients_expose_approved_child_rerun_fields(self) -> None:
+        react_schemas = Path("lib/api-client-react/src/generated/api.schemas.ts").read_text(encoding="utf-8")
+        zod_api = Path("lib/api-zod/src/generated/api.ts").read_text(encoding="utf-8")
+
+        for field in ("approved_action_ids", "approved_actions_artifact_name"):
+            self.assertIn(field, react_schemas)
+            self.assertIn(field, zod_api)
+
 
 if __name__ == "__main__":
     unittest.main()

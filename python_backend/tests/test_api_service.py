@@ -22,7 +22,13 @@ from football_tracking.api.routes.ai import approve_improvements as approve_impr
 from football_tracking.api.routes.ai import improve as improve_route
 from football_tracking.api.routes import runs as run_routes
 from football_tracking.api.routes.artifacts import get_artifact
-from football_tracking.api.schemas import AIFrameWindow, AIImproveApprovalRequest, AIImproveRequest, HighlightRenderRequest
+from football_tracking.api.schemas import (
+    AIFrameWindow,
+    AIImproveApprovalRequest,
+    AIImproveRequest,
+    CreateRunRequest,
+    HighlightRenderRequest,
+)
 from football_tracking.api.service import ApiService
 from football_tracking.config import load_config
 from football_tracking.metrics import write_run_artifacts
@@ -741,6 +747,19 @@ class ApiServiceSmokeTests(unittest.TestCase):
 
         self.assertIn("/api/v1/inputs/quality-check", route_paths)
 
+    def test_create_run_route_reports_value_error_as_bad_request(self) -> None:
+        class BadRequestService:
+            def create_run(self, request):
+                raise ValueError("bad request")
+
+        with self.assertRaises(HTTPException) as raised:
+            run_routes.create_run(
+                CreateRunRequest(config_name="default.yaml"),
+                service=BadRequestService(),  # type: ignore[arg-type]
+            )
+
+        self.assertEqual(400, raised.exception.status_code)
+
     def test_quality_check_route_uses_service_response(self) -> None:
         if not hasattr(input_routes, "check_input_quality"):
             self.fail("inputs.check_input_quality route is missing")
@@ -1114,6 +1133,561 @@ class ApiServiceSmokeTests(unittest.TestCase):
             Path(created_run["output_dir"]).resolve().as_posix(),
         )
         self.assertTrue(Path(created_run["output_dir"]).exists())
+
+    def test_create_run_thread_start_failure_cleans_reservation_registry_and_output(self) -> None:
+        class FailingStartThread:
+            def __init__(self, *, target, args, name, daemon) -> None:
+                pass
+
+            def start(self) -> None:
+                raise RuntimeError("thread start failed")
+
+            def is_alive(self) -> bool:
+                return False
+
+        with mock.patch("football_tracking.api.service.threading.Thread", FailingStartThread):
+            with self.assertRaisesRegex(RuntimeError, "thread start failed"):
+                self.service.create_run(
+                    {
+                        "config_name": "default.yaml",
+                        "input_video": str((self.repo_root / "data" / "input.mp4").resolve()),
+                        "output_dir_name": "baseline_start_failed",
+                    }
+                )
+
+        self.assertFalse((self.repo_root / "outputs" / "runs" / "input" / "baseline_start_failed").exists())
+        self.assertEqual([], [run for run in self.service.list_runs() if run["run_id"] == "baseline_start_failed"])
+        self.assertNotIn("baseline_start_failed", self.service._active_threads)
+        self.assertNotIn("baseline_start_failed", self.service._cancel_events)
+
+    def test_normal_create_run_still_requires_config_name(self) -> None:
+        with self.assertRaises(ValidationError):
+            CreateRunRequest(output_dir_name="missing_config")
+
+        with self.assertRaisesRegex(ValueError, "config_name"):
+            self.service.create_run({"output_dir_name": "missing_config"})
+
+    def test_create_run_request_strips_approved_child_fields(self) -> None:
+        request = CreateRunRequest(
+            parent_run_id=" parent_run ",
+            approved_action_ids=[" approval_001 ", " ", ""],
+            approved_actions_artifact_name=" approvals.json ",
+        )
+
+        self.assertEqual("parent_run", request.parent_run_id)
+        self.assertEqual(["approval_001"], request.approved_action_ids)
+        self.assertEqual("approvals.json", request.approved_actions_artifact_name)
+
+        with self.assertRaises(ValidationError):
+            CreateRunRequest(parent_run_id=" ", approved_actions_artifact_name=" ")
+
+    def test_approved_child_run_executes_selected_id_without_mutating_parent(self) -> None:
+        parent_output_dir = self.create_output_bundle("kept_baseline")
+        self.write_json(
+            "outputs/kept_baseline/ai_improvement_approved_actions.json",
+            {
+                "schema_version": "1.0",
+                "source_report": "ai_improvement_report.json",
+                "metadata": {"kept": True},
+                "approved_actions": [
+                    {
+                        "approval_id": "approval_keep",
+                        "improvement_id": "imp_keep",
+                        "approved_action": "targeted_rerun",
+                        "approval_source": "api",
+                        "approved_at": "2026-06-22T00:00:00+00:00",
+                        "approved_by": "operator-a",
+                        "rerun_scope": {"start_frame": 4, "end_frame": 6},
+                    },
+                    {
+                        "approval_id": "approval_skip",
+                        "improvement_id": "imp_skip",
+                        "approved_action": "targeted_rerun",
+                        "approval_source": "api",
+                        "approved_at": "2026-06-22T00:00:00+00:00",
+                        "approved_by": "operator-a",
+                        "rerun_scope": {"start_frame": 20, "end_frame": 30},
+                    },
+                ],
+            },
+        )
+        parent_run = self.service.list_runs()[0]
+        watched_paths = [
+            parent_output_dir / "ball_track.csv",
+            parent_output_dir / "ball_track.cleaned.csv",
+            parent_output_dir / "follow_cam.mp4",
+            Path(parent_run["config_path"]),
+        ]
+        before = {path: self.file_fingerprint(path) for path in watched_paths}
+
+        class ImmediateThread:
+            def __init__(self, *, target, args, name, daemon) -> None:
+                self._target = target
+                self._args = args
+                self._alive = False
+
+            def start(self) -> None:
+                self._alive = True
+                try:
+                    self._target(*self._args)
+                finally:
+                    self._alive = False
+
+            def is_alive(self) -> bool:
+                return self._alive
+
+        with (
+            mock.patch("football_tracking.api.service.threading.Thread", ImmediateThread),
+            mock.patch(
+                "football_tracking.api.service.run_high_recall_windows",
+                return_value={
+                    "windows": [{"start_frame": 4, "end_frame": 6}],
+                    "execution": {"status": "succeeded"},
+                },
+            ) as rerun,
+        ):
+            created = self.service.create_run(
+                {
+                    "parent_run_id": parent_run["run_id"],
+                    "approved_action_ids": ["approval_keep"],
+                    "output_dir_name": "approved_child_run",
+                }
+            )
+
+        child = self.service.get_run(created["run_id"])
+        child_output_dir = Path(child["output_dir"])
+        selected_artifact = json.loads((child_output_dir / "ai_improvement_approved_actions.json").read_text(encoding="utf-8"))
+        child_config = yaml.safe_load((child_output_dir / "approved_targeted_rerun_config.yaml").read_text(encoding="utf-8"))
+        runner_config = rerun.call_args.args[0]
+
+        self.assertEqual("completed", child["status"])
+        self.assertEqual(parent_run["run_id"], child["parent_run_id"])
+        self.assertEqual(["approval_keep"], [item["approval_id"] for item in selected_artifact["approved_actions"]])
+        self.assertEqual({"kept": True}, selected_artifact["metadata"])
+        self.assertTrue((child_output_dir / "ball_track.csv").exists())
+        self.assertTrue((child_output_dir / "ball_track.cleaned.csv").exists())
+        self.assertEqual(
+            (child_output_dir / "approved_targeted_rerun_config.yaml").resolve(),
+            Path(child["config_path"]).resolve(),
+        )
+        self.assertTrue(child_config["high_recall_windows"]["approved_only"])
+        self.assertEqual(0, child_config["high_recall_windows"]["margin_frames"])
+        self.assertEqual(0, child_config["high_recall_windows"]["merge_gap_frames"])
+        self.assertFalse(child_config["postprocess"]["enabled"])
+        self.assertFalse(child_config["follow_cam"]["enabled"])
+        self.assertFalse(child_config["temporal_chunks"]["enabled"])
+        self.assertTrue(runner_config.high_recall_windows.enabled)
+        self.assertTrue(runner_config.high_recall_windows.approved_only)
+        self.assertEqual(3, runner_config.high_recall_windows.max_total_frames)
+        self.assertFalse(runner_config.postprocess.enabled)
+        self.assertFalse(runner_config.follow_cam.enabled)
+        self.assertFalse(runner_config.temporal_chunks.enabled)
+        self.assertEqual(before, {path: self.file_fingerprint(path) for path in watched_paths})
+
+    def test_approved_child_artifact_only_custom_artifact_uses_all_actions_and_preserves_metadata(self) -> None:
+        self.create_output_bundle("kept_baseline")
+        custom_artifact = self.write_json(
+            "outputs/kept_baseline/approvals/custom_actions.json",
+            {
+                "schema_version": "1.0",
+                "source_report": "custom_report.json",
+                "metadata": {"mode": "artifact-only"},
+                "approved_actions": [
+                    {
+                        "approval_id": "approval_001",
+                        "improvement_id": "imp_001",
+                        "approved_action": "targeted_rerun",
+                        "approval_source": "api",
+                        "approved_at": "2026-06-22T00:00:00+00:00",
+                        "approved_by": "operator-a",
+                        "rerun_scope": {"start_frame": 1, "end_frame": 1},
+                    },
+                    {
+                        "approval_id": "approval_manual",
+                        "improvement_id": "imp_manual",
+                        "approved_action": "manual_review",
+                        "approval_source": "api",
+                        "approved_at": "2026-06-22T00:00:00+00:00",
+                        "approved_by": "operator-a",
+                    },
+                ],
+            },
+        )
+        parent_run = self.service.list_runs()[0]
+
+        class PassiveThread:
+            def __init__(self, *, target, args, name, daemon) -> None:
+                self._alive = False
+
+            def start(self) -> None:
+                self._alive = False
+
+            def is_alive(self) -> bool:
+                return self._alive
+
+        with mock.patch("football_tracking.api.service.threading.Thread", PassiveThread):
+            created = self.service.create_run(
+                {
+                    "parent_run_id": parent_run["run_id"],
+                    "approved_actions_artifact_name": "approvals/custom_actions.json",
+                    "output_dir_name": "artifact_only_child",
+                }
+            )
+
+        child_artifact_path = Path(created["output_dir"]) / "ai_improvement_approved_actions.json"
+        child_artifact = json.loads(child_artifact_path.read_text(encoding="utf-8"))
+
+        self.assertEqual("queued", created["status"])
+        self.assertEqual(["approval_001", "approval_manual"], [item["approval_id"] for item in child_artifact["approved_actions"]])
+        self.assertEqual({"mode": "artifact-only"}, child_artifact["metadata"])
+        self.assertEqual("custom_report.json", child_artifact["source_report"])
+        self.assertEqual(str(custom_artifact), child_artifact["source_approved_actions_path"])
+
+    def test_approved_child_rejects_frame_budget_over_config_limit_before_output(self) -> None:
+        self.create_output_bundle("kept_baseline")
+        self.write_json(
+            "outputs/kept_baseline/ai_improvement_approved_actions.json",
+            {
+                "schema_version": "1.0",
+                "approved_actions": [
+                    {
+                        "approval_id": "approval_huge",
+                        "improvement_id": "imp_huge",
+                        "approved_action": "targeted_rerun",
+                        "rerun_scope": {"start_frame": 0, "end_frame": 1800},
+                    }
+                ],
+            },
+        )
+        parent_run = self.service.list_runs()[0]
+
+        with self.assertRaisesRegex(ValueError, "frame budget"):
+            self.service.create_run(
+                {
+                    "parent_run_id": parent_run["run_id"],
+                    "approved_action_ids": ["approval_huge"],
+                    "output_dir_name": "huge_budget_child",
+                }
+            )
+
+        self.assertFalse((self.repo_root / "outputs" / "runs" / "input" / "huge_budget_child").exists())
+
+    def test_approved_child_rejects_fractional_frame_before_output_dir_creation(self) -> None:
+        self.create_output_bundle("kept_baseline")
+        self.write_json(
+            "outputs/kept_baseline/ai_improvement_approved_actions.json",
+            {
+                "schema_version": "1.0",
+                "approved_actions": [
+                    {
+                        "approval_id": "approval_bad",
+                        "improvement_id": "imp_bad",
+                        "approved_action": "targeted_rerun",
+                        "rerun_scope": {"start_frame": 1.5, "end_frame": 4},
+                    }
+                ],
+            },
+        )
+        parent_run = self.service.list_runs()[0]
+
+        with self.assertRaisesRegex(ValueError, "integer start_frame"):
+            self.service.create_run(
+                {
+                    "parent_run_id": parent_run["run_id"],
+                    "approved_action_ids": ["approval_bad"],
+                    "output_dir_name": "bad_fractional_child",
+                }
+            )
+
+        self.assertFalse((self.repo_root / "outputs" / "runs" / "input" / "bad_fractional_child").exists())
+
+    def test_approved_child_rejects_unsafe_output_dir_name_before_output_dir_creation(self) -> None:
+        self.create_output_bundle("kept_baseline")
+        self.write_json(
+            "outputs/kept_baseline/ai_improvement_approved_actions.json",
+            {
+                "schema_version": "1.0",
+                "approved_actions": [
+                    {
+                        "approval_id": "approval_001",
+                        "improvement_id": "imp_001",
+                        "approved_action": "targeted_rerun",
+                        "rerun_scope": {"start_frame": 1, "end_frame": 2},
+                    }
+                ],
+            },
+        )
+        parent_run = self.service.list_runs()[0]
+
+        with self.assertRaisesRegex(ValueError, "output_dir_name"):
+            self.service.create_run(
+                {
+                    "parent_run_id": parent_run["run_id"],
+                    "approved_action_ids": ["approval_001"],
+                    "output_dir_name": "..",
+                }
+            )
+
+        self.assertFalse((self.repo_root / "outputs" / "runs" / "input").exists())
+
+    def test_approved_child_rejects_active_run_before_output_dir_creation(self) -> None:
+        self.create_output_bundle("kept_baseline")
+        self.write_json(
+            "outputs/kept_baseline/ai_improvement_approved_actions.json",
+            {
+                "schema_version": "1.0",
+                "approved_actions": [
+                    {
+                        "approval_id": "approval_001",
+                        "improvement_id": "imp_001",
+                        "approved_action": "targeted_rerun",
+                        "rerun_scope": {"start_frame": 1, "end_frame": 2},
+                    }
+                ],
+            },
+        )
+        parent_run = self.service.list_runs()[0]
+
+        class ReservedThread:
+            def is_alive(self) -> bool:
+                return False
+
+        self.service._active_threads["other_run"] = ReservedThread()  # type: ignore[assignment]
+        self.service._cancel_events["other_run"] = threading.Event()
+
+        with self.assertRaisesRegex(RuntimeError, "Another run is already active"):
+            self.service.create_run(
+                {
+                    "parent_run_id": parent_run["run_id"],
+                    "approved_action_ids": ["approval_001"],
+                    "output_dir_name": "blocked_active_child",
+                }
+            )
+
+        self.assertFalse((self.repo_root / "outputs" / "runs" / "input" / "blocked_active_child").exists())
+
+    def test_approved_child_existing_empty_output_dir_is_not_deleted(self) -> None:
+        self.create_output_bundle("kept_baseline")
+        self.write_json(
+            "outputs/kept_baseline/ai_improvement_approved_actions.json",
+            {
+                "schema_version": "1.0",
+                "approved_actions": [
+                    {
+                        "approval_id": "approval_001",
+                        "improvement_id": "imp_001",
+                        "approved_action": "targeted_rerun",
+                        "rerun_scope": {"start_frame": 1, "end_frame": 2},
+                    }
+                ],
+            },
+        )
+        parent_run = self.service.list_runs()[0]
+        existing_dir = self.repo_root / "outputs" / "runs" / "input" / "existing_empty_child"
+        existing_dir.mkdir(parents=True)
+
+        with self.assertRaises(FileExistsError):
+            self.service.create_run(
+                {
+                    "parent_run_id": parent_run["run_id"],
+                    "approved_action_ids": ["approval_001"],
+                    "output_dir_name": "existing_empty_child",
+                }
+            )
+
+        self.assertTrue(existing_dir.exists())
+        self.assertEqual([], list(existing_dir.iterdir()))
+
+    def test_approved_child_no_executable_runner_windows_marks_failed(self) -> None:
+        self.create_output_bundle("kept_baseline")
+        self.write_json(
+            "outputs/kept_baseline/ai_improvement_approved_actions.json",
+            {
+                "schema_version": "1.0",
+                "approved_actions": [
+                    {
+                        "approval_id": "approval_001",
+                        "improvement_id": "imp_001",
+                        "approved_action": "targeted_rerun",
+                        "rerun_scope": {"start_frame": 1, "end_frame": 2},
+                    }
+                ],
+            },
+        )
+        parent_run = self.service.list_runs()[0]
+
+        class ImmediateThread:
+            def __init__(self, *, target, args, name, daemon) -> None:
+                self._target = target
+                self._args = args
+
+            def start(self) -> None:
+                self._target(*self._args)
+
+            def is_alive(self) -> bool:
+                return False
+
+        with (
+            mock.patch("football_tracking.api.service.threading.Thread", ImmediateThread),
+            mock.patch(
+                "football_tracking.api.service.run_high_recall_windows",
+                return_value={"windows": [], "execution": {"status": "skipped"}},
+            ),
+        ):
+            created = self.service.create_run(
+                {
+                    "parent_run_id": parent_run["run_id"],
+                    "approved_action_ids": ["approval_001"],
+                    "output_dir_name": "no_windows_child",
+                }
+            )
+
+        child = self.service.get_run(created["run_id"])
+        self.assertEqual("failed", child["status"])
+        self.assertIn("no executable windows", child["error"])
+
+    def test_approved_child_failed_runner_still_reports_parent_mutation(self) -> None:
+        parent_output = self.create_output_bundle("kept_baseline")
+        self.write_json(
+            "outputs/kept_baseline/ai_improvement_approved_actions.json",
+            {
+                "schema_version": "1.0",
+                "approved_actions": [
+                    {
+                        "approval_id": "approval_001",
+                        "improvement_id": "imp_001",
+                        "approved_action": "targeted_rerun",
+                        "rerun_scope": {"start_frame": 1, "end_frame": 2},
+                    }
+                ],
+            },
+        )
+        parent_run = self.service.list_runs()[0]
+
+        class ImmediateThread:
+            def __init__(self, *, target, args, name, daemon) -> None:
+                self._target = target
+                self._args = args
+
+            def start(self) -> None:
+                self._target(*self._args)
+
+            def is_alive(self) -> bool:
+                return False
+
+        def mutate_parent_and_fail(*args, **kwargs):
+            (parent_output / "follow_cam.mp4").write_text("mutated", encoding="utf-8")
+            raise RuntimeError("runner failed")
+
+        with (
+            mock.patch("football_tracking.api.service.threading.Thread", ImmediateThread),
+            mock.patch("football_tracking.api.service.run_high_recall_windows", side_effect=mutate_parent_and_fail),
+        ):
+            created = self.service.create_run(
+                {
+                    "parent_run_id": parent_run["run_id"],
+                    "approved_action_ids": ["approval_001"],
+                    "output_dir_name": "mutated_parent_child",
+                }
+            )
+
+        child = self.service.get_run(created["run_id"])
+        self.assertEqual("failed", child["status"])
+        self.assertIn("runner failed", child["error"])
+        self.assertIn("Parent run artifact changed", child["error"])
+
+    def test_approved_child_detects_parent_artifact_created_during_run(self) -> None:
+        parent_output = self.create_output_bundle("kept_baseline")
+        self.assertFalse((parent_output / "highlight.mp4").exists())
+        self.write_json(
+            "outputs/kept_baseline/ai_improvement_approved_actions.json",
+            {
+                "schema_version": "1.0",
+                "approved_actions": [
+                    {
+                        "approval_id": "approval_001",
+                        "improvement_id": "imp_001",
+                        "approved_action": "targeted_rerun",
+                        "rerun_scope": {"start_frame": 1, "end_frame": 2},
+                    }
+                ],
+            },
+        )
+        parent_run = self.service.list_runs()[0]
+
+        class ImmediateThread:
+            def __init__(self, *, target, args, name, daemon) -> None:
+                self._target = target
+                self._args = args
+
+            def start(self) -> None:
+                self._target(*self._args)
+
+            def is_alive(self) -> bool:
+                return False
+
+        def create_parent_highlight(*args, **kwargs):
+            (parent_output / "highlight.mp4").write_text("new parent highlight", encoding="utf-8")
+            return {"windows": [{"start_frame": 1, "end_frame": 2}], "execution": {"status": "succeeded"}}
+
+        with (
+            mock.patch("football_tracking.api.service.threading.Thread", ImmediateThread),
+            mock.patch("football_tracking.api.service.run_high_recall_windows", side_effect=create_parent_highlight),
+        ):
+            created = self.service.create_run(
+                {
+                    "parent_run_id": parent_run["run_id"],
+                    "approved_action_ids": ["approval_001"],
+                    "output_dir_name": "created_parent_artifact_child",
+                }
+            )
+
+        child = self.service.get_run(created["run_id"])
+        self.assertEqual("failed", child["status"])
+        self.assertIn("highlight.mp4", child["error"])
+
+    def test_approved_child_thread_start_failure_cleans_registry_and_output(self) -> None:
+        self.create_output_bundle("kept_baseline")
+        self.write_json(
+            "outputs/kept_baseline/ai_improvement_approved_actions.json",
+            {
+                "schema_version": "1.0",
+                "approved_actions": [
+                    {
+                        "approval_id": "approval_001",
+                        "improvement_id": "imp_001",
+                        "approved_action": "targeted_rerun",
+                        "rerun_scope": {"start_frame": 1, "end_frame": 2},
+                    }
+                ],
+            },
+        )
+        parent_run = self.service.list_runs()[0]
+
+        class FailingStartThread:
+            def __init__(self, *, target, args, name, daemon) -> None:
+                pass
+
+            def start(self) -> None:
+                raise RuntimeError("thread start failed")
+
+            def is_alive(self) -> bool:
+                return False
+
+        with mock.patch("football_tracking.api.service.threading.Thread", FailingStartThread):
+            with self.assertRaisesRegex(RuntimeError, "thread start failed"):
+                self.service.create_run(
+                    {
+                        "parent_run_id": parent_run["run_id"],
+                        "approved_action_ids": ["approval_001"],
+                        "output_dir_name": "thread_start_failed_child",
+                    }
+                )
+
+        self.assertFalse((self.repo_root / "outputs" / "runs" / "input" / "thread_start_failed_child").exists())
+        self.assertEqual([], [run for run in self.service.list_runs() if run["run_id"] == "thread_start_failed_child"])
+        self.assertNotIn("thread_start_failed_child", self.service._active_threads)
+        self.assertNotIn("thread_start_failed_child", self.service._cancel_events)
 
     def test_create_follow_cam_render_creates_standalone_deliverable_task(self) -> None:
         self.create_output_bundle("kept_baseline")
