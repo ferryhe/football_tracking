@@ -41,6 +41,7 @@ AIRecommendedAction: TypeAlias = Literal[
     "adjust_highlight_window",
     "adjust_follow_cam",
     "tracking_rerun_before_follow_cam",
+    "human_review_camera_motion",
     "render_suggested_highlight",
 ]
 

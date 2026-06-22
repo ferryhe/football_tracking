@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pathlib import Path
 import unittest
 
 from scripts.export_openapi import _frontend_paths, build_openapi_document
@@ -54,6 +55,28 @@ class ExportOpenApiTests(unittest.TestCase):
         )
 
         self.assertEqual("keep_api_v1_name", paths["/sample"]["get"]["operationId"])
+
+    def test_generated_clients_expose_ai_camera_improvement_fields(self) -> None:
+        react_schemas = Path("lib/api-client-react/src/generated/api.schemas.ts").read_text(encoding="utf-8")
+        zod_summary = Path("lib/api-zod/src/generated/types/aIImproveSummary.ts").read_text(encoding="utf-8")
+        zod_item = Path("lib/api-zod/src/generated/types/aIImprovementItem.ts").read_text(encoding="utf-8")
+        zod_action = Path("lib/api-zod/src/generated/types/aIApprovedAction.ts").read_text(encoding="utf-8")
+        zod_api = Path("lib/api-zod/src/generated/api.ts").read_text(encoding="utf-8")
+
+        for field in ("camera_improvement_count", "camera_severity_counts", "camera_action_counts"):
+            self.assertIn(field, react_schemas)
+            self.assertIn(field, zod_summary)
+            self.assertIn(field, zod_api)
+        for field in (
+            "camera_motion_event_id",
+            "camera_motion_severity",
+            "evidence_payload",
+            "follow_cam_rerender_plan",
+        ):
+            self.assertIn(field, react_schemas)
+            self.assertIn(field, zod_item)
+        for field in ("camera_motion_event_id", "camera_motion_severity"):
+            self.assertIn(field, zod_action)
 
 
 if __name__ == "__main__":

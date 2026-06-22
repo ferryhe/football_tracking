@@ -4,6 +4,8 @@
  * Api
  * OpenAPI spec version: 0.1.0
  */
+import type { AIImproveSummaryCameraActionCounts } from "./aIImproveSummaryCameraActionCounts";
+import type { AIImproveSummaryCameraSeverityCounts } from "./aIImproveSummaryCameraSeverityCounts";
 import type { AIImproveSummaryStatus } from "./aIImproveSummaryStatus";
 
 export interface AIImproveSummary {
@@ -13,4 +15,7 @@ export interface AIImproveSummary {
   targeted_rerun_count?: number;
   config_patch_count?: number;
   highlight_adjustment_count?: number;
+  camera_improvement_count?: number;
+  camera_severity_counts?: AIImproveSummaryCameraSeverityCounts;
+  camera_action_counts?: AIImproveSummaryCameraActionCounts;
 }

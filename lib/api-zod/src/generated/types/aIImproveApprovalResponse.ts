@@ -16,6 +16,8 @@ export interface AIImproveApprovalResponse {
   artifact_path: string;
   config_patch_artifact_name?: string | null;
   config_patch_artifact_path?: string | null;
+  follow_cam_rerender_plan_artifact_name?: string | null;
+  follow_cam_rerender_plan_artifact_path?: string | null;
   approved_actions: AIApprovedAction[];
   warnings?: string[];
 }

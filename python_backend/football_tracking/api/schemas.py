@@ -498,6 +498,9 @@ class AIImproveSummary(BaseModel):
     targeted_rerun_count: int = 0
     config_patch_count: int = 0
     highlight_adjustment_count: int = 0
+    camera_improvement_count: int = 0
+    camera_severity_counts: dict[str, int] = Field(default_factory=dict)
+    camera_action_counts: dict[str, int] = Field(default_factory=dict)
 
 
 class AIFrameWindow(BaseModel):
@@ -546,6 +549,10 @@ class AIImprovementItem(BaseModel):
     likely_ball_region: AILikelyBallRegion | None = None
     local_search_roi: AILocalSearchRoi | None = None
     false_positive_class: str | None = None
+    camera_motion_event_id: str | None = None
+    camera_motion_severity: str | None = None
+    evidence_payload: dict[str, Any] = Field(default_factory=dict)
+    follow_cam_rerender_plan: dict[str, Any] | None = None
 
 
 class AIHighlightAdjustment(BaseModel):
@@ -627,6 +634,8 @@ class AIApprovedAction(BaseModel):
     visual_review_id: str | None = None
     candidate_id: str | None = None
     false_positive_class: str | None = None
+    camera_motion_event_id: str | None = None
+    camera_motion_severity: str | None = None
     start_frame: int | None = Field(default=None, ge=0)
     end_frame: int | None = Field(default=None, ge=0)
 
@@ -641,5 +650,7 @@ class AIImproveApprovalResponse(BaseModel):
     artifact_path: str
     config_patch_artifact_name: str | None = None
     config_patch_artifact_path: str | None = None
+    follow_cam_rerender_plan_artifact_name: str | None = None
+    follow_cam_rerender_plan_artifact_path: str | None = None
     approved_actions: list[AIApprovedAction]
     warnings: list[str] = Field(default_factory=list)

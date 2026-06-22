@@ -24,6 +24,7 @@ import yaml
 from football_tracking.ai_improvement import (
     APPROVED_ACTIONS_FILE_NAME,
     APPROVED_CONFIG_PATCH_FILE_NAME,
+    FOLLOW_CAM_RERENDER_PLAN_FILE_NAME,
     approve_ai_improvement_actions,
     compact_ai_improvement_summary,
     write_ai_improvement_report,
@@ -971,16 +972,22 @@ class ApiService:
 
         artifact_path = (output_dir / APPROVED_ACTIONS_FILE_NAME).resolve()
         config_patch_path = (output_dir / APPROVED_CONFIG_PATCH_FILE_NAME).resolve()
+        follow_cam_plan_path = (output_dir / FOLLOW_CAM_RERENDER_PLAN_FILE_NAME).resolve()
         response = {
             **artifact,
             "artifact_name": APPROVED_ACTIONS_FILE_NAME,
             "artifact_path": str(artifact_path),
             "config_patch_artifact_name": None,
             "config_patch_artifact_path": None,
+            "follow_cam_rerender_plan_artifact_name": None,
+            "follow_cam_rerender_plan_artifact_path": None,
         }
         if config_patch_path.exists():
             response["config_patch_artifact_name"] = APPROVED_CONFIG_PATCH_FILE_NAME
             response["config_patch_artifact_path"] = str(config_patch_path)
+        if follow_cam_plan_path.exists():
+            response["follow_cam_rerender_plan_artifact_name"] = FOLLOW_CAM_RERENDER_PLAN_FILE_NAME
+            response["follow_cam_rerender_plan_artifact_path"] = str(follow_cam_plan_path)
         return response
 
     def _ai_explain_heuristic(

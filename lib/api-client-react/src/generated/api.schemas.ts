@@ -19,6 +19,7 @@ export const AIApprovedActionApprovedAction = {
   adjust_highlight_window: "adjust_highlight_window",
   adjust_follow_cam: "adjust_follow_cam",
   tracking_rerun_before_follow_cam: "tracking_rerun_before_follow_cam",
+  human_review_camera_motion: "human_review_camera_motion",
   render_suggested_highlight: "render_suggested_highlight",
 } as const;
 
@@ -80,6 +81,8 @@ export interface AIApprovedAction {
   visual_review_id?: string | null;
   candidate_id?: string | null;
   false_positive_class?: string | null;
+  camera_motion_event_id?: string | null;
+  camera_motion_severity?: string | null;
   start_frame?: number | null;
   end_frame?: number | null;
   [key: string]: unknown;
@@ -188,6 +191,8 @@ export interface AIImproveApprovalResponse {
   artifact_path: string;
   config_patch_artifact_name?: string | null;
   config_patch_artifact_path?: string | null;
+  follow_cam_rerender_plan_artifact_name?: string | null;
+  follow_cam_rerender_plan_artifact_path?: string | null;
   approved_actions: AIApprovedAction[];
   warnings?: string[];
 }
@@ -223,6 +228,10 @@ export const AIImproveSummaryStatus = {
   error: "error",
 } as const;
 
+export type AIImproveSummaryCameraSeverityCounts = { [key: string]: number };
+
+export type AIImproveSummaryCameraActionCounts = { [key: string]: number };
+
 export interface AIImproveSummary {
   status: AIImproveSummaryStatus;
   primary_issue?: string | null;
@@ -230,6 +239,9 @@ export interface AIImproveSummary {
   targeted_rerun_count?: number;
   config_patch_count?: number;
   highlight_adjustment_count?: number;
+  camera_improvement_count?: number;
+  camera_severity_counts?: AIImproveSummaryCameraSeverityCounts;
+  camera_action_counts?: AIImproveSummaryCameraActionCounts;
 }
 
 export type AIImprovementItemFailureTagsItem =
@@ -280,6 +292,7 @@ export const AIImprovementItemRecommendedAction = {
   adjust_highlight_window: "adjust_highlight_window",
   adjust_follow_cam: "adjust_follow_cam",
   tracking_rerun_before_follow_cam: "tracking_rerun_before_follow_cam",
+  human_review_camera_motion: "human_review_camera_motion",
   render_suggested_highlight: "render_suggested_highlight",
 } as const;
 
@@ -290,6 +303,12 @@ export interface AILikelyBallRegion {
 }
 
 export type AIImprovementItemConfigPatch = { [key: string]: unknown };
+
+export type AIImprovementItemEvidencePayload = { [key: string]: unknown };
+
+export type AIImprovementItemFollowCamRerenderPlan = {
+  [key: string]: unknown;
+} | null;
 
 export interface AIImprovementItem {
   id: string;
@@ -312,6 +331,10 @@ export interface AIImprovementItem {
   likely_ball_region?: AILikelyBallRegion | null;
   local_search_roi?: AILocalSearchRoi | null;
   false_positive_class?: string | null;
+  camera_motion_event_id?: string | null;
+  camera_motion_severity?: string | null;
+  evidence_payload?: AIImprovementItemEvidencePayload;
+  follow_cam_rerender_plan?: AIImprovementItemFollowCamRerenderPlan;
   [key: string]: unknown;
 }
 

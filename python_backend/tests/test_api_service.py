@@ -1754,6 +1754,48 @@ class ApiServiceSmokeTests(unittest.TestCase):
         self.assertEqual("ai_improvement_report.json", response.artifact_name)
         self.assertTrue(Path(response.artifact_path).exists())
 
+    def test_ai_improve_route_preserves_camera_summary_and_item_fields(self) -> None:
+        output_dir = self.create_output_bundle("improve_camera_route_baseline")
+        self.write_json(
+            "outputs/improve_camera_route_baseline/camera_motion_audit.json",
+            {
+                "schema_version": "1.0",
+                "summary": {"status": "ok", "review_event_count": 1},
+                "review_events": [
+                    {
+                        "type": "camera_motion_spike",
+                        "severity": "warn",
+                        "start_frame": 40,
+                        "end_frame": 40,
+                        "reason": "Camera step exceeded warning threshold.",
+                        "evidence": {"max_step_px": 120.0},
+                    }
+                ],
+            },
+        )
+        (output_dir / "ball_track.csv").write_text(
+            "Frame,Status,X,Y\n"
+            "28,Detected,100,100\n"
+            "36,Detected,102,100\n"
+            "40,Detected,105,100\n"
+            "44,Detected,108,100\n"
+            "52,Detected,110,100\n",
+            encoding="utf-8",
+        )
+        run = self.service.list_runs()[0]
+
+        response = improve_route(
+            AIImproveRequest(run_id=run["run_id"], dry_run=True, max_items=1),
+            service=self.service,
+        )
+
+        self.assertEqual(1, response.summary.camera_improvement_count)
+        self.assertEqual({"warn": 1}, response.summary.camera_severity_counts)
+        self.assertEqual({"adjust_follow_cam": 1}, response.summary.camera_action_counts)
+        self.assertEqual("cam_event_001", response.improvements[0].camera_motion_event_id)
+        self.assertEqual("warn", response.improvements[0].camera_motion_severity)
+        self.assertEqual("stable_detected", response.improvements[0].evidence_payload["nearby_ball_track"]["classification"])
+
     def test_ai_improvement_approve_writes_approved_actions(self) -> None:
         output_dir = self.create_output_bundle("approve_baseline")
         self.write_json(
@@ -1850,6 +1892,49 @@ class ApiServiceSmokeTests(unittest.TestCase):
         self.assertEqual("foot_confusion", response.approved_actions[0].false_positive_class)
         self.assertTrue((output_dir / "ai_improvement_approved_config_patch.json").exists())
         self.assertTrue(any("detector.confidence_threshold" in warning for warning in response.warnings))
+
+    def test_ai_improvement_approve_exposes_follow_cam_rerender_plan_artifact(self) -> None:
+        output_dir = self.create_output_bundle("approve_follow_cam_baseline")
+        self.write_json(
+            "outputs/approve_follow_cam_baseline/ai_improvement_report.json",
+            {
+                "schema_version": "1.0",
+                "generated_at": "2026-06-22T00:00:00+00:00",
+                "model": "gpt-improve",
+                "summary": {"status": "needs_rerun"},
+                "improvements": [
+                    {
+                        "id": "imp_camera",
+                        "priority": "P1",
+                        "area": "camera_motion",
+                        "failure_tags": ["camera_catchup_spike"],
+                        "root_cause_module": "follow_cam",
+                        "start_frame": 40,
+                        "end_frame": 40,
+                        "diagnosis": "Stable tracking but follow-cam jumped.",
+                        "recommended_action": "adjust_follow_cam",
+                        "config_patch": {"follow_cam": {"glide_pan_smoothing": 0.2}},
+                        "confidence": 0.74,
+                    }
+                ],
+            },
+        )
+        run = self.service.list_runs()[0]
+
+        response = self.service.ai_improvement_approve(
+            run_id=run["run_id"],
+            improvement_ids=["imp_camera"],
+            approved_by="operator-a",
+        )
+
+        refreshed = self.service.get_run(run["run_id"])
+        artifact_names = {artifact["name"] for artifact in refreshed["artifacts"]}
+        plan = json.loads((output_dir / "follow_cam_rerender_plan.json").read_text(encoding="utf-8"))
+        self.assertEqual("follow_cam_rerender_plan.json", response["follow_cam_rerender_plan_artifact_name"])
+        self.assertEqual(str((output_dir / "follow_cam_rerender_plan.json").resolve()), response["follow_cam_rerender_plan_artifact_path"])
+        self.assertIn("follow_cam_rerender_plan.json", artifact_names)
+        self.assertFalse(plan["requires_tracking_rerun"])
+        self.assertEqual({"follow_cam": {"glide_pan_smoothing": 0.2}}, plan["recommended_config_patch"])
 
     def test_ai_improvement_approve_clears_stale_config_patch_artifact_from_response(self) -> None:
         output_dir = self.create_output_bundle("approve_no_patch_baseline")

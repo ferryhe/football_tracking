@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import csv
 import json
 import math
 import re
@@ -19,7 +20,11 @@ SCHEMA_VERSION = "1.0"
 REPORT_FILE_NAME = "ai_improvement_report.json"
 APPROVED_ACTIONS_FILE_NAME = "ai_improvement_approved_actions.json"
 APPROVED_CONFIG_PATCH_FILE_NAME = "ai_improvement_approved_config_patch.json"
+FOLLOW_CAM_RERENDER_PLAN_FILE_NAME = "follow_cam_rerender_plan.json"
 MAX_CONTEXT_ITEMS = 100
+CAMERA_TRACK_CONTEXT_RADIUS_FRAMES = 12
+FAST_PLAY_MIN_TRACK_STEP_PX = 80.0
+TRACK_JUMP_REVIEW_MIN_STEP_PX = 160.0
 
 _SOURCE_ARTIFACTS: tuple[tuple[str, str], ...] = (
     ("ball_audit", "ball_audit.json"),
@@ -73,6 +78,12 @@ def build_ai_improvement_context(output_dir: Path, max_items: int = 20) -> dict[
             warnings.append(warning)
         if loaded is not None:
             artifacts[artifact_key] = _limit_artifact_payload(artifact_key, _strip_data_urls(loaded), max_items=max_items)
+
+    if isinstance(artifacts.get("camera_motion_audit"), dict):
+        artifacts["camera_motion_audit"] = _enrich_camera_motion_audit_context(
+            artifacts["camera_motion_audit"],
+            output_dir=output_dir,
+        )
 
     return {
         "output_dir": str(output_dir.resolve()),
@@ -282,6 +293,17 @@ def approve_ai_improvement_actions(
         )
     elif stale_config_patch_path.exists():
         stale_config_patch_path.unlink()
+    stale_follow_cam_plan_path = output_dir / FOLLOW_CAM_RERENDER_PLAN_FILE_NAME
+    follow_cam_plan = _follow_cam_rerender_plan(
+        run_id=run_id,
+        generated_at=approved_at,
+        approved_actions=approved_actions,
+        improvements_by_id=by_id,
+    )
+    if follow_cam_plan is not None:
+        _write_json(stale_follow_cam_plan_path, follow_cam_plan)
+    elif stale_follow_cam_plan_path.exists():
+        stale_follow_cam_plan_path.unlink()
     return artifact
 
 
@@ -294,7 +316,7 @@ def compact_ai_improvement_summary(report: dict[str, Any]) -> dict[str, Any] | N
     status = summary.get("status")
     if not isinstance(status, str):
         return None
-    return {
+    compact = {
         "status": status,
         "primary_issue": summary.get("primary_issue") if isinstance(summary.get("primary_issue"), str) else None,
         "improvement_count": _safe_int(summary.get("improvement_count")),
@@ -302,6 +324,102 @@ def compact_ai_improvement_summary(report: dict[str, Any]) -> dict[str, Any] | N
         "config_patch_count": _safe_int(summary.get("config_patch_count")),
         "highlight_adjustment_count": _safe_int(summary.get("highlight_adjustment_count")),
     }
+    camera_summary = _compact_camera_improvement_counts(report, summary)
+    if camera_summary:
+        compact.update(camera_summary)
+    return compact
+
+
+def _compact_camera_improvement_counts(report: dict[str, Any], summary: dict[str, Any]) -> dict[str, Any]:
+    camera_count = _safe_int(summary.get("camera_improvement_count"))
+    severity_counts = summary.get("camera_severity_counts")
+    action_counts = summary.get("camera_action_counts")
+    if not isinstance(severity_counts, dict) or not isinstance(action_counts, dict):
+        improvements = report.get("improvements") if isinstance(report.get("improvements"), list) else []
+        camera_items = [
+            item
+            for item in improvements
+            if isinstance(item, dict)
+            and (
+                item.get("area") == "camera_motion"
+                or item.get("recommended_action")
+                in {"adjust_follow_cam", "tracking_rerun_before_follow_cam", "human_review_camera_motion"}
+            )
+        ]
+        camera_count = len(camera_items)
+        severity_counts = {}
+        action_counts = {}
+        for item in camera_items:
+            severity = item.get("camera_motion_severity")
+            if not isinstance(severity, str):
+                evidence_payload = item.get("evidence_payload") if isinstance(item.get("evidence_payload"), dict) else {}
+                severity = evidence_payload.get("camera_motion_severity") if isinstance(evidence_payload.get("camera_motion_severity"), str) else None
+            if isinstance(severity, str) and severity:
+                severity_counts[severity] = severity_counts.get(severity, 0) + 1
+            action = item.get("recommended_action")
+            if isinstance(action, str) and action:
+                action_counts[action] = action_counts.get(action, 0) + 1
+    result: dict[str, Any] = {}
+    if camera_count > 0:
+        result["camera_improvement_count"] = camera_count
+    if isinstance(severity_counts, dict) and severity_counts:
+        result["camera_severity_counts"] = {str(key): _safe_int(value) for key, value in severity_counts.items()}
+    if isinstance(action_counts, dict) and action_counts:
+        result["camera_action_counts"] = {str(key): _safe_int(value) for key, value in action_counts.items()}
+    return result
+
+
+def _follow_cam_rerender_plan(
+    *,
+    run_id: str,
+    generated_at: str,
+    approved_actions: list[dict[str, Any]],
+    improvements_by_id: dict[str, dict[str, Any]],
+) -> dict[str, Any] | None:
+    camera_actions = [
+        action
+        for action in approved_actions
+        if action.get("approved_action") in {"adjust_follow_cam", "tracking_rerun_before_follow_cam"}
+    ]
+    if not camera_actions:
+        return None
+    tracking_actions = [
+        action
+        for action in camera_actions
+        if action.get("approved_action") == "tracking_rerun_before_follow_cam"
+    ]
+    action = tracking_actions[0] if tracking_actions else camera_actions[0]
+    improvement = improvements_by_id.get(str(action.get("improvement_id") or ""), {})
+    approved_action = str(action.get("approved_action") or "")
+    requires_tracking_rerun = approved_action == "tracking_rerun_before_follow_cam"
+    reason = str(improvement.get("diagnosis") or "")
+    if requires_tracking_rerun:
+        reason = f"Track rerun is required before follow-cam rerender. {reason}".strip()
+    plan: dict[str, Any] = {
+        "schema_version": SCHEMA_VERSION,
+        "generated_at": generated_at,
+        "run_id": run_id,
+        "source": "ai_improvement_approved_action",
+        "source_approved_actions": APPROVED_ACTIONS_FILE_NAME,
+        "approval_id": action.get("approval_id"),
+        "improvement_id": action.get("improvement_id"),
+        "approved_action": approved_action,
+        "approved_camera_action_count": len(camera_actions),
+        "camera_motion_event_id": action.get("camera_motion_event_id"),
+        "requires_tracking_rerun": requires_tracking_rerun,
+        "recommended_config_patch": action.get("config_patch") if isinstance(action.get("config_patch"), dict) else {},
+        "reason": reason,
+        "provenance": action.get("provenance") if isinstance(action.get("provenance"), dict) else {},
+    }
+    if requires_tracking_rerun and isinstance(action.get("rerun_scope"), dict):
+        plan["tracking_rerun_scope"] = dict(action["rerun_scope"])
+    if isinstance(action.get("follow_cam_rerender_plan"), dict):
+        for key, value in action["follow_cam_rerender_plan"].items():
+            if key not in {"requires_tracking_rerun", "recommended_config_patch", "tracking_rerun_scope"}:
+                plan[str(key)] = value
+    if requires_tracking_rerun:
+        plan["recommended_config_patch"] = {}
+    return plan
 
 
 def _approved_action_entry(
@@ -344,7 +462,15 @@ def _approved_action_entry(
             "confidence": improvement.get("confidence"),
         },
     }
-    for key in ("source_packet_id", "visual_review_id", "candidate_id", "frame_dimensions", "false_positive_class"):
+    for key in (
+        "source_packet_id",
+        "visual_review_id",
+        "candidate_id",
+        "frame_dimensions",
+        "false_positive_class",
+        "camera_motion_event_id",
+        "camera_motion_severity",
+    ):
         value = improvement.get(key, evidence_payload.get(key))
         if value not in (None, ""):
             action[key] = value
@@ -395,6 +521,13 @@ def _approved_action_entry(
         action["follow_cam_rerender_plan"] = dict(improvement["follow_cam_rerender_plan"])
     if approved_action == "adjust_follow_cam" and "config_patch" not in action and "follow_cam_rerender_plan" not in action:
         raise ValueError(f"Approval {approval_id} adjust_follow_cam requires config_patch or follow_cam_rerender_plan.")
+    if approved_action == "tracking_rerun_before_follow_cam" and "rerun_scope" not in action:
+        raise ValueError(f"Approval {approval_id} tracking_rerun_before_follow_cam requires rerun_scope.")
+    if approved_action == "human_review_camera_motion":
+        if "camera_motion_event_id" not in action:
+            raise ValueError(f"Approval {approval_id} human_review_camera_motion requires camera_motion_event_id.")
+        if "start_frame" not in action or "end_frame" not in action:
+            raise ValueError(f"Approval {approval_id} human_review_camera_motion requires start_frame and end_frame.")
 
     return action, warnings
 
@@ -601,6 +734,147 @@ def _deep_merge(base: dict[str, Any], patch: dict[str, Any]) -> dict[str, Any]:
     return merged
 
 
+def _enrich_camera_motion_audit_context(payload: dict[str, Any], *, output_dir: Path) -> dict[str, Any]:
+    track_rows = _read_ball_track_rows(output_dir / "ball_track.csv")
+    enriched = dict(payload)
+    for event_key in ("review_events", "events", "motion_events"):
+        events = enriched.get(event_key)
+        if not isinstance(events, list):
+            continue
+        enriched_events: list[Any] = []
+        for index, event in enumerate(events, start=1):
+            if not isinstance(event, dict):
+                enriched_events.append(event)
+                continue
+            enriched_event = dict(event)
+            if not isinstance(enriched_event.get("id"), str):
+                enriched_event["id"] = f"cam_event_{index:03d}"
+            track_context = _camera_event_track_context(enriched_event, track_rows)
+            if track_context is not None:
+                enriched_event["nearby_ball_track"] = track_context
+            enriched_events.append(enriched_event)
+        enriched[event_key] = enriched_events
+    return enriched
+
+
+def _read_ball_track_rows(path: Path) -> list[dict[str, Any]]:
+    if not path.exists():
+        return []
+    rows: list[dict[str, Any]] = []
+    try:
+        with path.open("r", encoding="utf-8-sig", newline="") as handle:
+            reader = csv.DictReader(handle)
+            for raw in reader:
+                frame = _optional_int(raw.get("Frame") or raw.get("frame"))
+                if frame is None:
+                    continue
+                rows.append(
+                    {
+                        "frame": frame,
+                        "status": str(raw.get("Status") or raw.get("status") or ""),
+                        "point": _track_point(raw),
+                    }
+                )
+    except (csv.Error, OSError, UnicodeDecodeError):
+        return []
+    return sorted(rows, key=lambda row: row["frame"])
+
+
+def _track_point(raw: dict[str, Any]) -> tuple[float, float] | None:
+    x = _optional_number(raw.get("X") or raw.get("x"))
+    y = _optional_number(raw.get("Y") or raw.get("y"))
+    if x is None or y is None:
+        return None
+    return x, y
+
+
+def _camera_event_track_context(event: dict[str, Any], track_rows: list[dict[str, Any]]) -> dict[str, Any] | None:
+    event_range = _event_frame_range(event)
+    if event_range is None:
+        return None
+    window = {
+        "start_frame": max(0, event_range[0] - CAMERA_TRACK_CONTEXT_RADIUS_FRAMES),
+        "end_frame": event_range[1] + CAMERA_TRACK_CONTEXT_RADIUS_FRAMES,
+    }
+    nearby = [row for row in track_rows if window["start_frame"] <= int(row["frame"]) <= window["end_frame"]]
+    if not nearby:
+        return {
+            "window": window,
+            "status_counts": {},
+            "frame_count": 0,
+            "has_tracking_issue": False,
+            "stable_detected": False,
+            "max_step_px": None,
+            "classification": "no_track_context",
+        }
+
+    status_counts: dict[str, int] = {}
+    for row in nearby:
+        status = str(row.get("status") or "unknown")
+        status_counts[status] = status_counts.get(status, 0) + 1
+    max_step = _max_track_step_px(nearby)
+    has_status_issue = any(status_counts.get(status, 0) > 0 for status in ("Lost", "Predicted"))
+    stable_detected = bool(nearby) and status_counts.get("Detected", 0) == len(nearby)
+    classification = "tracking_issue" if has_status_issue else "stable_detected"
+    if stable_detected and max_step is not None and max_step >= TRACK_JUMP_REVIEW_MIN_STEP_PX:
+        classification = "track_jump_review"
+    elif stable_detected and max_step is not None and max_step >= FAST_PLAY_MIN_TRACK_STEP_PX:
+        classification = "acceptable_fast_play"
+
+    return {
+        "window": window,
+        "status_counts": status_counts,
+        "frame_count": len(nearby),
+        "has_tracking_issue": has_status_issue,
+        "stable_detected": stable_detected,
+        "max_step_px": round(max_step, 4) if max_step is not None else None,
+        "classification": classification,
+    }
+
+
+def _event_frame_range(event: dict[str, Any]) -> tuple[int, int] | None:
+    start = _optional_int(event.get("start_frame"))
+    end = _optional_int(event.get("end_frame"))
+    if start is None and end is None:
+        frame = _optional_int(event.get("frame"))
+        if frame is None:
+            return None
+        start = frame
+        end = frame
+    elif start is None:
+        start = end
+    elif end is None:
+        end = start
+    if start is None or end is None:
+        return None
+    return (start, end) if start <= end else (end, start)
+
+
+def _max_track_step_px(rows: list[dict[str, Any]]) -> float | None:
+    max_step: float | None = None
+    previous: dict[str, Any] | None = None
+    for row in rows:
+        point = row.get("point")
+        if point is None:
+            previous = row
+            continue
+        if previous is not None and previous.get("point") is not None:
+            step = math.dist(previous["point"], point)
+            max_step = step if max_step is None else max(max_step, step)
+        previous = row
+    return max_step
+
+
+def _optional_number(value: Any) -> float | None:
+    if value in (None, ""):
+        return None
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if math.isfinite(parsed) else None
+
+
 def _dry_run_report(
     *,
     output_dir: Path,
@@ -610,6 +884,19 @@ def _dry_run_report(
 ) -> dict[str, Any]:
     lost_gap = _first_lost_gap(context)
     if lost_gap is None:
+        camera_improvement = _dry_run_camera_improvement(context)
+        if camera_improvement is not None:
+            return _report(
+                output_dir=output_dir,
+                context=context,
+                model=model,
+                model_selection_source=model_selection_source,
+                dry_run=True,
+                status="needs_rerun",
+                primary_issue="camera_motion",
+                improvements=[camera_improvement],
+                warnings=context["warnings"],
+            )
         return _report(
             output_dir=output_dir,
             context=context,
@@ -664,6 +951,121 @@ def _dry_run_report(
         improvements=improvements,
         warnings=[*context["warnings"], *visual_warnings],
     )
+
+
+def _dry_run_camera_improvement(context: dict[str, Any]) -> dict[str, Any] | None:
+    event = _first_camera_motion_event(context)
+    if event is None:
+        return None
+    event_range = _event_frame_range(event)
+    if event_range is None:
+        return None
+    track_context = event.get("nearby_ball_track") if isinstance(event.get("nearby_ball_track"), dict) else {}
+    classification = str(track_context.get("classification") or "")
+    if classification == "acceptable_fast_play":
+        return None
+
+    event_id = str(event.get("id") or "cam_event_001")
+    severity = str(event.get("severity") or "warn")
+    evidence_payload = {
+        "camera_motion_event_id": event_id,
+        "camera_motion_event_type": event.get("type"),
+        "camera_motion_severity": severity,
+        "nearby_ball_track": track_context,
+    }
+    evidence = [
+        str(event.get("reason") or "camera motion audit event"),
+        {
+            "camera_motion_event_id": event_id,
+            "nearby_ball_track": track_context,
+        },
+    ]
+    priority = "P0" if severity == "fail" else "P1"
+
+    if classification in {"no_track_context", "track_jump_review"}:
+        diagnosis = (
+            "dry-run: camera motion event has no readable nearby ball-track context; human review should inspect the camera spike before rerender."
+            if classification == "no_track_context"
+            else "dry-run: camera motion event has stable Detected status but an extreme nearby ball-track jump; human review should confirm whether this is a tracking jump before accepting it as fast play."
+        )
+        return {
+            "id": "imp_camera_001",
+            "priority": priority,
+            "area": "camera_motion",
+            "failure_tags": ["camera_catchup_spike"],
+            "root_cause_module": "follow_cam",
+            "start_frame": event_range[0],
+            "end_frame": event_range[1],
+            "diagnosis": diagnosis,
+            "recommended_action": "human_review_camera_motion",
+            "config_patch": {},
+            "camera_motion_event_id": event_id,
+            "camera_motion_severity": severity,
+            "evidence_payload": evidence_payload,
+            "evidence": evidence,
+            "confidence": 0.35 if classification == "no_track_context" else 0.45,
+        }
+
+    if track_context.get("has_tracking_issue") is True or classification == "tracking_issue":
+        return {
+            "id": "imp_camera_001",
+            "priority": priority,
+            "area": "camera_motion",
+            "failure_tags": ["camera_catchup_spike", "ball_lost"],
+            "root_cause_module": "follow_cam",
+            "start_frame": event_range[0],
+            "end_frame": event_range[1],
+            "diagnosis": "dry-run: camera motion event overlaps nearby Lost/Predicted ball-track status; rerun tracking before rerendering follow-cam.",
+            "recommended_action": "tracking_rerun_before_follow_cam",
+            "config_patch": {},
+            "rerun_scope": {
+                "start_frame": max(0, event_range[0] - CAMERA_TRACK_CONTEXT_RADIUS_FRAMES),
+                "end_frame": event_range[1] + CAMERA_TRACK_CONTEXT_RADIUS_FRAMES,
+            },
+            "camera_motion_event_id": event_id,
+            "camera_motion_severity": severity,
+            "evidence_payload": evidence_payload,
+            "evidence": evidence,
+            "confidence": 0.55,
+        }
+
+    if track_context.get("stable_detected") is True or classification == "stable_detected":
+        return {
+            "id": "imp_camera_001",
+            "priority": priority,
+            "area": "camera_motion",
+            "failure_tags": ["camera_catchup_spike"],
+            "root_cause_module": "follow_cam",
+            "start_frame": event_range[0],
+            "end_frame": event_range[1],
+            "diagnosis": "dry-run: ball track is stable Detected near the camera motion event, so follow-cam smoothing should be reviewed before rerender.",
+            "recommended_action": "adjust_follow_cam",
+            "config_patch": {"follow_cam": {"glide_pan_smoothing": 0.18}},
+            "follow_cam_rerender_plan": {
+                "requires_tracking_rerun": False,
+                "reason": "Stable detected tracking near camera spike.",
+            },
+            "camera_motion_event_id": event_id,
+            "camera_motion_severity": severity,
+            "evidence_payload": evidence_payload,
+            "evidence": evidence,
+            "confidence": 0.5,
+        }
+
+    return None
+
+
+def _first_camera_motion_event(context: dict[str, Any]) -> dict[str, Any] | None:
+    artifacts = context.get("artifacts") if isinstance(context.get("artifacts"), dict) else {}
+    camera_audit = artifacts.get("camera_motion_audit") if isinstance(artifacts.get("camera_motion_audit"), dict) else {}
+    for event_key in ("review_events", "events", "motion_events"):
+        events = camera_audit.get(event_key)
+        if not isinstance(events, list):
+            continue
+        for event in events:
+            if isinstance(event, dict) and _event_frame_range(event) is not None:
+                return event
+    return None
 
 
 def _validate_model_report(
@@ -763,7 +1165,7 @@ def _validate_improvement(raw: Any, index: int) -> tuple[dict[str, Any], list[st
         "evidence": _evidence(raw.get("evidence")),
         "confidence": confidence,
     }
-    for key in ("source_packet_id", "visual_review_id", "candidate_id"):
+    for key in ("source_packet_id", "visual_review_id", "candidate_id", "camera_motion_event_id", "camera_motion_severity"):
         value = raw.get(key)
         if isinstance(value, str) and value.strip():
             item[key] = value.strip()
@@ -820,6 +1222,15 @@ def _validate_action_specific_improvement(item: dict[str, Any], index: int) -> N
             raise ValueError(f"Improvement {index} {action} requires supported clip_action.")
     if action == "adjust_follow_cam" and not item.get("config_patch") and not item.get("follow_cam_rerender_plan"):
         raise ValueError(f"Improvement {index} adjust_follow_cam requires config_patch or follow_cam_rerender_plan.")
+    if action == "tracking_rerun_before_follow_cam" and "rerun_scope" not in item:
+        raise ValueError(f"Improvement {index} tracking_rerun_before_follow_cam requires rerun_scope.")
+    if action == "human_review_camera_motion":
+        if not isinstance(item.get("camera_motion_event_id"), str) or not str(item.get("camera_motion_event_id")).strip():
+            raise ValueError(f"Improvement {index} human_review_camera_motion requires camera_motion_event_id.")
+        if "start_frame" not in item or "end_frame" not in item:
+            raise ValueError(f"Improvement {index} human_review_camera_motion requires start_frame and end_frame.")
+        if not item.get("evidence"):
+            raise ValueError(f"Improvement {index} human_review_camera_motion requires evidence.")
 
 
 def _validate_highlight_adjustment(raw: Any, index: int) -> dict[str, Any]:
@@ -905,13 +1316,45 @@ def _summary(
     improvements: list[dict[str, Any]],
     highlight_adjustments: list[dict[str, Any]],
 ) -> dict[str, Any]:
-    return {
+    summary = {
         "status": status,
         "primary_issue": primary_issue,
         "improvement_count": len(improvements),
         "targeted_rerun_count": sum(1 for item in improvements if item.get("recommended_action") == "targeted_rerun"),
         "config_patch_count": sum(1 for item in improvements if bool(item.get("config_patch"))),
         "highlight_adjustment_count": len(highlight_adjustments),
+    }
+    camera_counts = _camera_summary_counts(improvements)
+    if camera_counts:
+        summary.update(camera_counts)
+    return summary
+
+
+def _camera_summary_counts(improvements: list[dict[str, Any]]) -> dict[str, Any]:
+    camera_items = [
+        item
+        for item in improvements
+        if item.get("area") == "camera_motion"
+        or item.get("recommended_action") in {"adjust_follow_cam", "tracking_rerun_before_follow_cam", "human_review_camera_motion"}
+    ]
+    if not camera_items:
+        return {}
+    severity_counts: dict[str, int] = {}
+    action_counts: dict[str, int] = {}
+    for item in camera_items:
+        action = item.get("recommended_action")
+        if isinstance(action, str) and action:
+            action_counts[action] = action_counts.get(action, 0) + 1
+        severity = item.get("camera_motion_severity")
+        if not isinstance(severity, str):
+            evidence_payload = item.get("evidence_payload") if isinstance(item.get("evidence_payload"), dict) else {}
+            severity = evidence_payload.get("camera_motion_severity") if isinstance(evidence_payload.get("camera_motion_severity"), str) else None
+        if isinstance(severity, str) and severity:
+            severity_counts[severity] = severity_counts.get(severity, 0) + 1
+    return {
+        "camera_improvement_count": len(camera_items),
+        "camera_severity_counts": severity_counts,
+        "camera_action_counts": action_counts,
     }
 
 
@@ -931,6 +1374,9 @@ def _instructions(language: str | None) -> str:
         "localize_ball_roi requires local_search_roi. "
         "Noise suggestions must include false_positive_class, bounded start_frame/end_frame, and use noise_filter_adjustment "
         "with a safe config_patch or reject_noise for confirmed false positives. "
+        "Camera-motion suggestions must use adjust_follow_cam for stable Detected tracking with sudden camera movement, "
+        "tracking_rerun_before_follow_cam when the camera event overlaps Lost/Predicted or nearby tracking issues, "
+        "or human_review_camera_motion when evidence is ambiguous; continuous stable high-speed play is evidence, not an automatic failure. "
         "config_patch is advisory only and may only suggest known fields under follow_cam, postprocess, "
         "scene_bias.dynamic_air_recovery, selection, or tracking. "
         "Do not include image base64 or claim files that are not present in the supplied context. "
@@ -1039,6 +1485,8 @@ def _first_lost_gap(context: dict[str, Any]) -> dict[str, Any] | None:
 
 
 def _is_missing_ball_improvement(failure_tags: list[str], raw: dict[str, Any]) -> bool:
+    if raw.get("recommended_action") == "tracking_rerun_before_follow_cam":
+        return False
     lowered_tags = {tag.casefold() for tag in failure_tags}
     if lowered_tags & _MISSING_BALL_TAGS:
         return True
@@ -1252,17 +1700,21 @@ _CONFIG_PATCH_VALIDATORS: dict[str, Callable[[Any], bool]] = {
     "follow_cam.pan_smoothing": _number_between(0.0, 1.0),
     "follow_cam.zoom_smoothing": _number_between(0.0, 1.0),
     "follow_cam.glide_pan_smoothing": _number_between(0.0, 1.0),
-    "follow_cam.glide_max_pan_per_frame_x": _number_between(0.0, 5000.0),
-    "follow_cam.glide_max_pan_per_frame_y": _number_between(0.0, 5000.0),
+    "follow_cam.glide_max_pan_per_frame_x": _number_between(0.0, 500.0),
+    "follow_cam.glide_max_pan_per_frame_y": _number_between(0.0, 500.0),
     "follow_cam.catch_up_pan_smoothing": _number_between(0.0, 1.0),
     "follow_cam.zoom_out_confirm_frames": _int_between(0, 240),
     "follow_cam.zoom_in_confirm_frames": _int_between(0, 240),
     "follow_cam.zoom_hold_frames_after_change": _int_between(0, 300),
-    "follow_cam.catch_up_max_pan_per_frame_x": _number_between(0.0, 5000.0),
-    "follow_cam.catch_up_max_pan_per_frame_y": _number_between(0.0, 5000.0),
+    "follow_cam.catch_up_max_pan_per_frame_x": _number_between(0.0, 500.0),
+    "follow_cam.catch_up_max_pan_per_frame_y": _number_between(0.0, 500.0),
     "follow_cam.predicted_pan_decay": _number_between(0.0, 1.0),
-    "follow_cam.dead_zone_ratio_x": _number_between(0.0, 1.0),
-    "follow_cam.dead_zone_ratio_y": _number_between(0.0, 1.0),
+    "follow_cam.dead_zone_ratio_x": _number_between(0.0, 0.8),
+    "follow_cam.dead_zone_ratio_y": _number_between(0.0, 0.8),
+    "follow_cam.max_pan_per_frame_x": _number_between(0.0, 500.0),
+    "follow_cam.max_pan_per_frame_y": _number_between(0.0, 500.0),
+    "follow_cam.max_zoom_in_per_frame": _number_between(0.0, 240.0),
+    "follow_cam.max_zoom_out_per_frame": _number_between(0.0, 240.0),
     "postprocess.enabled": _bool_value,
     "postprocess.max_detected_island_length": _int_between(0, 60),
     "postprocess.low_confidence_threshold": _number_between(0.0, 1.0),
