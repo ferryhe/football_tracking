@@ -218,6 +218,30 @@ class AiImprovementTests(unittest.TestCase):
         self.assertEqual("no_track_context", improvement["evidence_payload"]["nearby_ball_track"]["classification"])
         self.assertEqual(0, improvement["evidence_payload"]["nearby_ball_track"]["frame_count"])
 
+    def test_camera_track_status_is_normalized_and_unknown_status_is_ambiguous(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_camera_motion_event(output_dir, frame=40, severity="warn", max_step_px=115.0)
+            (output_dir / "ball_track.csv").write_text(
+                "Frame,X,Y,Status\n"
+                "28,100,100, detected \n"
+                "36,102,100,DETECTED\n"
+                "40,104,100,\n"
+                "44,106,100,maybe\n"
+                "52,108,100,Detected\n",
+                encoding="utf-8",
+            )
+
+            context = build_ai_improvement_context(output_dir)
+            report = build_ai_improvement_report(output_dir, dry_run=True)
+
+        event = context["artifacts"]["camera_motion_audit"]["review_events"][0]
+        self.assertEqual({"Detected": 3, "unknown": 2}, event["nearby_ball_track"]["status_counts"])
+        self.assertEqual("ambiguous_status", event["nearby_ball_track"]["classification"])
+        improvement = report["improvements"][0]
+        self.assertEqual("human_review_camera_motion", improvement["recommended_action"])
+        self.assertEqual("ambiguous_status", improvement["evidence_payload"]["nearby_ball_track"]["classification"])
+
     def test_context_rejects_excessive_max_items(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:
             with self.assertRaisesRegex(ValueError, "at most 100"):

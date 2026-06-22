@@ -771,7 +771,7 @@ def _read_ball_track_rows(path: Path) -> list[dict[str, Any]]:
                 rows.append(
                     {
                         "frame": frame,
-                        "status": str(raw.get("Status") or raw.get("status") or ""),
+                        "status": _normalize_track_status(raw.get("Status") or raw.get("status")),
                         "point": _track_point(raw),
                     }
                 )
@@ -786,6 +786,17 @@ def _track_point(raw: dict[str, Any]) -> tuple[float, float] | None:
     if x is None or y is None:
         return None
     return x, y
+
+
+def _normalize_track_status(value: Any) -> str:
+    status = str(value or "").strip().casefold()
+    if status == "detected":
+        return "Detected"
+    if status == "predicted":
+        return "Predicted"
+    if status == "lost":
+        return "Lost"
+    return "unknown"
 
 
 def _camera_event_track_context(event: dict[str, Any], track_rows: list[dict[str, Any]]) -> dict[str, Any] | None:
@@ -815,7 +826,9 @@ def _camera_event_track_context(event: dict[str, Any], track_rows: list[dict[str
     max_step = _max_track_step_px(nearby)
     has_status_issue = any(status_counts.get(status, 0) > 0 for status in ("Lost", "Predicted"))
     stable_detected = bool(nearby) and status_counts.get("Detected", 0) == len(nearby)
-    classification = "tracking_issue" if has_status_issue else "stable_detected"
+    classification = "tracking_issue" if has_status_issue else "ambiguous_status"
+    if stable_detected:
+        classification = "stable_detected"
     if stable_detected and max_step is not None and max_step >= TRACK_JUMP_REVIEW_MIN_STEP_PX:
         classification = "track_jump_review"
     elif stable_detected and max_step is not None and max_step >= FAST_PLAY_MIN_TRACK_STEP_PX:
@@ -982,11 +995,15 @@ def _dry_run_camera_improvement(context: dict[str, Any]) -> dict[str, Any] | Non
     ]
     priority = "P0" if severity == "fail" else "P1"
 
-    if classification in {"no_track_context", "track_jump_review"}:
+    if classification in {"no_track_context", "track_jump_review", "ambiguous_status"}:
         diagnosis = (
             "dry-run: camera motion event has no readable nearby ball-track context; human review should inspect the camera spike before rerender."
             if classification == "no_track_context"
-            else "dry-run: camera motion event has stable Detected status but an extreme nearby ball-track jump; human review should confirm whether this is a tracking jump before accepting it as fast play."
+            else (
+                "dry-run: camera motion event has ambiguous nearby ball-track status; human review should inspect the camera spike before rerender."
+                if classification == "ambiguous_status"
+                else "dry-run: camera motion event has stable Detected status but an extreme nearby ball-track jump; human review should confirm whether this is a tracking jump before accepting it as fast play."
+            )
         )
         return {
             "id": "imp_camera_001",
@@ -1003,7 +1020,7 @@ def _dry_run_camera_improvement(context: dict[str, Any]) -> dict[str, Any] | Non
             "camera_motion_severity": severity,
             "evidence_payload": evidence_payload,
             "evidence": evidence,
-            "confidence": 0.35 if classification == "no_track_context" else 0.45,
+            "confidence": 0.35 if classification in {"no_track_context", "ambiguous_status"} else 0.45,
         }
 
     if track_context.get("has_tracking_issue") is True or classification == "tracking_issue":
