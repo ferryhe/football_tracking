@@ -32,5 +32,6 @@ export interface AIImprovementItem {
   rerun_scope?: AIFrameWindow | null;
   likely_ball_region?: AILikelyBallRegion | null;
   local_search_roi?: AILocalSearchRoi | null;
+  false_positive_class?: string | null;
   [key: string]: unknown;
 }

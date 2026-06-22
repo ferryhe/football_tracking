@@ -17,6 +17,8 @@ from football_tracking.ai_contracts import (
 
 SCHEMA_VERSION = "1.0"
 REPORT_FILE_NAME = "ai_improvement_report.json"
+APPROVED_ACTIONS_FILE_NAME = "ai_improvement_approved_actions.json"
+APPROVED_CONFIG_PATCH_FILE_NAME = "ai_improvement_approved_config_patch.json"
 MAX_CONTEXT_ITEMS = 100
 
 _SOURCE_ARTIFACTS: tuple[tuple[str, str], ...] = (
@@ -95,31 +97,38 @@ def build_ai_improvement_report(
 ) -> dict[str, Any]:
     output_dir = Path(output_dir)
     context = build_ai_improvement_context(output_dir, max_items=max_items)
-    selected_model = _selected_model(client, model)
+    selected_model, model_selection_source = _select_model(client, model)
 
     if context["available_artifact_count"] <= 0:
         return _report(
             output_dir=output_dir,
             context=context,
             model=selected_model,
+            model_selection_source=model_selection_source,
             dry_run=dry_run,
             status="unavailable",
             warnings=context["warnings"],
         )
 
     if dry_run:
-        return _dry_run_report(output_dir=output_dir, context=context, model=selected_model)
+        return _dry_run_report(
+            output_dir=output_dir,
+            context=context,
+            model=selected_model,
+            model_selection_source=model_selection_source,
+        )
 
     active_client = client
     if active_client is None:
         active_client = _build_default_client()
-        selected_model = _selected_model(active_client, model)
+        selected_model, model_selection_source = _select_model(active_client, model)
 
     if hasattr(active_client, "is_enabled") and not active_client.is_enabled():
         return _report(
             output_dir=output_dir,
             context=context,
             model=selected_model,
+            model_selection_source=model_selection_source,
             dry_run=False,
             status="unavailable",
             warnings=[*context["warnings"], "OpenAI provider is not configured."],
@@ -129,15 +138,18 @@ def build_ai_improvement_report(
         response = active_client.create_json_response(
             instructions=_instructions(language=language),
             prompt=_prompt(context=context, objective=objective, language=language),
-            model=model,
+            model=selected_model,
             temperature=0.1,
         )
         improvements, highlight_adjustments, validation_warnings, summary_status, primary_issue = _validate_model_report(response)
+        improvements, visual_warnings = _merge_visual_review_localization(improvements, context)
+        validation_warnings.extend(visual_warnings)
     except Exception as exc:
         return _report(
             output_dir=output_dir,
             context=context,
             model=selected_model,
+            model_selection_source=model_selection_source,
             dry_run=False,
             status="error",
             warnings=context["warnings"],
@@ -148,6 +160,7 @@ def build_ai_improvement_report(
         output_dir=output_dir,
         context=context,
         model=selected_model,
+        model_selection_source=model_selection_source,
         dry_run=False,
         status=summary_status,
         primary_issue=primary_issue,
@@ -181,6 +194,97 @@ def write_ai_improvement_report(
     return report
 
 
+def approve_ai_improvement_actions(
+    output_dir: Path,
+    *,
+    run_id: str,
+    improvement_ids: list[str],
+    approved_by: str = "operator",
+    approval_source: str = "api",
+    rerun_scope_overrides: dict[str, dict[str, Any]] | None = None,
+    local_search_roi_overrides: dict[str, dict[str, Any]] | None = None,
+    config_patch_overrides: dict[str, dict[str, Any]] | None = None,
+    suggested_window_overrides: dict[str, dict[str, Any]] | None = None,
+    clip_action_overrides: dict[str, str] | None = None,
+    follow_cam_rerender_plan_overrides: dict[str, dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    output_dir = Path(output_dir)
+    if not improvement_ids:
+        raise ValueError("At least one improvement_id is required.")
+    report = _read_required_report(output_dir / REPORT_FILE_NAME)
+    improvements = report.get("improvements")
+    if not isinstance(improvements, list):
+        raise ValueError("ai_improvement_report.json does not contain improvements.")
+    by_id = {
+        str(item.get("id")): item
+        for item in improvements
+        if isinstance(item, dict) and isinstance(item.get("id"), str) and item.get("id")
+    }
+
+    warnings: list[str] = []
+    approved_actions: list[dict[str, Any]] = []
+    config_patch_items: list[dict[str, Any]] = []
+    approved_at = _utc_now_iso()
+    for index, improvement_id in enumerate(improvement_ids, start=1):
+        if improvement_id not in by_id:
+            raise ValueError(f"Unknown improvement_id: {improvement_id}")
+        improvement = by_id[improvement_id]
+        action, action_warnings = _approved_action_entry(
+            improvement,
+            approval_id=f"approval_{index:03d}",
+            approved_by=approved_by,
+            approval_source=approval_source,
+            approved_at=approved_at,
+            model=report.get("model") if isinstance(report.get("model"), str) else None,
+            rerun_scope_override=(rerun_scope_overrides or {}).get(improvement_id),
+            local_search_roi_override=(local_search_roi_overrides or {}).get(improvement_id),
+            config_patch_override=(config_patch_overrides or {}).get(improvement_id),
+            suggested_window_override=(suggested_window_overrides or {}).get(improvement_id),
+            clip_action_override=(clip_action_overrides or {}).get(improvement_id),
+            follow_cam_rerender_plan_override=(follow_cam_rerender_plan_overrides or {}).get(improvement_id),
+        )
+        warnings.extend(action_warnings)
+        approved_actions.append(action)
+        if action.get("config_patch"):
+            config_patch_items.append(
+                {
+                    "approval_id": action["approval_id"],
+                    "improvement_id": action["improvement_id"],
+                    "approved_action": action["approved_action"],
+                    "config_patch": action["config_patch"],
+                }
+            )
+
+    artifact = {
+        "schema_version": SCHEMA_VERSION,
+        "generated_at": approved_at,
+        "run_id": run_id,
+        "source_report": REPORT_FILE_NAME,
+        "approved_by": approved_by,
+        "approved_actions": approved_actions,
+        "warnings": warnings,
+    }
+    _write_json(output_dir / APPROVED_ACTIONS_FILE_NAME, artifact)
+    stale_config_patch_path = output_dir / APPROVED_CONFIG_PATCH_FILE_NAME
+    if config_patch_items:
+        _write_json(
+            stale_config_patch_path,
+            {
+                "schema_version": SCHEMA_VERSION,
+                "generated_at": approved_at,
+                "run_id": run_id,
+                "source_approved_actions": APPROVED_ACTIONS_FILE_NAME,
+                "patches": config_patch_items,
+                "merged_config_patch": _merge_config_patches(
+                    [item["config_patch"] for item in config_patch_items if isinstance(item.get("config_patch"), dict)]
+                ),
+            },
+        )
+    elif stale_config_patch_path.exists():
+        stale_config_patch_path.unlink()
+    return artifact
+
+
 def compact_ai_improvement_summary(report: dict[str, Any]) -> dict[str, Any] | None:
     if not isinstance(report, dict):
         return None
@@ -200,13 +304,317 @@ def compact_ai_improvement_summary(report: dict[str, Any]) -> dict[str, Any] | N
     }
 
 
-def _dry_run_report(*, output_dir: Path, context: dict[str, Any], model: str | None) -> dict[str, Any]:
+def _approved_action_entry(
+    improvement: dict[str, Any],
+    *,
+    approval_id: str,
+    approved_by: str,
+    approval_source: str,
+    approved_at: str,
+    model: str | None,
+    rerun_scope_override: dict[str, Any] | None,
+    local_search_roi_override: dict[str, Any] | None,
+    config_patch_override: dict[str, Any] | None,
+    suggested_window_override: dict[str, Any] | None,
+    clip_action_override: str | None,
+    follow_cam_rerender_plan_override: dict[str, Any] | None,
+) -> tuple[dict[str, Any], list[str]]:
+    improvement_id = str(improvement.get("id") or "")
+    approved_action = str(improvement.get("recommended_action") or "")
+    if approved_action not in AI_RECOMMENDED_ACTIONS:
+        raise ValueError(f"Improvement {improvement_id} recommended_action is unsupported: {approved_action}")
+
+    warnings: list[str] = []
+    patch_source = config_patch_override if config_patch_override is not None else improvement.get("config_patch")
+    config_patch, patch_warnings = _filter_config_patch(patch_source if isinstance(patch_source, dict) else {})
+    warnings.extend(patch_warnings)
+    evidence_payload = improvement.get("evidence_payload") if isinstance(improvement.get("evidence_payload"), dict) else {}
+
+    action: dict[str, Any] = {
+        "approval_id": approval_id,
+        "improvement_id": improvement_id,
+        "approved_action": approved_action,
+        "approval_source": approval_source,
+        "approved_at": approved_at,
+        "approved_by": approved_by,
+        "provenance": {
+            "source": "ai_improvement",
+            "improvement_id": improvement_id,
+            "model": model,
+            "confidence": improvement.get("confidence"),
+        },
+    }
+    for key in ("source_packet_id", "visual_review_id", "candidate_id", "frame_dimensions", "false_positive_class"):
+        value = improvement.get(key, evidence_payload.get(key))
+        if value not in (None, ""):
+            action[key] = value
+    for key in ("start_frame", "end_frame"):
+        if key in improvement:
+            value = _optional_int(improvement.get(key))
+            if value is not None and value >= 0:
+                action[key] = value
+
+    rerun_scope_source = rerun_scope_override if rerun_scope_override is not None else improvement.get("rerun_scope")
+    if isinstance(rerun_scope_source, dict):
+        action["rerun_scope"] = _frame_window(rerun_scope_source, f"Approval {approval_id} rerun_scope")
+    local_roi_source = local_search_roi_override if local_search_roi_override is not None else improvement.get("local_search_roi")
+    if isinstance(local_roi_source, dict):
+        action["local_search_roi"] = _local_search_roi(local_roi_source, 0)
+    if config_patch:
+        action["config_patch"] = config_patch
+
+    if approved_action == "targeted_rerun" and "rerun_scope" not in action:
+        raise ValueError(f"Approval {approval_id} targeted_rerun requires rerun_scope.")
+    if approved_action == "localize_ball_roi" and "local_search_roi" not in action:
+        raise ValueError(f"Approval {approval_id} localize_ball_roi requires local_search_roi.")
+    if approved_action in {"noise_filter_adjustment", "tighten_noise_filter", "reject_noise"}:
+        if "false_positive_class" not in action:
+            raise ValueError(f"Approval {approval_id} {approved_action} requires false_positive_class.")
+        if "start_frame" not in action or "end_frame" not in action:
+            raise ValueError(f"Approval {approval_id} {approved_action} requires start_frame and end_frame.")
+        if int(action["end_frame"]) < int(action["start_frame"]):
+            raise ValueError(f"Approval {approval_id} end_frame must be greater than or equal to start_frame.")
+        if approved_action == "noise_filter_adjustment" and "config_patch" not in action:
+            raise ValueError(f"Approval {approval_id} noise_filter_adjustment requires config_patch.")
+
+    if approved_action in {"adjust_highlight_window", "render_suggested_highlight"}:
+        candidate_id = action.get("candidate_id") or improvement.get("candidate_id")
+        if not isinstance(candidate_id, str) or not candidate_id.strip():
+            raise ValueError(f"Approval {approval_id} {approved_action} requires candidate_id.")
+        action["candidate_id"] = candidate_id.strip()
+        window_source = suggested_window_override if suggested_window_override is not None else improvement.get("suggested_window")
+        action["suggested_window"] = _frame_window(window_source, f"Approval {approval_id} suggested_window")
+        clip_action = clip_action_override if clip_action_override is not None else improvement.get("clip_action")
+        if not isinstance(clip_action, str) or clip_action not in AI_CLIP_ACTIONS:
+            raise ValueError(f"Approval {approval_id} {approved_action} requires supported clip_action.")
+        action["clip_action"] = clip_action
+
+    if follow_cam_rerender_plan_override is not None:
+        action["follow_cam_rerender_plan"] = dict(follow_cam_rerender_plan_override)
+    elif isinstance(improvement.get("follow_cam_rerender_plan"), dict):
+        action["follow_cam_rerender_plan"] = dict(improvement["follow_cam_rerender_plan"])
+    if approved_action == "adjust_follow_cam" and "config_patch" not in action and "follow_cam_rerender_plan" not in action:
+        raise ValueError(f"Approval {approval_id} adjust_follow_cam requires config_patch or follow_cam_rerender_plan.")
+
+    return action, warnings
+
+
+def _merge_visual_review_localization(
+    improvements: list[dict[str, Any]],
+    context: dict[str, Any],
+) -> tuple[list[dict[str, Any]], list[str]]:
+    visual_reviews = _visual_reviews_by_packet_id(context)
+    if not visual_reviews:
+        return improvements, []
+    warnings: list[str] = []
+    merged: list[dict[str, Any]] = []
+    for index, improvement in enumerate(improvements, start=1):
+        item = dict(improvement)
+        source_packet_id = _improvement_source_packet_id(item)
+        if source_packet_id is None or source_packet_id not in visual_reviews:
+            merged.append(item)
+            continue
+        review = visual_reviews[source_packet_id]
+        evidence_payload = dict(item.get("evidence_payload") if isinstance(item.get("evidence_payload"), dict) else {})
+        evidence_payload["source_packet_id"] = source_packet_id
+        for key in ("visual_review_id", "frame_dimensions"):
+            value = review.get(key)
+            if value not in (None, "", {}):
+                evidence_payload[key] = value
+        provenance = review.get("provenance") if isinstance(review.get("provenance"), dict) else {"source": "ai_visual_review"}
+        evidence_payload["local_search_roi_provenance"] = provenance
+        item["evidence_payload"] = evidence_payload
+
+        visible = _visual_review_says_visible(review)
+        if visible is False:
+            item.pop("local_search_roi", None)
+            item["likely_ball_region"] = {"description": "not visible", "confidence": 0.0}
+            if item.get("recommended_action") == "localize_ball_roi":
+                item["recommended_action"] = "manual_review"
+                warnings.append(
+                    f"Improvement {item.get('id') or index} normalized from localize_ball_roi to manual_review "
+                    "because ai_visual_review marked the ball not visible."
+                )
+            merged.append(item)
+            continue
+
+        visual_roi = review.get("local_search_roi")
+        if isinstance(visual_roi, dict) and _visual_roi_is_better(item.get("local_search_roi"), visual_roi):
+            try:
+                item["local_search_roi"] = _local_search_roi(visual_roi, index)
+            except ValueError as exc:
+                warnings.append(str(exc))
+        visual_region = review.get("likely_ball_region")
+        if isinstance(visual_region, dict) and _likely_region_is_not_visible(item.get("likely_ball_region")):
+            try:
+                item["likely_ball_region"] = _likely_ball_region(visual_region, index)
+            except ValueError as exc:
+                warnings.append(str(exc))
+        merged.append(item)
+    return merged, warnings
+
+
+def _visual_reviews_by_packet_id(context: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    artifacts = context.get("artifacts") if isinstance(context.get("artifacts"), dict) else {}
+    visual_report = artifacts.get("ai_visual_review") if isinstance(artifacts.get("ai_visual_review"), dict) else {}
+    reviews = visual_report.get("reviews") if isinstance(visual_report.get("reviews"), list) else []
+    by_packet: dict[str, dict[str, Any]] = {}
+    for item in reviews:
+        if not isinstance(item, dict):
+            continue
+        review = item.get("review") if isinstance(item.get("review"), dict) else item
+        packet_id = review.get("source_packet_id") or item.get("source_packet_id") or item.get("packet_id") or review.get("packet_id")
+        if not isinstance(packet_id, str) or not packet_id:
+            continue
+        flattened = dict(review)
+        for key in ("packet_id", "visual_review_id", "frame_dimensions", "provenance"):
+            if key not in flattened and key in item:
+                flattened[key] = item[key]
+        by_packet[packet_id] = flattened
+    return by_packet
+
+
+def _improvement_source_packet_id(improvement: dict[str, Any]) -> str | None:
+    for value in (
+        improvement.get("source_packet_id"),
+        (improvement.get("evidence_payload") or {}).get("source_packet_id") if isinstance(improvement.get("evidence_payload"), dict) else None,
+    ):
+        if isinstance(value, str) and value:
+            return value
+    evidence = improvement.get("evidence")
+    if isinstance(evidence, list):
+        for item in evidence:
+            if isinstance(item, dict):
+                value = item.get("source_packet_id") or item.get("packet_id")
+                if isinstance(value, str) and value:
+                    return value
+    return None
+
+
+def _visual_review_says_visible(review: dict[str, Any]) -> bool | None:
+    if isinstance(review.get("visible"), bool):
+        return bool(review["visible"])
+    match_value = str(review.get("match_ball_visible") or "").casefold()
+    if match_value in {"yes", "partial"}:
+        return True
+    if match_value == "no":
+        return False
+    region = review.get("likely_ball_region") if isinstance(review.get("likely_ball_region"), dict) else {}
+    if str(region.get("description") or "").strip().casefold() == "not visible":
+        return False
+    return None
+
+
+def _has_valid_roi(value: Any) -> bool:
+    if not isinstance(value, dict):
+        return False
+    try:
+        _local_search_roi(value, 0)
+    except ValueError:
+        return False
+    return True
+
+
+def _visual_roi_is_better(existing: Any, visual_roi: dict[str, Any]) -> bool:
+    if not _has_valid_roi(existing):
+        return True
+    return _roi_confidence(visual_roi) > _roi_confidence(existing)
+
+
+def _roi_confidence(value: Any) -> float:
+    if not isinstance(value, dict):
+        return -1.0
+    confidence = value.get("confidence")
+    if isinstance(confidence, bool) or not isinstance(confidence, (int, float)) or not math.isfinite(float(confidence)):
+        return -1.0
+    return float(confidence)
+
+
+def _likely_region_is_not_visible(value: Any) -> bool:
+    if not isinstance(value, dict):
+        return True
+    return str(value.get("description") or "").strip().casefold() == "not visible"
+
+
+def _packet_id_for_window(context: dict[str, Any], *, start_frame: int, end_frame: int) -> str | None:
+    artifacts = context.get("artifacts") if isinstance(context.get("artifacts"), dict) else {}
+    packet_report = artifacts.get("review_packets") if isinstance(artifacts.get("review_packets"), dict) else {}
+    packets = packet_report.get("packets") if isinstance(packet_report.get("packets"), list) else []
+    best_packet: tuple[int, str] | None = None
+    for packet in packets:
+        if not isinstance(packet, dict):
+            continue
+        packet_id = packet.get("packet_id")
+        if not isinstance(packet_id, str) or not packet_id:
+            continue
+        packet_range = _packet_range(packet)
+        if packet_range is None:
+            continue
+        overlap = _range_overlap((start_frame, end_frame), packet_range)
+        if overlap <= 0:
+            continue
+        if best_packet is None or overlap > best_packet[0]:
+            best_packet = (overlap, packet_id)
+    return None if best_packet is None else best_packet[1]
+
+
+def _packet_range(packet: dict[str, Any]) -> tuple[int, int] | None:
+    for key in ("source", "window"):
+        value = packet.get(key)
+        if isinstance(value, dict):
+            start = _optional_int(value.get("start_frame"))
+            end = _optional_int(value.get("end_frame"))
+            if start is not None and end is not None:
+                return (start, end) if start <= end else (end, start)
+    return None
+
+
+def _range_overlap(first: tuple[int, int], second: tuple[int, int]) -> int:
+    start = max(first[0], second[0])
+    end = min(first[1], second[1])
+    return max(0, end - start + 1)
+
+
+def _read_required_report(path: Path) -> dict[str, Any]:
+    loaded, status, warning = _read_optional_json(path)
+    if loaded is None:
+        raise FileNotFoundError(warning or path.name)
+    if status != "loaded":
+        raise FileNotFoundError(warning or path.name)
+    return loaded
+
+
+def _merge_config_patches(patches: list[dict[str, Any]]) -> dict[str, Any]:
+    merged: dict[str, Any] = {}
+    for patch in patches:
+        merged = _deep_merge(merged, patch)
+    return merged
+
+
+def _deep_merge(base: dict[str, Any], patch: dict[str, Any]) -> dict[str, Any]:
+    merged = dict(base)
+    for key, value in patch.items():
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = _deep_merge(merged[key], value)
+        else:
+            merged[key] = value
+    return merged
+
+
+def _dry_run_report(
+    *,
+    output_dir: Path,
+    context: dict[str, Any],
+    model: str | None,
+    model_selection_source: str,
+) -> dict[str, Any]:
     lost_gap = _first_lost_gap(context)
     if lost_gap is None:
         return _report(
             output_dir=output_dir,
             context=context,
             model=model,
+            model_selection_source=model_selection_source,
             dry_run=True,
             status="ok",
             warnings=context["warnings"],
@@ -240,15 +648,21 @@ def _dry_run_report(*, output_dir: Path, context: dict[str, Any], model: str | N
         "evidence": [str(lost_gap.get("reason") or "lost gap artifact")],
         "confidence": 0.4,
     }
+    packet_id = _packet_id_for_window(context, start_frame=start_frame, end_frame=end_frame)
+    if packet_id is not None:
+        improvement["source_packet_id"] = packet_id
+        improvement["evidence"].append({"source_packet_id": packet_id})
+    improvements, visual_warnings = _merge_visual_review_localization([improvement], context)
     return _report(
         output_dir=output_dir,
         context=context,
         model=model,
+        model_selection_source=model_selection_source,
         dry_run=True,
         status="needs_rerun",
         primary_issue="tracking",
-        improvements=[improvement],
-        warnings=context["warnings"],
+        improvements=improvements,
+        warnings=[*context["warnings"], *visual_warnings],
     )
 
 
@@ -349,6 +763,16 @@ def _validate_improvement(raw: Any, index: int) -> tuple[dict[str, Any], list[st
         "evidence": _evidence(raw.get("evidence")),
         "confidence": confidence,
     }
+    for key in ("source_packet_id", "visual_review_id", "candidate_id"):
+        value = raw.get(key)
+        if isinstance(value, str) and value.strip():
+            item[key] = value.strip()
+    if isinstance(raw.get("frame_dimensions"), dict):
+        item["frame_dimensions"] = dict(raw["frame_dimensions"])
+    if isinstance(raw.get("evidence_payload"), dict):
+        item["evidence_payload"] = dict(raw["evidence_payload"])
+    if isinstance(raw.get("false_positive_class"), str) and raw["false_positive_class"].strip():
+        item["false_positive_class"] = raw["false_positive_class"].strip()
     for key in ("start_frame", "end_frame"):
         value = _optional_int(raw.get(key))
         if value is not None:
@@ -361,7 +785,41 @@ def _validate_improvement(raw: Any, index: int) -> tuple[dict[str, Any], list[st
         item["likely_ball_region"] = likely_ball_region
     if local_search_roi is not None:
         item["local_search_roi"] = local_search_roi
+    if isinstance(raw.get("suggested_window"), dict):
+        item["suggested_window"] = _frame_window(raw["suggested_window"], f"Improvement {index} suggested_window")
+    if isinstance(raw.get("clip_action"), str):
+        clip_action = raw["clip_action"].strip()
+        if clip_action not in AI_CLIP_ACTIONS:
+            raise ValueError(f"Improvement {index} clip_action is unsupported: {clip_action}")
+        item["clip_action"] = clip_action
+    if isinstance(raw.get("follow_cam_rerender_plan"), dict):
+        item["follow_cam_rerender_plan"] = dict(raw["follow_cam_rerender_plan"])
+    _validate_action_specific_improvement(item, index)
     return item, patch_warnings
+
+
+def _validate_action_specific_improvement(item: dict[str, Any], index: int) -> None:
+    action = item.get("recommended_action")
+    if action == "localize_ball_roi" and "local_search_roi" not in item:
+        raise ValueError(f"Improvement {index} localize_ball_roi requires local_search_roi.")
+    if action in {"noise_filter_adjustment", "tighten_noise_filter", "reject_noise"}:
+        if not item.get("false_positive_class"):
+            raise ValueError(f"Improvement {index} {action} requires false_positive_class.")
+        if "start_frame" not in item or "end_frame" not in item:
+            raise ValueError(f"Improvement {index} {action} requires start_frame and end_frame.")
+        if int(item["end_frame"]) < int(item["start_frame"]):
+            raise ValueError(f"Improvement {index} end_frame must be greater than or equal to start_frame.")
+    if action == "noise_filter_adjustment" and not item.get("config_patch"):
+        raise ValueError(f"Improvement {index} noise_filter_adjustment requires a safe config_patch.")
+    if action in {"adjust_highlight_window", "render_suggested_highlight"}:
+        if not isinstance(item.get("candidate_id"), str) or not str(item.get("candidate_id")).strip():
+            raise ValueError(f"Improvement {index} {action} requires candidate_id.")
+        if "suggested_window" not in item:
+            raise ValueError(f"Improvement {index} {action} requires suggested_window.")
+        if item.get("clip_action") not in AI_CLIP_ACTIONS:
+            raise ValueError(f"Improvement {index} {action} requires supported clip_action.")
+    if action == "adjust_follow_cam" and not item.get("config_patch") and not item.get("follow_cam_rerender_plan"):
+        raise ValueError(f"Improvement {index} adjust_follow_cam requires config_patch or follow_cam_rerender_plan.")
 
 
 def _validate_highlight_adjustment(raw: Any, index: int) -> dict[str, Any]:
@@ -401,6 +859,7 @@ def _report(
     model: str | None,
     dry_run: bool,
     status: str,
+    model_selection_source: str,
     primary_issue: str | None = None,
     improvements: list[dict[str, Any]] | None = None,
     highlight_adjustments: list[dict[str, Any]] | None = None,
@@ -422,6 +881,10 @@ def _report(
         "generated_at": _utc_now_iso(),
         "output_dir": str(output_dir.resolve()),
         "model": model,
+        "model_selection": {
+            "model": model,
+            "source": model_selection_source,
+        },
         "dry_run": bool(dry_run),
         "source_artifacts": context.get("source_artifacts") or {},
         "artifact_status": context.get("artifact_status") or {},
@@ -464,8 +927,10 @@ def _instructions(language: str | None) -> str:
         "summary.status must be one of ok, needs_rerun, unavailable, error. "
         "Each improvement must include priority, area, failure_tags, root_cause_module, recommended_action, confidence. "
         "targeted_rerun improvements must include rerun_scope. "
-        "Missing-ball suggestions must include likely_ball_region or local_search_roi; use likely_ball_region.description='not visible' "
-        "when the ball cannot be localized. "
+        "Missing-ball suggestions must use targeted_rerun, localize_ball_roi, or likely_ball_region.description='not visible'; "
+        "localize_ball_roi requires local_search_roi. "
+        "Noise suggestions must include false_positive_class, bounded start_frame/end_frame, and use noise_filter_adjustment "
+        "with a safe config_patch or reject_noise for confirmed false positives. "
         "config_patch is advisory only and may only suggest known fields under follow_cam, postprocess, "
         "scene_bias.dynamic_air_recovery, selection, or tracking. "
         "Do not include image base64 or claim files that are not present in the supplied context. "
@@ -824,12 +1289,17 @@ _CONFIG_PATCH_VALIDATORS: dict[str, Callable[[Any], bool]] = {
 }
 
 
-def _selected_model(client: Any, model: str | None) -> str | None:
+def _select_model(client: Any, model: str | None) -> tuple[str | None, str]:
     if model:
-        return model
+        return model, "explicit"
     settings = getattr(client, "settings", None)
+    improvement_model = getattr(settings, "improvement_model", None)
+    if isinstance(improvement_model, str) and improvement_model:
+        return improvement_model, "improvement_model"
     chat_model = getattr(settings, "chat_model", None)
-    return chat_model if isinstance(chat_model, str) and chat_model else None
+    if isinstance(chat_model, str) and chat_model:
+        return chat_model, "chat_model_fallback"
+    return None, "unknown"
 
 
 def _build_default_client() -> Any:

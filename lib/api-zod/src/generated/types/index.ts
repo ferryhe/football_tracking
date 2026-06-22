@@ -5,6 +5,11 @@
  * OpenAPI spec version: 0.1.0
  */
 
+export * from "./aIApprovedAction";
+export * from "./aIApprovedActionApprovedAction";
+export * from "./aIApprovedActionConfigPatch";
+export * from "./aIApprovedActionFollowCamRerenderPlan";
+export * from "./aIApprovedActionProvenance";
 export * from "./aIConfigDiffRequest";
 export * from "./aIConfigDiffRequestPatch";
 export * from "./aIConfigDiffResponse";
@@ -14,6 +19,14 @@ export * from "./aIExplainRequestLanguage";
 export * from "./aIExplainResponse";
 export * from "./aIFrameWindow";
 export * from "./aIHighlightAdjustment";
+export * from "./aIImproveApprovalRequest";
+export * from "./aIImproveApprovalRequestClipActionOverrides";
+export * from "./aIImproveApprovalRequestConfigPatchOverrides";
+export * from "./aIImproveApprovalRequestFollowCamRerenderPlanOverrides";
+export * from "./aIImproveApprovalRequestLocalSearchRoiOverrides";
+export * from "./aIImproveApprovalRequestRerunScopeOverrides";
+export * from "./aIImproveApprovalRequestSuggestedWindowOverrides";
+export * from "./aIImproveApprovalResponse";
 export * from "./aIImprovementItem";
 export * from "./aIImprovementItemConfigPatch";
 export * from "./aIImprovementItemFailureTagsItem";

@@ -17,10 +17,11 @@ from pydantic import ValidationError
 
 from football_tracking.api.app import create_app
 from football_tracking.api.routes import inputs as input_routes
+from football_tracking.api.routes.ai import approve_improvements as approve_improvements_route
 from football_tracking.api.routes.ai import improve as improve_route
 from football_tracking.api.routes import runs as run_routes
 from football_tracking.api.routes.artifacts import get_artifact
-from football_tracking.api.schemas import AIFrameWindow, AIImproveRequest, HighlightRenderRequest
+from football_tracking.api.schemas import AIFrameWindow, AIImproveApprovalRequest, AIImproveRequest, HighlightRenderRequest
 from football_tracking.api.service import ApiService
 from football_tracking.config import load_config
 from football_tracking.metrics import write_run_artifacts
@@ -1753,6 +1754,142 @@ class ApiServiceSmokeTests(unittest.TestCase):
         self.assertEqual("ai_improvement_report.json", response.artifact_name)
         self.assertTrue(Path(response.artifact_path).exists())
 
+    def test_ai_improvement_approve_writes_approved_actions(self) -> None:
+        output_dir = self.create_output_bundle("approve_baseline")
+        self.write_json(
+            "outputs/approve_baseline/ai_improvement_report.json",
+            {
+                "schema_version": "1.0",
+                "generated_at": "2026-06-22T00:00:00+00:00",
+                "model": "gpt-improve",
+                "summary": {"status": "needs_rerun"},
+                "improvements": [
+                    {
+                        "id": "imp_001",
+                        "priority": "P0",
+                        "area": "tracking",
+                        "failure_tags": ["ball_lost"],
+                        "root_cause_module": "reacquisition",
+                        "diagnosis": "Recover localized ball.",
+                        "recommended_action": "targeted_rerun",
+                        "rerun_scope": {"start_frame": 10, "end_frame": 20},
+                        "local_search_roi": {
+                            "coordinate_space": "image",
+                            "frame": 15,
+                            "x": 120,
+                            "y": 40,
+                            "width": 80,
+                            "height": 50,
+                            "confidence": 0.72,
+                        },
+                        "confidence": 0.82,
+                    }
+                ],
+            },
+        )
+        run = self.service.list_runs()[0]
+
+        response = self.service.ai_improvement_approve(
+            run_id=run["run_id"],
+            improvement_ids=["imp_001"],
+            approved_by="operator-a",
+        )
+
+        refreshed = self.service.get_run(run["run_id"])
+        artifact_names = {artifact["name"] for artifact in refreshed["artifacts"]}
+        written = json.loads((output_dir / "ai_improvement_approved_actions.json").read_text(encoding="utf-8"))
+        self.assertEqual("ai_improvement_approved_actions.json", response["artifact_name"])
+        self.assertEqual(response["approved_actions"], written["approved_actions"])
+        self.assertEqual("targeted_rerun", response["approved_actions"][0]["approved_action"])
+        self.assertIn("ai_improvement_approved_actions.json", artifact_names)
+
+    def test_ai_improvement_approve_route_validates_config_patch_overrides(self) -> None:
+        output_dir = self.create_output_bundle("approve_route_baseline")
+        self.write_json(
+            "outputs/approve_route_baseline/ai_improvement_report.json",
+            {
+                "schema_version": "1.0",
+                "generated_at": "2026-06-22T00:00:00+00:00",
+                "model": "gpt-improve",
+                "summary": {"status": "needs_rerun"},
+                "improvements": [
+                    {
+                        "id": "imp_filter",
+                        "priority": "P1",
+                        "area": "tracking",
+                        "failure_tags": ["foot_confusion"],
+                        "root_cause_module": "selection",
+                        "start_frame": 40,
+                        "end_frame": 52,
+                        "diagnosis": "Noise filter can tighten.",
+                        "recommended_action": "noise_filter_adjustment",
+                        "false_positive_class": "foot_confusion",
+                        "config_patch": {"selection": {"min_accept_score": 0.55}},
+                        "confidence": 0.7,
+                    }
+                ],
+            },
+        )
+        run = self.service.list_runs()[0]
+
+        response = approve_improvements_route(
+            run["run_id"],
+            AIImproveApprovalRequest(
+                improvement_ids=["imp_filter"],
+                config_patch_overrides={
+                    "imp_filter": {
+                        "selection": {"min_accept_score": 0.6},
+                        "detector": {"confidence_threshold": 0.01},
+                    }
+                },
+            ),
+            service=self.service,
+        )
+
+        self.assertEqual({"selection": {"min_accept_score": 0.6}}, response.approved_actions[0].config_patch)
+        self.assertEqual("foot_confusion", response.approved_actions[0].false_positive_class)
+        self.assertTrue((output_dir / "ai_improvement_approved_config_patch.json").exists())
+        self.assertTrue(any("detector.confidence_threshold" in warning for warning in response.warnings))
+
+    def test_ai_improvement_approve_clears_stale_config_patch_artifact_from_response(self) -> None:
+        output_dir = self.create_output_bundle("approve_no_patch_baseline")
+        self.write_json(
+            "outputs/approve_no_patch_baseline/ai_improvement_approved_config_patch.json",
+            {"schema_version": "1.0", "merged_config_patch": {"selection": {"min_accept_score": 0.99}}},
+        )
+        self.write_json(
+            "outputs/approve_no_patch_baseline/ai_improvement_report.json",
+            {
+                "schema_version": "1.0",
+                "generated_at": "2026-06-22T00:00:00+00:00",
+                "model": "gpt-improve",
+                "summary": {"status": "needs_rerun"},
+                "improvements": [
+                    {
+                        "id": "imp_manual",
+                        "priority": "P2",
+                        "area": "tracking",
+                        "failure_tags": ["unknown"],
+                        "root_cause_module": "unknown",
+                        "diagnosis": "Manual inspection only.",
+                        "recommended_action": "manual_review",
+                        "confidence": 0.5,
+                    }
+                ],
+            },
+        )
+        run = self.service.list_runs()[0]
+
+        response = self.service.ai_improvement_approve(
+            run["run_id"],
+            improvement_ids=["imp_manual"],
+            approved_by="operator-a",
+        )
+
+        self.assertIsNone(response["config_patch_artifact_name"])
+        self.assertIsNone(response["config_patch_artifact_path"])
+        self.assertFalse((output_dir / "ai_improvement_approved_config_patch.json").exists())
+
     def test_ai_frame_window_requires_ordered_frames(self) -> None:
         with self.assertRaises(ValidationError):
             AIFrameWindow(start_frame=30, end_frame=10)
@@ -1786,6 +1923,7 @@ class ApiServiceSmokeTests(unittest.TestCase):
             "/api/v1/ai/explain",
             "/api/v1/ai/recommend",
             "/api/v1/ai/improve",
+            "/api/v1/ai/improve/{run_id}/approve",
             "/api/v1/ai/config-diff",
         }
 
@@ -1882,6 +2020,19 @@ class ApiServiceSmokeTests(unittest.TestCase):
         )
         self.assertEqual(
             "#/components/schemas/AIImproveResponse",
+            operation["responses"]["200"]["content"]["application/json"]["schema"]["$ref"],
+        )
+
+    def test_create_app_documents_ai_improve_approval_schema(self) -> None:
+        app = create_app(self.repo_root)
+        operation = app.openapi()["paths"]["/api/v1/ai/improve/{run_id}/approve"]["post"]
+
+        self.assertEqual(
+            "#/components/schemas/AIImproveApprovalRequest",
+            operation["requestBody"]["content"]["application/json"]["schema"]["$ref"],
+        )
+        self.assertEqual(
+            "#/components/schemas/AIImproveApprovalResponse",
             operation["responses"]["200"]["content"]["application/json"]["schema"]["$ref"],
         )
 

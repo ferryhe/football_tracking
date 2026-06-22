@@ -78,6 +78,38 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/HTTPValidationError'
+  /ai/improve/{run_id}/approve:
+    post:
+      tags:
+      - ai
+      summary: Approve Improvements
+      operationId: approve_improvements
+      parameters:
+      - name: run_id
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Run Id
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AIImproveApprovalRequest'
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AIImproveApprovalResponse'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
   /ai/recommend:
     post:
       tags:
@@ -882,6 +914,118 @@ paths:
                 $ref: '#/components/schemas/HealthStatus'
 components:
   schemas:
+    AIApprovedAction:
+      properties:
+        approval_id:
+          type: string
+          title: Approval Id
+        improvement_id:
+          type: string
+          title: Improvement Id
+        approved_action:
+          type: string
+          enum:
+          - targeted_rerun
+          - localize_ball_roi
+          - noise_filter_adjustment
+          - tighten_noise_filter
+          - loosen_ball_recovery
+          - split_packet
+          - manual_review
+          - reject_noise
+          - adjust_highlight_window
+          - adjust_follow_cam
+          - tracking_rerun_before_follow_cam
+          - render_suggested_highlight
+          title: Approved Action
+        approval_source:
+          type: string
+          title: Approval Source
+        approved_at:
+          type: string
+          title: Approved At
+        approved_by:
+          type: string
+          title: Approved By
+        provenance:
+          additionalProperties: true
+          type: object
+          title: Provenance
+        rerun_scope:
+          anyOf:
+          - $ref: '#/components/schemas/AIFrameWindow'
+          - type: 'null'
+        local_search_roi:
+          anyOf:
+          - $ref: '#/components/schemas/AILocalSearchRoi'
+          - type: 'null'
+        config_patch:
+          additionalProperties: true
+          type: object
+          title: Config Patch
+        suggested_window:
+          anyOf:
+          - $ref: '#/components/schemas/AIFrameWindow'
+          - type: 'null'
+        clip_action:
+          anyOf:
+          - type: string
+            enum:
+            - extend_tail
+            - trim_head
+            - trim_tail
+            - split
+            - keep
+          - type: 'null'
+          title: Clip Action
+        follow_cam_rerender_plan:
+          anyOf:
+          - additionalProperties: true
+            type: object
+          - type: 'null'
+          title: Follow Cam Rerender Plan
+        source_packet_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Source Packet Id
+        visual_review_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Visual Review Id
+        candidate_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Candidate Id
+        false_positive_class:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: False Positive Class
+        start_frame:
+          anyOf:
+          - type: integer
+            minimum: 0.0
+          - type: 'null'
+          title: Start Frame
+        end_frame:
+          anyOf:
+          - type: integer
+            minimum: 0.0
+          - type: 'null'
+          title: End Frame
+      additionalProperties: true
+      type: object
+      required:
+      - approval_id
+      - improvement_id
+      - approved_action
+      - approval_source
+      - approved_at
+      - approved_by
+      title: AIApprovedAction
     AIConfigDiffRequest:
       properties:
         base_config_name:
@@ -1014,6 +1158,114 @@ components:
       - reason
       - confidence
       title: AIHighlightAdjustment
+    AIImproveApprovalRequest:
+      properties:
+        improvement_ids:
+          items:
+            type: string
+          type: array
+          minItems: 1
+          title: Improvement Ids
+        approved_by:
+          type: string
+          title: Approved By
+          default: operator
+        rerun_scope_overrides:
+          additionalProperties:
+            $ref: '#/components/schemas/AIFrameWindow'
+          type: object
+          title: Rerun Scope Overrides
+        local_search_roi_overrides:
+          additionalProperties:
+            $ref: '#/components/schemas/AILocalSearchRoi'
+          type: object
+          title: Local Search Roi Overrides
+        config_patch_overrides:
+          additionalProperties:
+            additionalProperties: true
+            type: object
+          type: object
+          title: Config Patch Overrides
+        suggested_window_overrides:
+          additionalProperties:
+            $ref: '#/components/schemas/AIFrameWindow'
+          type: object
+          title: Suggested Window Overrides
+        clip_action_overrides:
+          additionalProperties:
+            type: string
+            enum:
+            - extend_tail
+            - trim_head
+            - trim_tail
+            - split
+            - keep
+          type: object
+          title: Clip Action Overrides
+        follow_cam_rerender_plan_overrides:
+          additionalProperties:
+            additionalProperties: true
+            type: object
+          type: object
+          title: Follow Cam Rerender Plan Overrides
+      type: object
+      required:
+      - improvement_ids
+      title: AIImproveApprovalRequest
+    AIImproveApprovalResponse:
+      properties:
+        schema_version:
+          type: string
+          title: Schema Version
+        generated_at:
+          type: string
+          title: Generated At
+        run_id:
+          type: string
+          title: Run Id
+        source_report:
+          type: string
+          title: Source Report
+        approved_by:
+          type: string
+          title: Approved By
+        artifact_name:
+          type: string
+          title: Artifact Name
+        artifact_path:
+          type: string
+          title: Artifact Path
+        config_patch_artifact_name:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Config Patch Artifact Name
+        config_patch_artifact_path:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Config Patch Artifact Path
+        approved_actions:
+          items:
+            $ref: '#/components/schemas/AIApprovedAction'
+          type: array
+          title: Approved Actions
+        warnings:
+          items:
+            type: string
+          type: array
+          title: Warnings
+      type: object
+      required:
+      - schema_version
+      - generated_at
+      - run_id
+      - source_report
+      - approved_by
+      - artifact_name
+      - artifact_path
+      - approved_actions
+      title: AIImproveApprovalResponse
     AIImproveRequest:
       properties:
         run_id:
@@ -1163,6 +1415,8 @@ components:
           type: string
           enum:
           - targeted_rerun
+          - localize_ball_roi
+          - noise_filter_adjustment
           - tighten_noise_filter
           - loosen_ball_recovery
           - split_packet
@@ -1210,6 +1464,11 @@ components:
           anyOf:
           - $ref: '#/components/schemas/AILocalSearchRoi'
           - type: 'null'
+        false_positive_class:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: False Positive Class
       additionalProperties: true
       type: object
       required:

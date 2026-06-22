@@ -21,7 +21,13 @@ import cv2
 import numpy as np
 import yaml
 
-from football_tracking.ai_improvement import compact_ai_improvement_summary, write_ai_improvement_report
+from football_tracking.ai_improvement import (
+    APPROVED_ACTIONS_FILE_NAME,
+    APPROVED_CONFIG_PATCH_FILE_NAME,
+    approve_ai_improvement_actions,
+    compact_ai_improvement_summary,
+    write_ai_improvement_report,
+)
 from football_tracking.ai_review_triggers import compact_ai_review_trigger_summary
 from football_tracking.api.ai_provider import OpenAIResponsesClient, load_provider_settings
 from football_tracking.ball_audit import compact_ball_audit_summary
@@ -929,6 +935,53 @@ class ApiService:
                 report.get("highlight_adjustments") if isinstance(report.get("highlight_adjustments"), list) else []
             ),
         }
+
+    def ai_improvement_approve(
+        self,
+        run_id: str,
+        improvement_ids: list[str],
+        approved_by: str = "operator",
+        rerun_scope_overrides: dict[str, dict[str, Any]] | None = None,
+        local_search_roi_overrides: dict[str, dict[str, Any]] | None = None,
+        config_patch_overrides: dict[str, dict[str, Any]] | None = None,
+        suggested_window_overrides: dict[str, dict[str, Any]] | None = None,
+        clip_action_overrides: dict[str, str] | None = None,
+        follow_cam_rerender_plan_overrides: dict[str, dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        run = self.get_run(run_id)
+        output_dir = Path(run["output_dir"]).resolve()
+        artifact = approve_ai_improvement_actions(
+            output_dir,
+            run_id=run_id,
+            improvement_ids=improvement_ids,
+            approved_by=approved_by,
+            approval_source="api",
+            rerun_scope_overrides=rerun_scope_overrides,
+            local_search_roi_overrides=local_search_roi_overrides,
+            config_patch_overrides=config_patch_overrides,
+            suggested_window_overrides=suggested_window_overrides,
+            clip_action_overrides=clip_action_overrides,
+            follow_cam_rerender_plan_overrides=follow_cam_rerender_plan_overrides,
+        )
+        (output_dir / "metrics_report.json").write_text(
+            json.dumps(build_metrics_report(output_dir), ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        self._refresh_run_artifacts_and_stats(run_id, output_dir)
+
+        artifact_path = (output_dir / APPROVED_ACTIONS_FILE_NAME).resolve()
+        config_patch_path = (output_dir / APPROVED_CONFIG_PATCH_FILE_NAME).resolve()
+        response = {
+            **artifact,
+            "artifact_name": APPROVED_ACTIONS_FILE_NAME,
+            "artifact_path": str(artifact_path),
+            "config_patch_artifact_name": None,
+            "config_patch_artifact_path": None,
+        }
+        if config_patch_path.exists():
+            response["config_patch_artifact_name"] = APPROVED_CONFIG_PATCH_FILE_NAME
+            response["config_patch_artifact_path"] = str(config_patch_path)
+        return response
 
     def _ai_explain_heuristic(
         self,

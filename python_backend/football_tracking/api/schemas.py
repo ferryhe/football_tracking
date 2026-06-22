@@ -545,6 +545,7 @@ class AIImprovementItem(BaseModel):
     rerun_scope: AIFrameWindow | None = None
     likely_ball_region: AILikelyBallRegion | None = None
     local_search_roi: AILocalSearchRoi | None = None
+    false_positive_class: str | None = None
 
 
 class AIHighlightAdjustment(BaseModel):
@@ -593,3 +594,52 @@ class AIImproveResponse(BaseModel):
     artifact_path: str
     improvements: list[AIImprovementItem]
     highlight_adjustments: list[AIHighlightAdjustment]
+
+
+class AIImproveApprovalRequest(BaseModel):
+    improvement_ids: list[str] = Field(min_length=1)
+    approved_by: str = "operator"
+    rerun_scope_overrides: dict[str, AIFrameWindow] = Field(default_factory=dict)
+    local_search_roi_overrides: dict[str, AILocalSearchRoi] = Field(default_factory=dict)
+    config_patch_overrides: dict[str, dict[str, Any]] = Field(default_factory=dict)
+    suggested_window_overrides: dict[str, AIFrameWindow] = Field(default_factory=dict)
+    clip_action_overrides: dict[str, AIClipAction] = Field(default_factory=dict)
+    follow_cam_rerender_plan_overrides: dict[str, dict[str, Any]] = Field(default_factory=dict)
+
+
+class AIApprovedAction(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    approval_id: str
+    improvement_id: str
+    approved_action: AIRecommendedAction
+    approval_source: str
+    approved_at: str
+    approved_by: str
+    provenance: dict[str, Any] = Field(default_factory=dict)
+    rerun_scope: AIFrameWindow | None = None
+    local_search_roi: AILocalSearchRoi | None = None
+    config_patch: dict[str, Any] = Field(default_factory=dict)
+    suggested_window: AIFrameWindow | None = None
+    clip_action: AIClipAction | None = None
+    follow_cam_rerender_plan: dict[str, Any] | None = None
+    source_packet_id: str | None = None
+    visual_review_id: str | None = None
+    candidate_id: str | None = None
+    false_positive_class: str | None = None
+    start_frame: int | None = Field(default=None, ge=0)
+    end_frame: int | None = Field(default=None, ge=0)
+
+
+class AIImproveApprovalResponse(BaseModel):
+    schema_version: str
+    generated_at: str
+    run_id: str
+    source_report: str
+    approved_by: str
+    artifact_name: str
+    artifact_path: str
+    config_patch_artifact_name: str | None = None
+    config_patch_artifact_path: str | None = None
+    approved_actions: list[AIApprovedAction]
+    warnings: list[str] = Field(default_factory=list)

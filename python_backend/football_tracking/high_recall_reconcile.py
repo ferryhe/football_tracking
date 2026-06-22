@@ -27,7 +27,7 @@ def reconcile_high_recall_window(
     start_frame = _parse_int(window.get("start_frame"))
     end_frame = _parse_int(window.get("end_frame"))
     if start_frame is None or end_frame is None:
-        return _rejected_result(main_rows, window, "invalid_window")
+        return _with_ai_improvement_metadata(_rejected_result(main_rows, window, "invalid_window"), window)
     if end_frame < start_frame:
         start_frame, end_frame = end_frame, start_frame
 
@@ -74,10 +74,10 @@ def reconcile_high_recall_window(
         reason = "jump_gate_failed" if gate_violations else "no_continuity_improvement"
         result = _rejected_result(main_rows, window, reason)
         result["gate_violations"] = gate_violations
-        return result
+        return _with_ai_improvement_metadata(result, window)
 
     proposed_rows = _rows_from_frame_map(proposed_by_frame)
-    return {
+    return _with_ai_improvement_metadata({
         "accepted": True,
         "reason": "accepted",
         "window": _window_clue(window),
@@ -85,7 +85,7 @@ def reconcile_high_recall_window(
         "rows": proposed_rows,
         "review_packet_clues": review_packet_clues,
         "gate_violations": gate_violations,
-    }
+    }, window)
 
 
 def reconcile_high_recall_outputs(
@@ -110,6 +110,7 @@ def reconcile_high_recall_outputs(
         if not window_csv_path.exists():
             result = _rejected_result(current_rows, window, "high_recall_csv_missing")
             result["window_dir"] = str(window_dir)
+            result = _with_ai_improvement_metadata(result, window)
             results.append(_report_result(result))
             continue
         high_recall_rows = read_track_csv(window_csv_path)
@@ -180,7 +181,7 @@ def write_track_csv(path: Path, rows: list[dict[str, Any]]) -> None:
 
 
 def _report_result(result: dict[str, Any]) -> dict[str, Any]:
-    return {
+    reported = {
         "accepted": bool(result.get("accepted")),
         "reason": result.get("reason"),
         "window": result.get("window"),
@@ -189,6 +190,10 @@ def _report_result(result: dict[str, Any]) -> dict[str, Any]:
         "review_packet_clues": result.get("review_packet_clues", []),
         "gate_violations": result.get("gate_violations", []),
     }
+    for key in ("source", "improvement_id", "approval_source", "approval_provenance", "changed_frame_count"):
+        if key in result:
+            reported[key] = result[key]
+    return reported
 
 
 def _rejected_result(rows: list[dict[str, Any]], window: dict[str, Any], reason: str) -> dict[str, Any]:
@@ -201,6 +206,25 @@ def _rejected_result(rows: list[dict[str, Any]], window: dict[str, Any], reason:
         "review_packet_clues": [_window_clue(window, rejection_reason=reason)],
         "gate_violations": [],
     }
+
+
+def _with_ai_improvement_metadata(result: dict[str, Any], window: dict[str, Any]) -> dict[str, Any]:
+    sources = window.get("sources")
+    is_ai_window = isinstance(sources, list) and "ai_improvement" in sources
+    if not is_ai_window and str(window.get("source") or "") != "ai_improvement":
+        return result
+    enriched = dict(result)
+    enriched["source"] = "ai_improvement"
+    if isinstance(window.get("improvement_id"), str):
+        enriched["improvement_id"] = window["improvement_id"]
+    if isinstance(window.get("approval_source"), str):
+        enriched["approval_source"] = window["approval_source"]
+    if isinstance(window.get("approval_provenance"), list):
+        enriched["approval_provenance"] = [
+            dict(item) for item in window["approval_provenance"] if isinstance(item, dict)
+        ]
+    enriched["changed_frame_count"] = len(enriched.get("accepted_frames") or [])
+    return enriched
 
 
 def _window_clue(window: dict[str, Any], *, rejection_reason: str | None = None) -> dict[str, Any]:

@@ -31,6 +31,8 @@ AIRootCauseModule: TypeAlias = Literal[
 
 AIRecommendedAction: TypeAlias = Literal[
     "targeted_rerun",
+    "localize_ball_roi",
+    "noise_filter_adjustment",
     "tighten_noise_filter",
     "loosen_ball_recovery",
     "split_packet",

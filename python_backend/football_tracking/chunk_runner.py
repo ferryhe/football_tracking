@@ -254,6 +254,7 @@ def run_high_recall_windows(
     write_ball_audit_report(config.output_dir)
     write_ai_review_trigger_report(config.output_dir)
     write_event_candidate_report(config.output_dir)
+    approved_actions_path = config.output_dir / "ai_improvement_approved_actions.json"
     report = write_high_recall_window_report(
         config.output_dir,
         output_dir_name=settings.output_dir_name,
@@ -262,6 +263,7 @@ def run_high_recall_windows(
         max_total_frames=settings.max_total_frames,
         total_frames=source_total_frames,
         mode=settings.mode,
+        approved_actions_path=approved_actions_path if approved_actions_path.exists() else None,
     )
 
     windows = report.get("windows") if isinstance(report.get("windows"), list) else []
