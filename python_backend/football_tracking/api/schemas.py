@@ -334,8 +334,25 @@ class EventCandidateSummary(BaseModel):
 
 
 class EventCandidateWindow(BaseModel):
-    start_frame: int
-    end_frame: int
+    start_frame: int = Field(ge=0)
+    end_frame: int = Field(ge=0)
+
+    @model_validator(mode="after")
+    def validate_order(self) -> "EventCandidateWindow":
+        if self.end_frame < self.start_frame:
+            raise ValueError("EventCandidateWindow requires end_frame to be greater than or equal to start_frame.")
+        return self
+
+
+class EventCandidateBufferPolicy(BaseModel):
+    fps: float = Field(gt=0)
+    fps_source: str
+    pre_buffer_seconds: float = Field(ge=0)
+    post_buffer_seconds: float = Field(ge=0)
+    pre_buffer_frames: int = Field(ge=0)
+    post_buffer_frames: int = Field(ge=0)
+    min_post_event_frames: int = Field(ge=0)
+    min_tail_frames: int = Field(ge=0)
 
 
 class EventCandidate(BaseModel):
@@ -347,7 +364,9 @@ class EventCandidate(BaseModel):
     frame_count: int
     score: float
     reason: str
+    core_window: EventCandidateWindow
     render_window: EventCandidateWindow
+    buffer_policy: EventCandidateBufferPolicy
     evidence: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -431,18 +450,46 @@ class FollowCamRenderRequest(BaseModel):
 class HighlightRenderRequest(BaseModel):
     model_config = ConfigDict(
         json_schema_extra={
-            "anyOf": [
-                {"required": ["candidate_id"]},
-                {"required": ["start_frame", "end_frame"]},
+            "oneOf": [
+                {
+                    "required": ["candidate_id"],
+                    "not": {
+                        "anyOf": [
+                            {"required": ["approved_action_id"]},
+                            {"required": ["start_frame"]},
+                            {"required": ["end_frame"]},
+                        ]
+                    },
+                },
+                {
+                    "required": ["approved_action_id"],
+                    "not": {
+                        "anyOf": [
+                            {"required": ["candidate_id"]},
+                            {"required": ["start_frame"]},
+                            {"required": ["end_frame"]},
+                        ]
+                    },
+                },
+                {
+                    "required": ["start_frame", "end_frame"],
+                    "not": {
+                        "anyOf": [
+                            {"required": ["candidate_id"]},
+                            {"required": ["approved_action_id"]},
+                        ]
+                    },
+                },
             ],
         }
     )
 
     candidate_id: str | None = None
+    approved_action_id: str | None = None
     start_frame: int | None = Field(default=None, ge=0)
     end_frame: int | None = Field(default=None, ge=0)
-    pre_roll_frames: int = Field(default=15, ge=0)
-    post_roll_frames: int = Field(default=30, ge=0)
+    pre_roll_frames: int | None = Field(default=None, ge=0)
+    post_roll_frames: int | None = Field(default=None, ge=0)
     output_dir_name: str | None = None
     output_video_name: str | None = None
     notes: str | None = None
@@ -450,10 +497,17 @@ class HighlightRenderRequest(BaseModel):
     @model_validator(mode="after")
     def validate_selection(self) -> "HighlightRenderRequest":
         has_candidate = bool(self.candidate_id)
+        has_approved_action = bool(self.approved_action_id)
         has_start = self.start_frame is not None
         has_end = self.end_frame is not None
-        if not has_candidate and not (has_start and has_end):
-            raise ValueError("Highlight render requires candidate_id or start_frame/end_frame.")
+        explicit_window = has_start and has_end
+        if not has_candidate and not has_approved_action and not (has_start and has_end):
+            raise ValueError("Highlight render requires candidate_id, approved_action_id, or start_frame/end_frame.")
+        mode_count = sum(1 for selected in (has_candidate, has_approved_action, explicit_window) if selected)
+        if mode_count != 1:
+            raise ValueError(
+                "Highlight render requires exactly one of candidate_id, approved_action_id, or start_frame/end_frame."
+            )
         if has_start != has_end:
             raise ValueError("Highlight render frame window requires both start_frame and end_frame.")
         if has_start and has_end and self.end_frame is not None and self.start_frame is not None and self.end_frame < self.start_frame:
@@ -549,6 +603,9 @@ class AIImprovementItem(BaseModel):
     likely_ball_region: AILikelyBallRegion | None = None
     local_search_roi: AILocalSearchRoi | None = None
     false_positive_class: str | None = None
+    candidate_id: str | None = None
+    suggested_window: AIFrameWindow | None = None
+    clip_action: AIClipAction | None = None
     camera_motion_event_id: str | None = None
     camera_motion_severity: str | None = None
     evidence_payload: dict[str, Any] = Field(default_factory=dict)

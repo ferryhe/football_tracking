@@ -35,6 +35,15 @@ export interface AIImprovementItem {
   likely_ball_region?: AILikelyBallRegion | null;
   local_search_roi?: AILocalSearchRoi | null;
   false_positive_class?: string | null;
+  candidate_id?: string | null;
+  suggested_window?: AIFrameWindow | null;
+  clip_action?:
+    | "extend_tail"
+    | "trim_head"
+    | "trim_tail"
+    | "split"
+    | "keep"
+    | null;
   camera_motion_event_id?: string | null;
   camera_motion_severity?: string | null;
   evidence_payload?: AIImprovementItemEvidencePayload;

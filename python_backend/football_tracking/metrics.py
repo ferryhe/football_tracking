@@ -8,6 +8,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+import cv2
+
 from football_tracking.accepted_highlights import (
     REPORT_FILE_NAME as ACCEPTED_HIGHLIGHTS_REPORT_FILE_NAME,
 )
@@ -204,7 +206,8 @@ def write_run_artifacts(output_dir: Path, run: dict[str, Any]) -> tuple[dict[str
         ai_review_triggers_error = f"Failed to write ai_review_triggers.json: {exc}"
     event_candidates_error: str | None = None
     try:
-        write_event_candidate_report(output_dir)
+        event_candidate_fps, event_candidate_fps_source = _event_candidate_fps(run)
+        write_event_candidate_report(output_dir, fps=event_candidate_fps, fps_source=event_candidate_fps_source)
     except Exception as exc:
         event_candidates_error = f"Failed to write event_candidates.json: {exc}"
     player_tracks_error: str | None = None
@@ -224,6 +227,34 @@ def write_run_artifacts(output_dir: Path, run: dict[str, Any]) -> tuple[dict[str
     _write_json(output_dir / "run_manifest.json", manifest)
     _write_json(output_dir / "metrics_report.json", report)
     return manifest, report
+
+
+def _event_candidate_fps(run: dict[str, Any]) -> tuple[float | None, str | None]:
+    for key in ("fps", "video_fps"):
+        fps = _optional_positive_float(run.get(key))
+        if fps is not None:
+            return fps, key
+    input_video = run.get("input_video")
+    if not isinstance(input_video, str) or not input_video.strip():
+        return None, None
+    capture = cv2.VideoCapture(str(Path(input_video).resolve()))
+    try:
+        if not capture.isOpened():
+            return None, None
+        fps = _optional_positive_float(capture.get(cv2.CAP_PROP_FPS))
+        return (fps, "input_video") if fps is not None else (None, None)
+    finally:
+        capture.release()
+
+
+def _optional_positive_float(value: Any) -> float | None:
+    if isinstance(value, bool) or value in (None, ""):
+        return None
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if math.isfinite(parsed) and parsed > 0 else None
 
 
 def stats_from_metrics_report(report: dict[str, Any]) -> dict[str, Any]:

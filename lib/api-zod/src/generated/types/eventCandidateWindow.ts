@@ -6,6 +6,8 @@
  */
 
 export interface EventCandidateWindow {
+  /** @minimum 0 */
   start_frame: number;
+  /** @minimum 0 */
   end_frame: number;
 }

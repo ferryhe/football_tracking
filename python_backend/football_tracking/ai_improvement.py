@@ -152,7 +152,10 @@ def build_ai_improvement_report(
             model=selected_model,
             temperature=0.1,
         )
-        improvements, highlight_adjustments, validation_warnings, summary_status, primary_issue = _validate_model_report(response)
+        improvements, highlight_adjustments, validation_warnings, summary_status, primary_issue = _validate_model_report(
+            response,
+            context=context,
+        )
         improvements, visual_warnings = _merge_visual_review_localization(improvements, context)
         validation_warnings.extend(visual_warnings)
     except Exception as exc:
@@ -231,6 +234,7 @@ def approve_ai_improvement_actions(
         for item in improvements
         if isinstance(item, dict) and isinstance(item.get("id"), str) and item.get("id")
     }
+    highlight_candidates = _event_candidate_lookup(_read_optional_json(output_dir / "event_candidates.json")[0])
 
     warnings: list[str] = []
     approved_actions: list[dict[str, Any]] = []
@@ -253,6 +257,7 @@ def approve_ai_improvement_actions(
             suggested_window_override=(suggested_window_overrides or {}).get(improvement_id),
             clip_action_override=(clip_action_overrides or {}).get(improvement_id),
             follow_cam_rerender_plan_override=(follow_cam_rerender_plan_overrides or {}).get(improvement_id),
+            highlight_candidates=highlight_candidates,
         )
         warnings.extend(action_warnings)
         approved_actions.append(action)
@@ -436,6 +441,7 @@ def _approved_action_entry(
     suggested_window_override: dict[str, Any] | None,
     clip_action_override: str | None,
     follow_cam_rerender_plan_override: dict[str, Any] | None,
+    highlight_candidates: dict[str, dict[str, Any]] | None = None,
 ) -> tuple[dict[str, Any], list[str]]:
     improvement_id = str(improvement.get("id") or "")
     approved_action = str(improvement.get("recommended_action") or "")
@@ -514,6 +520,12 @@ def _approved_action_entry(
         if not isinstance(clip_action, str) or clip_action not in AI_CLIP_ACTIONS:
             raise ValueError(f"Approval {approval_id} {approved_action} requires supported clip_action.")
         action["clip_action"] = clip_action
+        _validate_highlight_window_invariants(
+            action["suggested_window"],
+            candidate_id=action["candidate_id"],
+            candidates=highlight_candidates,
+            label=f"Approval {approval_id} suggested_window",
+        )
 
     if follow_cam_rerender_plan_override is not None:
         action["follow_cam_rerender_plan"] = dict(follow_cam_rerender_plan_override)
@@ -1087,6 +1099,8 @@ def _first_camera_motion_event(context: dict[str, Any]) -> dict[str, Any] | None
 
 def _validate_model_report(
     response: Any,
+    *,
+    context: dict[str, Any] | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[str], str, str | None]:
     if not isinstance(response, dict):
         raise ValueError("Model response must be a JSON object.")
@@ -1106,8 +1120,16 @@ def _validate_model_report(
 
     warnings: list[str] = []
     improvements = []
+    highlight_candidates = _highlight_candidate_lookup_from_context(context)
     for index, raw in enumerate(raw_improvements, start=1):
         improvement, patch_warnings = _validate_improvement(raw, index)
+        if improvement.get("recommended_action") in {"adjust_highlight_window", "render_suggested_highlight"}:
+            _validate_highlight_window_invariants(
+                improvement["suggested_window"],
+                candidate_id=str(improvement["candidate_id"]),
+                candidates=highlight_candidates,
+                label=f"Improvement {index} suggested_window",
+            )
         warnings.extend(patch_warnings)
         improvements.append(improvement)
 
@@ -1116,9 +1138,16 @@ def _validate_model_report(
         raw_highlight_adjustments = []
     if not isinstance(raw_highlight_adjustments, list):
         raise ValueError("Model response highlight_adjustments must be a list.")
-    highlight_adjustments = [
-        _validate_highlight_adjustment(raw, index) for index, raw in enumerate(raw_highlight_adjustments, start=1)
-    ]
+    highlight_adjustments = []
+    for index, raw in enumerate(raw_highlight_adjustments, start=1):
+        adjustment = _validate_highlight_adjustment(raw, index)
+        _validate_highlight_window_invariants(
+            adjustment["suggested_window"],
+            candidate_id=adjustment["candidate_id"],
+            candidates=highlight_candidates,
+            label=f"Highlight adjustment {index} suggested_window",
+        )
+        highlight_adjustments.append(adjustment)
 
     if status == "ok" and (improvements or highlight_adjustments):
         status = "needs_rerun"
@@ -1269,6 +1298,90 @@ def _validate_highlight_adjustment(raw: Any, index: int) -> dict[str, Any]:
     }
 
 
+def _highlight_candidate_lookup_from_context(context: dict[str, Any] | None) -> dict[str, dict[str, Any]]:
+    if not isinstance(context, dict):
+        return {}
+    artifacts = context.get("artifacts")
+    event_candidates = artifacts.get("event_candidates") if isinstance(artifacts, dict) else None
+    return _event_candidate_lookup(event_candidates)
+
+
+def _event_candidate_lookup(event_candidates: Any) -> dict[str, dict[str, Any]]:
+    if not isinstance(event_candidates, dict):
+        return {}
+    candidates = event_candidates.get("candidates")
+    if not isinstance(candidates, list):
+        return {}
+    lookup: dict[str, dict[str, Any]] = {}
+    for candidate in candidates:
+        if not isinstance(candidate, dict):
+            continue
+        candidate_id = candidate.get("id")
+        if isinstance(candidate_id, str) and candidate_id.strip():
+            lookup[candidate_id.strip()] = candidate
+    return lookup
+
+
+def _validate_highlight_window_invariants(
+    window: dict[str, int],
+    *,
+    candidate_id: str,
+    candidates: dict[str, dict[str, Any]] | None,
+    label: str,
+) -> None:
+    if not candidates:
+        raise ValueError(f"{label} cannot be validated because event_candidates.json has no matching candidates.")
+    candidate = candidates.get(candidate_id)
+    if candidate is None:
+        raise ValueError(f"{label} references unknown candidate_id: {candidate_id}.")
+    core_window = _candidate_core_window(candidate)
+    if core_window is None:
+        raise ValueError(f"{label} requires candidate {candidate_id} to include core_window.")
+    if window["start_frame"] > core_window["start_frame"] or window["end_frame"] < core_window["end_frame"]:
+        raise ValueError(f"{label} must include candidate core_window {core_window}.")
+    min_tail = _candidate_min_post_event_frames(candidate)
+    if min_tail > 0:
+        required_end = core_window["end_frame"] + min_tail
+        if window["end_frame"] < required_end:
+            raise ValueError(
+                f"{label} must preserve the minimum post-event tail for {candidate_id}: "
+                f"end_frame {window['end_frame']} < {required_end}."
+            )
+
+
+def _candidate_core_window(candidate: dict[str, Any]) -> dict[str, int] | None:
+    core_window = _optional_frame_window(candidate.get("core_window"))
+    if core_window is not None:
+        return core_window
+    start_frame = _optional_int(candidate.get("start_frame"))
+    end_frame = _optional_int(candidate.get("end_frame"))
+    if start_frame is None or end_frame is None or start_frame < 0 or end_frame < start_frame:
+        return None
+    return {"start_frame": start_frame, "end_frame": end_frame}
+
+
+def _optional_frame_window(value: Any) -> dict[str, int] | None:
+    if not isinstance(value, dict):
+        return None
+    start_frame = _optional_int(value.get("start_frame"))
+    end_frame = _optional_int(value.get("end_frame"))
+    if start_frame is None or end_frame is None or start_frame < 0 or end_frame < start_frame:
+        return None
+    return {"start_frame": start_frame, "end_frame": end_frame}
+
+
+def _candidate_min_post_event_frames(candidate: dict[str, Any]) -> int:
+    buffer_policy = candidate.get("buffer_policy")
+    if not isinstance(buffer_policy, dict):
+        return 0
+    value = _optional_int(buffer_policy.get("min_tail_frames"))
+    if value is None:
+        value = _optional_int(buffer_policy.get("min_post_event_frames"))
+    if value is None:
+        value = _optional_int(buffer_policy.get("post_buffer_frames"))
+    return max(0, value or 0)
+
+
 def _optional_clip_action(value: Any, index: int) -> dict[str, str]:
     if value is None:
         return {}
@@ -1394,6 +1507,8 @@ def _instructions(language: str | None) -> str:
         "Camera-motion suggestions must use adjust_follow_cam for stable Detected tracking with sudden camera movement, "
         "tracking_rerun_before_follow_cam when the camera event overlaps Lost/Predicted or nearby tracking issues, "
         "or human_review_camera_motion when evidence is ambiguous; continuous stable high-speed play is evidence, not an automatic failure. "
+        "Highlight suggestions must include candidate.core_window, preserve candidate.buffer_policy.min_tail_frames, "
+        "and do not trim result tail after a shot or goal. "
         "config_patch is advisory only and may only suggest known fields under follow_cam, postprocess, "
         "scene_bias.dynamic_air_recovery, selection, or tracking. "
         "Do not include image base64 or claim files that are not present in the supplied context. "

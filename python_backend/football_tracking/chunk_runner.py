@@ -253,7 +253,8 @@ def run_high_recall_windows(
     _remove_stale_postprocess_artifacts(config)
     write_ball_audit_report(config.output_dir)
     write_ai_review_trigger_report(config.output_dir)
-    write_event_candidate_report(config.output_dir)
+    event_candidate_fps, event_candidate_fps_source = _event_candidate_fps(config)
+    write_event_candidate_report(config.output_dir, fps=event_candidate_fps, fps_source=event_candidate_fps_source)
     approved_actions_path = config.output_dir / "ai_improvement_approved_actions.json"
     report = write_high_recall_window_report(
         config.output_dir,
@@ -939,6 +940,34 @@ def _remove_stale_postprocess_artifacts(config: AppConfig) -> None:
                 path.unlink()
         except OSError:
             logger.warning("Unable to remove stale postprocess artifact before high-recall planning: %s", path)
+
+
+def _event_candidate_fps(config: AppConfig) -> tuple[float | None, str | None]:
+    if getattr(getattr(config, "mock", None), "enabled", False):
+        fps = _optional_positive_float(getattr(config.mock, "fps", None))
+        return (fps, "mock_source") if fps is not None else (None, None)
+
+    input_video = getattr(config, "input_video", None)
+    if not isinstance(input_video, Path):
+        return None, None
+    capture = cv2.VideoCapture(str(input_video.resolve()))
+    try:
+        if not capture.isOpened():
+            return None, None
+        fps = _optional_positive_float(capture.get(cv2.CAP_PROP_FPS))
+        return (fps, "input_video") if fps is not None else (None, None)
+    finally:
+        capture.release()
+
+
+def _optional_positive_float(value: Any) -> float | None:
+    if isinstance(value, bool) or value in (None, ""):
+        return None
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 and parsed == parsed and parsed not in (float("inf"), float("-inf")) else None
 
 
 def _high_recall_settings(config: Any) -> _HighRecallSettings:

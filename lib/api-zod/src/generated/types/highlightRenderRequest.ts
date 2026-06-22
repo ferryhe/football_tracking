@@ -7,12 +7,11 @@
 
 export type HighlightRenderRequest = unknown & {
   candidate_id?: string | null;
+  approved_action_id?: string | null;
   start_frame?: number | null;
   end_frame?: number | null;
-  /** @minimum 0 */
-  pre_roll_frames?: number;
-  /** @minimum 0 */
-  post_roll_frames?: number;
+  pre_roll_frames?: number | null;
+  post_roll_frames?: number | null;
   output_dir_name?: string | null;
   output_video_name?: string | null;
   notes?: string | null;

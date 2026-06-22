@@ -722,14 +722,22 @@ class TemporalChunkSequentialRunnerTests(unittest.TestCase):
                 call_order.append("audit")
                 return {}
 
+            def fake_event_candidates(output_dir: Path, **kwargs: object) -> dict[str, object]:
+                self.assertEqual(config.output_dir, output_dir)
+                self.assertEqual(30.0, kwargs["fps"])
+                self.assertEqual("input_video", kwargs["fps_source"])
+                call_order.append("events")
+                return {}
+
             with (
                 patch("football_tracking.chunk_runner.plan_temporal_chunks", return_value=chunks),
                 patch("football_tracking.chunk_runner.run_chunk", side_effect=fake_temporal_chunk_run),
                 patch("football_tracking.chunk_runner.stitch_chunk_outputs", side_effect=fake_stitch),
                 patch("football_tracking.chunk_runner._source_total_frames", return_value=30),
+                patch("football_tracking.chunk_runner._event_candidate_fps", return_value=(30.0, "input_video")),
                 patch("football_tracking.chunk_runner.write_ball_audit_report", side_effect=fake_audit),
                 patch("football_tracking.chunk_runner.write_ai_review_trigger_report", side_effect=lambda output_dir: call_order.append("triggers") or {}),
-                patch("football_tracking.chunk_runner.write_event_candidate_report", side_effect=lambda output_dir: call_order.append("events") or {}),
+                patch("football_tracking.chunk_runner.write_event_candidate_report", side_effect=fake_event_candidates),
                 patch(
                     "football_tracking.chunk_runner.write_high_recall_window_report",
                     return_value={

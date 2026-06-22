@@ -96,6 +96,10 @@ export const improveResponseImprovementsItemLocalSearchRoiOneHeightExclusiveMin 
 export const improveResponseImprovementsItemLocalSearchRoiOneConfidenceMin = 0;
 export const improveResponseImprovementsItemLocalSearchRoiOneConfidenceMax = 1;
 
+export const improveResponseImprovementsItemSuggestedWindowOneStartFrameMin = 0;
+
+export const improveResponseImprovementsItemSuggestedWindowOneEndFrameMin = 0;
+
 export const improveResponseHighlightAdjustmentsItemCurrentWindowStartFrameMin = 0;
 
 export const improveResponseHighlightAdjustmentsItemCurrentWindowEndFrameMin = 0;
@@ -281,6 +285,30 @@ export const ImproveResponse = zod.object({
         ])
         .optional(),
       false_positive_class: zod.union([zod.string(), zod.null()]).optional(),
+      candidate_id: zod.union([zod.string(), zod.null()]).optional(),
+      suggested_window: zod
+        .union([
+          zod.object({
+            start_frame: zod
+              .number()
+              .min(
+                improveResponseImprovementsItemSuggestedWindowOneStartFrameMin,
+              ),
+            end_frame: zod
+              .number()
+              .min(
+                improveResponseImprovementsItemSuggestedWindowOneEndFrameMin,
+              ),
+          }),
+          zod.null(),
+        ])
+        .optional(),
+      clip_action: zod
+        .union([
+          zod.enum(["extend_tail", "trim_head", "trim_tail", "split", "keep"]),
+          zod.null(),
+        ])
+        .optional(),
       camera_motion_event_id: zod.union([zod.string(), zod.null()]).optional(),
       camera_motion_severity: zod.union([zod.string(), zod.null()]).optional(),
       evidence_payload: zod.record(zod.string(), zod.unknown()).optional(),
@@ -1477,6 +1505,27 @@ export const GetEventCandidatesReportParams = zod.object({
 });
 
 export const getEventCandidatesReportResponseCandidatesItemLabelDefault = `candidate`;
+export const getEventCandidatesReportResponseCandidatesItemCoreWindowStartFrameMin = 0;
+
+export const getEventCandidatesReportResponseCandidatesItemCoreWindowEndFrameMin = 0;
+
+export const getEventCandidatesReportResponseCandidatesItemRenderWindowStartFrameMin = 0;
+
+export const getEventCandidatesReportResponseCandidatesItemRenderWindowEndFrameMin = 0;
+
+export const getEventCandidatesReportResponseCandidatesItemBufferPolicyFpsExclusiveMin = 0;
+
+export const getEventCandidatesReportResponseCandidatesItemBufferPolicyPreBufferSecondsMin = 0;
+
+export const getEventCandidatesReportResponseCandidatesItemBufferPolicyPostBufferSecondsMin = 0;
+
+export const getEventCandidatesReportResponseCandidatesItemBufferPolicyPreBufferFramesMin = 0;
+
+export const getEventCandidatesReportResponseCandidatesItemBufferPolicyPostBufferFramesMin = 0;
+
+export const getEventCandidatesReportResponseCandidatesItemBufferPolicyMinPostEventFramesMin = 0;
+
+export const getEventCandidatesReportResponseCandidatesItemBufferPolicyMinTailFramesMin = 0;
 
 export const GetEventCandidatesReportResponse = zod.object({
   schema_version: zod.string(),
@@ -1506,9 +1555,67 @@ export const GetEventCandidatesReportResponse = zod.object({
         frame_count: zod.number(),
         score: zod.number(),
         reason: zod.string(),
+        core_window: zod.object({
+          start_frame: zod
+            .number()
+            .min(
+              getEventCandidatesReportResponseCandidatesItemCoreWindowStartFrameMin,
+            ),
+          end_frame: zod
+            .number()
+            .min(
+              getEventCandidatesReportResponseCandidatesItemCoreWindowEndFrameMin,
+            ),
+        }),
         render_window: zod.object({
-          start_frame: zod.number(),
-          end_frame: zod.number(),
+          start_frame: zod
+            .number()
+            .min(
+              getEventCandidatesReportResponseCandidatesItemRenderWindowStartFrameMin,
+            ),
+          end_frame: zod
+            .number()
+            .min(
+              getEventCandidatesReportResponseCandidatesItemRenderWindowEndFrameMin,
+            ),
+        }),
+        buffer_policy: zod.object({
+          fps: zod
+            .number()
+            .gt(
+              getEventCandidatesReportResponseCandidatesItemBufferPolicyFpsExclusiveMin,
+            ),
+          fps_source: zod.string(),
+          pre_buffer_seconds: zod
+            .number()
+            .min(
+              getEventCandidatesReportResponseCandidatesItemBufferPolicyPreBufferSecondsMin,
+            ),
+          post_buffer_seconds: zod
+            .number()
+            .min(
+              getEventCandidatesReportResponseCandidatesItemBufferPolicyPostBufferSecondsMin,
+            ),
+          pre_buffer_frames: zod
+            .number()
+            .min(
+              getEventCandidatesReportResponseCandidatesItemBufferPolicyPreBufferFramesMin,
+            ),
+          post_buffer_frames: zod
+            .number()
+            .min(
+              getEventCandidatesReportResponseCandidatesItemBufferPolicyPostBufferFramesMin,
+            ),
+          min_post_event_frames: zod
+            .number()
+            .min(
+              getEventCandidatesReportResponseCandidatesItemBufferPolicyMinPostEventFramesMin,
+            ),
+          min_tail_frames: zod
+            .number()
+            .min(
+              getEventCandidatesReportResponseCandidatesItemBufferPolicyMinTailFramesMin,
+            ),
         }),
         evidence: zod.record(zod.string(), zod.unknown()).optional(),
       }),
@@ -1566,46 +1673,76 @@ export const CreateHighlightRenderParams = zod.object({
   run_id: zod.coerce.string(),
 });
 
-export const createHighlightRenderBodyThreeStartFrameOneMin = 0;
+export const createHighlightRenderBodyFourStartFrameOneMin = 0;
 
-export const createHighlightRenderBodyThreeEndFrameOneMin = 0;
+export const createHighlightRenderBodyFourEndFrameOneMin = 0;
 
-export const createHighlightRenderBodyThreePreRollFramesDefault = 15;
-export const createHighlightRenderBodyThreePreRollFramesMin = 0;
+export const createHighlightRenderBodyFourPreRollFramesOneMin = 0;
 
-export const createHighlightRenderBodyThreePostRollFramesDefault = 30;
-export const createHighlightRenderBodyThreePostRollFramesMin = 0;
+export const createHighlightRenderBodyFourPostRollFramesOneMin = 0;
 
 export const CreateHighlightRenderBody = zod
-  .union([zod.unknown(), zod.unknown()])
+  .union([zod.unknown(), zod.unknown(), zod.unknown()])
   .and(
     zod.object({
       candidate_id: zod.union([zod.string(), zod.null()]).optional(),
+      approved_action_id: zod.union([zod.string(), zod.null()]).optional(),
       start_frame: zod
         .union([
-          zod.number().min(createHighlightRenderBodyThreeStartFrameOneMin),
+          zod.number().min(createHighlightRenderBodyFourStartFrameOneMin),
           zod.null(),
         ])
         .optional(),
       end_frame: zod
         .union([
-          zod.number().min(createHighlightRenderBodyThreeEndFrameOneMin),
+          zod.number().min(createHighlightRenderBodyFourEndFrameOneMin),
           zod.null(),
         ])
         .optional(),
       pre_roll_frames: zod
-        .number()
-        .min(createHighlightRenderBodyThreePreRollFramesMin)
-        .default(createHighlightRenderBodyThreePreRollFramesDefault),
+        .union([
+          zod.number().min(createHighlightRenderBodyFourPreRollFramesOneMin),
+          zod.null(),
+        ])
+        .optional(),
       post_roll_frames: zod
-        .number()
-        .min(createHighlightRenderBodyThreePostRollFramesMin)
-        .default(createHighlightRenderBodyThreePostRollFramesDefault),
+        .union([
+          zod.number().min(createHighlightRenderBodyFourPostRollFramesOneMin),
+          zod.null(),
+        ])
+        .optional(),
       output_dir_name: zod.union([zod.string(), zod.null()]).optional(),
       output_video_name: zod.union([zod.string(), zod.null()]).optional(),
       notes: zod.union([zod.string(), zod.null()]).optional(),
     }),
-  );
+  )
+  .superRefine((value, ctx) => {
+    const payload = value && typeof value === "object" ? (value as Record<string, unknown>) : {};
+    const candidateId = Boolean(payload.candidate_id);
+    const approvedActionId = Boolean(payload.approved_action_id);
+    const hasStart = payload.start_frame !== undefined && payload.start_frame !== null;
+    const hasEnd = payload.end_frame !== undefined && payload.end_frame !== null;
+    const explicitWindow = hasStart && hasEnd;
+    const modeCount = [candidateId, approvedActionId, explicitWindow].filter(Boolean).length;
+    if (modeCount !== 1) {
+      ctx.addIssue({
+        code: zod.ZodIssueCode.custom,
+        message: "Highlight render requires exactly one of candidate_id, approved_action_id, or start_frame/end_frame.",
+      });
+    }
+    if (hasStart !== hasEnd) {
+      ctx.addIssue({
+        code: zod.ZodIssueCode.custom,
+        message: "Highlight render frame window requires both start_frame and end_frame.",
+      });
+    }
+    if (hasStart && hasEnd && Number(payload.end_frame) < Number(payload.start_frame)) {
+      ctx.addIssue({
+        code: zod.ZodIssueCode.custom,
+        message: "Highlight render requires end_frame to be greater than or equal to start_frame.",
+      });
+    }
+  });
 
 /**
  * @summary Get Player Tracks Report
