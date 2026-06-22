@@ -739,6 +739,7 @@ export interface EventCandidateReport {
   source: EventCandidateSource;
   summary: EventCandidateSummary;
   candidates?: EventCandidate[];
+  warnings?: string[];
 }
 
 export type FieldCalibrationPayloadConfidence =

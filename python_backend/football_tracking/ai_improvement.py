@@ -234,16 +234,26 @@ def approve_ai_improvement_actions(
         for item in improvements
         if isinstance(item, dict) and isinstance(item.get("id"), str) and item.get("id")
     }
-    highlight_candidates = _event_candidate_lookup(_read_optional_json(output_dir / "event_candidates.json")[0])
+    selected_improvements: list[dict[str, Any]] = []
+    for improvement_id in improvement_ids:
+        if improvement_id not in by_id:
+            raise ValueError(f"Unknown improvement_id: {improvement_id}")
+        selected_improvements.append(by_id[improvement_id])
+
+    highlight_candidates: dict[str, dict[str, Any]] = {}
+    if _approval_needs_highlight_candidates(selected_improvements):
+        event_candidates_payload, _event_candidates_status, event_candidates_warning = _read_optional_json(
+            output_dir / "event_candidates.json"
+        )
+        if event_candidates_payload is None:
+            raise ValueError(event_candidates_warning or "event_candidates.json could not be loaded.")
+        highlight_candidates = _event_candidate_lookup(event_candidates_payload)
 
     warnings: list[str] = []
     approved_actions: list[dict[str, Any]] = []
     config_patch_items: list[dict[str, Any]] = []
     approved_at = _utc_now_iso()
-    for index, improvement_id in enumerate(improvement_ids, start=1):
-        if improvement_id not in by_id:
-            raise ValueError(f"Unknown improvement_id: {improvement_id}")
-        improvement = by_id[improvement_id]
+    for index, (improvement_id, improvement) in enumerate(zip(improvement_ids, selected_improvements), start=1):
         action, action_warnings = _approved_action_entry(
             improvement,
             approval_id=f"approval_{index:03d}",
@@ -310,6 +320,13 @@ def approve_ai_improvement_actions(
     elif stale_follow_cam_plan_path.exists():
         stale_follow_cam_plan_path.unlink()
     return artifact
+
+
+def _approval_needs_highlight_candidates(improvements: list[dict[str, Any]]) -> bool:
+    return any(
+        str(improvement.get("recommended_action") or "") in {"adjust_highlight_window", "render_suggested_highlight"}
+        for improvement in improvements
+    )
 
 
 def compact_ai_improvement_summary(report: dict[str, Any]) -> dict[str, Any] | None:

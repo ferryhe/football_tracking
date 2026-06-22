@@ -375,6 +375,7 @@ class EventCandidateReport(BaseModel):
     source: EventCandidateSource
     summary: EventCandidateSummary
     candidates: list[EventCandidate] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
 
 
 class RunProgress(BaseModel):

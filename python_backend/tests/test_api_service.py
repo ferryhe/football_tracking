@@ -2322,6 +2322,9 @@ class ApiServiceSmokeTests(unittest.TestCase):
             "#/components/schemas/ApiErrorResponse",
             operation["responses"]["404"]["content"]["application/json"]["schema"]["$ref"],
         )
+        report_schema = openapi["components"]["schemas"]["EventCandidateReport"]
+        self.assertIn("warnings", report_schema["properties"])
+        self.assertEqual("array", report_schema["properties"]["warnings"]["type"])
         candidate_schema = openapi["components"]["schemas"]["EventCandidate"]
         self.assertIn("core_window", candidate_schema["required"])
         self.assertIn("buffer_policy", candidate_schema["required"])

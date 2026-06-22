@@ -93,6 +93,8 @@ class ExportOpenApiTests(unittest.TestCase):
             self.assertIn(field, react_schemas)
             self.assertIn(field, zod_policy)
             self.assertIn(field, zod_api)
+        self.assertIn("export interface EventCandidateReport", react_schemas)
+        self.assertIn("warnings?: string[]", react_schemas)
         self.assertIn("CreateHighlightRenderBody", zod_api)
         self.assertIn("superRefine", zod_api)
         self.assertIn("exactly one of candidate_id, approved_action_id, or start_frame/end_frame", zod_api)

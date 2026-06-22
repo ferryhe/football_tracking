@@ -1621,6 +1621,7 @@ export const GetEventCandidatesReportResponse = zod.object({
       }),
     )
     .optional(),
+  warnings: zod.array(zod.string()).optional(),
 });
 
 /**

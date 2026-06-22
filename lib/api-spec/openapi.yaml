@@ -2419,6 +2419,11 @@ components:
             $ref: '#/components/schemas/EventCandidate'
           type: array
           title: Candidates
+        warnings:
+          items:
+            type: string
+          type: array
+          title: Warnings
       type: object
       required:
       - schema_version
