@@ -306,6 +306,330 @@ class MetricsTests(unittest.TestCase):
         self.assertEqual({"highlight_worthy": 1, "needs_ai_review": 2}, report["review_packets"]["counts_by_label"])
         self.assertEqual(report["review_packets"], stats["review_packets"])
 
+    def test_build_metrics_report_flags_unreviewed_long_lost_gap(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            (output_dir / "ball_audit.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": "1.0",
+                        "review_events": [
+                            {
+                                "type": "lost_gap",
+                                "start_frame": 2049,
+                                "end_frame": 2544,
+                                "frame_count": 496,
+                                "reason": "Ball track is lost for 496 frames between tracklets.",
+                            }
+                        ],
+                        "tracklets": [],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (output_dir / "review_packets.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": "1.0",
+                        "summary": {"packet_count": 1, "counts_by_label": {"needs_ai_review": 1}},
+                        "packets": [
+                            {
+                                "source": {"kind": "trigger", "type": "large_jump", "start_frame": 160, "end_frame": 276},
+                                "window": {"start_frame": 130, "end_frame": 306},
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            report = build_metrics_report(output_dir)
+            stats = stats_from_metrics_report(report)
+
+        self.assertEqual("needs_review", report["quality_gate"]["status"])
+        self.assertEqual(1, report["quality_gate"]["unreviewed_long_lost_gap_count"])
+        self.assertEqual([(2049, 2544)], [tuple(item) for item in report["quality_gate"]["unreviewed_long_lost_gaps"]])
+        self.assertEqual(report["quality_gate"], stats["quality_gate"])
+
+    def test_build_metrics_report_accepts_reviewed_long_lost_gap(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            (output_dir / "ball_audit.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": "1.0",
+                        "review_events": [
+                            {
+                                "type": "lost_gap",
+                                "start_frame": 2049,
+                                "end_frame": 2544,
+                                "frame_count": 496,
+                            }
+                        ],
+                        "tracklets": [],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (output_dir / "review_packets.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": "1.0",
+                        "summary": {"packet_count": 1, "counts_by_label": {"ball_not_visible": 1}},
+                        "packets": [
+                            {
+                                "source": {"kind": "trigger", "type": "lost_gap", "start_frame": 2049, "end_frame": 2544},
+                                "window": {"start_frame": 2019, "end_frame": 2574},
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            report = build_metrics_report(output_dir)
+
+        self.assertEqual("review_ready", report["quality_gate"]["status"])
+        self.assertEqual(0, report["quality_gate"]["unreviewed_long_lost_gap_count"])
+
+    def test_build_metrics_report_ignores_budget_rejection_for_reviewed_long_lost_gap(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            (output_dir / "ball_audit.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": "1.0",
+                        "review_events": [
+                            {
+                                "type": "lost_gap",
+                                "start_frame": 100,
+                                "end_frame": 300,
+                                "frame_count": 201,
+                            }
+                        ],
+                        "tracklets": [],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (output_dir / "review_packets.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": "1.0",
+                        "summary": {"packet_count": 1, "counts_by_label": {"ball_not_visible": 1}},
+                        "packets": [
+                            {
+                                "source": {"kind": "trigger", "type": "lost_gap", "start_frame": 100, "end_frame": 300},
+                                "window": {"start_frame": 70, "end_frame": 330},
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            report_dir = output_dir / "high_recall_windows"
+            report_dir.mkdir()
+            (report_dir / "report.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": "1.0",
+                        "windows": [],
+                        "rejected_windows": [
+                            {
+                                "start_frame": 90,
+                                "end_frame": 310,
+                                "reason": "ball_audit: lost_gap",
+                                "priority": "medium",
+                                "rejection_reason": "max_total_frames_exceeded",
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            report = build_metrics_report(output_dir)
+
+        self.assertEqual("review_ready", report["quality_gate"]["status"])
+        self.assertEqual(1, report["quality_gate"]["reviewed_long_lost_gap_count"])
+        self.assertEqual(0, report["quality_gate"]["high_recall_lost_gap_budget_rejection_count"])
+
+    def test_build_metrics_report_counts_high_recall_lost_gap_packet_as_reviewed(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            (output_dir / "ball_audit.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": "1.0",
+                        "review_events": [
+                            {
+                                "type": "lost_gap",
+                                "start_frame": 100,
+                                "end_frame": 300,
+                                "frame_count": 201,
+                            }
+                        ],
+                        "tracklets": [],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (output_dir / "review_packets.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": "1.0",
+                        "summary": {"packet_count": 1, "counts_by_label": {"needs_ai_review": 1}},
+                        "packets": [
+                            {
+                                "source": {
+                                    "kind": "high_recall_rejection",
+                                    "type": "high_recall_rejected",
+                                    "start_frame": 90,
+                                    "end_frame": 310,
+                                    "reason": "High-recall window rejected: max_total_frames_exceeded",
+                                    "evidence": {
+                                        "window_reason": "ball_audit: lost_gap",
+                                        "rejection_reason": "max_total_frames_exceeded",
+                                    },
+                                },
+                                "window": {"start_frame": 60, "end_frame": 340},
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            report = build_metrics_report(output_dir)
+
+        self.assertEqual("review_ready", report["quality_gate"]["status"])
+        self.assertEqual(1, report["quality_gate"]["reviewed_long_lost_gap_count"])
+
+    def test_build_metrics_report_checks_custom_high_recall_rejection_roots(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            (output_dir / "ball_audit.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": "1.0",
+                        "review_events": [
+                            {
+                                "type": "lost_gap",
+                                "start_frame": 100,
+                                "end_frame": 300,
+                                "frame_count": 201,
+                            }
+                        ],
+                        "tracklets": [],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            report_dir = output_dir / "second_pass_windows"
+            report_dir.mkdir()
+            (report_dir / "report.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": "1.0",
+                        "windows": [],
+                        "rejected_windows": [
+                            {
+                                "start_frame": 90,
+                                "end_frame": 310,
+                                "reason": "ball_audit: lost_gap",
+                                "priority": "medium",
+                                "rejection_reason": "max_total_frames_exceeded",
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            report = build_metrics_report(output_dir)
+
+        self.assertEqual("needs_review", report["quality_gate"]["status"])
+        self.assertEqual(1, report["quality_gate"]["high_recall_lost_gap_budget_rejection_count"])
+        self.assertEqual([[90, 310]], report["quality_gate"]["high_recall_lost_gap_budget_rejections"])
+
+    def test_build_metrics_report_ignores_short_high_recall_lost_gap_budget_rejections(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            (output_dir / "ball_audit.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": "1.0",
+                        "review_events": [],
+                        "tracklets": [],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            report_dir = output_dir / "high_recall_windows"
+            report_dir.mkdir()
+            (report_dir / "report.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": "1.0",
+                        "windows": [],
+                        "rejected_windows": [
+                            {
+                                "start_frame": 200,
+                                "end_frame": 230,
+                                "reason": "ball_audit: lost_gap",
+                                "priority": "medium",
+                                "rejection_reason": "max_total_frames_exceeded",
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            report = build_metrics_report(output_dir)
+
+        self.assertEqual("stable", report["quality_gate"]["status"])
+        self.assertEqual(0, report["quality_gate"]["high_recall_lost_gap_budget_rejection_count"])
+
+    def test_build_metrics_report_ignores_high_recall_rejections_without_current_long_lost_gap(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            (output_dir / "ball_audit.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": "1.0",
+                        "review_events": [],
+                        "tracklets": [],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            report_dir = output_dir / "high_recall_windows"
+            report_dir.mkdir()
+            (report_dir / "report.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": "1.0",
+                        "windows": [],
+                        "rejected_windows": [
+                            {
+                                "start_frame": 100,
+                                "end_frame": 400,
+                                "reason": "ai_review: large_jump; lost_gap; dense_noise_cluster",
+                                "priority": "high",
+                                "rejection_reason": "max_total_frames_exceeded",
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            report = build_metrics_report(output_dir)
+
+        self.assertEqual("stable", report["quality_gate"]["status"])
+        self.assertEqual(0, report["quality_gate"]["high_recall_lost_gap_budget_rejection_count"])
+
     def test_build_metrics_report_includes_ai_visual_review_and_accepted_highlights(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:
             output_dir = Path(temp_name)

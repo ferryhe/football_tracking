@@ -138,6 +138,9 @@ def enforce_high_recall_chunk_config(config: AppConfig) -> AppConfig:
     config.postprocess.enabled = False
     config.follow_cam.enabled = False
     config.temporal_chunks.enabled = False
+    detector_mode = str(getattr(config.detector, "inference_mode", "")).strip().lower()
+    if detector_mode == "sahi" and hasattr(config.detector, "use_half"):
+        config.detector.use_half = False
     if hasattr(config, "high_recall_windows"):
         config.high_recall_windows.enabled = False
     config.output.save_csv = True

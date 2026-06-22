@@ -12,6 +12,8 @@ SCHEMA_VERSION = "1.0"
 DEFAULT_PRE_ROLL_FRAMES = 30
 DEFAULT_POST_ROLL_FRAMES = 30
 MAX_TRIGGER_WINDOW_FRAMES = 600
+LONG_LOST_GAP_MIN_FRAMES = 120
+LONG_LOST_GAP_RESERVED_PACKETS = 1
 FRAME_SAMPLES_PER_PACKET = 5
 CONTACT_SHEET_SEEK_PREROLL_FRAMES = 120
 
@@ -130,14 +132,22 @@ def _packet_sources(output_dir: Path, *, max_packets: int) -> list[dict[str, Any
         return []
     event_sources = _event_candidate_sources(output_dir)
     trigger_sources = [*_trigger_sources(output_dir), *_high_recall_rejection_sources(output_dir)]
-    if not event_sources or not trigger_sources:
-        return _dedupe_sources([*event_sources, *trigger_sources])[:max_packets]
+    reserved_sources = _reserved_long_lost_gap_sources(trigger_sources, max_packets=max_packets)
+    reserved_keys = {_source_key(source) for source in reserved_sources}
+    trigger_sources = [source for source in trigger_sources if _source_key(source) not in reserved_keys]
+    remaining_slots = max(0, max_packets - len(reserved_sources))
+    if remaining_slots <= 0:
+        return _dedupe_sources(reserved_sources)[:max_packets]
 
-    trigger_quota = min(len(trigger_sources), max(1, max_packets // 2))
-    event_quota = max_packets - trigger_quota
+    if not event_sources or not trigger_sources:
+        selected = _dedupe_sources([*event_sources, *trigger_sources])[:remaining_slots]
+        return _dedupe_sources([*selected, *reserved_sources])[:max_packets]
+
+    trigger_quota = min(len(trigger_sources), max(1, remaining_slots // 2))
+    event_quota = remaining_slots - trigger_quota
     if event_quota <= 0 and event_sources:
         event_quota = 1
-        trigger_quota = max(0, max_packets - event_quota)
+        trigger_quota = max(0, remaining_slots - event_quota)
 
     selected = [
         *event_sources[:event_quota],
@@ -145,19 +155,42 @@ def _packet_sources(output_dir: Path, *, max_packets: int) -> list[dict[str, Any
         *event_sources[event_quota:],
         *trigger_sources[trigger_quota:],
     ]
-    return _dedupe_sources(selected)[:max_packets]
+    return _dedupe_sources([*selected[:remaining_slots], *reserved_sources])[:max_packets]
 
 
 def _dedupe_sources(sources: list[dict[str, Any]]) -> list[dict[str, Any]]:
     deduped: list[dict[str, Any]] = []
     seen: set[tuple[str, int | None, int | None]] = set()
     for source in sources:
-        key = (str(source.get("kind")), source.get("start_frame"), source.get("end_frame"))
+        key = _source_key(source)
         if key in seen:
             continue
         seen.add(key)
         deduped.append(source)
     return deduped
+
+
+def _source_key(source: dict[str, Any]) -> tuple[str, int | None, int | None]:
+    return (str(source.get("kind")), source.get("start_frame"), source.get("end_frame"))
+
+
+def _reserved_long_lost_gap_sources(sources: list[dict[str, Any]], *, max_packets: int) -> list[dict[str, Any]]:
+    if max_packets <= 0:
+        return []
+    long_lost_gaps = [
+        source
+        for source in sources
+        if _source_represents_lost_gap(source)
+        and _frame_count(int(source["start_frame"]), int(source["end_frame"])) >= LONG_LOST_GAP_MIN_FRAMES
+    ]
+    long_lost_gaps.sort(
+        key=lambda item: (
+            -_frame_count(int(item["start_frame"]), int(item["end_frame"])),
+            -_priority_rank(str(item.get("priority") or "none")),
+            int(item["start_frame"]),
+        )
+    )
+    return long_lost_gaps[: min(max_packets, LONG_LOST_GAP_RESERVED_PACKETS)]
 
 
 def _event_candidate_sources(output_dir: Path) -> list[dict[str, Any]]:
@@ -218,7 +251,7 @@ def _trigger_sources(output_dir: Path) -> list[dict[str, Any]]:
         if start is None or end is None:
             continue
         frame_count = _frame_count(start, end)
-        if frame_count > MAX_TRIGGER_WINDOW_FRAMES:
+        if frame_count > MAX_TRIGGER_WINDOW_FRAMES and not _is_long_lost_gap_trigger(trigger_type, frame_count):
             continue
         sources.append(
             {
@@ -241,6 +274,10 @@ def _trigger_sources(output_dir: Path) -> list[dict[str, Any]]:
             int(item["start_frame"]),
         ),
     )
+
+
+def _is_long_lost_gap_trigger(trigger_type: str, frame_count: int) -> bool:
+    return trigger_type == "lost_gap" and frame_count >= LONG_LOST_GAP_MIN_FRAMES
 
 
 def _high_recall_rejection_sources(output_dir: Path) -> list[dict[str, Any]]:
@@ -286,6 +323,7 @@ def _high_recall_rejection_sources(output_dir: Path) -> list[dict[str, Any]]:
             continue
         priority = str(clue.get("priority") or "medium")
         rejection_reason = str(clue.get("rejection_reason") or "rejected")
+        window_reason = str(clue.get("reason") or "")
         sources.append(
             {
                 "kind": "high_recall_rejection",
@@ -296,7 +334,10 @@ def _high_recall_rejection_sources(output_dir: Path) -> list[dict[str, Any]]:
                 "end_frame": end,
                 "score": _priority_rank(priority),
                 "reason": f"High-recall window rejected: {rejection_reason}",
-                "evidence": {"rejection_reason": rejection_reason},
+                "evidence": {
+                    "rejection_reason": rejection_reason,
+                    "window_reason": window_reason,
+                },
             }
         )
     return sorted(
@@ -660,6 +701,16 @@ def _parse_float(value: Any) -> float | None:
 
 def _frame_count(start_frame: int, end_frame: int) -> int:
     return max(0, end_frame - start_frame + 1)
+
+
+def _source_represents_lost_gap(source: dict[str, Any]) -> bool:
+    if str(source.get("type") or "").casefold() == "lost_gap":
+        return True
+    values = [source.get("reason")]
+    evidence = source.get("evidence")
+    if isinstance(evidence, dict):
+        values.extend([evidence.get("reason"), evidence.get("window_reason"), evidence.get("trigger_type")])
+    return any("lost_gap" in str(value or "").casefold() for value in values)
 
 
 def _ratio(numerator: int | float, denominator: int | float) -> float:
