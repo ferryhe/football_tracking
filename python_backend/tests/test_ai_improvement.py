@@ -722,6 +722,61 @@ class AiImprovementTests(unittest.TestCase):
         self.assertEqual("error", report["summary"]["status"])
         self.assertIn("matches review_packets.json or ai_visual_review.json", report["error"])
 
+    def test_roi_provenance_uses_full_on_disk_packet_index_not_truncated_context(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_minimal_artifacts(output_dir)
+            _write_json(
+                output_dir / "review_packets.json",
+                {
+                    "summary": {"packet_count": 5},
+                    "packets": [
+                        {
+                            "packet_id": f"packet_{index:03d}",
+                            "source": {"kind": "trigger", "type": "lost_gap", "start_frame": index * 10, "end_frame": index * 10 + 2},
+                            "window": {"start_frame": index * 10, "end_frame": index * 10 + 2},
+                        }
+                        for index in range(1, 6)
+                    ],
+                },
+            )
+            client = _FakeImprovementClient(
+                {
+                    "summary": {"status": "needs_rerun"},
+                    "improvements": [
+                        {
+                            "id": "imp_001",
+                            "priority": "P0",
+                            "area": "tracking",
+                            "failure_tags": ["ball_lost"],
+                            "root_cause_module": "reacquisition",
+                            "diagnosis": "Packet id exists in review_packets.json but is outside the prompt context limit.",
+                            "recommended_action": "localize_ball_roi",
+                            "source_packet_id": "packet_005",
+                            "local_search_roi": {
+                                "coordinate_space": "image",
+                                "frame": 50,
+                                "x": 4300,
+                                "y": 760,
+                                "width": 900,
+                                "height": 520,
+                                "confidence": 0.74,
+                            },
+                            "confidence": 0.78,
+                        }
+                    ],
+                }
+            )
+
+            report = build_ai_improvement_report(output_dir, client=client, max_items=3)
+            prompt_payload = json.loads(str(client.calls[0]["prompt"]))
+
+        self.assertEqual("needs_rerun", report["summary"]["status"])
+        self.assertEqual("packet_005", report["improvements"][0]["source_packet_id"])
+        prompt_packets = prompt_payload["context"]["artifacts"]["review_packets"]["packets"]
+        self.assertEqual(["packet_001", "packet_002", "packet_003"], [packet["packet_id"] for packet in prompt_packets])
+        self.assertNotIn("traceable_provenance", prompt_payload["context"])
+
     def test_targeted_rerun_with_local_search_roi_requires_traceable_provenance(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:
             output_dir = Path(temp_name)

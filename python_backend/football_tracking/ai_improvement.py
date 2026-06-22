@@ -75,6 +75,7 @@ def build_ai_improvement_context(output_dir: Path, max_items: int = 20) -> dict[
 
     output_dir = Path(output_dir)
     artifacts: dict[str, Any] = {}
+    provenance_artifacts: dict[str, Any] = {}
     artifact_status: dict[str, str] = {}
     source_artifacts: dict[str, str | None] = {}
     warnings: list[str] = []
@@ -87,6 +88,8 @@ def build_ai_improvement_context(output_dir: Path, max_items: int = 20) -> dict[
         if warning is not None:
             warnings.append(warning)
         if loaded is not None:
+            if artifact_key in {"review_packets", "ai_visual_review"}:
+                provenance_artifacts[artifact_key] = loaded
             artifacts[artifact_key] = _limit_artifact_payload(artifact_key, _strip_data_urls(loaded), max_items=max_items)
 
     if isinstance(artifacts.get("camera_motion_audit"), dict):
@@ -101,6 +104,7 @@ def build_ai_improvement_context(output_dir: Path, max_items: int = 20) -> dict[
         "source_artifacts": source_artifacts,
         "artifact_status": artifact_status,
         "available_artifact_count": len(artifacts),
+        "traceable_provenance": _traceable_provenance_payload({"artifacts": provenance_artifacts}),
         "artifacts": artifacts,
         "warnings": warnings,
     }
@@ -1410,6 +1414,14 @@ def _visual_review_provenance_values(item: dict[str, Any]) -> set[str]:
 def _traceable_packet_and_visual_ids(context: dict[str, Any] | None) -> tuple[set[str], set[str]]:
     if not isinstance(context, dict):
         return set(), set()
+    provenance = context.get("traceable_provenance")
+    if isinstance(provenance, dict):
+        packet_values = provenance.get("packet_ids")
+        visual_values = provenance.get("visual_review_ids")
+        packet_ids = {value.strip() for value in packet_values if isinstance(value, str) and value.strip()} if isinstance(packet_values, list) else set()
+        visual_review_ids = {value.strip() for value in visual_values if isinstance(value, str) and value.strip()} if isinstance(visual_values, list) else set()
+        if packet_ids or visual_review_ids:
+            return packet_ids, visual_review_ids
     artifacts = context.get("artifacts") if isinstance(context.get("artifacts"), dict) else {}
     packet_ids: set[str] = set()
     visual_review_ids: set[str] = set()
@@ -1440,6 +1452,14 @@ def _traceable_packet_and_visual_ids(context: dict[str, Any] | None) -> tuple[se
                 visual_review_ids.add(value.strip())
 
     return packet_ids, visual_review_ids
+
+
+def _traceable_provenance_payload(context: dict[str, Any]) -> dict[str, list[str]]:
+    packet_ids, visual_review_ids = _traceable_packet_and_visual_ids(context)
+    return {
+        "packet_ids": sorted(packet_ids),
+        "visual_review_ids": sorted(visual_review_ids),
+    }
 
 
 def _validate_highlight_adjustment(raw: Any, index: int) -> dict[str, Any]:
@@ -1683,6 +1703,7 @@ def _provider_safe_context(context: dict[str, Any]) -> dict[str, Any]:
     safe = _redact_provider_paths(context)
     if isinstance(safe, dict):
         safe.pop("warnings", None)
+        safe.pop("traceable_provenance", None)
     return safe if isinstance(safe, dict) else {}
 
 
