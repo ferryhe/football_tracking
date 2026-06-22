@@ -747,6 +747,19 @@ class ApiServiceSmokeTests(unittest.TestCase):
 
         self.assertIn("/api/v1/inputs/quality-check", route_paths)
 
+    def test_create_run_route_reports_value_error_as_bad_request(self) -> None:
+        class BadRequestService:
+            def create_run(self, request):
+                raise ValueError("bad request")
+
+        with self.assertRaises(HTTPException) as raised:
+            run_routes.create_run(
+                CreateRunRequest(config_name="default.yaml"),
+                service=BadRequestService(),  # type: ignore[arg-type]
+            )
+
+        self.assertEqual(400, raised.exception.status_code)
+
     def test_quality_check_route_uses_service_response(self) -> None:
         if not hasattr(input_routes, "check_input_quality"):
             self.fail("inputs.check_input_quality route is missing")
@@ -1153,6 +1166,20 @@ class ApiServiceSmokeTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "config_name"):
             self.service.create_run({"output_dir_name": "missing_config"})
+
+    def test_create_run_request_strips_approved_child_fields(self) -> None:
+        request = CreateRunRequest(
+            parent_run_id=" parent_run ",
+            approved_action_ids=[" approval_001 ", " ", ""],
+            approved_actions_artifact_name=" approvals.json ",
+        )
+
+        self.assertEqual("parent_run", request.parent_run_id)
+        self.assertEqual(["approval_001"], request.approved_action_ids)
+        self.assertEqual("approvals.json", request.approved_actions_artifact_name)
+
+        with self.assertRaises(ValidationError):
+            CreateRunRequest(parent_run_id=" ", approved_actions_artifact_name=" ")
 
     def test_approved_child_run_executes_selected_id_without_mutating_parent(self) -> None:
         parent_output_dir = self.create_output_bundle("kept_baseline")

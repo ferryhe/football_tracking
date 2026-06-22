@@ -54,7 +54,7 @@ def create_run(request: CreateRunRequest, service: ApiService = Depends(get_serv
     except FileExistsError as exc:
         raise HTTPException(status_code=409, detail=f"Output dir already exists: {exc}") from exc
     except ValueError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     except RuntimeError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 

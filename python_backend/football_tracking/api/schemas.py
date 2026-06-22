@@ -440,6 +440,12 @@ class CreateRunRequest(BaseModel):
 
     @model_validator(mode="after")
     def validate_create_mode(self) -> "CreateRunRequest":
+        if self.config_name is not None:
+            self.config_name = self.config_name.strip() or None
+        if self.parent_run_id is not None:
+            self.parent_run_id = self.parent_run_id.strip() or None
+        if self.approved_actions_artifact_name is not None:
+            self.approved_actions_artifact_name = self.approved_actions_artifact_name.strip() or None
         approved_ids = [str(item).strip() for item in self.approved_action_ids if str(item).strip()]
         self.approved_action_ids = approved_ids
         has_approved_artifact = bool(self.approved_actions_artifact_name)

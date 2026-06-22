@@ -1860,7 +1860,11 @@ class ApiService:
         return None
 
     def _file_fingerprint(self, path: Path) -> tuple[int, str]:
-        return path.stat().st_size, hashlib.sha256(path.read_bytes()).hexdigest()
+        digest = hashlib.sha256()
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return path.stat().st_size, digest.hexdigest()
 
     def create_follow_cam_render(self, source_run_id: str, request: dict[str, Any]) -> dict[str, Any]:
         source_run = self.get_run(source_run_id)
