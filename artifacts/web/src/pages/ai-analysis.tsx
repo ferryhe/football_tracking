@@ -1342,12 +1342,13 @@ export default function AIAnalysisPage() {
                               lifecycleIndex,
                               approvedAction,
                             );
+                            const inferredProblemType = inferAIImprovementProblemType(item) ?? problemTypeForGroup(group.key);
                             const lifecycleCandidate = linkedLifecycleCandidate
                               ? {
                                   ...linkedLifecycleCandidate,
-                                  problem_type: linkedLifecycleCandidate.problem_type ?? problemTypeForGroup(group.key),
+                                  problem_type: linkedLifecycleCandidate.problem_type ?? inferredProblemType,
                                 }
-                              : createProposedLifecycleCandidate(item, problemTypeForGroup(group.key));
+                              : createProposedLifecycleCandidate(item, inferredProblemType);
                             const lifecyclePresentation = presentLifecycleCandidate(lifecycleCandidate);
                             return (
                               <ImprovementItemPanel
