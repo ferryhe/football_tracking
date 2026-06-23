@@ -1,6 +1,6 @@
 # AI Improvement Contract
 
-This contract is the stable reference for AI improvement workers and operators. It defines when AI output is only review text, when it becomes an executable candidate, and when a candidate may become final output. Executors for missing-ball recovery, follow-cam rerendering, and highlights must satisfy this document before they mutate or publish artifacts.
+This contract is the stable reference for AI improvement workers and operators. It defines when AI output is only review text, when it becomes an executable candidate, and when a candidate may become final output. The model-facing prompt contract lives in `python_backend/football_tracking/ai_improvement_prompt_contract.py` and mirrors the public action set below. Executors for missing-ball recovery, follow-cam rerendering, and highlights must satisfy this document before they mutate or publish artifacts.
 
 ## Lifecycle
 
@@ -44,7 +44,7 @@ Blocking reasons are `missing_evidence`, `unsafe_window`, `unsupported_type`, `m
 
 ## Traceability
 
-Executable candidates must carry these fields from suggestion through approval, candidate artifacts, comparison, quality gate, and final manifest:
+Executable candidates are stricter than ordinary review suggestions. They must carry these fields from suggestion through approval, candidate artifacts, comparison, quality gate, and final manifest:
 
 | Field | Contract |
 | --- | --- |
@@ -53,7 +53,7 @@ Executable candidates must carry these fields from suggestion through approval, 
 | `problem_type` | Required for candidate workflows. Valid values are `missing_ball`, `noise`, `follow_cam`, and `highlight`. |
 | Artifact refs | Candidate artifacts stay under `ai_candidates/<problem_type>/<candidate_id>/`. Reports reference paths and statuses only; comparison and final manifest builders must not copy media or mutate baseline tracks. |
 
-An executable candidate must also include evidence ids, a bounded frame window, `expected_artifact`, and `comparison_criteria`. Evidence ids may be packet ids, visual review ids, camera motion event ids, or event candidate ids as appropriate for the problem type.
+An executable candidate must also include evidence ids, a bounded frame window, `expected_artifact`, and `comparison_criteria`. Evidence ids may be packet ids, visual review ids, camera motion event ids, or event candidate ids as appropriate for the problem type. If evidence is insufficient, the AI output must stay `review_only` rather than pretending to be approval-ready.
 
 ## Executable Actions
 
@@ -94,9 +94,9 @@ Missing-ball problems have exactly two valid closures.
 | Bounded recovery candidate | `missing_ball_recovery_comparison.json` | Runs a bounded rerun or ROI candidate under `ai_candidates/missing_ball/<candidate_id>/`, writes candidate artifacts, and compares candidate recovery against baseline plus approval evidence. |
 | Evidence-backed not-visible resolution | `missing_ball_resolution.json` | Records that the ball is hidden, off-frame, or impossible to identify for the full requested window, backed by packet or visual evidence. This is a resolution lane, not a recovery candidate. |
 
-The long right-bottom gap `2049-2544` is protected as a full-window requirement. A short neighborhood around frame `2079` may be useful evidence, but it cannot close `2049-2544` unless packet, visual, AI suggestion, approval, recovery comparison, or not-visible resolution evidence covers the entire long window or explicitly records uncovered subwindows.
+The long right-bottom gap `2049-2544` is protected as a full-window requirement. A short neighborhood around frame `2079` may be useful evidence, but it cannot close `2049-2544` unless packet, visual, AI suggestion, approval, recovery comparison, or not-visible resolution evidence covers the entire long window or explicitly records or lists uncovered subwindows.
 
-Broad full-video SAHI is not a stable closure path. SAHI/ROI work belongs inside approved bounded recovery windows with packet or visual provenance.
+`localize_ball_roi` is bounded-window-only. It must not expand into broad full-video SAHI. Broad full-video SAHI is not a stable closure path; SAHI/ROI work belongs inside approved bounded recovery windows with packet or visual provenance.
 
 ## Follow-Cam Thresholds
 
@@ -114,11 +114,13 @@ Follow-cam candidates must prove smoother motion without hiding bad tracking by 
 
 Crop coverage is computed from Detected or Predicted `ball_track.csv` frames and `camera_path.csv`: a frame is covered when the ball center lies inside the crop rectangle. Sparse data must produce `warn` or `unavailable` evidence with sample counts and reasons; it must not silently pass.
 
-If a camera event overlaps Lost/Predicted tracking or nearby tracking instability, the valid action is `tracking_rerun_before_follow_cam`, not `adjust_follow_cam`, until linked tracking recovery passes.
+If a camera event overlaps Lost/Predicted tracking or nearby tracking instability, the valid action is `tracking_rerun_before_follow_cam`, not `adjust_follow_cam`, until linked tracking recovery passes. If tracking is stable and the issue is camera-only, the valid action is `adjust_follow_cam`.
 
 ## Highlight Comparison
 
 Highlight candidates compare event candidate metadata to the rendered candidate clip.
+
+Highlight suggestions use a path-safe `candidate_id` for the output candidate and `event_candidate_id` for the source event from `event_candidates.json`.
 
 The candidate `render_window` must contain the event `core_window`. It must also contain the required post-event tail through `core_window.end_frame + buffer_policy.min_tail_frames`, clamped by the source video end.
 

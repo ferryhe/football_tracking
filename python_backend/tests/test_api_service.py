@@ -8,6 +8,7 @@ import threading
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 from unittest import mock
 
 import cv2
@@ -18,9 +19,9 @@ from pydantic import ValidationError
 
 from football_tracking.api.app import create_app
 from football_tracking.api.routes import inputs as input_routes
+from football_tracking.api.routes import runs as run_routes
 from football_tracking.api.routes.ai import approve_improvements as approve_improvements_route
 from football_tracking.api.routes.ai import improve as improve_route
-from football_tracking.api.routes import runs as run_routes
 from football_tracking.api.routes.artifacts import get_artifact
 from football_tracking.api.schemas import (
     AIFrameWindow,
@@ -3567,7 +3568,8 @@ class ApiServiceSmokeTests(unittest.TestCase):
         self.assertEqual("ai_improvement_report.json", response["artifact_name"])
         self.assertEqual(str((output_dir / "ai_improvement_report.json").resolve()), response["artifact_path"])
         self.assertEqual("needs_rerun", response["summary"]["status"])
-        self.assertEqual("targeted_rerun", response["improvements"][0]["recommended_action"])
+        self.assertEqual("rerun_ball_window", response["improvements"][0]["recommended_action"])
+        self.assertEqual("targeted_rerun", response["improvements"][0]["legacy_recommended_action"])
         self.assertIn("ai_improvement_report.json", artifact_names)
         self.assertIn("metrics_report.json", artifact_names)
         self.assertEqual("needs_rerun", refreshed["stats"]["ai_improvement"]["status"])
@@ -3809,10 +3811,12 @@ class ApiServiceSmokeTests(unittest.TestCase):
                 "improvements": [
                     {
                         "id": "imp_camera",
+                        "candidate_id": "follow_cam_candidate_001",
                         "priority": "P1",
                         "area": "camera_motion",
                         "failure_tags": ["camera_catchup_spike"],
                         "root_cause_module": "follow_cam",
+                        "camera_motion_event_id": "cam_event_001",
                         "start_frame": 40,
                         "end_frame": 40,
                         "diagnosis": "Stable tracking but follow-cam jumped.",
@@ -3852,10 +3856,12 @@ class ApiServiceSmokeTests(unittest.TestCase):
                 "improvements": [
                     {
                         "id": "imp_camera_track",
+                        "candidate_id": "follow_cam_candidate_track_001",
                         "priority": "P0",
                         "area": "camera_motion",
                         "failure_tags": ["camera_catchup_spike", "ball_lost"],
                         "root_cause_module": "follow_cam",
+                        "camera_motion_event_id": "cam_event_001",
                         "start_frame": 40,
                         "end_frame": 42,
                         "diagnosis": "Camera jump is track-driven.",
