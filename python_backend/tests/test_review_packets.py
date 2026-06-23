@@ -305,7 +305,7 @@ class ReviewPacketTests(unittest.TestCase):
             ],
         )
 
-    def test_long_lost_gap_reports_uncovered_tail_when_packet_budget_is_tight(self) -> None:
+    def test_missing_ball_prompt_requires_uncovered_subranges(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             output_dir = Path(temp)
             rows = ["Frame,X,Y,Confidence,Status"]

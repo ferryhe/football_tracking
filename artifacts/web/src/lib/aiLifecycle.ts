@@ -268,7 +268,9 @@ export function inferAIImprovementProblemType(item: AIImprovementItem): string |
 
   if (
     action === "targeted_rerun" ||
+    action === "rerun_ball_window" ||
     action === "localize_ball_roi" ||
+    action === "mark_ball_not_visible" ||
     text.includes("missing_ball") ||
     text.includes("ball_lost") ||
     text.includes("lost_gap") ||

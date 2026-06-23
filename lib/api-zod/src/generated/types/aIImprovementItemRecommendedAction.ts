@@ -10,6 +10,8 @@ export type AIImprovementItemRecommendedAction =
 
 export const AIImprovementItemRecommendedAction = {
   targeted_rerun: "targeted_rerun",
+  rerun_ball_window: "rerun_ball_window",
+  mark_ball_not_visible: "mark_ball_not_visible",
   localize_ball_roi: "localize_ball_roi",
   noise_filter_adjustment: "noise_filter_adjustment",
   tighten_noise_filter: "tighten_noise_filter",

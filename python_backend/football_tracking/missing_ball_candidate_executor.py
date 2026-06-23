@@ -21,7 +21,7 @@ from football_tracking.high_recall_windows import approved_action_windows_from_r
 from football_tracking.metrics import build_metrics_report, write_run_artifacts
 from football_tracking.missing_ball_recovery_comparison import write_missing_ball_recovery_comparison
 
-MISSING_BALL_RECOVERY_ACTIONS = {"targeted_rerun", "localize_ball_roi"}
+MISSING_BALL_RECOVERY_ACTIONS = {"targeted_rerun", "rerun_ball_window", "localize_ball_roi"}
 MISSING_BALL_COMPARISON_NAME = "missing_ball_recovery_comparison.json"
 APPROVED_RECOVERY_CONFIG_NAME = "approved_recovery_config.yaml"
 _WINDOWS_RESERVED_NAMES = {

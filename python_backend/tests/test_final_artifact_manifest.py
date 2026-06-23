@@ -28,16 +28,29 @@ class FinalArtifactManifestTests(unittest.TestCase):
                     {"id": "candidate-fail", "path": "candidate/fail.mp4", "status": "available", "type": "video"},
                 ],
                 final_artifacts=[
-                    {"candidate_id": "candidate-pass", "path": "final/pass.mp4", "type": "video"},
+                    {
+                        "candidate_id": "candidate-pass",
+                        "approval_id": "approval-pass",
+                        "path": "final/pass.mp4",
+                        "type": "video",
+                        "operator_decision": _operator_decision("candidate-pass", "approval-pass"),
+                    },
                     {
                         "candidate_id": "candidate-warn",
+                        "approval_id": "approval-warn",
                         "path": "final/warn.mp4",
                         "type": "clip",
                         "requires_human_confirmation": True,
+                        "operator_decision": _operator_decision("candidate-warn", "approval-warn"),
                     },
                     {"candidate_id": "candidate-fail", "path": "final/fail.mp4", "type": "video"},
                 ],
                 consumed_approvals=[
+                    {
+                        "approval_id": "approval-pass",
+                        "candidate_id": "candidate-pass",
+                        "status": "approved",
+                    },
                     {
                         "approval_id": "approval-warn",
                         "candidate_id": "candidate-warn",
@@ -59,7 +72,7 @@ class FinalArtifactManifestTests(unittest.TestCase):
         self.assertEqual("baseline", payload["baseline_output"]["role"])
         self.assertEqual(["candidate", "candidate", "candidate"], [item["role"] for item in payload["candidate_outputs"]])
         self.assertEqual("pass", payload["quality_gate_status"]["status"])
-        self.assertEqual(["approval-warn"], [item["approval_id"] for item in payload["consumed_approvals"]])
+        self.assertEqual(["approval-pass", "approval-warn"], [item["approval_id"] for item in payload["consumed_approvals"]])
         self.assertEqual(["candidate-pass", "candidate-warn"], [item["candidate_id"] for item in payload["final_selected_artifacts"]])
         self.assertEqual(["candidate-fail"], [item["candidate_id"] for item in payload["rejected_candidates"]])
         self.assertEqual("comparison_failed", payload["rejected_candidates"][0]["reason"])
@@ -112,9 +125,11 @@ class FinalArtifactManifestTests(unittest.TestCase):
                 final_artifacts=[
                     {
                         "candidate_id": "candidate-warn",
+                        "approval_id": "approval-warn",
                         "path": "final/warn.mp4",
                         "type": "clip",
                         "requires_human_confirmation": True,
+                        "operator_decision": _operator_decision("candidate-warn", "approval-warn"),
                     }
                 ],
                 comparison_reports=[_comparison("candidate-warn", "warn", "noise_comparison.json")],
@@ -126,6 +141,26 @@ class FinalArtifactManifestTests(unittest.TestCase):
         self.assertEqual("requires_human_confirmation", payload["rejected_candidates"][0]["reason"])
         self.assertIn("candidate-warn requires human confirmation before promotion", payload["warnings"])
 
+    def test_pass_candidate_is_not_final_without_explicit_finalization_decision(self) -> None:
+        with patch("football_tracking.final_artifact_manifest._utc_now_iso", return_value=FIXED_NOW):
+            payload = build_final_artifact_manifest(
+                baseline_output={"path": "baseline/output.mp4", "type": "video"},
+                candidate_outputs=[{"id": "candidate-pass", "path": "candidate/pass.mp4", "type": "video"}],
+                final_artifacts=[{"candidate_id": "candidate-pass", "path": "final/pass.mp4", "type": "video"}],
+                consumed_approvals=[
+                    {
+                        "approval_id": "approval-pass",
+                        "candidate_id": "candidate-pass",
+                        "status": "approved",
+                    }
+                ],
+                comparison_reports=[_comparison("candidate-pass", "pass", "missing_ball_comparison.json")],
+                quality_gate_status={"status": "pass"},
+            )
+
+        self.assertEqual([], payload["final_selected_artifacts"])
+        self.assertEqual("missing_finalization_decision", payload["rejected_candidates"][0]["reason"])
+
     def test_warn_candidate_is_promoted_with_consumed_human_confirmation(self) -> None:
         with patch("football_tracking.final_artifact_manifest._utc_now_iso", return_value=FIXED_NOW):
             payload = build_final_artifact_manifest(
@@ -134,9 +169,11 @@ class FinalArtifactManifestTests(unittest.TestCase):
                 final_artifacts=[
                     {
                         "candidate_id": "candidate-warn",
+                        "approval_id": "approval-warn",
                         "path": "final/warn.mp4",
                         "type": "clip",
                         "requires_human_confirmation": True,
+                        "operator_decision": _operator_decision("candidate-warn", "approval-warn"),
                     }
                 ],
                 consumed_approvals=[
@@ -266,7 +303,22 @@ class FinalArtifactManifestTests(unittest.TestCase):
                     output_dir,
                     baseline_output={"path": str(output_dir / "baseline" / "output.mp4"), "type": "video"},
                     candidate_outputs=[{"id": "candidate-pass", "path": str(candidate_video), "type": "video"}],
-                    final_artifacts=[{"candidate_id": "candidate-pass", "path": str(final_video), "type": "video"}],
+                    final_artifacts=[
+                        {
+                            "candidate_id": "candidate-pass",
+                            "approval_id": "approval-pass",
+                            "path": str(final_video),
+                            "type": "video",
+                            "operator_decision": _operator_decision("candidate-pass", "approval-pass"),
+                        }
+                    ],
+                    consumed_approvals=[
+                        {
+                            "approval_id": "approval-pass",
+                            "candidate_id": "candidate-pass",
+                            "status": "approved",
+                        }
+                    ],
                     comparison_reports=[_comparison("candidate-pass", "pass", "missing_ball_comparison.json")],
                     quality_gate_status={"status": "pass"},
                 )
@@ -897,6 +949,72 @@ class FinalArtifactManifestTests(unittest.TestCase):
         self.assertEqual("cleanup removed too much continuity", rejected["operator_decision"]["note"])
         self.assertEqual("rejected", result["lifecycle"]["summary"]["promotion_status"])
 
+    def test_missing_ball_and_noise_warn_candidates_require_confirmation(self) -> None:
+        for problem_type, output_role in (
+            ("missing_ball", "missing_ball_track"),
+            ("noise", "noise_cleaned_track"),
+        ):
+            with self.subTest(problem_type=problem_type), tempfile.TemporaryDirectory() as temp_name:
+                output_dir = Path(temp_name)
+                _write_seed_manifest(
+                    output_dir,
+                    [
+                        _candidate_seed(
+                            output_dir,
+                            problem_type=problem_type,
+                            candidate_id=f"{problem_type}-warn",
+                            approval_id=f"{problem_type}-approval",
+                            status="warn",
+                        )
+                    ],
+                )
+
+                with self.assertRaisesRegex(ValueError, "confirmation"):
+                    finalize_ai_candidate(
+                        output_dir,
+                        problem_type=problem_type,
+                        candidate_id=f"{problem_type}-warn",
+                        approval_id=f"{problem_type}-approval",
+                        decision="promote",
+                        output_role=output_role,
+                    )
+
+                loaded = json.loads((output_dir / FINAL_ARTIFACT_MANIFEST_NAME).read_text(encoding="utf-8"))
+                self.assertEqual([], loaded["final_selected_artifacts"])
+
+    def test_missing_ball_and_noise_fail_unavailable_review_only_do_not_promote(self) -> None:
+        cases = (
+            ("missing_ball", "missing_ball_track", "fail", None),
+            ("noise", "noise_cleaned_track", "unavailable", None),
+            ("missing_ball", "missing_ball_track", "pass", "review_only"),
+        )
+        for problem_type, output_role, status, intent in cases:
+            with self.subTest(problem_type=problem_type, status=status, intent=intent), tempfile.TemporaryDirectory() as temp_name:
+                output_dir = Path(temp_name)
+                seed = _candidate_seed(
+                    output_dir,
+                    problem_type=problem_type,
+                    candidate_id=f"{problem_type}-{status}",
+                    approval_id=f"{problem_type}-approval",
+                    status=status,
+                )
+                if intent is not None and isinstance(seed["candidate"], dict):
+                    seed["candidate"]["candidate_intent"] = intent
+                _write_seed_manifest(output_dir, [seed])
+
+                with self.assertRaisesRegex(ValueError, "not promotable|review_only"):
+                    finalize_ai_candidate(
+                        output_dir,
+                        problem_type=problem_type,
+                        candidate_id=f"{problem_type}-{status}",
+                        approval_id=f"{problem_type}-approval",
+                        decision="promote",
+                        output_role=output_role,
+                    )
+
+                loaded = json.loads((output_dir / FINAL_ARTIFACT_MANIFEST_NAME).read_text(encoding="utf-8"))
+                self.assertEqual([], loaded["final_selected_artifacts"])
+
 
 def _comparison(candidate_id: str, status: str, path: str) -> dict[str, object]:
     problem_type = "noise" if "noise" in path else "follow_cam" if "follow_cam" in path else "missing_ball"
@@ -912,6 +1030,19 @@ def _comparison(candidate_id: str, status: str, path: str) -> dict[str, object]:
             "unavailable_count": 1 if status == "unavailable" else 0,
         },
         "checks": [{"name": "comparison", "status": status}],
+    }
+
+
+def _operator_decision(candidate_id: str, approval_id: str, *, output_role: str = "missing_ball_track") -> dict[str, object]:
+    return {
+        "decision_id": f"promote:missing_ball:{candidate_id}:{approval_id}:{output_role}",
+        "decision": "promote",
+        "approval_id": approval_id,
+        "candidate_id": candidate_id,
+        "problem_type": "missing_ball",
+        "output_role": output_role,
+        "comparison_status": "pass",
+        "confirm_warn": False,
     }
 
 

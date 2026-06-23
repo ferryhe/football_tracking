@@ -9,7 +9,13 @@ from pathlib import Path
 from unittest.mock import patch
 
 from football_tracking.ai_candidate_lifecycle import build_ai_candidate_lifecycle
-from scripts.run_stable_ai_improvement_workflow import _approved_child_rerun_stage, main, run_workflow
+from scripts.run_stable_ai_improvement_workflow import (
+    _approved_child_rerun_stage,
+    _final_artifact_manifest_stage,
+    _load_selected_approved_actions,
+    main,
+    run_workflow,
+)
 
 
 class StableAiImprovementWorkflowTests(unittest.TestCase):
@@ -206,7 +212,30 @@ class StableAiImprovementWorkflowTests(unittest.TestCase):
         self.assertEqual({"approval_1": "not_requested"}, selection["skipped_reasons"])
         self.assertEqual("skipped", _stage(report, "approved_child_rerun")["status"])
 
-    def test_stale_missing_ball_resolution_is_ignored_without_current_noop_approval(self) -> None:
+    def test_external_legacy_targeted_rerun_approval_is_normalized_at_workflow_boundary(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            approved_path = output_dir / "approved_actions.json"
+            approval = _approval("approval_1", start=10, end=20)
+            approval["approved_action"] = "targeted_rerun"
+            approval["candidate_id"] = "candidate_001"
+            approval["source_packet_id"] = "packet_001"
+            approval["evidence"] = [{"source_packet_id": "packet_001"}]
+            _write_json(approved_path, {"approved_actions": [approval]})
+
+            payload = _load_selected_approved_actions(
+                approved_actions_path=approved_path,
+                approval_ids=["approval_1"],
+                approved_action_id=None,
+                fail_on_selection_error=True,
+                warnings=[],
+            )
+
+        self.assertEqual(["approval_1"], payload["approval_selection"]["consumed_ids"])
+        self.assertEqual("rerun_ball_window", payload["approved_actions"][0]["approved_action"])
+        self.assertEqual("targeted_rerun", payload["approved_actions"][0]["legacy_approved_action"])
+
+    def test_existing_missing_ball_resolution_is_preserved_without_current_noop_approval(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:
             output_dir = Path(temp_name)
             _write_tracks(output_dir)
@@ -227,6 +256,14 @@ class StableAiImprovementWorkflowTests(unittest.TestCase):
                             "end_frame": 2544,
                             "source_packet_id": "packet_2079",
                             "likely_ball_region": {"description": "not_visible"},
+                            "evidence": [
+                                {
+                                    "source_packet_id": "packet_2079",
+                                    "start_frame": 2049,
+                                    "end_frame": 2544,
+                                    "reason": "packet marks ball_not_visible",
+                                }
+                            ],
                         }
                     ],
                 },
@@ -240,12 +277,14 @@ class StableAiImprovementWorkflowTests(unittest.TestCase):
                 "scripts.run_stable_ai_improvement_workflow.write_ai_improvement_report",
                 side_effect=fake_improvement,
             ):
-                report = run_workflow(output_dir=output_dir, dry_run=True)
+                report = run_workflow(output_dir=output_dir, dry_run=False)
+            resolution_exists = (output_dir / "missing_ball_resolution.json").exists()
 
-        self.assertEqual("fail", report["quality_gate"]["summary"]["status"])
         self.assertEqual("skipped", _stage(report, "missing_ball_noop_resolution")["status"])
+        self.assertEqual(1, _stage(report, "missing_ball_noop_resolution")["preserved_resolution_count"])
+        self.assertTrue(resolution_exists)
 
-    def test_dispatcher_executes_selected_noise_candidate_and_keeps_other_types_unsupported(self) -> None:
+    def test_noise_candidate_not_final_until_promotion(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:
             output_dir = Path(temp_name)
             _write_noise_tracks(output_dir)
@@ -296,6 +335,7 @@ class StableAiImprovementWorkflowTests(unittest.TestCase):
         self.assertEqual(1, manifest["summary"]["candidate_output_count"])
         self.assertEqual("noise-candidate-1", manifest["candidate_outputs"][0]["candidate_id"])
         self.assertEqual([], manifest["final_selected_artifacts"])
+        self.assertEqual(["noise-candidate-1"], [item["candidate_id"] for item in manifest["pending_candidates"]])
         self.assertEqual("pass", manifest["comparison_reports"][0]["status"])
         self.assertNotEqual("invalid_checks", manifest["comparison_reports"][0]["artifact_status"])
         self.assertEqual(report["quality_gate"]["summary"]["status"], manifest["quality_gate_status"]["status"])
@@ -325,7 +365,7 @@ class StableAiImprovementWorkflowTests(unittest.TestCase):
         self.assertEqual("skipped", dispatcher["noise_candidate_execution_path"]["status"])
         self.assertFalse(candidate_dir_exists)
 
-    def test_selected_missing_ball_recovery_executes_candidate(self) -> None:
+    def test_missing_ball_candidate_not_final_until_promotion(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:
             root = Path(temp_name)
             output_dir = root / "outputs" / "baseline"
@@ -373,7 +413,7 @@ class StableAiImprovementWorkflowTests(unittest.TestCase):
             self.assertEqual(1, manifest["summary"]["candidate_output_count"])
             self.assertEqual("candidate_2079", manifest["candidate_outputs"][0]["candidate_id"])
             self.assertEqual([], manifest["final_selected_artifacts"])
-            self.assertEqual(0, manifest["summary"]["pending_candidate_count"])
+            self.assertEqual(["candidate_2079"], [item["candidate_id"] for item in manifest["pending_candidates"]])
 
     def test_selected_missing_ball_recovery_executes_multiple_candidate_groups(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:
@@ -795,6 +835,31 @@ class StableAiImprovementWorkflowTests(unittest.TestCase):
         self.assertEqual("succeeded", noop_stage["status"])
         self.assertEqual("missing_ball_resolution.json", noop_stage["artifact"])
 
+    def test_mark_ball_not_visible_approval_uses_resolution_not_recovery_comparison(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_tracks(output_dir)
+            _write_2079_gap(output_dir)
+            _write_packet(output_dir, packet_id="packet_2079", start=2049, end=2544, label="ball_not_visible")
+            approved_path = output_dir / "approved_actions.json"
+            approval = _not_visible_approval("noop_2079", candidate_id="resolved_2079", start=2049, end=2544)
+            approval["approved_action"] = "mark_ball_not_visible"
+            _write_json(approved_path, {"approved_actions": [approval]})
+
+            report = run_workflow(
+                output_dir=output_dir,
+                dry_run=False,
+                approved_actions_path=approved_path,
+                approval_ids=["noop_2079"],
+            )
+            resolution = json.loads((output_dir / "missing_ball_resolution.json").read_text(encoding="utf-8"))
+
+        self.assertEqual("resolved_not_visible", resolution["summary"]["status"])
+        self.assertEqual("succeeded", _stage(report, "missing_ball_noop_resolution")["status"])
+        self.assertEqual("skipped", _stage(report, "selected_approval_dispatcher")["missing_ball_execution_path"]["status"])
+        comparison_check = report["quality_gate"]["checks"]["candidate_comparisons_ok"]
+        self.assertNotEqual("selected_missing_ball_approval_missing_comparison", json.dumps(comparison_check))
+
     def test_real_visual_review_unavailable_is_not_reported_as_successful_localization(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:
             output_dir = Path(temp_name)
@@ -831,6 +896,65 @@ class StableAiImprovementWorkflowTests(unittest.TestCase):
             manifest = json.loads((output_dir / "final_ai_improvement_artifact_manifest.json").read_text(encoding="utf-8"))
 
         self.assertEqual(report["quality_gate"]["summary"]["status"], manifest["quality_gate_status"]["status"])
+
+    def test_final_manifest_stage_preserves_existing_finalized_selection(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_tracks(output_dir)
+            existing_comparison = _comparison_payload("candidate-final", "pass")
+            existing_comparison["problem_type"] = "missing_ball"
+            existing_comparison["approval_id"] = "approval-final"
+            existing_comparison["consumed_approval_ids"] = ["approval-final"]
+            _write_json(
+                output_dir / "final_ai_improvement_artifact_manifest.json",
+                {
+                    "schema_version": "1.0",
+                    "candidate_outputs": [
+                        {
+                            "id": "candidate-final",
+                            "candidate_id": "candidate-final",
+                            "problem_type": "missing_ball",
+                            "path": "ai_candidates/missing_ball/candidate-final",
+                            "candidate_artifacts": ["ai_candidates/missing_ball/candidate-final/ball_track.csv"],
+                        }
+                    ],
+                    "final_selected_artifacts": [
+                        {
+                            "candidate_id": "candidate-final",
+                            "approval_id": "approval-final",
+                            "problem_type": "missing_ball",
+                            "output_role": "missing_ball_track",
+                            "path": "ai_candidates/missing_ball/candidate-final/ball_track.csv",
+                            "operator_decision": {
+                                "decision_id": "promote:missing_ball:candidate-final:approval-final:missing_ball_track",
+                                "decision": "promote",
+                                "approval_id": "approval-final",
+                                "candidate_id": "candidate-final",
+                                "problem_type": "missing_ball",
+                                "output_role": "missing_ball_track",
+                            },
+                        }
+                    ],
+                    "consumed_approvals": [{"approval_id": "approval-final", "candidate_id": "candidate-final"}],
+                    "comparison_reports": [existing_comparison],
+                },
+            )
+
+            _final_artifact_manifest_stage(
+                output_dir=output_dir,
+                dispatcher_stage={
+                    "missing_ball_execution_path": {"status": "skipped"},
+                    "noise_candidate_execution_path": {"status": "skipped"},
+                    "unsupported_actions": [],
+                },
+                approved_payload={"approved_actions": []},
+                resolved_noop_candidates=[],
+                quality_gate_summary={"status": "pass"},
+            )
+            manifest = json.loads((output_dir / "final_ai_improvement_artifact_manifest.json").read_text(encoding="utf-8"))
+
+        self.assertEqual(["candidate-final"], [item["candidate_id"] for item in manifest["final_selected_artifacts"]])
+        self.assertEqual(1, manifest["summary"]["final_artifact_count"])
 
     def test_unknown_approval_ids_fail_in_non_dry_run(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:
@@ -1612,6 +1736,18 @@ def _write_packet(output_dir: Path, *, packet_id: str, start: int, end: int, lab
             ]
         },
     )
+
+
+def _comparison_payload(candidate_id: str, status: str) -> dict[str, object]:
+    return {
+        "schema_version": "1.0",
+        "candidate_id": candidate_id,
+        "problem_type": "missing_ball",
+        "status": status,
+        "summary": {"status": status},
+        "checks": [{"name": "fixture", "status": status}],
+        "candidate": {"id": candidate_id, "path": f"ai_candidates/missing_ball/{candidate_id}"},
+    }
 
 
 def _write_json(path: Path, payload: object) -> None:

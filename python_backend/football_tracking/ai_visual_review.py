@@ -274,6 +274,12 @@ def build_ai_visual_review_report(
         reviews.append(review_item)
 
     summary = _summary(reviews, errors)
+    provider_mode = "dry-run" if dry_run else "real"
+    can_lead_to_executable_candidates = (
+        not dry_run
+        and selected_model is not None
+        and summary.get("status") not in {"unavailable", "error"}
+    )
     return {
         "schema_version": SCHEMA_VERSION,
         "generated_at": _utc_now_iso(),
@@ -282,6 +288,8 @@ def build_ai_visual_review_report(
         "model": selected_model,
         "model_selection": model_selection,
         "candidate_intent": "visual_localization",
+        "provider_mode": provider_mode,
+        "can_lead_to_executable_candidates": can_lead_to_executable_candidates,
         "dry_run": bool(dry_run),
         "filters": {
             "only_labels": list(only_labels) if only_labels is not None else None,

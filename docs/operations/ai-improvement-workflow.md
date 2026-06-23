@@ -25,6 +25,7 @@ Stable rules summary:
 
 - Review-only AI output is advisory and cannot mutate artifacts or become final output.
 - Executable candidates require `candidate_id`, `approval_id`, `problem_type`, traceable evidence, a bounded frame window, expected artifacts, and comparison criteria.
+- Public executable approvals use the closed `approved_action` set from the contract. Legacy `targeted_rerun` is accepted as input only by normalization to `rerun_ball_window`.
 - Missing-ball closure is either a bounded recovery candidate with `missing_ball_recovery_comparison.json` or an evidence-backed full-window `missing_ball_resolution.json`.
 - The `2049-2544` long missing-ball window cannot be closed by only proving a short frame `2079` neighborhood.
 - Follow-cam candidates must improve or stay below motion thresholds while preserving Detected/Predicted crop coverage; sparse data warns instead of silently passing.
@@ -103,7 +104,9 @@ The quality gate reads direct `*_comparison.json` reports and comparison referen
 
 ## Model Guidance
 
-Use the configured strong model for run-level improvement and hard recovery cases. Reserve smaller or cheaper models for low-risk tagging and dry-run smoke checks. Provider mode, candidate intent, and model selection should be visible in the workflow report so operators can distinguish strong-model candidate work from low-risk review-only output.
+Use the configured strong model for run-level improvement and hard recovery cases. Reserve smaller or cheaper models for low-risk tagging and dry-run smoke checks. Provider mode, candidate intent, resolved model, model-selection source, and whether the call can lead to executable candidates are visible in the workflow/improvement artifacts so operators can distinguish strong-model candidate work from low-risk review-only output.
+
+When the improvement-capable model is unavailable in real mode, the workflow falls back to non-mutating review-only/unavailable behavior. It does not use a small-model fallback to create executable approvals.
 
 ## AI Suggestion Contract
 
@@ -112,6 +115,8 @@ Run-level AI suggestions must be evidence-backed before they are eligible for ap
 - Long missing-ball or lost-gap suggestions must cover the full lost gap, or explicitly describe uncovered subwindows.
 - ROI and localization suggestions must cite a `source_packet_id` or `visual_review_id`.
 - `not_visible` is only valid when packet or visual evidence supports that the ball is hidden, off-frame, or impossible to identify.
-- Noise suggestions must use bounded frame windows and an accepted false-positive class: `extra_ball`, `shoe_confusion`, `foot_confusion`, `player_head`, `advertising_board`, `sideline_confusion`, `wall_background_drift`, `unknown_false_positive`, or `unknown`.
+- Noise suggestions must use bounded frame windows, evidence ids, and an accepted false-positive class: `extra_ball`, `shoe_confusion`, `foot_confusion`, `player_head`, `advertising_board`, `sideline_confusion`, `wall_background_drift`, `unknown_false_positive`, or `unknown`.
 - Camera suggestions must distinguish tracking recovery from follow-cam tuning. Lost or Predicted ball-track context should produce `tracking_rerun_before_follow_cam`; stable Detected context can produce `adjust_follow_cam`.
 - Highlight suggestions must preserve the candidate `core_window` and required tail unless the source-video end clamps the tail.
+
+Generated missing-ball and noise candidates are written as pending finalization, even when their comparison status is `pass`. They become final output only through `finalize_ai_candidate` with `missing_ball_track` or `noise_cleaned_track`; `warn` candidates require explicit confirmation, while `fail`, `unavailable`, review-only, missing-approval, and unknown-candidate cases cannot promote.

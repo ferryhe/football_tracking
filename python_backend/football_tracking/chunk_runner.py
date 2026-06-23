@@ -1055,14 +1055,17 @@ def _roi_policy_for_mode(mode: str, suffix: str) -> str:
     return f"{prefix}_{suffix}"
 
 
+_APPROVED_ROI_ACTIONS = {"targeted_rerun", "rerun_ball_window", "localize_ball_roi"}
+
+
 def _is_approved_roi_action_window(window: dict[str, Any]) -> bool:
-    if window.get("approved_action") in {"targeted_rerun", "localize_ball_roi"}:
+    if window.get("approved_action") in _APPROVED_ROI_ACTIONS:
         return True
     provenance = window.get("approval_provenance")
     if not isinstance(provenance, list):
         return False
     return any(
-        isinstance(item, dict) and item.get("approved_action") in {"targeted_rerun", "localize_ball_roi"}
+        isinstance(item, dict) and item.get("approved_action") in _APPROVED_ROI_ACTIONS
         for item in provenance
     )
 

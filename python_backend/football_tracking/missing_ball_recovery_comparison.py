@@ -203,7 +203,7 @@ def _approval_linkage_check(approval: dict[str, Any] | None, *, candidate_id: st
     if not isinstance(approval_id, str) or not approval_id.strip():
         return {"name": "approval_linkage", "status": "fail", "reason": "approval_id is required"}
     approved_action = approval.get("approved_action")
-    if approved_action not in {"localize_ball_roi", "targeted_rerun"}:
+    if approved_action not in {"localize_ball_roi", "targeted_rerun", "rerun_ball_window"}:
         return {
             "name": "approval_linkage",
             "status": "fail",

@@ -371,8 +371,16 @@ def _apply_final_manifest(
             fallback_key=f"pending:{candidate_id or len(state['candidates'])}",
         )
         _advance_candidate_stage(candidate, "finalized")
-        _set_promotion_status(candidate, "pending_confirmation")
-        _add_blocking_reason(candidate, "pending_human_confirmation")
+        _append_unique(candidate["approval_ids"], _optional_string(item.get("approval_id")))
+        for approval_id in _string_items(item.get("approval_ids")):
+            _append_unique(candidate["approval_ids"], approval_id)
+        _set_problem_type(candidate, _optional_string(item.get("problem_type")))
+        comparison_status = _optional_string(item.get("comparison_status"))
+        if comparison_status in {"pass", "warn", "fail"}:
+            _set_comparison_status(candidate, comparison_status)
+        if comparison_status == "warn":
+            _set_promotion_status(candidate, "pending_confirmation")
+            _add_blocking_reason(candidate, "pending_human_confirmation")
 
     for item in _dict_items(payload.get("unsupported_candidates")):
         candidate_id = _optional_string(item.get("candidate_id"))
@@ -660,6 +668,8 @@ def _approval_needs_candidate_id(action: dict[str, Any]) -> bool:
 def _approval_requires_execution(action: dict[str, Any]) -> bool:
     return _optional_string(action.get("approved_action")) in {
         "targeted_rerun",
+        "rerun_ball_window",
+        "mark_ball_not_visible",
         "localize_ball_roi",
         "noise_filter_adjustment",
         "tighten_noise_filter",
@@ -725,7 +735,18 @@ def _infer_problem_type(item: dict[str, Any]) -> str | None:
         )
         if value
     ).lower()
-    if any(token in text for token in ("missing_ball", "ball_lost", "lost_gap", "targeted_rerun", "localize_ball_roi")):
+    if any(
+        token in text
+        for token in (
+            "missing_ball",
+            "ball_lost",
+            "lost_gap",
+            "targeted_rerun",
+            "rerun_ball_window",
+            "localize_ball_roi",
+            "mark_ball_not_visible",
+        )
+    ):
         return "missing_ball"
     if any(token in text for token in ("noise", "false_positive", "reject_noise", "filter")):
         return "noise"

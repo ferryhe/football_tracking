@@ -98,6 +98,11 @@ def build_final_artifact_manifest(
         if comparison_status is None:
             rejected.append(_rejection(candidate_id, "comparison_missing", final_ref, "unavailable"))
             continue
+        finalization_block = _finalization_blocking_reason(final_ref, candidate_id, consumed)
+        if finalization_block is not None:
+            rejected.append(_rejection(candidate_id, finalization_block, final_ref, comparison_status))
+            manifest_warnings.append(f"{candidate_id} requires explicit finalization before promotion")
+            continue
         selected.append(final_ref)
 
     videos = _media_refs([baseline, *candidates, *selected], media_type="video")
@@ -384,6 +389,37 @@ def _has_consumed_human_confirmation(candidate_id: str, approvals: list[dict[str
         if approval.get("approval_type") != "human_confirmation":
             continue
         if approval.get("status") == "approved":
+            return True
+    return False
+
+
+def _finalization_blocking_reason(
+    final_ref: dict[str, Any],
+    candidate_id: str,
+    approvals: list[dict[str, Any]],
+) -> str | None:
+    decision = final_ref.get("operator_decision") if isinstance(final_ref.get("operator_decision"), dict) else {}
+    if decision.get("decision") != "promote":
+        return "missing_finalization_decision"
+    if _optional_string(decision.get("candidate_id")) != candidate_id:
+        return "candidate_finalization_mismatch"
+    approval_id = _optional_string(final_ref.get("approval_id")) or _optional_string(decision.get("approval_id"))
+    if approval_id is None:
+        return "missing_finalization_approval"
+    if _optional_string(decision.get("approval_id")) not in {approval_id, None}:
+        return "candidate_finalization_mismatch"
+    if not _has_consumed_approval(candidate_id, approval_id, approvals):
+        return "missing_finalization_approval"
+    return None
+
+
+def _has_consumed_approval(candidate_id: str, approval_id: str, approvals: list[dict[str, Any]]) -> bool:
+    for approval in approvals:
+        if approval_id != _optional_string(approval.get("approval_id")):
+            continue
+        if candidate_id != _optional_string(approval.get("candidate_id")):
+            continue
+        if approval.get("status") in {None, "approved", "consumed"}:
             return True
     return False
 

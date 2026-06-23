@@ -3721,9 +3721,9 @@ class ApiServiceSmokeTests(unittest.TestCase):
         written = json.loads((output_dir / "ai_improvement_approved_actions.json").read_text(encoding="utf-8"))
         self.assertEqual("ai_improvement_approved_actions.json", response["artifact_name"])
         self.assertEqual(response["approved_actions"], written["approved_actions"])
-        self.assertEqual("targeted_rerun", response["approved_actions"][0]["approved_action"])
+        self.assertEqual("rerun_ball_window", response["approved_actions"][0]["approved_action"])
         self.assertEqual(1, response["summary"]["approved_action_count"])
-        self.assertEqual({"targeted_rerun": 1}, response["summary"]["approved_action_counts"])
+        self.assertEqual({"rerun_ball_window": 1}, response["summary"]["approved_action_counts"])
         self.assertTrue(response["summary"]["requires_execution"])
         self.assertTrue(response["summary"]["requires_high_recall_rerun"])
         self.assertFalse(response["summary"]["requires_tracking_rerun"])
@@ -3732,6 +3732,19 @@ class ApiServiceSmokeTests(unittest.TestCase):
 
     def test_ai_improvement_approve_route_validates_config_patch_overrides(self) -> None:
         output_dir = self.create_output_bundle("approve_route_baseline")
+        self.write_json(
+            "outputs/approve_route_baseline/review_packets.json",
+            {
+                "summary": {"packet_count": 1},
+                "packets": [
+                    {
+                        "packet_id": "packet_001",
+                        "source": {"kind": "trigger", "type": "candidate_ambiguity", "start_frame": 40, "end_frame": 52},
+                        "window": {"start_frame": 40, "end_frame": 52},
+                    }
+                ],
+            },
+        )
         self.write_json(
             "outputs/approve_route_baseline/ai_improvement_report.json",
             {
@@ -3742,6 +3755,7 @@ class ApiServiceSmokeTests(unittest.TestCase):
                 "improvements": [
                     {
                         "id": "imp_filter",
+                        "candidate_id": "noise_candidate_001",
                         "priority": "P1",
                         "area": "tracking",
                         "failure_tags": ["foot_confusion"],
@@ -3750,6 +3764,8 @@ class ApiServiceSmokeTests(unittest.TestCase):
                         "end_frame": 52,
                         "diagnosis": "Noise filter can tighten.",
                         "recommended_action": "noise_filter_adjustment",
+                        "source_packet_id": "packet_001",
+                        "evidence": [{"source_packet_id": "packet_001"}],
                         "false_positive_class": "foot_confusion",
                         "config_patch": {"selection": {"min_accept_score": 0.55}},
                         "confidence": 0.7,
