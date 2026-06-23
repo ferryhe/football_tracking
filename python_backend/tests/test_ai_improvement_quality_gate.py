@@ -7,12 +7,13 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from football_tracking.ai_candidate_lifecycle import build_ai_candidate_lifecycle
+from football_tracking.ai_candidate_registry import write_candidate_registry
 from football_tracking.ai_improvement_quality_gate import (
     build_ai_improvement_quality_gate,
     write_ai_improvement_quality_gate,
     write_track_hash_snapshot,
 )
-from football_tracking.ai_candidate_lifecycle import build_ai_candidate_lifecycle
 from football_tracking.final_artifact_manifest import finalize_ai_candidate, write_final_artifact_manifest
 
 
@@ -307,6 +308,103 @@ class AiImprovementQualityGateTests(unittest.TestCase):
                 for report in payload["checks"]["candidate_comparisons_ok"]["reports"]
             )
         )
+
+    def test_real_mode_selected_follow_cam_approval_requires_follow_cam_comparison_report(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_tracks(output_dir)
+            write_track_hash_snapshot(output_dir, "before_review")
+            write_track_hash_snapshot(output_dir, "after_ai_improvement")
+            approved_path = _write_approved_actions(
+                output_dir,
+                [
+                    {
+                        "approval_id": "approval_camera",
+                        "candidate_id": "follow-cam-candidate",
+                        "approved_action": "adjust_follow_cam",
+                        "problem_type": "follow_cam",
+                        "config_patch": {"follow_cam": {"glide_pan_smoothing": 0.07}},
+                    }
+                ],
+            )
+
+            payload = build_ai_improvement_quality_gate(output_dir, mode="real", approved_actions_path=approved_path)
+
+        self.assertEqual("unavailable", payload["checks"]["candidate_comparisons_ok"]["status"])
+        self.assertTrue(
+            any(
+                report.get("artifact_status") == "selected_follow_cam_approval_missing_comparison"
+                for report in payload["checks"]["candidate_comparisons_ok"]["reports"]
+            )
+        )
+
+    def test_real_mode_selected_follow_cam_approval_requires_candidate_id(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_tracks(output_dir)
+            write_track_hash_snapshot(output_dir, "before_review")
+            write_track_hash_snapshot(output_dir, "after_ai_improvement")
+            approved_path = _write_approved_actions(
+                output_dir,
+                [
+                    {
+                        "approval_id": "approval_camera",
+                        "approved_action": "adjust_follow_cam",
+                        "problem_type": "follow_cam",
+                        "config_patch": {"follow_cam": {"glide_pan_smoothing": 0.07}},
+                    }
+                ],
+            )
+
+            payload = build_ai_improvement_quality_gate(output_dir, mode="real", approved_actions_path=approved_path)
+
+        self.assertEqual("unavailable", payload["checks"]["candidate_comparisons_ok"]["status"])
+        self.assertTrue(
+            any(
+                report.get("artifact_status") == "selected_follow_cam_approval_missing_candidate_id"
+                for report in payload["checks"]["candidate_comparisons_ok"]["reports"]
+            )
+        )
+
+    def test_real_mode_selected_follow_cam_approval_accepts_matching_comparison_report(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_tracks(output_dir)
+            write_track_hash_snapshot(output_dir, "before_review")
+            write_track_hash_snapshot(output_dir, "after_ai_improvement")
+            approved_path = _write_approved_actions(
+                output_dir,
+                [
+                    {
+                        "approval_id": "approval_camera",
+                        "candidate_id": "follow-cam-candidate",
+                        "approved_action": "adjust_follow_cam",
+                        "problem_type": "follow_cam",
+                        "config_patch": {"follow_cam": {"glide_pan_smoothing": 0.07}},
+                    }
+                ],
+            )
+            comparison = _comparison_payload("follow-cam-candidate", "pass")
+            comparison["problem_type"] = "follow_cam"
+            comparison["approval_id"] = "approval_camera"
+            comparison["consumed_approval_ids"] = ["approval_camera"]
+            comparison["comparison_report"] = "ai_candidates/follow_cam/follow-cam-candidate/follow_cam_candidate_comparison.json"
+            _write_json(
+                output_dir / "ai_candidates" / "follow_cam" / "follow-cam-candidate" / "follow_cam_candidate_comparison.json",
+                comparison,
+            )
+            write_candidate_registry(output_dir, comparison_reports=[comparison])
+
+            payload = build_ai_improvement_quality_gate(output_dir, mode="real", approved_actions_path=approved_path)
+
+        reports = payload["checks"]["candidate_comparisons_ok"]["reports"]
+        self.assertFalse(
+            any(
+                str(report.get("artifact_status") or "").startswith("selected_follow_cam_approval_missing")
+                for report in reports
+            )
+        )
+        self.assertTrue(any(report.get("candidate_id") == "follow-cam-candidate" for report in reports))
 
     def test_long_lost_gap_2079_fails_when_approval_lacks_provenance(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:

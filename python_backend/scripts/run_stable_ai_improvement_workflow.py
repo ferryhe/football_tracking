@@ -21,6 +21,8 @@ from football_tracking.ai_visual_review import write_ai_visual_review_report
 from football_tracking.chunk_runner import run_high_recall_windows
 from football_tracking.config import load_config
 from football_tracking.final_artifact_manifest import write_final_artifact_manifest
+from football_tracking.follow_cam_candidate_comparison import FOLLOW_CAM_CANDIDATE_COMPARISON_NAME
+from football_tracking.follow_cam_candidate_executor import execute_follow_cam_candidate
 from football_tracking.metrics import build_metrics_report
 from football_tracking.missing_ball_candidate_executor import execute_missing_ball_candidate
 from football_tracking.noise_candidate_comparison import execute_noise_cleanup_candidate
@@ -170,7 +172,13 @@ def run_workflow(
             missing_ball_execution_path=dispatcher_stage.get("missing_ball_execution_path"),
         )
     )
-    stages.append(_follow_cam_rerender_plan_stage(approval_intent=approval_intent, approved_payload=approved_payload))
+    stages.append(
+        _follow_cam_rerender_plan_stage(
+            approval_intent=approval_intent,
+            approved_payload=approved_payload,
+            follow_cam_execution_path=dispatcher_stage.get("follow_cam_candidate_execution_path"),
+        )
+    )
     stages.append(_highlight_render_stage(approval_intent=approval_intent, approved_payload=approved_payload))
     noop_stage, resolved_noop_candidates = _missing_ball_noop_resolution_stage(output_dir, approved_payload)
     stages.append(noop_stage)
@@ -735,6 +743,7 @@ def _selected_approval_dispatcher_stage(
     actions = approved_payload.get("approved_actions") if isinstance(approved_payload.get("approved_actions"), list) else []
     missing_ball_actions: list[dict[str, Any]] = []
     noise_actions: list[dict[str, Any]] = []
+    follow_cam_actions: list[dict[str, Any]] = []
     unsupported_actions: list[dict[str, Any]] = []
     noop_actions: list[dict[str, Any]] = []
     for action in actions:
@@ -745,9 +754,11 @@ def _selected_approval_dispatcher_stage(
             missing_ball_actions.append(action)
         elif approved_action in NOISE_APPROVAL_ACTIONS:
             noise_actions.append(action)
+        elif approved_action in FOLLOW_CAM_APPROVAL_ACTIONS:
+            follow_cam_actions.append(action)
         elif _is_not_visible_noop_action(action):
             noop_actions.append(action)
-        elif approved_action in (FOLLOW_CAM_APPROVAL_ACTIONS | HIGHLIGHT_APPROVAL_ACTIONS):
+        elif approved_action in HIGHLIGHT_APPROVAL_ACTIONS:
             unsupported_actions.append(_unsupported_action_summary(action))
     missing_ball_path = _missing_ball_candidate_execution_path(
         output_dir=output_dir,
@@ -757,10 +768,25 @@ def _selected_approval_dispatcher_stage(
         dry_run=dry_run,
     )
     noise_path = _noise_candidate_execution_path(output_dir=output_dir, actions=noise_actions, dry_run=dry_run)
-    dispatcher_failed = noise_path.get("status") == "failed" or missing_ball_path.get("status") in {
-        "failed",
-        "partial_failure",
-    }
+    follow_cam_path = _follow_cam_candidate_execution_path(
+        output_dir=output_dir,
+        input_video=input_video,
+        actions=follow_cam_actions,
+        dry_run=dry_run,
+    )
+    dispatcher_failed = (
+        noise_path.get("status") == "failed"
+        or follow_cam_path.get("status")
+        in {
+            "failed",
+            "partial_failure",
+        }
+        or missing_ball_path.get("status")
+        in {
+            "failed",
+            "partial_failure",
+        }
+    )
     return {
         "name": "selected_approval_dispatcher",
         "status": "failed" if dispatcher_failed else "completed",
@@ -771,6 +797,7 @@ def _selected_approval_dispatcher_stage(
             "executor": "missing_ball_resolution",
         },
         "noise_candidate_execution_path": noise_path,
+        "follow_cam_candidate_execution_path": follow_cam_path,
         "unsupported_actions": unsupported_actions,
     }
 
@@ -945,6 +972,155 @@ def _noise_candidate_execution_path(*, output_dir: Path, actions: list[dict[str,
     }
 
 
+def _follow_cam_candidate_execution_path(
+    *,
+    output_dir: Path,
+    input_video: Path | None,
+    actions: list[dict[str, Any]],
+    dry_run: bool,
+) -> dict[str, Any]:
+    if not actions:
+        return {
+            "status": "skipped",
+            "approval_ids": [],
+            "candidate_ids": [],
+            "execution_status": "not_run",
+            "reason": "No selected follow-cam approvals.",
+        }
+    approval_ids = _approval_ids(actions)
+    candidate_ids = [
+        candidate_id
+        for action in actions
+        if (candidate_id := _follow_cam_candidate_id(action)) is not None
+    ]
+    blocked = [
+        {
+            "approval_id": _action_approval_id(action),
+            "candidate_id": _follow_cam_candidate_id(action),
+            "error": "tracking_rerun_before_follow_cam requires linked passed tracking candidate evidence",
+        }
+        for action in actions
+        if _follow_cam_action_requires_tracking_link(action)
+        and _follow_cam_linked_tracking_candidate_id(action) is None
+    ]
+    blocked_approval_ids = {
+        item["approval_id"]
+        for item in blocked
+        if isinstance(item.get("approval_id"), str)
+    }
+    executable_actions = [
+        action
+        for action in actions
+        if _action_approval_id(action) not in blocked_approval_ids
+    ]
+    if blocked and not executable_actions:
+        return {
+            "status": "blocked",
+            "approval_ids": approval_ids,
+            "candidate_ids": candidate_ids,
+            "execution_status": "blocked",
+            "reason": "linked_tracking_candidate_evidence_required",
+            "errors": [],
+            "blocked": blocked,
+        }
+    if dry_run:
+        return {
+            "status": "planned" if not blocked else "partial_failure",
+            "approval_ids": approval_ids,
+            "candidate_ids": candidate_ids,
+            "execution_status": "not_run" if not blocked else "partial_failure",
+            "reason": "Dry-run records selected follow-cam approvals without rendering candidate artifacts."
+            if not blocked
+            else "linked_tracking_candidate_evidence_required",
+            "blocked": blocked,
+        }
+    try:
+        config_path = _recovery_config_path(output_dir)
+        resolved_input_video = input_video or _recovery_input_video(output_dir, config_path)
+        if resolved_input_video is None:
+            raise ValueError("Selected follow-cam candidate requires input_video or run_manifest/config input_video.")
+    except Exception as exc:
+        return {
+            "status": "failed",
+            "approval_ids": approval_ids,
+            "candidate_ids": candidate_ids,
+            "execution_status": "failed",
+            "candidate_outputs": [],
+            "comparison_reports": [],
+            "errors": [
+                {
+                    "approval_id": _action_approval_id(action),
+                    "candidate_id": _follow_cam_candidate_id(action),
+                    "approval_ids": [_action_approval_id(action)] if _action_approval_id(action) else [],
+                    "candidate_ids": [_follow_cam_candidate_id(action)] if _follow_cam_candidate_id(action) else [],
+                    "status": "failed",
+                    "execution_status": "failed",
+                    "error": str(exc),
+                }
+                for action in executable_actions
+            ],
+            "blocked": blocked,
+        }
+    reports: list[dict[str, Any]] = []
+    errors: list[dict[str, Any]] = []
+    for action in executable_actions:
+        try:
+            reports.append(
+                execute_follow_cam_candidate(
+                    output_dir,
+                    action,
+                    config_path=config_path,
+                    input_video=resolved_input_video,
+                )
+            )
+        except Exception as exc:  # pragma: no cover - defensive workflow reporting
+            error = {
+                "approval_id": _action_approval_id(action),
+                "candidate_id": _follow_cam_candidate_id(action),
+                "error": str(exc),
+            }
+            if "requires linked passed tracking candidate evidence" in str(exc):
+                blocked.append(error)
+            else:
+                errors.append(error)
+    candidate_outputs = [
+        {
+            "id": report.get("candidate_id"),
+            "candidate_id": report.get("candidate_id"),
+            "problem_type": "follow_cam",
+            "path": report.get("candidate_dir"),
+            "type": "video",
+            "status": report.get("comparison_status"),
+            "candidate_artifacts": report.get("candidate_artifacts", []),
+        }
+        for report in reports
+        if isinstance(report.get("candidate_id"), str)
+    ]
+    comparison_reports = [{**report, "path": report.get("comparison_report")} for report in reports]
+    if errors:
+        status = "partial_failure" if reports else "failed"
+        execution_status = "partial_failure" if reports else "failed"
+    elif blocked:
+        status = "blocked" if not reports else "partial_failure"
+        execution_status = "blocked" if not reports else "partial_failure"
+    else:
+        status = "succeeded"
+        execution_status = "executed"
+    return {
+        "status": status,
+        "approval_ids": approval_ids,
+        "candidate_ids": [str(report.get("candidate_id")) for report in reports if isinstance(report.get("candidate_id"), str)]
+        or candidate_ids,
+        "execution_status": execution_status,
+        "candidate_outputs": candidate_outputs,
+        "comparison_reports": comparison_reports,
+        "errors": errors,
+        "blocked": blocked,
+        "reason": "linked_tracking_candidate_evidence_required" if blocked and not errors else None,
+        "strategy": "follow_cam_candidate_render",
+    }
+
+
 def _group_missing_ball_actions_by_candidate_id(actions: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
     grouped: dict[str, list[dict[str, Any]]] = {}
     for action in actions:
@@ -962,7 +1138,33 @@ def _missing_ball_candidate_ids(actions: list[dict[str, Any]]) -> list[str]:
     return candidate_ids
 
 
-def _follow_cam_rerender_plan_stage(*, approval_intent: dict[str, Any], approved_payload: dict[str, Any]) -> dict[str, Any]:
+def _follow_cam_rerender_plan_stage(
+    *,
+    approval_intent: dict[str, Any],
+    approved_payload: dict[str, Any],
+    follow_cam_execution_path: Any = None,
+) -> dict[str, Any]:
+    if isinstance(follow_cam_execution_path, dict) and follow_cam_execution_path.get("status") in {
+        "succeeded",
+        "failed",
+        "partial_failure",
+        "planned",
+        "blocked",
+    }:
+        status = str(follow_cam_execution_path.get("status"))
+        return {
+            "name": "follow_cam_rerender_plan",
+            "status": status,
+            "artifact": FOLLOW_CAM_CANDIDATE_COMPARISON_NAME,
+            "reason": follow_cam_execution_path.get("reason"),
+            "execution_status": follow_cam_execution_path.get("execution_status", "not_run"),
+            "approval_ids": follow_cam_execution_path.get("approval_ids", []),
+            "candidate_ids": follow_cam_execution_path.get("candidate_ids", []),
+            "candidate_outputs": follow_cam_execution_path.get("candidate_outputs", []),
+            "comparison_reports": follow_cam_execution_path.get("comparison_reports", []),
+            "errors": follow_cam_execution_path.get("errors", []),
+            "blocked": follow_cam_execution_path.get("blocked", []),
+        }
     actions = approved_payload.get("approved_actions") if isinstance(approved_payload.get("approved_actions"), list) else []
     approved_action_id = approval_intent.get("approved_action_id") if isinstance(approval_intent.get("approved_action_id"), str) else None
     follow_cam_actions = [
@@ -1085,6 +1287,7 @@ def _final_artifact_manifest_stage(
     unsupported = dispatcher_stage.get("unsupported_actions")
     unsupported_candidates = unsupported if isinstance(unsupported, list) else []
     noise_path = dispatcher_stage.get("noise_candidate_execution_path")
+    follow_cam_path = dispatcher_stage.get("follow_cam_candidate_execution_path")
     missing_ball_path = dispatcher_stage.get("missing_ball_execution_path")
     missing_ball_candidate_outputs = (
         missing_ball_path.get("candidate_outputs", [])
@@ -1116,28 +1319,59 @@ def _final_artifact_manifest_stage(
         if isinstance(noise_path, dict) and isinstance(noise_path.get("errors"), list)
         else []
     )
+    follow_cam_candidate_outputs = (
+        follow_cam_path.get("candidate_outputs", [])
+        if isinstance(follow_cam_path, dict) and isinstance(follow_cam_path.get("candidate_outputs"), list)
+        else []
+    )
+    follow_cam_comparison_reports = (
+        follow_cam_path.get("comparison_reports", [])
+        if isinstance(follow_cam_path, dict) and isinstance(follow_cam_path.get("comparison_reports"), list)
+        else []
+    )
+    follow_cam_rejected_candidates = (
+        [_follow_cam_rejected_candidate_summary(item) for item in follow_cam_path.get("errors", [])]
+        if isinstance(follow_cam_path, dict) and isinstance(follow_cam_path.get("errors"), list)
+        else []
+    )
+    follow_cam_blocked_candidates = (
+        [_follow_cam_blocked_candidate_summary(item) for item in follow_cam_path.get("blocked", [])]
+        if isinstance(follow_cam_path, dict) and isinstance(follow_cam_path.get("blocked"), list)
+        else []
+    )
     pending_candidates = [
         *pending_candidates,
         *_executed_pending_candidate_summaries(
-            [*missing_ball_candidate_outputs, *noise_candidate_outputs],
-            [*missing_ball_comparison_reports, *noise_comparison_reports],
+            [*missing_ball_candidate_outputs, *noise_candidate_outputs, *follow_cam_candidate_outputs],
+            [*missing_ball_comparison_reports, *noise_comparison_reports, *follow_cam_comparison_reports],
         ),
+        *follow_cam_blocked_candidates,
     ]
     manifest = write_final_artifact_manifest(
         output_dir,
         baseline_output={"path": str(output_dir), "status": "baseline"},
         candidate_outputs=_unique_json_dicts(
-            [*existing_finalization["candidate_outputs"], *missing_ball_candidate_outputs, *noise_candidate_outputs]
+            [
+                *existing_finalization["candidate_outputs"],
+                *missing_ball_candidate_outputs,
+                *noise_candidate_outputs,
+                *follow_cam_candidate_outputs,
+            ]
         ),
         final_artifacts=existing_finalization["final_selected_artifacts"],
         consumed_approvals=_unique_json_dicts(
             [*existing_finalization["consumed_approvals"], *[action for action in actions if isinstance(action, dict)]]
         ),
         comparison_reports=_unique_json_dicts(
-            [*existing_finalization["comparison_reports"], *missing_ball_comparison_reports, *noise_comparison_reports]
+            [
+                *existing_finalization["comparison_reports"],
+                *missing_ball_comparison_reports,
+                *noise_comparison_reports,
+                *follow_cam_comparison_reports,
+            ]
         ),
         quality_gate_status=quality_gate_summary,
-        rejected_candidates=[*missing_ball_rejected_candidates, *noise_rejected_candidates],
+        rejected_candidates=[*missing_ball_rejected_candidates, *noise_rejected_candidates, *follow_cam_rejected_candidates],
         pending_candidates=pending_candidates,
         unsupported_candidates=unsupported_candidates,
         resolved_noop_candidates=_unique_json_dicts(
@@ -1335,6 +1569,48 @@ def _noise_rejected_candidate_summary(error: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _follow_cam_rejected_candidate_summary(error: dict[str, Any]) -> dict[str, Any]:
+    candidate_id = _first_string(error, ("candidate_id",))
+    if candidate_id is None:
+        candidate_ids = error.get("candidate_ids")
+        if isinstance(candidate_ids, list):
+            candidate_id = next((item.strip() for item in candidate_ids if isinstance(item, str) and item.strip()), None)
+    approval_id = _first_string(error, ("approval_id",))
+    approval_ids = [item for item in error.get("approval_ids", []) if isinstance(item, str) and item.strip()]
+    if approval_id is not None and approval_id not in approval_ids:
+        approval_ids.insert(0, approval_id)
+    return {
+        "candidate_id": candidate_id,
+        "candidate_ids": [candidate_id] if candidate_id else [],
+        "approval_id": approval_id,
+        "approval_ids": approval_ids,
+        "problem_type": "follow_cam",
+        "reason": "comparison_unavailable",
+        "error": str(error.get("error") or "Follow-cam candidate execution failed."),
+        "status": "rejected",
+        "execution_status": str(error.get("execution_status") or error.get("status") or "failed"),
+        "comparison_status": "unavailable",
+    }
+
+
+def _follow_cam_blocked_candidate_summary(error: dict[str, Any]) -> dict[str, Any]:
+    candidate_id = _first_string(error, ("candidate_id",))
+    approval_id = _first_string(error, ("approval_id",))
+    return {
+        "candidate_id": candidate_id,
+        "candidate_ids": [candidate_id] if candidate_id else [],
+        "approval_id": approval_id,
+        "approval_ids": [approval_id] if approval_id else [],
+        "problem_type": "follow_cam",
+        "approved_action": "tracking_rerun_before_follow_cam",
+        "status": "blocked",
+        "execution_status": "blocked",
+        "comparison_status": "unavailable",
+        "reason": "linked_tracking_candidate_evidence_required",
+        "requires_linked_tracking_candidate": True,
+    }
+
+
 def _problem_type_for_action(approved_action: str) -> str:
     if approved_action in NOISE_APPROVAL_ACTIONS:
         return "noise"
@@ -1354,6 +1630,28 @@ def _noise_candidate_id(action: dict[str, Any]) -> str | None:
     if isinstance(value, str) and value.strip():
         return value.strip()
     return None
+
+
+def _follow_cam_candidate_id(action: dict[str, Any]) -> str | None:
+    value = action.get("candidate_id")
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    return None
+
+
+def _follow_cam_action_requires_tracking_link(action: dict[str, Any]) -> bool:
+    return str(action.get("approved_action") or "") == "tracking_rerun_before_follow_cam"
+
+
+def _follow_cam_linked_tracking_candidate_id(action: dict[str, Any]) -> str | None:
+    return _first_string(
+        action,
+        (
+            "linked_tracking_candidate_id",
+            "tracking_candidate_id",
+            "source_candidate_id",
+        ),
+    )
 
 
 def _missing_ball_candidate_id(action: dict[str, Any]) -> str | None:

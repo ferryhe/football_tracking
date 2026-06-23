@@ -376,11 +376,20 @@ def _apply_final_manifest(
             _append_unique(candidate["approval_ids"], approval_id)
         _set_problem_type(candidate, _optional_string(item.get("problem_type")))
         comparison_status = _optional_string(item.get("comparison_status"))
+        item_status = _optional_string(item.get("status"))
+        execution_status = _optional_string(item.get("execution_status"))
+        is_blocked_pending = item_status == "blocked" or execution_status == "blocked"
         if comparison_status in {"pass", "warn", "fail"}:
             _set_comparison_status(candidate, comparison_status)
+        if comparison_status == "unavailable" and is_blocked_pending:
+            _set_comparison_status(candidate, comparison_status)
+            _add_blocking_reason(candidate, "missing_comparison")
         if comparison_status == "warn":
             _set_promotion_status(candidate, "pending_confirmation")
             _add_blocking_reason(candidate, "pending_human_confirmation")
+        if is_blocked_pending:
+            _set_promotion_status(candidate, "blocked")
+            _add_blocking_reason(candidate, "missing_evidence")
 
     for item in _dict_items(payload.get("unsupported_candidates")):
         candidate_id = _optional_string(item.get("candidate_id"))
