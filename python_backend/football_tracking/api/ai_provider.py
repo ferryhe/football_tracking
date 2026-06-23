@@ -15,6 +15,7 @@ class OpenAIProviderSettings:
     api_key: str = ""
     base_url: str = "https://api.openai.com/v1"
     chat_model: str = "gpt-4o-mini"
+    visual_review_model: str | None = None
     improvement_model: str | None = None
 
     @property
@@ -33,6 +34,10 @@ def load_provider_settings(repo_root: Path) -> OpenAIProviderSettings:
         "PROVIDER_OPENAI_CHAT_MODEL",
         env_values.get("PROVIDER_OPENAI_CHAT_MODEL", "gpt-4o-mini"),
     ).strip()
+    visual_review_model = os.environ.get(
+        "PROVIDER_OPENAI_VISUAL_REVIEW_MODEL",
+        env_values.get("PROVIDER_OPENAI_VISUAL_REVIEW_MODEL", ""),
+    ).strip()
     improvement_model = os.environ.get(
         "PROVIDER_OPENAI_IMPROVEMENT_MODEL",
         env_values.get("PROVIDER_OPENAI_IMPROVEMENT_MODEL", ""),
@@ -41,6 +46,7 @@ def load_provider_settings(repo_root: Path) -> OpenAIProviderSettings:
         api_key=api_key,
         base_url=base_url.rstrip("/"),
         chat_model=chat_model or "gpt-4o-mini",
+        visual_review_model=visual_review_model or None,
         improvement_model=improvement_model or None,
     )
 

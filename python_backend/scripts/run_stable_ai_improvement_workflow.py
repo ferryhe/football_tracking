@@ -15,6 +15,8 @@ from football_tracking.ai_improvement_quality_gate import (
     write_ai_improvement_quality_gate,
     write_track_hash_snapshot,
 )
+from football_tracking.ai_visual_review import write_ai_visual_review_report
+from football_tracking.final_artifact_manifest import write_final_artifact_manifest
 from football_tracking.metrics import build_metrics_report
 from football_tracking.review_packets import write_review_packet_report
 
@@ -25,7 +27,11 @@ HASH_SNAPSHOT_REPORT_NAME = "ai_improvement_hash_snapshots.json"
 QUALITY_GATE_REPORT_NAME = "ai_improvement_quality_gate.json"
 AI_IMPROVEMENT_REPORT_NAME = "ai_improvement_report.json"
 APPROVED_ACTIONS_NAME = "ai_improvement_approved_actions.json"
+MISSING_BALL_RESOLUTION_NAME = "missing_ball_resolution.json"
+FINAL_ARTIFACT_MANIFEST_NAME = "final_ai_improvement_artifact_manifest.json"
 MISSING_BALL_APPROVAL_ACTIONS = {"targeted_rerun", "localize_ball_roi"}
+NOOP_NOT_VISIBLE_ACTIONS = {"manual_review", "resolve_not_visible", "not_visible"}
+NOISE_APPROVAL_ACTIONS = {"noise_filter_adjustment", "tighten_noise_filter", "reject_noise"}
 FOLLOW_CAM_APPROVAL_ACTIONS = {"adjust_follow_cam", "tracking_rerun_before_follow_cam"}
 HIGHLIGHT_APPROVAL_ACTIONS = {"adjust_highlight_window", "render_suggested_highlight"}
 SINGLE_ACTION_ID_ACTIONS = FOLLOW_CAM_APPROVAL_ACTIONS | HIGHLIGHT_APPROVAL_ACTIONS
@@ -105,7 +111,18 @@ def run_workflow(
             warnings=warnings,
         )
     )
-    stages.append(_visual_review_stage(dry_run=dry_run))
+    stages.append(
+        _visual_review_stage(
+            output_dir=output_dir,
+            dry_run=dry_run,
+            gate_mode=gate_mode,
+            model=model,
+            warnings=warnings,
+        )
+    )
+    if approved_actions_path is not None and not approval_ids and approved_action_id is None:
+        warnings.append("approved actions path supplied without approval ids; no approval action will execute by path alone.")
+    _discard_stale_workflow_artifacts(output_dir)
     stages.append(
         _ai_improvement_stage(
             output_dir=output_dir,
@@ -132,6 +149,8 @@ def run_workflow(
         approved_action_id=approved_action_id,
         approved_actions_path=approved_actions_path,
     )
+    dispatcher_stage = _selected_approval_dispatcher_stage(approved_payload)
+    stages.append(dispatcher_stage)
     stages.append(
         _approved_child_rerun_stage(
             dry_run=dry_run,
@@ -141,6 +160,8 @@ def run_workflow(
     )
     stages.append(_follow_cam_rerender_plan_stage(approval_intent=approval_intent, approved_payload=approved_payload))
     stages.append(_highlight_render_stage(approval_intent=approval_intent, approved_payload=approved_payload))
+    noop_stage, resolved_noop_candidates = _missing_ball_noop_resolution_stage(output_dir, approved_payload)
+    stages.append(noop_stage)
 
     gate_approved_payload = _quality_gate_approved_payload(
         approved_payload,
@@ -160,6 +181,14 @@ def run_workflow(
             "summary": quality_gate["summary"],
         }
     )
+    manifest_stage = _final_artifact_manifest_stage(
+        output_dir,
+        approved_payload=approved_payload,
+        dispatcher_stage=dispatcher_stage,
+        resolved_noop_candidates=resolved_noop_candidates,
+        quality_gate_summary=quality_gate["summary"],
+    )
+    stages.append(manifest_stage)
 
     produced_artifacts = _produced_artifacts(output_dir, extra_names=[report_name])
     report = {
@@ -291,12 +320,52 @@ def _review_packets_stage(
     }
 
 
-def _visual_review_stage(*, dry_run: bool) -> dict[str, Any]:
+def _visual_review_stage(
+    *,
+    output_dir: Path,
+    dry_run: bool,
+    gate_mode: str,
+    model: str | None,
+    warnings: list[str],
+) -> dict[str, Any]:
+    if dry_run:
+        return {
+            "name": "visual_review",
+            "status": "planned",
+            "enabled": False,
+            "artifact": "ai_visual_review.json",
+            "reason": "Dry-run records the visual review stage without calling a provider.",
+        }
+    if gate_mode != "real":
+        return {
+            "name": "visual_review",
+            "status": "skipped",
+            "enabled": False,
+            "artifact": "ai_visual_review.json",
+            "reason": "Provider-backed visual review runs only in real mode.",
+        }
+    try:
+        report = write_ai_visual_review_report(output_dir, model=model, dry_run=False)
+    except Exception as exc:  # pragma: no cover - defensive CLI reporting
+        warnings.append(f"visual review unavailable: {exc}")
+        return {
+            "name": "visual_review",
+            "status": "unavailable",
+            "enabled": True,
+            "artifact": "ai_visual_review.json",
+            "error": str(exc),
+        }
+    summary = report.get("summary") if isinstance(report.get("summary"), dict) else {}
+    summary_status = summary.get("status") if isinstance(summary.get("status"), str) else "ok"
+    stage_status = "succeeded" if summary_status in {"ok", "warn"} else summary_status
     return {
         "name": "visual_review",
-        "status": "planned" if dry_run else "skipped",
-        "enabled": False,
-        "reason": "Optional provider-backed visual review is not enabled by this recipe run.",
+        "status": stage_status,
+        "enabled": True,
+        "artifact": "ai_visual_review.json",
+        "model": report.get("model") or model,
+        "model_selection": report.get("model_selection") if isinstance(report.get("model_selection"), dict) else {},
+        "summary": summary,
     }
 
 
@@ -474,6 +543,8 @@ def _load_selected_approved_actions(
     if all_requested_ids:
         wanted = set(all_requested_ids)
         selected = [action for action in selected if str(action.get("approval_id") or "") in wanted]
+    else:
+        selected = []
     if single_requested_ids:
         selected = [
             action
@@ -588,27 +659,76 @@ def _approved_child_rerun_stage(
         }
     return {
         "name": "approved_child_rerun",
-        "status": "planned",
+        "status": "pending_api_required",
         "dry_run": dry_run,
-        "rerun_mode": "sahi_roi" if any(window.get("has_roi") for window in bounded_windows) else "direct_full_frame",
+        "execution_status": "not_run",
+        "api_required": True,
+        "reason": (
+            "Bounded missing-ball approvals require the PR #46 API/service child execution path; "
+            "this stable workflow records the selected windows but does not mutate tracking artifacts."
+        ),
+        "required_executor": "api_missing_ball_candidate_execution",
+        "intended_rerun_mode": "sahi_roi" if any(window.get("has_roi") for window in bounded_windows) else "direct_full_frame",
         "bounded_windows": [{key: window[key] for key in ("approval_id", "start_frame", "end_frame")} for window in bounded_windows],
         "runs_full_video_sahi": False,
     }
 
 
+def _selected_approval_dispatcher_stage(approved_payload: dict[str, Any]) -> dict[str, Any]:
+    actions = approved_payload.get("approved_actions") if isinstance(approved_payload.get("approved_actions"), list) else []
+    missing_ball_actions: list[dict[str, Any]] = []
+    unsupported_actions: list[dict[str, Any]] = []
+    noop_actions: list[dict[str, Any]] = []
+    for action in actions:
+        if not isinstance(action, dict):
+            continue
+        approved_action = str(action.get("approved_action") or "")
+        if approved_action in MISSING_BALL_APPROVAL_ACTIONS:
+            missing_ball_actions.append(action)
+        elif _is_not_visible_noop_action(action):
+            noop_actions.append(action)
+        elif approved_action in (NOISE_APPROVAL_ACTIONS | FOLLOW_CAM_APPROVAL_ACTIONS | HIGHLIGHT_APPROVAL_ACTIONS):
+            unsupported_actions.append(_unsupported_action_summary(action))
+    return {
+        "name": "selected_approval_dispatcher",
+        "status": "completed",
+        "missing_ball_execution_path": {
+            "status": "pending_api_required" if missing_ball_actions else "skipped",
+            "approval_ids": _approval_ids(missing_ball_actions),
+            "execution_status": "not_run",
+            "api_required": bool(missing_ball_actions),
+            "required_executor": "api_missing_ball_candidate_execution",
+            "reason": (
+                "Selected missing-ball approvals are executable only through the PR #46 API/service child-run path; "
+                "this workflow does not execute or promote those candidates directly."
+                if missing_ball_actions
+                else "No selected missing-ball recovery approvals."
+            ),
+        },
+        "noop_resolution_path": {
+            "status": "supported" if noop_actions else "skipped",
+            "approval_ids": _approval_ids(noop_actions),
+            "executor": "missing_ball_resolution",
+        },
+        "unsupported_actions": unsupported_actions,
+    }
+
+
 def _follow_cam_rerender_plan_stage(*, approval_intent: dict[str, Any], approved_payload: dict[str, Any]) -> dict[str, Any]:
     actions = approved_payload.get("approved_actions") if isinstance(approved_payload.get("approved_actions"), list) else []
+    approved_action_id = approval_intent.get("approved_action_id") if isinstance(approval_intent.get("approved_action_id"), str) else None
     follow_cam_actions = [
-        action for action in actions if isinstance(action, dict) and str(action.get("approved_action") or "") in FOLLOW_CAM_APPROVAL_ACTIONS
+        action
+        for action in actions
+        if isinstance(action, dict)
+        and str(action.get("approval_id") or "") == approved_action_id
+        and str(action.get("approved_action") or "") in FOLLOW_CAM_APPROVAL_ACTIONS
     ]
-    if not approval_intent["has_explicit_approval_intent"] or not follow_cam_actions:
-        return {"name": "follow_cam_rerender_plan", "status": "skipped", "artifact": "follow_cam_rerender_plan.json"}
-    return {
-        "name": "follow_cam_rerender_plan",
-        "status": "planned",
-        "artifact": "follow_cam_rerender_plan.json",
-        "approved_action_count": len(follow_cam_actions),
-    }
+    selected_follow_cam_without_single_id = any(
+        isinstance(action, dict) and str(action.get("approved_action") or "") in FOLLOW_CAM_APPROVAL_ACTIONS for action in actions
+    )
+    reason = "unsupported_candidate_type" if (selected_follow_cam_without_single_id or follow_cam_actions) else "no selected follow-cam action"
+    return {"name": "follow_cam_rerender_plan", "status": "skipped", "artifact": "follow_cam_rerender_plan.json", "reason": reason}
 
 
 def _highlight_render_stage(*, approval_intent: dict[str, Any], approved_payload: dict[str, Any]) -> dict[str, Any]:
@@ -621,14 +741,115 @@ def _highlight_render_stage(*, approval_intent: dict[str, Any], approved_payload
         and str(action.get("approval_id") or "") == approved_action_id
         and str(action.get("approved_action") or "") in HIGHLIGHT_APPROVAL_ACTIONS
     ]
-    if not approval_intent["approved_action_id_explicit"] or not highlight_actions:
-        return {"name": "highlight_render", "status": "skipped", "artifact": "highlight_report.json"}
+    selected_highlight = any(
+        isinstance(action, dict) and str(action.get("approved_action") or "") in HIGHLIGHT_APPROVAL_ACTIONS for action in actions
+    )
+    reason = "unsupported_candidate_type" if (selected_highlight or highlight_actions) else "no selected highlight action"
+    return {"name": "highlight_render", "status": "skipped", "artifact": "highlight_report.json", "reason": reason}
+
+
+def _missing_ball_noop_resolution_stage(output_dir: Path, approved_payload: dict[str, Any]) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    actions = approved_payload.get("approved_actions") if isinstance(approved_payload.get("approved_actions"), list) else []
+    noop_actions = [action for action in actions if isinstance(action, dict) and _is_not_visible_noop_action(action)]
+    if not noop_actions:
+        _discard_artifact(output_dir / MISSING_BALL_RESOLUTION_NAME)
+        return (
+            {
+                "name": "missing_ball_noop_resolution",
+                "status": "skipped",
+                "artifact": MISSING_BALL_RESOLUTION_NAME,
+                "reason": "No selected evidence-backed not_visible approvals.",
+            },
+            [],
+        )
+    requested_resolutions = [_resolution_from_action(action) for action in noop_actions]
+    resolutions = [resolution for resolution in requested_resolutions if _resolution_has_not_visible_evidence(output_dir, resolution)]
+    rejected_resolutions = [resolution for resolution in requested_resolutions if resolution not in resolutions]
+    if not resolutions:
+        _discard_artifact(output_dir / MISSING_BALL_RESOLUTION_NAME)
+        return (
+            {
+                "name": "missing_ball_noop_resolution",
+                "status": "failed",
+                "artifact": MISSING_BALL_RESOLUTION_NAME,
+                "reason": "Selected not_visible approvals lack covering packet or visual evidence.",
+                "rejected_approval_ids": [item["approval_id"] for item in rejected_resolutions],
+            },
+            [],
+        )
+    payload = {
+        "schema_version": SCHEMA_VERSION,
+        "generated_at": _utc_now_iso(),
+        "summary": {
+            "status": "resolved_not_visible",
+            "resolution_count": len(resolutions),
+            "consumed_approval_ids": [item["approval_id"] for item in resolutions],
+        },
+        "resolutions": resolutions,
+    }
+    (output_dir / MISSING_BALL_RESOLUTION_NAME).write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    return (
+        {
+            "name": "missing_ball_noop_resolution",
+            "status": "succeeded",
+            "artifact": MISSING_BALL_RESOLUTION_NAME,
+            "resolution_count": len(resolutions),
+            "consumed_approval_ids": payload["summary"]["consumed_approval_ids"],
+            "rejected_approval_ids": [item["approval_id"] for item in rejected_resolutions],
+        },
+        [
+            {
+                "candidate_id": item["candidate_id"],
+                "approval_id": item["approval_id"],
+                "problem_type": "missing_ball",
+                "status": "resolved_not_visible",
+                "start_frame": item["start_frame"],
+                "end_frame": item["end_frame"],
+            }
+            for item in resolutions
+        ],
+    )
+
+
+def _final_artifact_manifest_stage(
+    output_dir: Path,
+    *,
+    approved_payload: dict[str, Any],
+    dispatcher_stage: dict[str, Any],
+    resolved_noop_candidates: list[dict[str, Any]],
+    quality_gate_summary: dict[str, Any],
+) -> dict[str, Any]:
+    actions = approved_payload.get("approved_actions") if isinstance(approved_payload.get("approved_actions"), list) else []
+    missing_ball_path = dispatcher_stage.get("missing_ball_execution_path")
+    pending_candidates = []
+    if isinstance(missing_ball_path, dict):
+        missing_ids = {
+            approval_id
+            for approval_id in missing_ball_path.get("approval_ids", [])
+            if isinstance(approval_id, str) and approval_id.strip()
+        }
+        pending_candidates = [_pending_candidate_summary(action) for action in actions if _action_approval_id(action) in missing_ids]
+    unsupported = dispatcher_stage.get("unsupported_actions")
+    unsupported_candidates = unsupported if isinstance(unsupported, list) else []
+    manifest = write_final_artifact_manifest(
+        output_dir,
+        baseline_output={"path": str(output_dir), "status": "baseline"},
+        candidate_outputs=[],
+        final_artifacts=[],
+        consumed_approvals=[action for action in actions if isinstance(action, dict)],
+        quality_gate_status=quality_gate_summary,
+        pending_candidates=pending_candidates,
+        unsupported_candidates=unsupported_candidates,
+        resolved_noop_candidates=resolved_noop_candidates,
+    )
     return {
-        "name": "highlight_render",
-        "status": "planned",
-        "artifact": "highlight_report.json",
-        "requires_explicit_approved_action_id": True,
-        "approved_action_count": len(highlight_actions),
+        "name": "final_artifact_manifest",
+        "status": "succeeded",
+        "artifact": FINAL_ARTIFACT_MANIFEST_NAME,
+        "summary": manifest.get("summary", {}),
     }
 
 
@@ -644,6 +865,174 @@ def _strategy(parallel_mode: str) -> dict[str, Any]:
             "reason": "Use SAHI/ROI for bounded recovery windows, not broad full-video slicing.",
         },
     }
+
+
+def _is_not_visible_noop_action(action: dict[str, Any]) -> bool:
+    approved_action = str(action.get("approved_action") or "")
+    if approved_action not in NOOP_NOT_VISIBLE_ACTIONS:
+        return False
+    if str(action.get("resolution") or "").casefold().replace(" ", "_") == "not_visible":
+        return True
+    region = action.get("likely_ball_region") if isinstance(action.get("likely_ball_region"), dict) else {}
+    description = str(region.get("description") or "").casefold().replace(" ", "_")
+    status = str(region.get("status") or action.get("status") or "").casefold()
+    return "not_visible" in description or status == "resolved_not_visible"
+
+
+def _approval_ids(actions: list[dict[str, Any]]) -> list[str]:
+    return [approval_id for action in actions if (approval_id := _action_approval_id(action))]
+
+
+def _action_approval_id(action: dict[str, Any]) -> str | None:
+    value = action.get("approval_id")
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    return None
+
+
+def _unsupported_action_summary(action: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "approval_id": _action_approval_id(action),
+        "problem_type": str(action.get("problem_type") or _problem_type_for_action(str(action.get("approved_action") or ""))),
+        "approved_action": str(action.get("approved_action") or ""),
+        "reason": "unsupported_candidate_type",
+    }
+
+
+def _pending_candidate_summary(action: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "candidate_id": str(action.get("candidate_id") or action.get("approval_id") or ""),
+        "approval_id": _action_approval_id(action),
+        "problem_type": "missing_ball",
+        "approved_action": str(action.get("approved_action") or ""),
+        "status": "pending_api_required",
+        "execution_status": "not_run",
+        "api_required": True,
+        "required_executor": "api_missing_ball_candidate_execution",
+    }
+
+
+def _problem_type_for_action(approved_action: str) -> str:
+    if approved_action in NOISE_APPROVAL_ACTIONS:
+        return "noise"
+    if approved_action in FOLLOW_CAM_APPROVAL_ACTIONS:
+        return "follow_cam"
+    if approved_action in HIGHLIGHT_APPROVAL_ACTIONS:
+        return "highlight"
+    return "unknown"
+
+
+def _resolution_from_action(action: dict[str, Any]) -> dict[str, Any]:
+    scope = action.get("rerun_scope") if isinstance(action.get("rerun_scope"), dict) else action
+    start = _optional_int(scope.get("start_frame"))
+    end = _optional_int(scope.get("end_frame"))
+    approval_id = _action_approval_id(action) or ""
+    candidate_id = str(action.get("candidate_id") or approval_id or "resolved_not_visible").strip()
+    source_packet_id = str(action.get("source_packet_id") or "")
+    resolution = {
+        "candidate_id": candidate_id,
+        "approval_id": approval_id,
+        "problem_type": "missing_ball",
+        "status": "resolved_not_visible",
+        "start_frame": start if start is not None else 0,
+        "end_frame": end if end is not None else start if start is not None else 0,
+        "source_packet_id": source_packet_id,
+        "likely_ball_region": {"description": "not_visible"},
+        "evidence": action.get("evidence") if isinstance(action.get("evidence"), list) else [],
+    }
+    if "visual_review_id" in action:
+        resolution["visual_review_id"] = action["visual_review_id"]
+    if not resolution["evidence"] and source_packet_id:
+        resolution["evidence"] = [{"source_packet_id": source_packet_id, "reason": "approved not_visible resolution"}]
+    return resolution
+
+
+def _resolution_has_not_visible_evidence(output_dir: Path, resolution: dict[str, Any]) -> bool:
+    review_packets = _read_json_if_available(output_dir / "review_packets.json")
+    for packet in review_packets.get("packets", []) if isinstance(review_packets.get("packets"), list) else []:
+        if not isinstance(packet, dict):
+            continue
+        if _first_string(packet, ("packet_id", "id", "source_packet_id")) != resolution.get("source_packet_id"):
+            continue
+        if _payload_says_not_visible(packet) and _evidence_window_covers_resolution(packet, resolution):
+            return True
+    visual_review = _read_json_if_available(output_dir / "ai_visual_review.json")
+    visual_ids = {value for value in (resolution.get("visual_review_id"),) if isinstance(value, str) and value.strip()}
+    for item in visual_review.get("reviews", []) if isinstance(visual_review.get("reviews"), list) else []:
+        if not isinstance(item, dict):
+            continue
+        review = item.get("review") if isinstance(item.get("review"), dict) else item
+        item_visual_ids = {
+            value
+            for value in (
+                _first_string(item, ("visual_review_id", "id")),
+                _first_string(review, ("visual_review_id", "id")),
+            )
+            if value is not None
+        }
+        packet_id = _first_string(review, ("source_packet_id", "packet_id"))
+        if (
+            (visual_ids and item_visual_ids & visual_ids)
+            or (packet_id is not None and packet_id == resolution.get("source_packet_id"))
+        ) and _payload_says_not_visible(review) and _evidence_window_covers_resolution(item, resolution):
+            return True
+    return False
+
+
+def _evidence_window_covers_resolution(evidence: dict[str, Any], resolution: dict[str, Any]) -> bool:
+    evidence_window = _window_from_payload(evidence)
+    resolution_window = _window_from_payload(resolution)
+    if evidence_window is None or resolution_window is None:
+        return False
+    return evidence_window["start_frame"] <= resolution_window["start_frame"] and evidence_window["end_frame"] >= resolution_window["end_frame"]
+
+
+def _window_from_payload(payload: dict[str, Any]) -> dict[str, int] | None:
+    source = payload.get("window") if isinstance(payload.get("window"), dict) else payload
+    start = _optional_int(source.get("start_frame"))
+    end = _optional_int(source.get("end_frame"))
+    if start is None or end is None or end < start:
+        return None
+    return {"start_frame": start, "end_frame": end}
+
+
+def _first_string(mapping: dict[str, Any], keys: tuple[str, ...]) -> str | None:
+    for key in keys:
+        value = mapping.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
+def _payload_says_not_visible(value: Any) -> bool:
+    if isinstance(value, dict):
+        return any(_payload_says_not_visible(item) for item in value.values())
+    if isinstance(value, list):
+        return any(_payload_says_not_visible(item) for item in value)
+    if isinstance(value, str):
+        normalized = value.casefold().replace(" ", "_").replace("-", "_")
+        return "not_visible" in normalized or "ball_not_visible" in normalized
+    return False
+
+
+def _read_json_if_available(path: Path) -> dict[str, Any]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _discard_stale_workflow_artifacts(output_dir: Path) -> None:
+    for name in (MISSING_BALL_RESOLUTION_NAME, FINAL_ARTIFACT_MANIFEST_NAME):
+        _discard_artifact(output_dir / name)
+
+
+def _discard_artifact(path: Path) -> None:
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        return
 
 
 def _snapshot_summary(snapshot: dict[str, Any]) -> dict[str, Any]:
@@ -667,6 +1056,8 @@ def _produced_artifacts(output_dir: Path, *, extra_names: list[str]) -> list[str
         HASH_SNAPSHOT_REPORT_NAME,
         "follow_cam_rerender_plan.json",
         "highlight_report.json",
+        MISSING_BALL_RESOLUTION_NAME,
+        FINAL_ARTIFACT_MANIFEST_NAME,
         QUALITY_GATE_REPORT_NAME,
         *extra_names,
     ]

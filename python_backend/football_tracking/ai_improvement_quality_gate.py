@@ -121,6 +121,7 @@ def build_ai_improvement_quality_gate(
         "camera_motion_audit": _load_artifact(output_dir / "camera_motion_audit.json"),
         "event_candidates": _load_artifact(output_dir / "event_candidates.json"),
         "ai_visual_review": _load_artifact(output_dir / "ai_visual_review.json"),
+        "missing_ball_resolution": _load_artifact(output_dir / "missing_ball_resolution.json"),
         "final_artifact_manifest": _load_artifact(output_dir / FINAL_ARTIFACT_MANIFEST_NAME),
     }
     candidate_artifacts = {
@@ -171,6 +172,7 @@ def build_ai_improvement_quality_gate(
         artifacts["review_packets"],
         artifacts["ai_improvement_report"],
         artifacts["ai_visual_review"],
+        artifacts["missing_ball_resolution"],
         approved_actions,
         mode=mode,
         approved_actions_path=approved_actions_path,
@@ -307,6 +309,7 @@ def _check_long_lost_gap_coverage(
     review_packets: dict[str, Any],
     ai_report: dict[str, Any],
     ai_visual_review: dict[str, Any],
+    missing_ball_resolution: dict[str, Any],
     approved_actions: dict[str, Any],
     *,
     mode: str,
@@ -334,10 +337,14 @@ def _check_long_lost_gap_coverage(
     explicit_approvals = approved_actions["status"] == "loaded" and approved_actions.get("source") != "missing"
     packet_ids = _packet_ids(review_packets["payload"]) if review_packets["status"] == "loaded" else set()
     visual_review_ids = _visual_review_ids(ai_visual_review["payload"]) if ai_visual_review["status"] == "loaded" else set()
+    resolution_items = (
+        _resolution_items(missing_ball_resolution["payload"]) if missing_ball_resolution["status"] == "loaded" else []
+    )
 
     reasons: list[str] = []
     uncovered_ranges: list[dict[str, int]] = []
     saw_not_visible = False
+    saw_resolution = False
     saw_roi_or_approval = False
     warning_only = False
     gap_details: list[dict[str, Any]] = []
@@ -351,9 +358,23 @@ def _check_long_lost_gap_coverage(
         if not overlapping_packets:
             reasons.append(f"Long lost gap {start}-{end} has no overlapping review packet coverage")
 
+        resolution_coverages = [
+            _coverage_window(item)
+            for item in resolution_items
+            if _is_evidence_backed_resolution(
+                item,
+                review_packets=review_packets["payload"] if review_packets["status"] == "loaded" else {},
+                ai_visual_review=ai_visual_review["payload"] if ai_visual_review["status"] == "loaded" else {},
+            )
+        ]
+        resolution_coverages = [
+            coverage for coverage in resolution_coverages if coverage is not None and _overlaps(coverage, start, end)
+        ]
+        resolution_has_full_coverage = _has_full_coverage(resolution_coverages, start, end)
+
         ai_coverages = [_coverage_window(item) for item in improvements if _is_missing_ball_item(item)]
         ai_coverages = [coverage for coverage in ai_coverages if coverage is not None and _overlaps(coverage, start, end)]
-        if not _has_full_coverage(ai_coverages, start, end):
+        if not _has_full_coverage(ai_coverages, start, end) and not resolution_has_full_coverage:
             reasons.append(f"Long lost gap {start}-{end} lacks full AI improvement coverage")
             uncovered_ranges.extend(_uncovered_ranges(ai_coverages, start, end))
 
@@ -384,6 +405,16 @@ def _check_long_lost_gap_coverage(
         not_visible_coverages = [
             coverage for coverage in not_visible_coverages if coverage is not None and _overlaps(coverage, start, end)
         ]
+        unprovenanced_resolution_overlap = any(
+            not _is_evidence_backed_resolution(
+                item,
+                review_packets=review_packets["payload"] if review_packets["status"] == "loaded" else {},
+                ai_visual_review=ai_visual_review["payload"] if ai_visual_review["status"] == "loaded" else {},
+            )
+            and (coverage := _coverage_window(item)) is not None
+            and _overlaps(coverage, start, end)
+            for item in resolution_items
+        )
         unavailable_not_visible = any(
             _is_evidence_backed_not_visible(item, packet_ids=packet_ids, visual_review_ids=visual_review_ids)
             and _not_visible_status(item) == "unavailable"
@@ -398,9 +429,15 @@ def _check_long_lost_gap_coverage(
             saw_not_visible = True
             warning_only = True
             detail["not_visible_coverage"] = "full"
+        elif resolution_has_full_coverage:
+            saw_not_visible = True
+            saw_resolution = True
+            detail["resolved_not_visible_coverage"] = "full"
         else:
             if unavailable_not_visible and mode == "real":
                 reasons.append(f"Long lost gap {start}-{end} uses unavailable not_visible evidence in real mode")
+            elif unprovenanced_resolution_overlap:
+                reasons.append(f"Long lost gap {start}-{end} resolution lacks not_visible packet or visual evidence")
             elif unprovenanced_approval_overlap:
                 reasons.append(f"Long lost gap {start}-{end} approval coverage lacks packet or visual provenance")
             elif not explicit_approvals and approval_coverages:
@@ -423,13 +460,14 @@ def _check_long_lost_gap_coverage(
         uncovered_ranges=uncovered_ranges,
         gaps=gap_details,
     )
-    missing_ball_status = "warn" if saw_not_visible and status != "fail" else status
+    missing_ball_status = "warn" if saw_not_visible and not saw_resolution and status != "fail" else status
     if saw_roi_or_approval and status == "pass":
         missing_ball_status = "pass"
     missing_ball_check = _check(
         missing_ball_status,
         reason="Missing-ball gaps require explicit approval or evidence-backed not_visible",
         not_visible_evidence=saw_not_visible,
+        resolved_not_visible=saw_resolution,
         explicit_roi_or_approval=saw_roi_or_approval,
     )
     return long_gap_check, missing_ball_check
@@ -631,6 +669,13 @@ def _approval_items(approved_actions: dict[str, Any]) -> list[dict[str, Any]]:
     return [item for item in actions if isinstance(item, dict)] if isinstance(actions, list) else []
 
 
+def _resolution_items(missing_ball_resolution: dict[str, Any]) -> list[dict[str, Any]]:
+    resolutions = missing_ball_resolution.get("resolutions")
+    if not isinstance(resolutions, list):
+        return []
+    return [item for item in resolutions if isinstance(item, dict)]
+
+
 def _is_missing_ball_item(item: dict[str, Any]) -> bool:
     action = str(item.get("recommended_action") or item.get("approved_action") or "").casefold()
     if action in {"targeted_rerun", "localize_ball_roi"}:
@@ -654,6 +699,62 @@ def _is_evidence_backed_not_visible(
     if "not_visible" not in description and "ball_not_visible" not in tags:
         return False
     return _has_traceable_packet_or_visual_provenance(item, packet_ids=packet_ids, visual_review_ids=visual_review_ids)
+
+
+def _is_evidence_backed_resolution(
+    item: dict[str, Any],
+    *,
+    review_packets: dict[str, Any],
+    ai_visual_review: dict[str, Any],
+) -> bool:
+    if _not_visible_status(item) != "resolved_not_visible":
+        return False
+    region = item.get("likely_ball_region") if isinstance(item.get("likely_ball_region"), dict) else {}
+    description = str(region.get("description") or item.get("description") or "").casefold().replace(" ", "_")
+    if "not_visible" not in description and "ball_not_visible" not in _tags(item):
+        return False
+    provenance = _provenance_ids(item)
+    packets = review_packets.get("packets")
+    if isinstance(packets, list):
+        for packet in packets:
+            if not isinstance(packet, dict):
+                continue
+            packet_id = _first_string(packet, ("packet_id", "id", "source_packet_id"))
+            if (
+                packet_id in provenance["packet_ids"]
+                and _payload_says_not_visible(packet)
+                and _evidence_window_covers_resolution(packet, item)
+            ):
+                return True
+    reviews = ai_visual_review.get("reviews")
+    if isinstance(reviews, list):
+        for review_item in reviews:
+            if not isinstance(review_item, dict):
+                continue
+            review = review_item.get("review") if isinstance(review_item.get("review"), dict) else review_item
+            review_ids = {
+                value
+                for value in (
+                    _first_string(review_item, ("visual_review_id", "id")),
+                    _first_string(review, ("visual_review_id", "id")),
+                )
+                if value is not None
+            }
+            packet_id = _first_string(review, ("source_packet_id", "packet_id"))
+            review_container = review_item if isinstance(review_item, dict) else review
+            if (
+                review_ids & provenance["visual_review_ids"]
+                and _payload_says_not_visible(review)
+                and _evidence_window_covers_resolution(review_container, item)
+            ):
+                return True
+            if (
+                packet_id in provenance["packet_ids"]
+                and _payload_says_not_visible(review)
+                and _evidence_window_covers_resolution(review_container, item)
+            ):
+                return True
+    return False
 
 
 def _has_traceable_packet_or_visual_provenance(
@@ -695,6 +796,37 @@ def _provenance_ids(item: dict[str, Any]) -> dict[str, set[str]]:
             if isinstance(nested_provenance, dict):
                 collect_from_mapping(nested_provenance)
     return {"packet_ids": packet_values, "visual_review_ids": visual_values}
+
+
+def _first_string(mapping: dict[str, Any], keys: tuple[str, ...]) -> str | None:
+    for key in keys:
+        value = mapping.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
+def _payload_says_not_visible(value: Any) -> bool:
+    if isinstance(value, dict):
+        return any(_payload_says_not_visible(item) for item in value.values())
+    if isinstance(value, list):
+        return any(_payload_says_not_visible(item) for item in value)
+    if isinstance(value, str):
+        normalized = value.casefold().replace(" ", "_").replace("-", "_")
+        return "not_visible" in normalized or "ball_not_visible" in normalized
+    return False
+
+
+def _evidence_window_covers_resolution(evidence: dict[str, Any], resolution: dict[str, Any]) -> bool:
+    resolution_window = _coverage_window(resolution)
+    evidence_window = _coverage_window(evidence)
+    if resolution_window is None or evidence_window is None:
+        return False
+    return _has_full_coverage(
+        [evidence_window],
+        int(resolution_window["start_frame"]),
+        int(resolution_window["end_frame"]),
+    )
 
 
 def _packet_ids(review_packets: dict[str, Any]) -> set[str]:

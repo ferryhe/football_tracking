@@ -66,6 +66,39 @@ class FinalArtifactManifestTests(unittest.TestCase):
         self.assertEqual(2, len(payload["clips"]))
         self.assertEqual(["candidate-pass", "candidate-warn", "candidate-fail"], [item["candidate_id"] for item in payload["comparison_reports"]])
 
+    def test_manifest_summarizes_pending_unsupported_and_resolved_noop_candidates(self) -> None:
+        with patch("football_tracking.final_artifact_manifest._utc_now_iso", return_value=FIXED_NOW):
+            payload = build_final_artifact_manifest(
+                baseline_output={"path": "baseline/output.mp4", "status": "available", "type": "video"},
+                candidate_outputs=[],
+                final_artifacts=[],
+                pending_candidates=[{"candidate_id": "candidate-pending", "problem_type": "missing_ball"}],
+                unsupported_candidates=[
+                    {
+                        "approval_id": "noise_1",
+                        "problem_type": "noise",
+                        "approved_action": "noise_filter_adjustment",
+                        "reason": "unsupported_candidate_type",
+                    }
+                ],
+                resolved_noop_candidates=[
+                    {
+                        "candidate_id": "resolved_2079",
+                        "approval_id": "noop_2079",
+                        "problem_type": "missing_ball",
+                        "status": "resolved_not_visible",
+                    }
+                ],
+                quality_gate_status={"status": "pass"},
+            )
+
+        self.assertEqual(["candidate-pending"], [item["candidate_id"] for item in payload["pending_candidates"]])
+        self.assertEqual(["noise_1"], [item["approval_id"] for item in payload["unsupported_candidates"]])
+        self.assertEqual(["resolved_2079"], [item["candidate_id"] for item in payload["resolved_noop_candidates"]])
+        self.assertEqual(1, payload["summary"]["pending_candidate_count"])
+        self.assertEqual(1, payload["summary"]["unsupported_candidate_count"])
+        self.assertEqual(1, payload["summary"]["resolved_noop_candidate_count"])
+
     def test_warn_candidate_is_not_silently_promoted_without_confirmation(self) -> None:
         with patch("football_tracking.final_artifact_manifest._utc_now_iso", return_value=FIXED_NOW):
             payload = build_final_artifact_manifest(

@@ -260,6 +260,7 @@ class ConfigAndProviderTests(unittest.TestCase):
                     "PROVIDER_OPENAI_API_KEY=dotenv-key",
                     "PROVIDER_OPENAI_BASE_URL=https://example.invalid/v1",
                     "PROVIDER_OPENAI_CHAT_MODEL=gpt-test",
+                    "PROVIDER_OPENAI_VISUAL_REVIEW_MODEL=gpt-visual",
                     "PROVIDER_OPENAI_IMPROVEMENT_MODEL=gpt-improve",
                 ]
             ),
@@ -272,6 +273,7 @@ class ConfigAndProviderTests(unittest.TestCase):
         self.assertEqual("dotenv-key", settings.api_key)
         self.assertEqual("https://example.invalid/v1", settings.base_url)
         self.assertEqual("gpt-test", settings.chat_model)
+        self.assertEqual("gpt-visual", settings.visual_review_model)
         self.assertEqual("gpt-improve", settings.improvement_model)
         self.assertTrue(settings.enabled)
 
@@ -285,6 +287,7 @@ class ConfigAndProviderTests(unittest.TestCase):
                 "PROVIDER_OPENAI_API_KEY": "env-key",
                 "PROVIDER_OPENAI_BASE_URL": "https://override.invalid/v1/",
                 "PROVIDER_OPENAI_CHAT_MODEL": "gpt-env",
+                "PROVIDER_OPENAI_VISUAL_REVIEW_MODEL": "gpt-env-visual",
                 "PROVIDER_OPENAI_IMPROVEMENT_MODEL": "gpt-env-improve",
             },
             clear=True,
@@ -294,6 +297,7 @@ class ConfigAndProviderTests(unittest.TestCase):
         self.assertEqual("env-key", settings.api_key)
         self.assertEqual("https://override.invalid/v1", settings.base_url)
         self.assertEqual("gpt-env", settings.chat_model)
+        self.assertEqual("gpt-env-visual", settings.visual_review_model)
         self.assertEqual("gpt-env-improve", settings.improvement_model)
 
     def test_create_json_vision_response_uses_structured_output_schema(self) -> None:
