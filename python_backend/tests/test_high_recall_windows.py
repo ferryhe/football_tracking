@@ -10,6 +10,7 @@ from unittest.mock import patch
 from football_tracking.chunk_runner import build_high_recall_window_config, run_high_recall_windows
 from football_tracking.config import load_config
 from football_tracking.high_recall_windows import (
+    _max_frame_in_csv,
     approved_action_windows_from_report,
     build_high_recall_windows,
     write_high_recall_window_report,
@@ -26,6 +27,19 @@ def _write_review_packets(output_dir: Path, *packet_ids: str) -> None:
 
 
 class HighRecallWindowTests(unittest.TestCase):
+    def test_max_frame_in_csv_streams_frame_column_and_skips_invalid_rows(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            path = Path(temp_name) / "ball_track.csv"
+            path.write_text(
+                "X,Frame,Y\n"
+                "10,3,20\n"
+                "bad,not-a-frame,row\n"
+                "11,15,21\n",
+                encoding="utf-8",
+            )
+
+            self.assertEqual(15, _max_frame_in_csv(path))
+
     def test_build_combines_sources_applies_margin_and_merges_close_windows(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:
             output_dir = Path(temp_name)

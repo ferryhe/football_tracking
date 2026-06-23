@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import csv
 import json
 import math
 from datetime import datetime, timezone
@@ -1010,25 +1011,18 @@ def _max_frame_in_csv(path: Path) -> int | None:
     if not path.exists():
         return None
     try:
-        lines = path.read_text(encoding="utf-8-sig").splitlines()
+        with path.open("r", encoding="utf-8-sig", newline="") as handle:
+            reader = csv.DictReader(handle)
+            if not reader.fieldnames or "Frame" not in reader.fieldnames:
+                return None
+            max_frame: int | None = None
+            for row in reader:
+                frame = _parse_int(row.get("Frame"))
+                if frame is not None and (max_frame is None or frame > max_frame):
+                    max_frame = frame
+            return max_frame
     except OSError:
         return None
-    if not lines:
-        return None
-    headers = [part.strip() for part in lines[0].split(",")]
-    try:
-        frame_index = headers.index("Frame")
-    except ValueError:
-        return None
-    max_frame: int | None = None
-    for line in lines[1:]:
-        parts = line.split(",")
-        if frame_index >= len(parts):
-            continue
-        frame = _parse_int(parts[frame_index])
-        if frame is not None and (max_frame is None or frame > max_frame):
-            max_frame = frame
-    return max_frame
 
 
 def _read_required_approved_actions(path: Path) -> dict[str, Any]:

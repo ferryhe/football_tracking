@@ -140,7 +140,7 @@ def _comparison_checks(
             "status": "pass" if lost_delta >= SUSTAINED_RECOVERY_MIN_FRAMES else "fail",
             "baseline_value": baseline_lost,
             "candidate_value": candidate_lost,
-            "reason": "candidate reduces the sustained lost gap" if lost_delta > 0 else "candidate does not reduce lost frames",
+            "reason": _lost_gap_reduced_reason(lost_delta),
         }
     )
     checks.append(
@@ -625,9 +625,17 @@ def _packet_evidence_coverage_check(
     return {
         "name": "packet_evidence_coverage",
         "status": "pass",
-        "reason": "packet evidence overlaps all recovery approvals",
+        "reason": "packet evidence fully covers all recovery approvals",
         "results": results,
     }
+
+
+def _lost_gap_reduced_reason(lost_delta: int) -> str:
+    if lost_delta >= SUSTAINED_RECOVERY_MIN_FRAMES:
+        return "candidate reduces the sustained lost gap"
+    if lost_delta > 0:
+        return "candidate reduces lost frames, but not enough for sustained recovery"
+    return "candidate does not reduce lost frames"
 
 
 def _packets_by_id(review_packets: dict[str, Any] | None) -> dict[str, dict[str, Any]]:

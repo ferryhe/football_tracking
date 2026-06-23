@@ -64,6 +64,9 @@ class MissingBallRecoveryComparisonTests(unittest.TestCase):
         failed_checks = {check["name"] for check in report["checks"] if check["status"] == "fail"}
         self.assertIn("short_false_positive_islands", failed_checks)
         self.assertIn("sustained_recovered_frames", failed_checks)
+        lost_gap_check = next(check for check in report["checks"] if check["name"] == "lost_gap_reduced")
+        self.assertEqual("fail", lost_gap_check["status"])
+        self.assertIn("not enough for sustained recovery", lost_gap_check["reason"])
 
     def test_candidate_fails_when_gap_is_filled_only_with_predictions(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:
@@ -350,6 +353,7 @@ class MissingBallRecoveryComparisonTests(unittest.TestCase):
 
         check = next(item for item in report["checks"] if item["name"] == "packet_evidence_coverage")
         self.assertEqual("pass", check["status"])
+        self.assertIn("fully covers", check["reason"])
 
     def test_packet_coverage_rejects_partial_overlap_for_targeted_rerun(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:
