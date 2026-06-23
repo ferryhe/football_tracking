@@ -212,6 +212,100 @@ class AiImprovementQualityGateTests(unittest.TestCase):
             )
         )
 
+    def test_real_mode_selected_noise_approval_requires_noise_comparison_report(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_tracks(output_dir)
+            write_track_hash_snapshot(output_dir, "before_review")
+            write_track_hash_snapshot(output_dir, "after_ai_improvement")
+            _write_packet(output_dir, packet_id="packet_noise", start=10, end=20)
+            _write_ai_report(
+                output_dir,
+                [
+                    {
+                        "id": "imp_noise",
+                        "area": "tracking",
+                        "failure_tags": ["shoe_confusion"],
+                        "recommended_action": "noise_filter_adjustment",
+                        "start_frame": 10,
+                        "end_frame": 20,
+                        "source_packet_id": "packet_noise",
+                    }
+                ],
+            )
+            approved_path = _write_approved_actions(
+                output_dir,
+                [
+                    {
+                        "approval_id": "approval_noise",
+                        "candidate_id": "noise-candidate",
+                        "approved_action": "noise_filter_adjustment",
+                        "problem_type": "noise",
+                        "start_frame": 10,
+                        "end_frame": 20,
+                        "source_packet_id": "packet_noise",
+                        "false_positive_class": "shoe_confusion",
+                        "config_patch": {"selection": {"min_accept_score": 0.62}},
+                    }
+                ],
+            )
+
+            payload = build_ai_improvement_quality_gate(output_dir, mode="real", approved_actions_path=approved_path)
+
+        self.assertEqual("unavailable", payload["checks"]["candidate_comparisons_ok"]["status"])
+        self.assertTrue(
+            any(
+                report.get("artifact_status") == "selected_noise_approval_missing_comparison"
+                for report in payload["checks"]["candidate_comparisons_ok"]["reports"]
+            )
+        )
+
+    def test_real_mode_selected_noise_approval_requires_candidate_id(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_tracks(output_dir)
+            write_track_hash_snapshot(output_dir, "before_review")
+            write_track_hash_snapshot(output_dir, "after_ai_improvement")
+            _write_packet(output_dir, packet_id="packet_noise", start=10, end=20)
+            _write_ai_report(
+                output_dir,
+                [
+                    {
+                        "id": "imp_noise",
+                        "area": "tracking",
+                        "failure_tags": ["shoe_confusion"],
+                        "recommended_action": "noise_filter_adjustment",
+                        "start_frame": 10,
+                        "end_frame": 20,
+                        "source_packet_id": "packet_noise",
+                    }
+                ],
+            )
+            approved_path = _write_approved_actions(
+                output_dir,
+                [
+                    {
+                        "approval_id": "approval_noise",
+                        "approved_action": "noise_filter_adjustment",
+                        "problem_type": "noise",
+                        "start_frame": 10,
+                        "end_frame": 20,
+                        "source_packet_id": "packet_noise",
+                        "false_positive_class": "shoe_confusion",
+                    }
+                ],
+            )
+
+            payload = build_ai_improvement_quality_gate(output_dir, mode="real", approved_actions_path=approved_path)
+
+        self.assertEqual("unavailable", payload["checks"]["candidate_comparisons_ok"]["status"])
+        self.assertTrue(
+            any(
+                report.get("artifact_status") == "selected_noise_approval_missing_candidate_id"
+                for report in payload["checks"]["candidate_comparisons_ok"]["reports"]
+            )
+        )
+
     def test_long_lost_gap_2079_fails_when_approval_lacks_provenance(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:
             output_dir = Path(temp_name)

@@ -1072,7 +1072,7 @@ def _decision_for_source(source: dict[str, Any], track_summary: dict[str, Any]) 
         return _decision("reject_noise", 0.70, "Postprocess replaced this segment, so treat it as likely noise.")
     if source_type == "dense_noise_cluster":
         return _decision("needs_ai_review", 0.76, str(source.get("reason") or "Dense noise cluster needs diagnosis."))
-    if source_type in {"large_jump", "candidate_ambiguity", "suspicious_tracklet"}:
+    if source_type in {"large_jump", "candidate_ambiguity", "suspicious_tracklet", "short_tracklet"}:
         return _decision("needs_ai_review", 0.76, f"{source_type} trigger with max step {max_step:.2f}px.")
     if source_kind == "high_recall_rejection":
         return _decision("needs_ai_review", 0.78, str(source.get("reason") or "High-recall rerun rejected."))
@@ -1110,7 +1110,7 @@ def _packet_diagnosis(source: dict[str, Any], track_summary: dict[str, Any]) -> 
         roots.add("postprocess")
         if "short" in text or "post_roll" in text:
             tags.add("post_roll_too_short")
-    if source_type == "dense_noise_cluster":
+    if source_type == "dense_noise_cluster" or source_type == "short_tracklet":
         roots.add("detection")
         if "foot" not in text and "shoe" not in text and "sideline" not in text and "line" not in text and "wall" not in text and "background" not in text:
             tags.add("unknown")
@@ -1151,7 +1151,7 @@ def _packet_diagnosis(source: dict[str, Any], track_summary: dict[str, Any]) -> 
 def _packet_purpose(tags: list[str], roots: list[str], source_kind: str, source_type: str) -> str:
     if "ball_lost" in tags:
         return "diagnose_missing_ball"
-    if source_type == "dense_noise_cluster":
+    if source_type in {"dense_noise_cluster", "short_tracklet"}:
         return "diagnose_noise"
     if any(tag in tags for tag in ("foot_confusion", "shoe_confusion", "sideline_confusion", "wall_background_drift")):
         return "diagnose_noise"

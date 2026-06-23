@@ -65,6 +65,10 @@ class FinalArtifactManifestTests(unittest.TestCase):
         self.assertEqual(4, len(payload["videos"]))
         self.assertEqual(2, len(payload["clips"]))
         self.assertEqual(["candidate-pass", "candidate-warn", "candidate-fail"], [item["candidate_id"] for item in payload["comparison_reports"]])
+        self.assertEqual(1, payload["summary"]["comparison_counts_by_problem_type"]["noise"])
+        self.assertEqual(1, payload["summary"]["comparison_counts_by_status"]["pass"])
+        self.assertEqual(1, payload["summary"]["comparison_counts_by_status"]["warn"])
+        self.assertEqual(1, payload["summary"]["comparison_counts_by_status"]["fail"])
 
     def test_manifest_summarizes_pending_unsupported_and_resolved_noop_candidates(self) -> None:
         with patch("football_tracking.final_artifact_manifest._utc_now_iso", return_value=FIXED_NOW):
@@ -287,9 +291,10 @@ class FinalArtifactManifestTests(unittest.TestCase):
 
 
 def _comparison(candidate_id: str, status: str, path: str) -> dict[str, object]:
+    problem_type = "noise" if "noise" in path else "follow_cam" if "follow_cam" in path else "missing_ball"
     return {
         "path": path,
-        "problem_type": "missing_ball",
+        "problem_type": problem_type,
         "candidate": {"id": candidate_id},
         "summary": {
             "status": status,

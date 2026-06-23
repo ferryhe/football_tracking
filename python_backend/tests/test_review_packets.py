@@ -1039,6 +1039,37 @@ class ReviewPacketTests(unittest.TestCase):
 
         self.assertEqual({"start_frame": 100, "end_frame": 150, "frame_count": 51}, report["packets"][0]["window"])
 
+    def test_build_review_packet_report_promotes_short_island_to_noise_packet(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            output_dir = Path(temp)
+            _write_detected_track(output_dir, 120)
+            (output_dir / "ai_review_triggers.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": "1.0",
+                        "triggers": [
+                            {
+                                "id": "event:short_tracklet:70-72",
+                                "type": "short_tracklet",
+                                "priority": "medium",
+                                "start_frame": 70,
+                                "end_frame": 72,
+                                "reason": "Short detected island is likely false-positive noise.",
+                                "evidence": {"flags": ["short_tracklet"]},
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            report = build_review_packet_report(output_dir, max_packets=1, include_media=False)
+
+        packet = report["packets"][0]
+        self.assertEqual("short_tracklet", packet["source"]["type"])
+        self.assertEqual("needs_ai_review", packet["decision"]["label"])
+        self.assertEqual("diagnose_noise", packet["packet_purpose"])
+
     def test_build_review_packet_report_keeps_small_high_recall_source_within_source_window(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             output_dir = Path(temp)

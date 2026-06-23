@@ -215,6 +215,32 @@ class AIReviewTriggerTests(unittest.TestCase):
         self.assertIn("candidate_ambiguity", report["decision"]["recommended_review_windows"][0]["reason"])
         self.assertIn("dense_noise_cluster", report["decision"]["recommended_review_windows"][0]["reason"])
 
+    def test_short_detected_island_event_creates_noise_review_trigger(self) -> None:
+        module = _module()
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_ball_audit(
+                output_dir,
+                _audit_report(
+                    review_events=[
+                        _event(
+                            "short_tracklet",
+                            70,
+                            72,
+                            3,
+                            reason="Short detected island is likely a false-positive ball.",
+                        )
+                    ],
+                ),
+            )
+
+            report = module.build_ai_review_trigger_report(output_dir)
+
+        short_triggers = [trigger for trigger in report["triggers"] if trigger["type"] == "short_tracklet"]
+        self.assertEqual(1, len(short_triggers))
+        self.assertEqual("medium", short_triggers[0]["priority"])
+        self.assertTrue(report["decision"]["needs_ai_review"])
+
     def test_write_report_persists_json_and_compact_summary(self) -> None:
         module = _module()
         with tempfile.TemporaryDirectory() as temp_name:
