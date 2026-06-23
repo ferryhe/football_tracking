@@ -6,6 +6,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from football_tracking.ai_visual_review import (
@@ -126,6 +127,71 @@ class AiVisualReviewTests(unittest.TestCase):
         self.assertEqual("vision-test", first_call["model"])
         self.assertTrue(str(first_call["contact_sheet_data_url"]).startswith("data:image/jpeg;base64,"))
         self.assertTrue(str(first_call["crop_sheet_data_url"]).startswith("data:image/jpeg;base64,"))
+
+    def test_visual_model_routing_prefers_request_then_visual_then_improvement_model(self) -> None:
+        cases = [
+            ("explicit request", "gpt-request", "gpt-visual", "gpt-improve", "gpt-request", "explicit"),
+            ("visual setting", None, "gpt-visual", "gpt-improve", "gpt-visual", "visual_review_model"),
+            ("improvement fallback", None, None, "gpt-improve", "gpt-improve", "improvement_model"),
+        ]
+        for label, requested_model, visual_model, improvement_model, expected_model, expected_source in cases:
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as temp_name:
+                output_dir = Path(temp_name)
+                _write_review_packets(output_dir, [("packet_001", "needs_ai_review")])
+                client = _FakeVisualReviewClient([_valid_review()])
+                client.settings = SimpleNamespace(
+                    chat_model="gpt-chat-mini",
+                    visual_review_model=visual_model,
+                    improvement_model=improvement_model,
+                )
+
+                report = build_ai_visual_review_report(output_dir, client=client, model=requested_model)
+
+            self.assertEqual(expected_model, client.calls[0]["model"])
+            self.assertEqual(expected_model, report["model"])
+            self.assertEqual(
+                {
+                    "model": expected_model,
+                    "source": expected_source,
+                    "provider_dry_run": False,
+                    "provider_mode": "real",
+                },
+                report["model_selection"],
+            )
+            self.assertEqual("visual_localization", report["candidate_intent"])
+
+    def test_default_visual_review_client_uses_nested_provider_settings_for_model_routing(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_review_packets(output_dir, [("packet_001", "needs_ai_review")])
+            responses_client = _CapturingResponsesClient(_valid_review())
+            responses_client.settings = SimpleNamespace(
+                chat_model="gpt-chat-mini",
+                visual_review_model="gpt-visual",
+                improvement_model="gpt-improve",
+            )
+            client = OpenAIVisualReviewClient(responses_client)
+
+            report = build_ai_visual_review_report(output_dir, client=client)
+
+        self.assertEqual("gpt-visual", responses_client.calls[0]["model"])
+        self.assertEqual("gpt-visual", report["model"])
+        self.assertEqual("visual_review_model", report["model_selection"]["source"])
+
+    def test_real_visual_review_without_strong_model_records_unavailable_without_chat_fallback(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_review_packets(output_dir, [("packet_001", "needs_ai_review")])
+            client = _ExplodingClient()
+            client.settings = SimpleNamespace(chat_model="gpt-chat-mini", visual_review_model=None, improvement_model=None)
+
+            report = build_ai_visual_review_report(output_dir, client=client)
+
+        self.assertEqual([], getattr(client, "calls", []))
+        self.assertIsNone(report["model"])
+        self.assertEqual("strong_model_unavailable", report["model_selection"]["source"])
+        self.assertEqual("unavailable", report["summary"]["status"])
+        self.assertEqual("strong_visual_model_unavailable", report["errors"][0]["error_type"])
 
     def test_only_label_filter_is_applied_before_max_packets(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:

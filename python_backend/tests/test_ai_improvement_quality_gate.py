@@ -279,6 +279,57 @@ class AiImprovementQualityGateTests(unittest.TestCase):
         self.assertEqual("warn", payload["checks"]["long_lost_gap_improvement_coverage"]["status"])
         self.assertEqual("warn", payload["checks"]["missing_ball_roi_or_not_visible_present"]["status"])
 
+    def test_missing_ball_resolution_passes_with_packet_not_visible_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_tracks(output_dir)
+            _write_2079_gap(output_dir)
+            _write_packet(output_dir, packet_id="packet_2079", start=2049, end=2544, label="ball_not_visible")
+            _write_missing_ball_resolution(output_dir, start=2049, end=2544, source_packet_id="packet_2079")
+
+            payload = build_ai_improvement_quality_gate(output_dir)
+
+        self.assertEqual("pass", payload["checks"]["long_lost_gap_improvement_coverage"]["status"])
+        missing_ball_check = payload["checks"]["missing_ball_roi_or_not_visible_present"]
+        self.assertEqual("pass", missing_ball_check["status"])
+        self.assertTrue(missing_ball_check["resolved_not_visible"])
+
+    def test_missing_ball_resolution_without_packet_or_visual_evidence_fails_gate(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_tracks(output_dir)
+            _write_2079_gap(output_dir)
+            _write_packet(output_dir, packet_id="packet_2079", start=2049, end=2544, label="needs_ai_review")
+            _write_missing_ball_resolution(output_dir, start=2049, end=2544, source_packet_id="packet_2079")
+
+            payload = build_ai_improvement_quality_gate(output_dir)
+
+        self.assertEqual("fail", payload["checks"]["long_lost_gap_improvement_coverage"]["status"])
+        self.assertTrue(
+            any(
+                "resolution lacks not_visible packet or visual evidence" in reason
+                for reason in payload["checks"]["long_lost_gap_improvement_coverage"]["reasons"]
+            )
+        )
+
+    def test_missing_ball_resolution_requires_evidence_window_to_cover_gap(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_tracks(output_dir)
+            _write_2079_gap(output_dir)
+            _write_packet(output_dir, packet_id="packet_2079", start=2079, end=2079, label="ball_not_visible")
+            _write_missing_ball_resolution(output_dir, start=2049, end=2544, source_packet_id="packet_2079")
+
+            payload = build_ai_improvement_quality_gate(output_dir)
+
+        self.assertEqual("fail", payload["checks"]["long_lost_gap_improvement_coverage"]["status"])
+        self.assertTrue(
+            any(
+                "resolution lacks not_visible packet or visual evidence" in reason
+                for reason in payload["checks"]["long_lost_gap_improvement_coverage"]["reasons"]
+            )
+        )
+
     def test_dense_noise_requires_failure_tag_and_window_overlap(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:
             output_dir = Path(temp_name)
@@ -965,6 +1016,41 @@ def _write_approved_actions(output_dir: Path, actions: list[dict[str, object]]) 
     path = output_dir / "ai_improvement_approved_actions.json"
     _write_json(path, {"approved_actions": actions})
     return path
+
+
+def _write_missing_ball_resolution(
+    output_dir: Path,
+    *,
+    start: int,
+    end: int,
+    source_packet_id: str,
+    approval_id: str = "noop_2079",
+    candidate_id: str = "resolved_2079",
+) -> None:
+    _write_json(
+        output_dir / "missing_ball_resolution.json",
+        {
+            "schema_version": "1.0",
+            "summary": {
+                "status": "resolved_not_visible",
+                "resolution_count": 1,
+                "consumed_approval_ids": [approval_id],
+            },
+            "resolutions": [
+                {
+                    "candidate_id": candidate_id,
+                    "approval_id": approval_id,
+                    "problem_type": "missing_ball",
+                    "status": "resolved_not_visible",
+                    "start_frame": start,
+                    "end_frame": end,
+                    "source_packet_id": source_packet_id,
+                    "likely_ball_region": {"description": "not_visible"},
+                    "evidence": [{"source_packet_id": source_packet_id, "reason": "packet marks not_visible"}],
+                }
+            ],
+        },
+    )
 
 
 def _write_camera_audit(output_dir: Path, *, review_events: int, max_pan: float, p95_pan: float) -> None:

@@ -38,10 +38,13 @@ class StableAiImprovementWorkflowTests(unittest.TestCase):
                 "visual_review",
                 "ai_improvement",
                 "after_ai_improvement_hash_snapshot",
+                "selected_approval_dispatcher",
                 "approved_child_rerun",
                 "follow_cam_rerender_plan",
                 "highlight_render",
+                "missing_ball_noop_resolution",
                 "quality_gate",
+                "final_artifact_manifest",
             ],
             stage_names,
         )
@@ -53,6 +56,79 @@ class StableAiImprovementWorkflowTests(unittest.TestCase):
         self.assertTrue(ai_stage["provider_dry_run"])
         self.assertEqual("dry-run", ai_stage["provider_mode"])
         self.assertEqual("review_only", ai_stage["candidate_intent"])
+
+    def test_real_mode_runs_review_packets_then_visual_review_before_ai_improvement(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            input_video = output_dir / "source.mp4"
+            input_video.write_bytes(b"fake-video")
+            _write_tracks(output_dir)
+            _write_json(output_dir / "ball_audit.json", {"review_events": []})
+            call_order: list[str] = []
+
+            def fake_review_packets(path: Path, **kwargs: object) -> dict[str, object]:
+                call_order.append("review_packets")
+                _write_packet(path, packet_id="packet_001", start=10, end=20)
+                return {"summary": {"packet_count": 1}}
+
+            def fake_visual_review(path: Path, **kwargs: object) -> dict[str, object]:
+                self.assertTrue((path / "review_packets.json").exists())
+                call_order.append("visual_review")
+                payload = {
+                    "summary": {"status": "ok", "reviewed_count": 1, "error_count": 0},
+                    "model": kwargs.get("model"),
+                    "model_selection": {
+                        "model": kwargs.get("model"),
+                        "source": "explicit",
+                        "provider_dry_run": False,
+                        "provider_mode": "real",
+                    },
+                    "candidate_intent": "visual_localization",
+                    "reviews": [],
+                    "errors": [],
+                }
+                _write_json(path / "ai_visual_review.json", payload)
+                return payload
+
+            def fake_improvement(path: Path, **kwargs: object) -> dict[str, object]:
+                self.assertTrue((path / "ai_visual_review.json").exists())
+                call_order.append("ai_improvement")
+                payload = {
+                    "summary": {"status": "ok"},
+                    "model": kwargs.get("model"),
+                    "model_selection": {
+                        "model": kwargs.get("model"),
+                        "source": "explicit",
+                        "provider_dry_run": False,
+                        "provider_mode": "real",
+                    },
+                    "candidate_intent": kwargs.get("candidate_intent"),
+                    "improvements": [],
+                    "highlight_adjustments": [],
+                }
+                _write_json(path / "ai_improvement_report.json", payload)
+                return payload
+
+            with (
+                patch("scripts.run_stable_ai_improvement_workflow.write_review_packet_report", side_effect=fake_review_packets),
+                patch(
+                    "scripts.run_stable_ai_improvement_workflow.write_ai_visual_review_report",
+                    side_effect=fake_visual_review,
+                    create=True,
+                ),
+                patch("scripts.run_stable_ai_improvement_workflow.write_ai_improvement_report", side_effect=fake_improvement),
+            ):
+                report = run_workflow(
+                    output_dir=output_dir,
+                    input_video=input_video,
+                    dry_run=False,
+                    model="gpt-strong",
+                    quality_gate_mode="real",
+                )
+
+        self.assertEqual(["review_packets", "visual_review", "ai_improvement"], call_order)
+        self.assertEqual("succeeded", _stage(report, "visual_review")["status"])
+        self.assertEqual("gpt-strong", _stage(report, "visual_review")["model"])
 
     def test_workflow_candidate_intent_is_independent_from_quality_gate_mode(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:
@@ -113,6 +189,169 @@ class StableAiImprovementWorkflowTests(unittest.TestCase):
         self.assertEqual("skipped", highlight_stage["status"])
         self.assertFalse(report["inputs"]["approval_intent"]["has_explicit_approval_intent"])
         self.assertTrue(any("not passed explicitly" in warning for warning in report["warnings"]))
+
+    def test_approved_actions_path_without_ids_does_not_select_or_execute_actions(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_tracks(output_dir)
+            approved_path = output_dir / "approved_actions.json"
+            _write_json(approved_path, {"approved_actions": [_approval("approval_1", start=10, end=20)]})
+
+            report = run_workflow(output_dir=output_dir, dry_run=False, approved_actions_path=approved_path)
+
+        selection = report["inputs"]["approval_selection"]
+        self.assertEqual([], selection["consumed_ids"])
+        self.assertEqual(["approval_1"], selection["skipped_ids"])
+        self.assertEqual({"approval_1": "not_requested"}, selection["skipped_reasons"])
+        self.assertEqual("skipped", _stage(report, "approved_child_rerun")["status"])
+
+    def test_stale_missing_ball_resolution_is_ignored_without_current_noop_approval(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_tracks(output_dir)
+            _write_2079_gap(output_dir)
+            _write_packet(output_dir, packet_id="packet_2079", start=2049, end=2544, label="ball_not_visible")
+            _write_json(
+                output_dir / "missing_ball_resolution.json",
+                {
+                    "schema_version": "1.0",
+                    "summary": {"status": "resolved_not_visible", "resolution_count": 1},
+                    "resolutions": [
+                        {
+                            "candidate_id": "stale",
+                            "approval_id": "stale_approval",
+                            "problem_type": "missing_ball",
+                            "status": "resolved_not_visible",
+                            "start_frame": 2049,
+                            "end_frame": 2544,
+                            "source_packet_id": "packet_2079",
+                            "likely_ball_region": {"description": "not_visible"},
+                        }
+                    ],
+                },
+            )
+
+            def fake_improvement(path: Path, **_: object) -> dict[str, object]:
+                _write_ai_report(path)
+                return {"summary": {"status": "ok"}, "improvements": []}
+
+            with patch(
+                "scripts.run_stable_ai_improvement_workflow.write_ai_improvement_report",
+                side_effect=fake_improvement,
+            ):
+                report = run_workflow(output_dir=output_dir, dry_run=True)
+
+        self.assertEqual("fail", report["quality_gate"]["summary"]["status"])
+        self.assertEqual("skipped", _stage(report, "missing_ball_noop_resolution")["status"])
+
+    def test_dispatcher_records_unsupported_selected_candidate_types_without_child_execution(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_tracks(output_dir)
+            approved_path = output_dir / "approved_actions.json"
+            _write_json(
+                approved_path,
+                {
+                    "approved_actions": [
+                        _noise_approval("noise_1", start=10, end=20),
+                        _tracking_rerun_before_follow_cam_approval("camera_1", start=30, end=40),
+                        _highlight_approval("highlight_1", start=50, end=70),
+                    ]
+                },
+            )
+
+            report = run_workflow(
+                output_dir=output_dir,
+                dry_run=False,
+                approved_actions_path=approved_path,
+                approval_ids=["noise_1", "camera_1", "highlight_1"],
+            )
+
+        dispatcher = _stage(report, "selected_approval_dispatcher")
+        self.assertEqual("completed", dispatcher["status"])
+        self.assertEqual([], dispatcher["missing_ball_execution_path"]["approval_ids"])
+        self.assertEqual("skipped", dispatcher["missing_ball_execution_path"]["status"])
+        self.assertEqual(
+            ["noise_1", "camera_1", "highlight_1"],
+            [item["approval_id"] for item in dispatcher["unsupported_actions"]],
+        )
+        self.assertTrue(
+            all(item["reason"] == "unsupported_candidate_type" for item in dispatcher["unsupported_actions"])
+        )
+        self.assertEqual("skipped", _stage(report, "approved_child_rerun")["status"])
+        self.assertEqual("skipped", _stage(report, "follow_cam_rerender_plan")["status"])
+        self.assertEqual("skipped", _stage(report, "highlight_render")["status"])
+
+    def test_selected_not_visible_noop_writes_resolution_only_for_explicit_ids(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_tracks(output_dir)
+            _write_2079_gap(output_dir)
+            _write_packet(output_dir, packet_id="packet_2079", start=2049, end=2544, label="ball_not_visible")
+            approved_path = output_dir / "approved_actions.json"
+            _write_json(
+                approved_path,
+                {
+                    "approved_actions": [
+                        _not_visible_approval("noop_2079", candidate_id="resolved_2079", start=2049, end=2544),
+                        _not_visible_approval("noop_unselected", candidate_id="resolved_unselected", start=3000, end=3050),
+                    ]
+                },
+            )
+
+            report = run_workflow(
+                output_dir=output_dir,
+                dry_run=False,
+                approved_actions_path=approved_path,
+                approval_ids=["noop_2079"],
+            )
+            resolution = json.loads((output_dir / "missing_ball_resolution.json").read_text(encoding="utf-8"))
+
+        self.assertEqual("resolved_not_visible", resolution["summary"]["status"])
+        self.assertEqual(["noop_2079"], resolution["summary"]["consumed_approval_ids"])
+        self.assertEqual(["noop_2079"], [item["approval_id"] for item in resolution["resolutions"]])
+        self.assertEqual(["resolved_2079"], [item["candidate_id"] for item in resolution["resolutions"]])
+        self.assertNotIn("noop_unselected", json.dumps(resolution))
+        noop_stage = _stage(report, "missing_ball_noop_resolution")
+        self.assertEqual("succeeded", noop_stage["status"])
+        self.assertEqual("missing_ball_resolution.json", noop_stage["artifact"])
+
+    def test_real_visual_review_unavailable_is_not_reported_as_successful_localization(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_tracks(output_dir)
+            _write_packet(output_dir, packet_id="packet_001", start=10, end=20)
+
+            def fake_visual_review(path: Path, **kwargs: object) -> dict[str, object]:
+                payload = {
+                    "summary": {"status": "unavailable", "reviewed_count": 0, "error_count": 1},
+                    "model": None,
+                    "model_selection": {"source": "strong_model_unavailable", "provider_mode": "real"},
+                    "reviews": [],
+                    "errors": [{"packet_id": "packet_001", "error_type": "strong_visual_model_unavailable"}],
+                }
+                _write_json(path / "ai_visual_review.json", payload)
+                return payload
+
+            with patch(
+                "scripts.run_stable_ai_improvement_workflow.write_ai_visual_review_report",
+                side_effect=fake_visual_review,
+            ):
+                report = run_workflow(output_dir=output_dir, dry_run=False, quality_gate_mode="real", model="gpt-strong")
+
+        visual_stage = _stage(report, "visual_review")
+        self.assertEqual("unavailable", visual_stage["status"])
+        self.assertEqual("unavailable", visual_stage["summary"]["status"])
+
+    def test_final_manifest_records_final_quality_gate_status(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_tracks(output_dir)
+
+            report = run_workflow(output_dir=output_dir, dry_run=True)
+            manifest = json.loads((output_dir / "final_ai_improvement_artifact_manifest.json").read_text(encoding="utf-8"))
+
+        self.assertEqual(report["quality_gate"]["summary"]["status"], manifest["quality_gate_status"]["status"])
 
     def test_unknown_approval_ids_fail_in_non_dry_run(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:
@@ -272,7 +511,10 @@ class StableAiImprovementWorkflowTests(unittest.TestCase):
             )
 
         self.assertEqual("skipped", _stage(report, "approved_child_rerun")["status"])
-        self.assertEqual("planned", _stage(report, "highlight_render")["status"])
+        self.assertEqual("skipped", _stage(report, "highlight_render")["status"])
+        self.assertEqual("unsupported_candidate_type", _stage(report, "highlight_render")["reason"])
+        dispatcher = _stage(report, "selected_approval_dispatcher")
+        self.assertEqual(["highlight_1"], [item["approval_id"] for item in dispatcher["unsupported_actions"]])
         selection = report["inputs"]["approval_selection"]
         self.assertEqual(["highlight_1"], selection["consumed_ids"])
         self.assertEqual(["rerun_1"], selection["skipped_ids"])
@@ -367,7 +609,7 @@ class StableAiImprovementWorkflowTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "non-empty string approval_id"):
                 run_workflow(output_dir=output_dir, dry_run=False, approved_actions_path=approved_path)
 
-    def test_tracking_rerun_before_follow_cam_is_follow_cam_plan_action(self) -> None:
+    def test_tracking_rerun_before_follow_cam_is_recorded_unsupported_for_pr2(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:
             output_dir = Path(temp_name)
             _write_tracks(output_dir)
@@ -384,9 +626,11 @@ class StableAiImprovementWorkflowTests(unittest.TestCase):
                 approval_ids=["camera_1"],
             )
 
+        dispatcher = _stage(report, "selected_approval_dispatcher")
+        self.assertEqual(["camera_1"], [item["approval_id"] for item in dispatcher["unsupported_actions"]])
         follow_stage = _stage(report, "follow_cam_rerender_plan")
-        self.assertEqual("planned", follow_stage["status"])
-        self.assertEqual(1, follow_stage["approved_action_count"])
+        self.assertEqual("skipped", follow_stage["status"])
+        self.assertEqual("unsupported_candidate_type", follow_stage["reason"])
 
     def test_follow_cam_approved_action_id_does_not_plan_highlight_render(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:
@@ -596,12 +840,26 @@ class StableAiImprovementWorkflowTests(unittest.TestCase):
                 approved_actions_path=approved_path,
                 approval_ids=["approval_1"],
             )
+            manifest = json.loads((output_dir / "final_ai_improvement_artifact_manifest.json").read_text(encoding="utf-8"))
 
         child_stage = _stage(report, "approved_child_rerun")
-        self.assertEqual("planned", child_stage["status"])
-        self.assertEqual("sahi_roi", child_stage["rerun_mode"])
+        dispatcher = _stage(report, "selected_approval_dispatcher")
+        self.assertEqual("pending_api_required", dispatcher["missing_ball_execution_path"]["status"])
+        self.assertTrue(dispatcher["missing_ball_execution_path"]["api_required"])
+        self.assertEqual("not_run", dispatcher["missing_ball_execution_path"]["execution_status"])
+        self.assertEqual("api_missing_ball_candidate_execution", dispatcher["missing_ball_execution_path"]["required_executor"])
+        self.assertEqual("pending_api_required", child_stage["status"])
+        self.assertTrue(child_stage["api_required"])
+        self.assertEqual("not_run", child_stage["execution_status"])
+        self.assertEqual("api_missing_ball_candidate_execution", child_stage["required_executor"])
+        self.assertIn("PR #46 API/service child execution path", child_stage["reason"])
+        self.assertEqual("sahi_roi", child_stage["intended_rerun_mode"])
         self.assertEqual([{"approval_id": "approval_1", "start_frame": 10, "end_frame": 20}], child_stage["bounded_windows"])
         self.assertFalse(child_stage["runs_full_video_sahi"])
+        self.assertEqual(1, manifest["summary"]["pending_candidate_count"])
+        self.assertEqual("pending_api_required", manifest["pending_candidates"][0]["status"])
+        self.assertTrue(manifest["pending_candidates"][0]["api_required"])
+        self.assertEqual("not_run", manifest["pending_candidates"][0]["execution_status"])
 
     def test_workflow_report_records_consumed_and_skipped_approval_ids(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:
@@ -732,6 +990,36 @@ def _tracking_rerun_before_follow_cam_approval(approval_id: str, *, start: int, 
     }
 
 
+def _noise_approval(approval_id: str, *, start: int, end: int) -> dict[str, object]:
+    return {
+        "approval_id": approval_id,
+        "improvement_id": "noise_imp_1",
+        "problem_type": "noise",
+        "approved_action": "noise_filter_adjustment",
+        "start_frame": start,
+        "end_frame": end,
+        "false_positive_class": "shoe_confusion",
+        "config_patch": {"selection": {"priors": {"enabled": True}}},
+        "source_packet_id": "packet_noise",
+    }
+
+
+def _not_visible_approval(approval_id: str, *, candidate_id: str, start: int, end: int) -> dict[str, object]:
+    return {
+        "approval_id": approval_id,
+        "improvement_id": f"imp_{approval_id}",
+        "candidate_id": candidate_id,
+        "problem_type": "missing_ball",
+        "approved_action": "manual_review",
+        "start_frame": start,
+        "end_frame": end,
+        "source_packet_id": "packet_2079",
+        "likely_ball_region": {"description": "not_visible", "status": "resolved_not_visible"},
+        "resolution": "not_visible",
+        "evidence": [{"source_packet_id": "packet_2079", "reason": "packet marks ball_not_visible"}],
+    }
+
+
 def _write_tracks(output_dir: Path) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     text = "Frame,X,Y,Status\n1,10,20,Detected\n"
@@ -770,7 +1058,7 @@ def _write_2079_gap(output_dir: Path) -> None:
     )
 
 
-def _write_packet(output_dir: Path, *, packet_id: str, start: int, end: int) -> None:
+def _write_packet(output_dir: Path, *, packet_id: str, start: int, end: int, label: str = "needs_ai_review") -> None:
     _write_json(
         output_dir / "review_packets.json",
         {
@@ -778,7 +1066,7 @@ def _write_packet(output_dir: Path, *, packet_id: str, start: int, end: int) -> 
                 {
                     "packet_id": packet_id,
                     "window": {"start_frame": start, "end_frame": end},
-                    "decision": {"label": "needs_ai_review"},
+                    "decision": {"label": label},
                 }
             ]
         },

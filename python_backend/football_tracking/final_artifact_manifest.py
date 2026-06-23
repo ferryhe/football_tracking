@@ -26,6 +26,9 @@ def build_final_artifact_manifest(
     comparison_reports: list[dict[str, Any] | str | Path] | None = None,
     quality_gate_status: dict[str, Any] | str | None = None,
     rejected_candidates: list[dict[str, Any]] | None = None,
+    pending_candidates: list[dict[str, Any]] | None = None,
+    unsupported_candidates: list[dict[str, Any]] | None = None,
+    resolved_noop_candidates: list[dict[str, Any]] | None = None,
     warnings: list[str] | None = None,
 ) -> dict[str, Any]:
     baseline = _artifact_ref(baseline_output, role="baseline")
@@ -37,6 +40,9 @@ def build_final_artifact_manifest(
     manifest_warnings = list(warnings or [])
     consumed = [_json_ready(item) for item in (consumed_approvals or [])]
     rejected = [_json_ready(item) for item in (rejected_candidates or [])]
+    pending = [_json_ready(item) for item in (pending_candidates or [])]
+    unsupported = [_json_ready(item) for item in (unsupported_candidates or [])]
+    resolved_noop = [_json_ready(item) for item in (resolved_noop_candidates or [])]
     selected: list[dict[str, Any]] = []
 
     for artifact in final_artifacts:
@@ -79,6 +85,9 @@ def build_final_artifact_manifest(
         "comparison_reports": comparisons,
         "quality_gate_status": _quality_gate_status(quality_gate_status),
         "rejected_candidates": rejected,
+        "pending_candidates": pending,
+        "unsupported_candidates": unsupported,
+        "resolved_noop_candidates": resolved_noop,
         "warnings": manifest_warnings,
         "videos": videos,
         "clips": clips,
@@ -86,6 +95,9 @@ def build_final_artifact_manifest(
             "candidate_output_count": len(candidates),
             "final_artifact_count": len(selected),
             "rejected_candidate_count": len(rejected),
+            "pending_candidate_count": len(pending),
+            "unsupported_candidate_count": len(unsupported),
+            "resolved_noop_candidate_count": len(resolved_noop),
             "warning_count": len(manifest_warnings),
         },
     }
@@ -101,6 +113,9 @@ def write_final_artifact_manifest(
     comparison_reports: list[dict[str, Any] | str | Path] | None = None,
     quality_gate_status: dict[str, Any] | str | None = None,
     rejected_candidates: list[dict[str, Any]] | None = None,
+    pending_candidates: list[dict[str, Any]] | None = None,
+    unsupported_candidates: list[dict[str, Any]] | None = None,
+    resolved_noop_candidates: list[dict[str, Any]] | None = None,
     warnings: list[str] | None = None,
     name: str = FINAL_ARTIFACT_MANIFEST_NAME,
 ) -> dict[str, Any]:
@@ -113,6 +128,9 @@ def write_final_artifact_manifest(
         comparison_reports=comparison_reports,
         quality_gate_status=quality_gate_status,
         rejected_candidates=rejected_candidates,
+        pending_candidates=pending_candidates,
+        unsupported_candidates=unsupported_candidates,
+        resolved_noop_candidates=resolved_noop_candidates,
         warnings=warnings,
     )
     _write_json(Path(output_dir) / manifest_name, payload)

@@ -222,6 +222,13 @@ def build_ai_visual_review_report(
     active_client = None if dry_run else client
     if active_client is None and not dry_run:
         active_client = _build_default_client()
+    selected_model, model_selection_source = _select_visual_model(client or active_client, model, dry_run=dry_run)
+    model_selection = {
+        "model": selected_model,
+        "source": model_selection_source,
+        "provider_dry_run": bool(dry_run),
+        "provider_mode": "dry-run" if dry_run else "real",
+    }
 
     reviews: list[dict[str, Any]] = []
     errors: list[dict[str, Any]] = []
@@ -230,6 +237,8 @@ def build_ai_visual_review_report(
         visual_review_id = _visual_review_id(packet_id)
         review_item = _base_review_item(packet, packet_id, visual_review_id)
         try:
+            if selected_model is None and model_selection_source == "strong_model_unavailable" and not dry_run:
+                raise RuntimeError("Strong visual review model is not configured.")
             if dry_run:
                 review_item["review"] = _with_review_linkage(_dry_run_review(), packet_id, visual_review_id)
             else:
@@ -241,7 +250,7 @@ def build_ai_visual_review_report(
                     metadata=metadata,
                     contact_sheet_data_url=_image_data_url(contact_sheet),
                     crop_sheet_data_url=_image_data_url(crop_sheet),
-                    model=model,
+                    model=selected_model,
                 )
                 review_item["review"] = _with_review_linkage(
                     _validate_review_response(
@@ -256,7 +265,9 @@ def build_ai_visual_review_report(
             error = {
                 "packet_id": packet_id,
                 "error": _safe_error_message(exc),
-                "error_type": exc.__class__.__name__,
+                "error_type": "strong_visual_model_unavailable"
+                if selected_model is None and not dry_run
+                else exc.__class__.__name__,
             }
             review_item["error"] = error["error"]
             errors.append(error)
@@ -268,7 +279,9 @@ def build_ai_visual_review_report(
         "generated_at": _utc_now_iso(),
         "output_dir": str(output_dir.resolve()),
         "source_review_packets": str((output_dir / "review_packets.json").resolve()),
-        "model": model,
+        "model": selected_model,
+        "model_selection": model_selection,
+        "candidate_intent": "visual_localization",
         "dry_run": bool(dry_run),
         "filters": {
             "only_labels": list(only_labels) if only_labels is not None else None,
@@ -672,7 +685,16 @@ def _summary(reviews: list[dict[str, Any]], errors: list[dict[str, Any]]) -> dic
         if isinstance(item.get("review"), dict) and isinstance(item["review"].get("verdict"), str)
     ]
     counts = Counter(verdicts)
+    if errors and not verdicts and all(error.get("error_type") == "strong_visual_model_unavailable" for error in errors):
+        status = "unavailable"
+    elif errors and not verdicts:
+        status = "error"
+    elif errors:
+        status = "warn"
+    else:
+        status = "ok"
     return {
+        "status": status,
         "packet_count": len(reviews),
         "reviewed_count": len(verdicts),
         "error_count": len(errors),
@@ -681,6 +703,27 @@ def _summary(reviews: list[dict[str, Any]], errors: list[dict[str, Any]]) -> dic
         "needs_human_review_count": counts.get(VERDICT_NEEDS_HUMAN_REVIEW, 0),
         "reject_noise_count": counts.get(VERDICT_REJECT_NOISE, 0),
     }
+
+
+def _select_visual_model(client: Any, model: str | None, *, dry_run: bool) -> tuple[str | None, str]:
+    if model:
+        return model, "explicit"
+    settings = getattr(client, "settings", None)
+    if settings is None:
+        responses_client = getattr(client, "responses_client", None)
+        settings = getattr(responses_client, "settings", None)
+    if settings is None and client is not None:
+        return None, "client_supplied"
+    visual_model = getattr(settings, "visual_review_model", None)
+    if isinstance(visual_model, str) and visual_model.strip():
+        return visual_model.strip(), "visual_review_model"
+    improvement_model = getattr(settings, "improvement_model", None)
+    if isinstance(improvement_model, str) and improvement_model.strip():
+        return improvement_model.strip(), "improvement_model"
+    chat_model = getattr(settings, "chat_model", None)
+    if dry_run and isinstance(chat_model, str) and chat_model.strip():
+        return chat_model.strip(), "chat_model_fallback"
+    return None, "strong_model_unavailable"
 
 
 def _packet_media_path(output_dir: Path, packet: dict[str, Any], key: str) -> Path:
