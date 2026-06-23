@@ -881,6 +881,33 @@ class ApiServiceSmokeTests(unittest.TestCase):
         self.assertFalse((output_dir / "run_manifest.json").exists())
         self.assertFalse((output_dir / "metrics_report.json").exists())
 
+    def test_run_responses_include_ai_candidate_lifecycle_summary(self) -> None:
+        self.create_output_bundle("candidate_lifecycle_baseline")
+        self.write_json(
+            "outputs/candidate_lifecycle_baseline/ai_improvement_report.json",
+            {
+                "schema_version": "1.0",
+                "generated_at": "2026-06-23T00:00:00+00:00",
+                "summary": {"status": "needs_rerun"},
+                "improvements": [
+                    {
+                        "id": "imp_lifecycle",
+                        "candidate_id": "candidate-lifecycle",
+                        "recommended_action": "targeted_rerun",
+                        "rerun_scope": {"start_frame": 10, "end_frame": 20},
+                    }
+                ],
+            },
+        )
+
+        run = self.service.list_runs()[0]
+        route_response = run_routes.get_run(run["run_id"], service=self.service)
+
+        self.assertEqual("proposed", run["ai_candidate_lifecycle"]["summary"]["stage"])
+        self.assertEqual("proposed", run["stats"]["ai_candidate_lifecycle"]["stage"])
+        self.assertEqual("proposed", route_response.ai_candidate_lifecycle.summary.stage)
+        self.assertEqual("candidate-lifecycle", route_response.ai_candidate_lifecycle.candidates[0].candidate_id)
+
     def test_list_runs_collects_metrics_artifacts_and_stats(self) -> None:
         output_dir = self.create_output_bundle("kept_baseline")
         write_run_artifacts(

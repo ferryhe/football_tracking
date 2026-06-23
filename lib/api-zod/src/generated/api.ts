@@ -1016,6 +1016,18 @@ export const CheckInputQualityResponse = zod.object({
 /**
  * @summary List Runs
  */
+export const listRunsResponseAiCandidateLifecycleSchemaVersionDefault = `1.0`;
+export const listRunsResponseAiCandidateLifecycleSummaryStageDefault = `review_only`;
+export const listRunsResponseAiCandidateLifecycleSummaryComparisonStatusDefault = `none`;
+export const listRunsResponseAiCandidateLifecycleSummaryPromotionStatusDefault = `not_promoted`;
+export const listRunsResponseAiCandidateLifecycleSummaryResolutionStatusDefault = `none`;
+export const listRunsResponseAiCandidateLifecycleSummaryCandidateCountDefault = 0;
+export const listRunsResponseAiCandidateLifecycleSummaryApprovedActionCountDefault = 0;
+export const listRunsResponseAiCandidateLifecycleSummaryComparisonReportCountDefault = 0;
+export const listRunsResponseAiCandidateLifecycleCandidatesItemStageDefault = `review_only`;
+export const listRunsResponseAiCandidateLifecycleCandidatesItemComparisonStatusDefault = `none`;
+export const listRunsResponseAiCandidateLifecycleCandidatesItemPromotionStatusDefault = `not_promoted`;
+export const listRunsResponseAiCandidateLifecycleCandidatesItemResolutionStatusDefault = `none`;
 export const listRunsResponseProgressOnePercentDefault = 0;
 
 export const ListRunsResponseItem = zod.object({
@@ -1044,6 +1056,142 @@ export const ListRunsResponseItem = zod.object({
     )
     .optional(),
   stats: zod.record(zod.string(), zod.unknown()).optional(),
+  ai_candidate_lifecycle: zod
+    .object({
+      schema_version: zod
+        .string()
+        .default(listRunsResponseAiCandidateLifecycleSchemaVersionDefault),
+      generated_at: zod.union([zod.string(), zod.null()]).optional(),
+      output_dir: zod.union([zod.string(), zod.null()]).optional(),
+      summary: zod
+        .object({
+          stage: zod
+            .enum([
+              "review_only",
+              "proposed",
+              "approved",
+              "pending_execution",
+              "executed",
+              "compared",
+              "gated",
+              "finalized",
+            ])
+            .default(listRunsResponseAiCandidateLifecycleSummaryStageDefault),
+          comparison_status: zod
+            .enum(["pass", "warn", "fail", "unavailable", "none"])
+            .default(
+              listRunsResponseAiCandidateLifecycleSummaryComparisonStatusDefault,
+            ),
+          promotion_status: zod
+            .enum([
+              "not_promoted",
+              "pending_confirmation",
+              "promoted",
+              "rejected",
+              "blocked",
+            ])
+            .default(
+              listRunsResponseAiCandidateLifecycleSummaryPromotionStatusDefault,
+            ),
+          resolution_status: zod
+            .enum(["none", "resolved_not_visible", "candidate_output"])
+            .default(
+              listRunsResponseAiCandidateLifecycleSummaryResolutionStatusDefault,
+            ),
+          blocking_reasons: zod
+            .array(
+              zod.enum([
+                "missing_evidence",
+                "unsafe_window",
+                "unsupported_type",
+                "missing_candidate_id",
+                "missing_comparison",
+                "failed_quality_gate",
+                "pending_api_execution",
+                "pending_human_confirmation",
+              ]),
+            )
+            .optional(),
+          candidate_count: zod
+            .number()
+            .default(
+              listRunsResponseAiCandidateLifecycleSummaryCandidateCountDefault,
+            ),
+          approved_action_count: zod
+            .number()
+            .default(
+              listRunsResponseAiCandidateLifecycleSummaryApprovedActionCountDefault,
+            ),
+          comparison_report_count: zod
+            .number()
+            .default(
+              listRunsResponseAiCandidateLifecycleSummaryComparisonReportCountDefault,
+            ),
+        })
+        .optional(),
+      candidates: zod
+        .array(
+          zod.object({
+            candidate_id: zod.union([zod.string(), zod.null()]).optional(),
+            problem_type: zod.union([zod.string(), zod.null()]).optional(),
+            improvement_ids: zod.array(zod.string()).optional(),
+            approval_ids: zod.array(zod.string()).optional(),
+            artifact_paths: zod.array(zod.string()).optional(),
+            stage: zod
+              .enum([
+                "review_only",
+                "proposed",
+                "approved",
+                "pending_execution",
+                "executed",
+                "compared",
+                "gated",
+                "finalized",
+              ])
+              .default(
+                listRunsResponseAiCandidateLifecycleCandidatesItemStageDefault,
+              ),
+            comparison_status: zod
+              .enum(["pass", "warn", "fail", "unavailable", "none"])
+              .default(
+                listRunsResponseAiCandidateLifecycleCandidatesItemComparisonStatusDefault,
+              ),
+            promotion_status: zod
+              .enum([
+                "not_promoted",
+                "pending_confirmation",
+                "promoted",
+                "rejected",
+                "blocked",
+              ])
+              .default(
+                listRunsResponseAiCandidateLifecycleCandidatesItemPromotionStatusDefault,
+              ),
+            resolution_status: zod
+              .enum(["none", "resolved_not_visible", "candidate_output"])
+              .default(
+                listRunsResponseAiCandidateLifecycleCandidatesItemResolutionStatusDefault,
+              ),
+            blocking_reasons: zod
+              .array(
+                zod.enum([
+                  "missing_evidence",
+                  "unsafe_window",
+                  "unsupported_type",
+                  "missing_candidate_id",
+                  "missing_comparison",
+                  "failed_quality_gate",
+                  "pending_api_execution",
+                  "pending_human_confirmation",
+                ]),
+              )
+              .optional(),
+          }),
+        )
+        .optional(),
+      artifacts: zod.record(zod.string(), zod.string()).optional(),
+    })
+    .optional(),
   progress: zod
     .union([
       zod.object({
@@ -1108,7 +1256,31 @@ export const CreateRunBody = zod.object({
 export const listAssetGroupsResponseRunCountDefault = 0;
 export const listAssetGroupsResponseConfigCountDefault = 0;
 export const listAssetGroupsResponseOutputCountDefault = 0;
+export const listAssetGroupsResponseRunsItemAiCandidateLifecycleSchemaVersionDefault = `1.0`;
+export const listAssetGroupsResponseRunsItemAiCandidateLifecycleSummaryStageDefault = `review_only`;
+export const listAssetGroupsResponseRunsItemAiCandidateLifecycleSummaryComparisonStatusDefault = `none`;
+export const listAssetGroupsResponseRunsItemAiCandidateLifecycleSummaryPromotionStatusDefault = `not_promoted`;
+export const listAssetGroupsResponseRunsItemAiCandidateLifecycleSummaryResolutionStatusDefault = `none`;
+export const listAssetGroupsResponseRunsItemAiCandidateLifecycleSummaryCandidateCountDefault = 0;
+export const listAssetGroupsResponseRunsItemAiCandidateLifecycleSummaryApprovedActionCountDefault = 0;
+export const listAssetGroupsResponseRunsItemAiCandidateLifecycleSummaryComparisonReportCountDefault = 0;
+export const listAssetGroupsResponseRunsItemAiCandidateLifecycleCandidatesItemStageDefault = `review_only`;
+export const listAssetGroupsResponseRunsItemAiCandidateLifecycleCandidatesItemComparisonStatusDefault = `none`;
+export const listAssetGroupsResponseRunsItemAiCandidateLifecycleCandidatesItemPromotionStatusDefault = `not_promoted`;
+export const listAssetGroupsResponseRunsItemAiCandidateLifecycleCandidatesItemResolutionStatusDefault = `none`;
 export const listAssetGroupsResponseRunsItemProgressOnePercentDefault = 0;
+export const listAssetGroupsResponseOutputsItemAiCandidateLifecycleSchemaVersionDefault = `1.0`;
+export const listAssetGroupsResponseOutputsItemAiCandidateLifecycleSummaryStageDefault = `review_only`;
+export const listAssetGroupsResponseOutputsItemAiCandidateLifecycleSummaryComparisonStatusDefault = `none`;
+export const listAssetGroupsResponseOutputsItemAiCandidateLifecycleSummaryPromotionStatusDefault = `not_promoted`;
+export const listAssetGroupsResponseOutputsItemAiCandidateLifecycleSummaryResolutionStatusDefault = `none`;
+export const listAssetGroupsResponseOutputsItemAiCandidateLifecycleSummaryCandidateCountDefault = 0;
+export const listAssetGroupsResponseOutputsItemAiCandidateLifecycleSummaryApprovedActionCountDefault = 0;
+export const listAssetGroupsResponseOutputsItemAiCandidateLifecycleSummaryComparisonReportCountDefault = 0;
+export const listAssetGroupsResponseOutputsItemAiCandidateLifecycleCandidatesItemStageDefault = `review_only`;
+export const listAssetGroupsResponseOutputsItemAiCandidateLifecycleCandidatesItemComparisonStatusDefault = `none`;
+export const listAssetGroupsResponseOutputsItemAiCandidateLifecycleCandidatesItemPromotionStatusDefault = `not_promoted`;
+export const listAssetGroupsResponseOutputsItemAiCandidateLifecycleCandidatesItemResolutionStatusDefault = `none`;
 export const listAssetGroupsResponseOutputsItemProgressOnePercentDefault = 0;
 export const listAssetGroupsResponseIsUnboundDefault = false;
 
@@ -1164,6 +1336,150 @@ export const ListAssetGroupsResponseItem = zod.object({
           )
           .optional(),
         stats: zod.record(zod.string(), zod.unknown()).optional(),
+        ai_candidate_lifecycle: zod
+          .object({
+            schema_version: zod
+              .string()
+              .default(
+                listAssetGroupsResponseRunsItemAiCandidateLifecycleSchemaVersionDefault,
+              ),
+            generated_at: zod.union([zod.string(), zod.null()]).optional(),
+            output_dir: zod.union([zod.string(), zod.null()]).optional(),
+            summary: zod
+              .object({
+                stage: zod
+                  .enum([
+                    "review_only",
+                    "proposed",
+                    "approved",
+                    "pending_execution",
+                    "executed",
+                    "compared",
+                    "gated",
+                    "finalized",
+                  ])
+                  .default(
+                    listAssetGroupsResponseRunsItemAiCandidateLifecycleSummaryStageDefault,
+                  ),
+                comparison_status: zod
+                  .enum(["pass", "warn", "fail", "unavailable", "none"])
+                  .default(
+                    listAssetGroupsResponseRunsItemAiCandidateLifecycleSummaryComparisonStatusDefault,
+                  ),
+                promotion_status: zod
+                  .enum([
+                    "not_promoted",
+                    "pending_confirmation",
+                    "promoted",
+                    "rejected",
+                    "blocked",
+                  ])
+                  .default(
+                    listAssetGroupsResponseRunsItemAiCandidateLifecycleSummaryPromotionStatusDefault,
+                  ),
+                resolution_status: zod
+                  .enum(["none", "resolved_not_visible", "candidate_output"])
+                  .default(
+                    listAssetGroupsResponseRunsItemAiCandidateLifecycleSummaryResolutionStatusDefault,
+                  ),
+                blocking_reasons: zod
+                  .array(
+                    zod.enum([
+                      "missing_evidence",
+                      "unsafe_window",
+                      "unsupported_type",
+                      "missing_candidate_id",
+                      "missing_comparison",
+                      "failed_quality_gate",
+                      "pending_api_execution",
+                      "pending_human_confirmation",
+                    ]),
+                  )
+                  .optional(),
+                candidate_count: zod
+                  .number()
+                  .default(
+                    listAssetGroupsResponseRunsItemAiCandidateLifecycleSummaryCandidateCountDefault,
+                  ),
+                approved_action_count: zod
+                  .number()
+                  .default(
+                    listAssetGroupsResponseRunsItemAiCandidateLifecycleSummaryApprovedActionCountDefault,
+                  ),
+                comparison_report_count: zod
+                  .number()
+                  .default(
+                    listAssetGroupsResponseRunsItemAiCandidateLifecycleSummaryComparisonReportCountDefault,
+                  ),
+              })
+              .optional(),
+            candidates: zod
+              .array(
+                zod.object({
+                  candidate_id: zod
+                    .union([zod.string(), zod.null()])
+                    .optional(),
+                  problem_type: zod
+                    .union([zod.string(), zod.null()])
+                    .optional(),
+                  improvement_ids: zod.array(zod.string()).optional(),
+                  approval_ids: zod.array(zod.string()).optional(),
+                  artifact_paths: zod.array(zod.string()).optional(),
+                  stage: zod
+                    .enum([
+                      "review_only",
+                      "proposed",
+                      "approved",
+                      "pending_execution",
+                      "executed",
+                      "compared",
+                      "gated",
+                      "finalized",
+                    ])
+                    .default(
+                      listAssetGroupsResponseRunsItemAiCandidateLifecycleCandidatesItemStageDefault,
+                    ),
+                  comparison_status: zod
+                    .enum(["pass", "warn", "fail", "unavailable", "none"])
+                    .default(
+                      listAssetGroupsResponseRunsItemAiCandidateLifecycleCandidatesItemComparisonStatusDefault,
+                    ),
+                  promotion_status: zod
+                    .enum([
+                      "not_promoted",
+                      "pending_confirmation",
+                      "promoted",
+                      "rejected",
+                      "blocked",
+                    ])
+                    .default(
+                      listAssetGroupsResponseRunsItemAiCandidateLifecycleCandidatesItemPromotionStatusDefault,
+                    ),
+                  resolution_status: zod
+                    .enum(["none", "resolved_not_visible", "candidate_output"])
+                    .default(
+                      listAssetGroupsResponseRunsItemAiCandidateLifecycleCandidatesItemResolutionStatusDefault,
+                    ),
+                  blocking_reasons: zod
+                    .array(
+                      zod.enum([
+                        "missing_evidence",
+                        "unsafe_window",
+                        "unsupported_type",
+                        "missing_candidate_id",
+                        "missing_comparison",
+                        "failed_quality_gate",
+                        "pending_api_execution",
+                        "pending_human_confirmation",
+                      ]),
+                    )
+                    .optional(),
+                }),
+              )
+              .optional(),
+            artifacts: zod.record(zod.string(), zod.string()).optional(),
+          })
+          .optional(),
         progress: zod
           .union([
             zod.object({
@@ -1238,6 +1554,150 @@ export const ListAssetGroupsResponseItem = zod.object({
           )
           .optional(),
         stats: zod.record(zod.string(), zod.unknown()).optional(),
+        ai_candidate_lifecycle: zod
+          .object({
+            schema_version: zod
+              .string()
+              .default(
+                listAssetGroupsResponseOutputsItemAiCandidateLifecycleSchemaVersionDefault,
+              ),
+            generated_at: zod.union([zod.string(), zod.null()]).optional(),
+            output_dir: zod.union([zod.string(), zod.null()]).optional(),
+            summary: zod
+              .object({
+                stage: zod
+                  .enum([
+                    "review_only",
+                    "proposed",
+                    "approved",
+                    "pending_execution",
+                    "executed",
+                    "compared",
+                    "gated",
+                    "finalized",
+                  ])
+                  .default(
+                    listAssetGroupsResponseOutputsItemAiCandidateLifecycleSummaryStageDefault,
+                  ),
+                comparison_status: zod
+                  .enum(["pass", "warn", "fail", "unavailable", "none"])
+                  .default(
+                    listAssetGroupsResponseOutputsItemAiCandidateLifecycleSummaryComparisonStatusDefault,
+                  ),
+                promotion_status: zod
+                  .enum([
+                    "not_promoted",
+                    "pending_confirmation",
+                    "promoted",
+                    "rejected",
+                    "blocked",
+                  ])
+                  .default(
+                    listAssetGroupsResponseOutputsItemAiCandidateLifecycleSummaryPromotionStatusDefault,
+                  ),
+                resolution_status: zod
+                  .enum(["none", "resolved_not_visible", "candidate_output"])
+                  .default(
+                    listAssetGroupsResponseOutputsItemAiCandidateLifecycleSummaryResolutionStatusDefault,
+                  ),
+                blocking_reasons: zod
+                  .array(
+                    zod.enum([
+                      "missing_evidence",
+                      "unsafe_window",
+                      "unsupported_type",
+                      "missing_candidate_id",
+                      "missing_comparison",
+                      "failed_quality_gate",
+                      "pending_api_execution",
+                      "pending_human_confirmation",
+                    ]),
+                  )
+                  .optional(),
+                candidate_count: zod
+                  .number()
+                  .default(
+                    listAssetGroupsResponseOutputsItemAiCandidateLifecycleSummaryCandidateCountDefault,
+                  ),
+                approved_action_count: zod
+                  .number()
+                  .default(
+                    listAssetGroupsResponseOutputsItemAiCandidateLifecycleSummaryApprovedActionCountDefault,
+                  ),
+                comparison_report_count: zod
+                  .number()
+                  .default(
+                    listAssetGroupsResponseOutputsItemAiCandidateLifecycleSummaryComparisonReportCountDefault,
+                  ),
+              })
+              .optional(),
+            candidates: zod
+              .array(
+                zod.object({
+                  candidate_id: zod
+                    .union([zod.string(), zod.null()])
+                    .optional(),
+                  problem_type: zod
+                    .union([zod.string(), zod.null()])
+                    .optional(),
+                  improvement_ids: zod.array(zod.string()).optional(),
+                  approval_ids: zod.array(zod.string()).optional(),
+                  artifact_paths: zod.array(zod.string()).optional(),
+                  stage: zod
+                    .enum([
+                      "review_only",
+                      "proposed",
+                      "approved",
+                      "pending_execution",
+                      "executed",
+                      "compared",
+                      "gated",
+                      "finalized",
+                    ])
+                    .default(
+                      listAssetGroupsResponseOutputsItemAiCandidateLifecycleCandidatesItemStageDefault,
+                    ),
+                  comparison_status: zod
+                    .enum(["pass", "warn", "fail", "unavailable", "none"])
+                    .default(
+                      listAssetGroupsResponseOutputsItemAiCandidateLifecycleCandidatesItemComparisonStatusDefault,
+                    ),
+                  promotion_status: zod
+                    .enum([
+                      "not_promoted",
+                      "pending_confirmation",
+                      "promoted",
+                      "rejected",
+                      "blocked",
+                    ])
+                    .default(
+                      listAssetGroupsResponseOutputsItemAiCandidateLifecycleCandidatesItemPromotionStatusDefault,
+                    ),
+                  resolution_status: zod
+                    .enum(["none", "resolved_not_visible", "candidate_output"])
+                    .default(
+                      listAssetGroupsResponseOutputsItemAiCandidateLifecycleCandidatesItemResolutionStatusDefault,
+                    ),
+                  blocking_reasons: zod
+                    .array(
+                      zod.enum([
+                        "missing_evidence",
+                        "unsafe_window",
+                        "unsupported_type",
+                        "missing_candidate_id",
+                        "missing_comparison",
+                        "failed_quality_gate",
+                        "pending_api_execution",
+                        "pending_human_confirmation",
+                      ]),
+                    )
+                    .optional(),
+                }),
+              )
+              .optional(),
+            artifacts: zod.record(zod.string(), zod.string()).optional(),
+          })
+          .optional(),
         progress: zod
           .union([
             zod.object({
@@ -1274,6 +1734,18 @@ export const GetRunParams = zod.object({
   run_id: zod.coerce.string(),
 });
 
+export const getRunResponseAiCandidateLifecycleSchemaVersionDefault = `1.0`;
+export const getRunResponseAiCandidateLifecycleSummaryStageDefault = `review_only`;
+export const getRunResponseAiCandidateLifecycleSummaryComparisonStatusDefault = `none`;
+export const getRunResponseAiCandidateLifecycleSummaryPromotionStatusDefault = `not_promoted`;
+export const getRunResponseAiCandidateLifecycleSummaryResolutionStatusDefault = `none`;
+export const getRunResponseAiCandidateLifecycleSummaryCandidateCountDefault = 0;
+export const getRunResponseAiCandidateLifecycleSummaryApprovedActionCountDefault = 0;
+export const getRunResponseAiCandidateLifecycleSummaryComparisonReportCountDefault = 0;
+export const getRunResponseAiCandidateLifecycleCandidatesItemStageDefault = `review_only`;
+export const getRunResponseAiCandidateLifecycleCandidatesItemComparisonStatusDefault = `none`;
+export const getRunResponseAiCandidateLifecycleCandidatesItemPromotionStatusDefault = `not_promoted`;
+export const getRunResponseAiCandidateLifecycleCandidatesItemResolutionStatusDefault = `none`;
 export const getRunResponseProgressOnePercentDefault = 0;
 
 export const GetRunResponse = zod.object({
@@ -1302,6 +1774,142 @@ export const GetRunResponse = zod.object({
     )
     .optional(),
   stats: zod.record(zod.string(), zod.unknown()).optional(),
+  ai_candidate_lifecycle: zod
+    .object({
+      schema_version: zod
+        .string()
+        .default(getRunResponseAiCandidateLifecycleSchemaVersionDefault),
+      generated_at: zod.union([zod.string(), zod.null()]).optional(),
+      output_dir: zod.union([zod.string(), zod.null()]).optional(),
+      summary: zod
+        .object({
+          stage: zod
+            .enum([
+              "review_only",
+              "proposed",
+              "approved",
+              "pending_execution",
+              "executed",
+              "compared",
+              "gated",
+              "finalized",
+            ])
+            .default(getRunResponseAiCandidateLifecycleSummaryStageDefault),
+          comparison_status: zod
+            .enum(["pass", "warn", "fail", "unavailable", "none"])
+            .default(
+              getRunResponseAiCandidateLifecycleSummaryComparisonStatusDefault,
+            ),
+          promotion_status: zod
+            .enum([
+              "not_promoted",
+              "pending_confirmation",
+              "promoted",
+              "rejected",
+              "blocked",
+            ])
+            .default(
+              getRunResponseAiCandidateLifecycleSummaryPromotionStatusDefault,
+            ),
+          resolution_status: zod
+            .enum(["none", "resolved_not_visible", "candidate_output"])
+            .default(
+              getRunResponseAiCandidateLifecycleSummaryResolutionStatusDefault,
+            ),
+          blocking_reasons: zod
+            .array(
+              zod.enum([
+                "missing_evidence",
+                "unsafe_window",
+                "unsupported_type",
+                "missing_candidate_id",
+                "missing_comparison",
+                "failed_quality_gate",
+                "pending_api_execution",
+                "pending_human_confirmation",
+              ]),
+            )
+            .optional(),
+          candidate_count: zod
+            .number()
+            .default(
+              getRunResponseAiCandidateLifecycleSummaryCandidateCountDefault,
+            ),
+          approved_action_count: zod
+            .number()
+            .default(
+              getRunResponseAiCandidateLifecycleSummaryApprovedActionCountDefault,
+            ),
+          comparison_report_count: zod
+            .number()
+            .default(
+              getRunResponseAiCandidateLifecycleSummaryComparisonReportCountDefault,
+            ),
+        })
+        .optional(),
+      candidates: zod
+        .array(
+          zod.object({
+            candidate_id: zod.union([zod.string(), zod.null()]).optional(),
+            problem_type: zod.union([zod.string(), zod.null()]).optional(),
+            improvement_ids: zod.array(zod.string()).optional(),
+            approval_ids: zod.array(zod.string()).optional(),
+            artifact_paths: zod.array(zod.string()).optional(),
+            stage: zod
+              .enum([
+                "review_only",
+                "proposed",
+                "approved",
+                "pending_execution",
+                "executed",
+                "compared",
+                "gated",
+                "finalized",
+              ])
+              .default(
+                getRunResponseAiCandidateLifecycleCandidatesItemStageDefault,
+              ),
+            comparison_status: zod
+              .enum(["pass", "warn", "fail", "unavailable", "none"])
+              .default(
+                getRunResponseAiCandidateLifecycleCandidatesItemComparisonStatusDefault,
+              ),
+            promotion_status: zod
+              .enum([
+                "not_promoted",
+                "pending_confirmation",
+                "promoted",
+                "rejected",
+                "blocked",
+              ])
+              .default(
+                getRunResponseAiCandidateLifecycleCandidatesItemPromotionStatusDefault,
+              ),
+            resolution_status: zod
+              .enum(["none", "resolved_not_visible", "candidate_output"])
+              .default(
+                getRunResponseAiCandidateLifecycleCandidatesItemResolutionStatusDefault,
+              ),
+            blocking_reasons: zod
+              .array(
+                zod.enum([
+                  "missing_evidence",
+                  "unsafe_window",
+                  "unsupported_type",
+                  "missing_candidate_id",
+                  "missing_comparison",
+                  "failed_quality_gate",
+                  "pending_api_execution",
+                  "pending_human_confirmation",
+                ]),
+              )
+              .optional(),
+          }),
+        )
+        .optional(),
+      artifacts: zod.record(zod.string(), zod.string()).optional(),
+    })
+    .optional(),
   progress: zod
     .union([
       zod.object({
@@ -1505,6 +2113,18 @@ export const CancelRunParams = zod.object({
   run_id: zod.coerce.string(),
 });
 
+export const cancelRunResponseAiCandidateLifecycleSchemaVersionDefault = `1.0`;
+export const cancelRunResponseAiCandidateLifecycleSummaryStageDefault = `review_only`;
+export const cancelRunResponseAiCandidateLifecycleSummaryComparisonStatusDefault = `none`;
+export const cancelRunResponseAiCandidateLifecycleSummaryPromotionStatusDefault = `not_promoted`;
+export const cancelRunResponseAiCandidateLifecycleSummaryResolutionStatusDefault = `none`;
+export const cancelRunResponseAiCandidateLifecycleSummaryCandidateCountDefault = 0;
+export const cancelRunResponseAiCandidateLifecycleSummaryApprovedActionCountDefault = 0;
+export const cancelRunResponseAiCandidateLifecycleSummaryComparisonReportCountDefault = 0;
+export const cancelRunResponseAiCandidateLifecycleCandidatesItemStageDefault = `review_only`;
+export const cancelRunResponseAiCandidateLifecycleCandidatesItemComparisonStatusDefault = `none`;
+export const cancelRunResponseAiCandidateLifecycleCandidatesItemPromotionStatusDefault = `not_promoted`;
+export const cancelRunResponseAiCandidateLifecycleCandidatesItemResolutionStatusDefault = `none`;
 export const cancelRunResponseProgressOnePercentDefault = 0;
 
 export const CancelRunResponse = zod.object({
@@ -1533,6 +2153,142 @@ export const CancelRunResponse = zod.object({
     )
     .optional(),
   stats: zod.record(zod.string(), zod.unknown()).optional(),
+  ai_candidate_lifecycle: zod
+    .object({
+      schema_version: zod
+        .string()
+        .default(cancelRunResponseAiCandidateLifecycleSchemaVersionDefault),
+      generated_at: zod.union([zod.string(), zod.null()]).optional(),
+      output_dir: zod.union([zod.string(), zod.null()]).optional(),
+      summary: zod
+        .object({
+          stage: zod
+            .enum([
+              "review_only",
+              "proposed",
+              "approved",
+              "pending_execution",
+              "executed",
+              "compared",
+              "gated",
+              "finalized",
+            ])
+            .default(cancelRunResponseAiCandidateLifecycleSummaryStageDefault),
+          comparison_status: zod
+            .enum(["pass", "warn", "fail", "unavailable", "none"])
+            .default(
+              cancelRunResponseAiCandidateLifecycleSummaryComparisonStatusDefault,
+            ),
+          promotion_status: zod
+            .enum([
+              "not_promoted",
+              "pending_confirmation",
+              "promoted",
+              "rejected",
+              "blocked",
+            ])
+            .default(
+              cancelRunResponseAiCandidateLifecycleSummaryPromotionStatusDefault,
+            ),
+          resolution_status: zod
+            .enum(["none", "resolved_not_visible", "candidate_output"])
+            .default(
+              cancelRunResponseAiCandidateLifecycleSummaryResolutionStatusDefault,
+            ),
+          blocking_reasons: zod
+            .array(
+              zod.enum([
+                "missing_evidence",
+                "unsafe_window",
+                "unsupported_type",
+                "missing_candidate_id",
+                "missing_comparison",
+                "failed_quality_gate",
+                "pending_api_execution",
+                "pending_human_confirmation",
+              ]),
+            )
+            .optional(),
+          candidate_count: zod
+            .number()
+            .default(
+              cancelRunResponseAiCandidateLifecycleSummaryCandidateCountDefault,
+            ),
+          approved_action_count: zod
+            .number()
+            .default(
+              cancelRunResponseAiCandidateLifecycleSummaryApprovedActionCountDefault,
+            ),
+          comparison_report_count: zod
+            .number()
+            .default(
+              cancelRunResponseAiCandidateLifecycleSummaryComparisonReportCountDefault,
+            ),
+        })
+        .optional(),
+      candidates: zod
+        .array(
+          zod.object({
+            candidate_id: zod.union([zod.string(), zod.null()]).optional(),
+            problem_type: zod.union([zod.string(), zod.null()]).optional(),
+            improvement_ids: zod.array(zod.string()).optional(),
+            approval_ids: zod.array(zod.string()).optional(),
+            artifact_paths: zod.array(zod.string()).optional(),
+            stage: zod
+              .enum([
+                "review_only",
+                "proposed",
+                "approved",
+                "pending_execution",
+                "executed",
+                "compared",
+                "gated",
+                "finalized",
+              ])
+              .default(
+                cancelRunResponseAiCandidateLifecycleCandidatesItemStageDefault,
+              ),
+            comparison_status: zod
+              .enum(["pass", "warn", "fail", "unavailable", "none"])
+              .default(
+                cancelRunResponseAiCandidateLifecycleCandidatesItemComparisonStatusDefault,
+              ),
+            promotion_status: zod
+              .enum([
+                "not_promoted",
+                "pending_confirmation",
+                "promoted",
+                "rejected",
+                "blocked",
+              ])
+              .default(
+                cancelRunResponseAiCandidateLifecycleCandidatesItemPromotionStatusDefault,
+              ),
+            resolution_status: zod
+              .enum(["none", "resolved_not_visible", "candidate_output"])
+              .default(
+                cancelRunResponseAiCandidateLifecycleCandidatesItemResolutionStatusDefault,
+              ),
+            blocking_reasons: zod
+              .array(
+                zod.enum([
+                  "missing_evidence",
+                  "unsafe_window",
+                  "unsupported_type",
+                  "missing_candidate_id",
+                  "missing_comparison",
+                  "failed_quality_gate",
+                  "pending_api_execution",
+                  "pending_human_confirmation",
+                ]),
+              )
+              .optional(),
+          }),
+        )
+        .optional(),
+      artifacts: zod.record(zod.string(), zod.string()).optional(),
+    })
+    .optional(),
   progress: zod
     .union([
       zod.object({

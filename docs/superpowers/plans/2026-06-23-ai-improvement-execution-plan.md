@@ -1,479 +1,462 @@
-# AI Improvement Remaining Gaps Implementation Plan
+# AI Improvement Execution Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use `managed-pr-development` for the full PR program. For each implementation PR, use `superpowers:subagent-driven-development` or `superpowers:executing-plans`, keep TDD active, and run separate spec/code review agents before publishing.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use `managed-pr-development` for the full program. Each PR starts from latest `main`, uses a fresh branch and worker, receives independent spec/code review, waits for remote CI/Copilot comments, merges only after valid feedback is resolved, and deletes merged branches.
 
-**Goal:** finish the remaining AI-improvement loop so AI can help recover missing balls, reduce false positives, stabilize follow-cam output, and tune highlight clips, then prove whether each approved candidate should become the final output.
+**Goal:** Turn AI from passive review into bounded, executable, measurable improvement for ball recovery, noise cleanup, follow-cam stability, and highlight timing.
 
-**Architecture:** the current tracker artifacts remain the baseline. AI produces evidence-backed suggestions only. Explicit approval creates a bounded candidate run/render. Candidate artifacts are re-audited and compared to baseline. A promotion gate decides whether the candidate becomes the final output, stays warning-only, or is rejected.
+**Architecture:** Baseline tracking artifacts stay immutable. AI may propose changes, but code executes only explicit approval ids into isolated candidate folders. Every executable candidate must write a manifest, comparison report, registry entry, quality-gate result, and final-manifest trace before it can be promoted.
 
-**Tech Stack:** Python backend, FastAPI service layer, React operator UI, pytest, existing AI provider routing, review packets, visual review, AI improvement report, approved actions, high-recall windows, camera motion audit, event/highlight artifacts, stable workflow runner, and managed PR workflow.
+**Tech Stack:** Python backend, pytest, FastAPI API service, generated OpenAPI clients, React operator UI, existing tracking/follow-cam/highlight artifacts, OpenAI-backed visual/improvement review when configured.
 
 ---
 
-## Requirement Restatement
+## Status And Review Revisions
 
-This work is **AI improvement**, not just AI review.
+Already merged before this plan:
 
-The loop must support four practical cases:
+- PR #48: noise AI cleanup candidates.
+- PR #49: AI evidence-contract guardrails.
 
-- **Ball missing:** AI inspects packet/visual evidence, proposes a bounded ROI or explicitly says `not_visible`. Long windows like the right-bottom corner sequence around frame 2079 must not pass with only early-window coverage.
-- **Noise too high:** AI classifies likely false-positive source and suggests bounded suppression or rerun strategy. Broad spatial slicing/SAHI is not the default full-video speed path because it adds too much noise.
-- **Follow-cam too jumpy:** AI uses camera motion audit plus nearby track status to choose between tracking rerun and follow-cam rerender/tuning.
-- **Highlight clips:** default clips keep pre/post buffer, and AI may adjust windows only if the shot/result tail remains intact.
+Independent plan review returned **Needs revision**. This revision applies the feedback:
 
-Preferred speed strategy:
+- Follow-cam candidates now explicitly update registry, quality gate, final manifest, stable workflow, and API lifecycle.
+- Highlight publishing now blocks AI-review-only clips and requires comparison-backed candidate evidence.
+- Real-video verification is now mandatory on `python_backend/data/raw5760x144020fps.mp4`; fixture-only proof is not acceptable for final sign-off.
+- Noise cleanup remains a first-class lane for lifecycle, promotion, and real-video regression.
+- Lifecycle status is split into `stage`, `comparison_status`, `promotion_status`, `resolution_status`, and `blocking_reasons` so UI does not blur AI audit with AI improvement.
+- API/codegen commands and generated files are explicit.
 
-- Full-video speed: temporal chunks.
-- Spatial slicing/SAHI: only bounded approved recovery windows or ROI reruns unless later benchmark data proves otherwise.
+## Requirement Summary
 
-## Current Baseline, Do Not Rebuild
+The user-facing requirement is **AI improvement**, not only **AI audit**:
 
-Already present on current `main`:
+- **Ball not found:** AI inspects packets/frames and proposes a bounded recovery window or a full-window `not_visible` resolution. A short note around frame `2079` must not close a longer right-bottom corner gap such as `2049-2544`.
+- **Too much noise:** AI identifies false-positive islands and proposes cleanup candidates. Cleanup is useful only when false positives decrease while sustained real-ball signal is preserved.
+- **Camera too shaky:** AI uses `camera_motion_audit.json` to decide whether the root cause is tracking loss or follow-cam path tuning. It must not hide bad tracking by merely zooming out.
+- **Highlight timing:** Default pre/post buffers remain the safe baseline. AI may adjust boundaries only when the event core and post-event tail remain covered.
 
-- Prompt/provenance hardening for AI improvement.
-- Packet-level AI visual review and run-level AI improvement reports.
-- Approval safety: `ai_improvement_approved_actions.json` does not execute by presence.
-- Approved `targeted_rerun` child-run path in the API/service layer.
-- Approved targeted high-recall windows in `high_recall_windows.py`.
-- ROI provenance policy for AI suggestions.
-- Camera motion audit and AI camera-action routing.
-- `follow_cam_rerender_plan.json` generation.
-- Highlight event candidates with `core_window`, `render_window`, and `buffer_policy`.
-- Highlight tail checks in the quality gate.
-- Operator AI improvement UI and approval surfaces.
-- Stable workflow runner with dry-run/artifact/real modes and explicit approval selection.
-- Quality gate with track hash, long lost gap, noise, camera, highlight tail, and model routing checks.
+Throughput rule:
 
-Important current gap:
+- Prefer **temporal chunk parallelism** for full-video speed.
+- Use spatial split/SAHI only in bounded, approved recovery windows, because broad spatial splitting produced too many extra ball-like noise points.
 
-- `targeted_rerun` can already become an approved child run; `localize_ball_roi` is validated and approvable, but it is not yet a first-class executable bounded recovery window.
-- Candidate output is not yet consistently compared, accepted, rejected, or promoted to a final artifact set across ball recovery, noise, follow-cam, and highlights.
-- Candidate output is not yet consistently re-audited after apply/render, so AI can suggest a fix without a closed feedback loop proving the fix helped.
+## Shared Candidate Proof Contract
 
-## Shared Output Vocabulary
+Every executable AI candidate must satisfy this chain:
 
-All remaining PRs should use these artifact roles:
+- Baseline artifacts are hash-snapshotted before candidate execution.
+- Execution requires explicit approval ids; approval-file presence alone is not enough.
+- Candidate output is isolated under `ai_candidates/<problem_type>/<candidate_id>/`.
+- Candidate writes `candidate_manifest.json`.
+- Candidate writes a problem-specific comparison report with `pass`, `warn`, `fail`, or `unavailable`.
+- Parent output writes or updates `ai_candidate_registry.json`.
+- `ai_improvement_quality_gate.json` sees the comparison and blocks missing evidence.
+- `final_ai_improvement_artifact_manifest.json` traces baseline, AI suggestion, approval, candidate output, comparison, gate result, and promotion state.
+- `pass` can promote according to policy; `warn` requires explicit confirmation; `fail`, `unavailable`, `unsupported`, and unexecuted review-only notes cannot be promoted.
 
-- `baseline`: original completed tracking output directory.
-- `candidate`: explicitly approved child run or render output.
-- `final`: selected output after comparison/promotion.
+## Required Validation Commands
 
-Shared candidate status values:
-
-- `pass`: candidate improves or preserves required metrics and can be promoted.
-- `warn`: candidate is usable only with documented caveats or human confirmation.
-- `fail`: candidate regresses or does not address the approved problem.
-- `unavailable`: required optional artifact was not requested or cannot be produced in the current mode.
-
-Minimum comparison payload:
-
-```json
-{
-  "schema_version": "1.0",
-  "generated_at": "...",
-  "problem_type": "missing_ball",
-  "baseline": {"output_dir": "...", "metrics": {}},
-  "candidate": {"output_dir": "...", "metrics": {}},
-  "approval": {"approval_id": "...", "approved_action": "..."},
-  "summary": {
-    "status": "pass",
-    "primary_reason": "...",
-    "regression_count": 0,
-    "improvement_count": 1
-  },
-  "checks": {}
-}
-```
-
-## PR A: Candidate Comparison And Promotion Contract
-
-**Purpose:** create one shared schema and helper layer so every later candidate uses the same pass/warn/fail and promotion semantics.
-
-**Files:**
-
-- Create: `python_backend/football_tracking/ai_candidate_comparison.py`
-- Create: `python_backend/football_tracking/final_artifact_manifest.py`
-- Create: `python_backend/tests/test_ai_candidate_comparison.py`
-- Create: `python_backend/tests/test_final_artifact_manifest.py`
-- Modify: `python_backend/football_tracking/ai_improvement_quality_gate.py`
-- Modify: `python_backend/tests/test_ai_improvement_quality_gate.py`
-- Modify: `docs/operations/ai-improvement-workflow.md`
-
-**Build:**
-
-- Define baseline/candidate/final roles.
-- Add shared `build_candidate_comparison(...)` helpers for status aggregation and regression counting.
-- Add a promotion helper that writes `final_ai_improvement_artifact_manifest.json`.
-- Promotion must record source baseline, candidate run/render, consumed approval ids, comparison reports, quality gate status, final video paths, and rejected candidates.
-- Quality gate should consume candidate comparison summaries without each feature inventing its own status semantics.
-- No helper should mutate baseline track files.
-
-**Tests:**
-
-- Golden JSON for pass/warn/fail/unavailable comparison reports.
-- Promotion manifest includes baseline, candidate, final, approvals, quality gate, and videos/clips.
-- A failed candidate is recorded but not promoted.
-- A warning candidate requires `requires_human_confirmation: true`.
-- Track hashes are unchanged by comparison-only helpers.
-- Quality gate summarizes candidate comparison reports consistently.
-
-**Validation:**
+Use the smallest focused command first, then broader checks before each PR:
 
 ```powershell
 $env:PYTHONPATH='python_backend'
-.\.venv\Scripts\python.exe -m pytest python_backend/tests/test_ai_candidate_comparison.py python_backend/tests/test_final_artifact_manifest.py python_backend/tests/test_ai_improvement_quality_gate.py -q
-git diff --check
+.\.venv\Scripts\python.exe -m pytest python_backend\tests\<focused_test>.py -q
+.\.venv\Scripts\python.exe -m pytest python_backend\tests -q
+.\.venv\Scripts\ruff.exe check python_backend --select F401,F841
+python_backend\scripts\export_openapi.py --output lib\api-spec\openapi.yaml
+pnpm --filter @workspace/api-spec run codegen
+pnpm run typecheck
+pnpm --filter @workspace/web run build
 ```
 
-**Deliverables:**
+Generated/API files that must stay synchronized when schemas change:
 
-- Shared comparison schema.
-- Shared final artifact manifest writer.
-- Quality-gate hook for candidate comparison summaries.
+- `lib/api-spec/openapi.yaml`
+- `lib/api-client-react/src/generated/`
+- `lib/api-zod/src/generated/`
+- `artifacts/web/src/lib/types.ts`
 
-## PR B: `localize_ball_roi` Recovery Executor And Long-Gap Tail Coverage
+---
 
-**Purpose:** make AI-located ball ROIs executable and ensure long missing-ball windows are reviewed across the whole span, including late frames.
+## PR2: Backend Candidate Lifecycle Contract
 
-**Files:**
-
-- Modify: `python_backend/football_tracking/high_recall_windows.py`
-- Modify: `python_backend/football_tracking/review_packets.py`
-- Modify: `python_backend/football_tracking/high_recall_reconcile.py`
-- Modify: `python_backend/football_tracking/api/service.py` only if approved-child-run selection needs service wiring.
-- Create or modify: `python_backend/football_tracking/missing_ball_recovery_comparison.py`
-- Modify: `python_backend/tests/test_high_recall_windows.py`
-- Modify: `python_backend/tests/test_review_packets.py`
-- Modify: `python_backend/tests/test_high_recall_reconcile.py`
-- Add service/API tests only if service behavior changes.
+**Purpose:** Add a backend source of truth that tells whether AI only reviewed, suggested, approved, executed, compared, gated, promoted, rejected, or marked a full window not visible.
 
 **Build:**
 
-- Treat approved `localize_ball_roi` as an executable bounded recovery input when it has frame bounds, ROI, and packet/visual provenance.
-- Keep approved `targeted_rerun` behavior unchanged.
-- Ensure executable ROI reruns still honor max-frame budget and never enable broad full-video SAHI.
-- Strengthen long lost-gap packet coverage so a large gap can create or reference start/middle/end/tail diagnostic packets, not only a single early-biased packet.
-- Ensure the frame-2079/right-bottom case has packet coverage that includes the late/right-bottom sequence or explicitly reports uncovered tail coverage.
-- Write `missing_ball_recovery_comparison.json` using the shared PR A schema.
-- Compare baseline versus candidate using lost-gap length, sustained recovered frames, new short false-positive islands, and provenance.
+- Create `python_backend/football_tracking/ai_candidate_lifecycle.py`.
+- Aggregate lightweight summaries from:
+  - `ai_improvement_report.json`
+  - `ai_improvement_approved_actions.json`
+  - `ai_candidate_registry.json`
+  - comparison reports under parent output and `ai_candidates/**`
+  - `ai_improvement_quality_gate.json`
+  - `final_ai_improvement_artifact_manifest.json`
+  - `missing_ball_resolution.json`
+- Represent lifecycle as separate fields:
+  - `stage`: `review_only`, `proposed`, `approved`, `pending_execution`, `executed`, `compared`, `gated`, `finalized`
+  - `comparison_status`: `pass`, `warn`, `fail`, `unavailable`, or `none`
+  - `promotion_status`: `not_promoted`, `pending_confirmation`, `promoted`, `rejected`, or `blocked`
+  - `resolution_status`: `none`, `resolved_not_visible`, or `candidate_output`
+  - `blocking_reasons`: list of machine-readable reasons
+- Blocking reasons include:
+  - `missing_evidence`
+  - `unsafe_window`
+  - `unsupported_type`
+  - `missing_candidate_id`
+  - `missing_comparison`
+  - `failed_quality_gate`
+  - `pending_api_execution`
+  - `pending_human_confirmation`
+- Expose lifecycle summaries through existing run/API responses in `python_backend/football_tracking/api/schemas.py`, `api/service.py`, and relevant routes.
+- Keep execution mutations explicit: any execution or promotion action must include approval ids.
+- Export OpenAPI and regenerate clients if schemas change.
 
 **Tests:**
 
-- Approved `localize_ball_roi` with bounded frames and valid provenance creates executable high-recall windows.
-- `localize_ball_roi` without ROI, frame bounds, or provenance is rejected.
-- Existing approved `targeted_rerun` tests still pass.
-- Long lost gap 2049-2544 containing frame 2079 has diagnostic coverage for the tail or reports the uncovered tail explicitly.
-- Candidate that reduces the long gap with sustained detections passes.
-- Candidate that only creates short noisy islands fails.
-- Parent baseline hashes remain unchanged.
+- Add `python_backend/tests/test_ai_candidate_lifecycle.py`.
+- Empty output returns stable empty lifecycle.
+- Review report without approval is `review_only` or `proposed`, never applied.
+- Approval without candidate artifact is `pending_execution`.
+- Registry plus comparison `pass/warn/fail/unavailable` maps correctly.
+- `missing_ball_resolution.json` with full-window evidence maps to `resolved_not_visible`.
+- Final manifest promoted/rejected state overrides raw suggestion text.
+- Missing comparison creates `missing_comparison`.
+- `python_backend/tests/test_api_service.py` verifies run responses include lifecycle summary.
+- `python_backend/tests/test_export_openapi.py` verifies schema fields are exported.
 
-**Validation:**
+**Deliver:**
 
-```powershell
-$env:PYTHONPATH='python_backend'
-.\.venv\Scripts\python.exe -m pytest python_backend/tests/test_high_recall_windows.py python_backend/tests/test_review_packets.py python_backend/tests/test_high_recall_reconcile.py python_backend/tests/test_ai_candidate_comparison.py -q
-git diff --check
-```
+- Backend/API lifecycle contract.
+- Generated client updates when needed.
+- No UI redesign yet; this PR keeps risk contained.
 
-**Deliverables:**
+---
 
-- Executable `localize_ball_roi` recovery path.
-- Tail-aware long-gap packet coverage.
-- `missing_ball_recovery_comparison.json`.
+## PR3: Operator UI Lifecycle Visibility
 
-## PR C: Post-Candidate Review Loop
-
-**Purpose:** close the AI feedback loop after a candidate is produced, instead of trusting the first AI suggestion.
-
-**Files:**
-
-- Modify: `python_backend/scripts/run_stable_ai_improvement_workflow.py`
-- Modify: `python_backend/football_tracking/ai_improvement.py` only if candidate context must be added to prompts.
-- Modify: `python_backend/football_tracking/ai_improvement_quality_gate.py`
-- Modify: `python_backend/tests/test_stable_ai_improvement_workflow.py`
-- Modify: `python_backend/tests/test_ai_improvement.py` only if prompt/context changes.
-- Modify: `python_backend/tests/test_ai_improvement_quality_gate.py`
+**Purpose:** Make the UI stop confusing AI audit text with executed AI improvement.
 
 **Build:**
 
-- Add optional post-candidate stages to the stable workflow:
-  - refresh candidate metrics;
-  - run candidate ball/camera/highlight audits when artifacts exist;
-  - build affected review packets for the candidate;
-  - run quality gate with `candidate_output_dir`;
-  - optionally run AI improvement in compare mode.
-- Compare-mode AI prompt must receive baseline and candidate summaries, not raw paths.
-- Candidate AI may confirm, reject, or request human review, but cannot auto-promote output.
-- Workflow report must show baseline review, candidate review, comparison, promotion decision, and exact approval ids consumed.
-- Dry-run and artifact-only modes must remain provider-safe.
+- Update `artifacts/web/src/pages/ai-analysis.tsx`.
+- Update `artifacts/web/src/pages/deliverable.tsx`.
+- Update `artifacts/web/src/lib/types.ts` if generated clients do not fully cover UI-specific shape.
+- Show each AI item as one of:
+  - AI review only
+  - suggested
+  - approved
+  - waiting to execute
+  - executed candidate
+  - passed/warned/failed comparison
+  - promoted final output
+  - rejected/blocked
+- Show comparison evidence for missing-ball, noise, follow-cam, and highlight candidates.
+- Show blocking reasons in plain operator language.
+- Deliverable page must tie final/publishable output to manifest or comparison-backed artifacts.
+- Keep buttons disabled unless explicit approval ids exist.
 
 **Tests:**
 
-- Dry-run records post-candidate stages without provider calls.
-- Candidate output missing optional artifacts reports `unavailable`, not crash.
-- Candidate quality gate fail prevents promotion.
-- Candidate AI `reject` or `needs_human_review` prevents auto-promotion.
-- Explicit approval ids remain the only way to create candidate work.
-- Report records baseline/candidate/final roles and consumed approvals.
+- `pnpm run typecheck`
+- `pnpm --filter @workspace/web run build`
+- Add or update frontend tests if the repo has an established test harness for these pages.
+- UI handles empty, proposed, pending, pass, warn, fail, unsupported, resolved no-op, promoted, and rejected states.
+- UI never labels review-only notes as applied improvement.
+- Noise lifecycle is visible, including pass/fail comparison and promotion state.
 
-**Validation:**
+**Deliver:**
 
-```powershell
-$env:PYTHONPATH='python_backend'
-.\.venv\Scripts\python.exe -m pytest python_backend/tests/test_stable_ai_improvement_workflow.py python_backend/tests/test_ai_improvement_quality_gate.py python_backend/tests/test_ai_candidate_comparison.py -q
-git diff --check
-```
+- Operator-visible lifecycle.
+- Clear separation between "AI said" and "AI executed and passed comparison".
 
-**Deliverables:**
+---
 
-- Post-candidate review stages in the stable workflow.
-- Candidate-aware quality-gate summary.
-- Closed-loop report that can reject a bad candidate.
+## PR4: Missing-Ball Executor Unification
 
-## PR D: Dense Noise Candidate Comparison
-
-**Purpose:** make AI useful when detector/slicing output produces too many false positives, while keeping temporal chunks as the default speed path.
-
-**Files:**
-
-- Create: `python_backend/football_tracking/noise_improvement.py`
-- Create: `python_backend/tests/test_noise_improvement.py`
-- Modify: `python_backend/football_tracking/ai_improvement.py`
-- Modify: `python_backend/football_tracking/ai_improvement_quality_gate.py`
-- Modify: `python_backend/tests/test_ai_improvement.py`
-- Modify: `python_backend/tests/test_ai_improvement_quality_gate.py`
-- Modify: `docs/operations/ai-improvement-workflow.md`
+**Purpose:** Make stable workflow execute missing-ball candidates through the same reusable path as the API, removing `pending_api_required`.
 
 **Build:**
 
-- Summarize dense-noise windows from `ball_audit.json`, `ai_review_triggers.json`, `review_packets.json`, and visual-review results.
-- Normalize false-positive classes: `extra_ball`, `shoe_confusion`, `foot_confusion`, `player_head`, `sideline_confusion`, `advertising_board`, `wall_background_drift`, `unknown_false_positive`.
-- Require bounded noise actions with frame windows and accepted false-positive classes.
-- Write `noise_improvement_comparison.json` using the shared schema.
-- Compare candidate versus baseline using false-positive island count, lost-gap coverage, and sustained valid track quality.
-- Candidate may pass only when noise improves without meaningful recall regression, or recall improvement clearly outweighs bounded noise increase.
-- Workflow docs must keep the strategy explicit: temporal chunks first, bounded spatial recovery second.
+- Create `python_backend/football_tracking/missing_ball_candidate_executor.py`.
+- Extract reusable logic from existing API service methods, especially the child-run comparison/registration path around:
+  - `_write_approved_child_missing_ball_comparison`
+  - `_register_approved_child_missing_ball_candidate`
+- Keep existing API child-run request/response behavior backward compatible.
+- Let `python_backend/scripts/run_stable_ai_improvement_workflow.py` execute selected `targeted_rerun` and `localize_ball_roi` approvals directly through the shared executor.
+- Candidate artifacts include:
+  - recovered track CSV
+  - `ball_audit.json`
+  - `metrics_report.json`
+  - `missing_ball_recovery_comparison.json`
+  - `candidate_manifest.json`
+  - registry entry
+- Reject broad full-video spatial/SAHI recovery before output is created.
+- Allow bounded ROI/SAHI only inside approved recovery windows.
 
 **Tests:**
 
-- Dense-noise context enters AI improvement prompt.
-- Noise action without false-positive class is rejected.
-- Unbounded noise action is rejected.
-- Candidate with increased false-positive islands and no recall gain fails.
-- Candidate with lower noise and unchanged/better recall passes.
-- Workflow strategy still forbids broad full-video SAHI by default.
+- API child-run behavior remains compatible.
+- Stable workflow executes an explicit selected missing-ball approval end to end.
+- Approval-file presence alone does not execute.
+- Candidate comparison passes only when the full required gap is recovered or resolved.
+- Short `2079`-only coverage fails for a `2049-2544` required gap.
+- Baseline track hashes remain unchanged.
+- Registry, quality gate, final manifest, and lifecycle record the candidate.
+- Broad full-video spatial/SAHI request is rejected.
 
-**Validation:**
+**Deliver:**
 
-```powershell
-$env:PYTHONPATH='python_backend'
-.\.venv\Scripts\python.exe -m pytest python_backend/tests/test_noise_improvement.py python_backend/tests/test_ai_improvement.py python_backend/tests/test_ai_improvement_quality_gate.py python_backend/tests/test_stable_ai_improvement_workflow.py -q
-git diff --check
-```
+- One canonical missing-ball candidate executor.
+- Stable workflow can produce real missing-ball candidate outputs without manual API follow-up.
+- Right-bottom corner case is protected by full-window evidence.
 
-**Deliverables:**
+---
 
-- `noise_improvement_comparison.json`.
-- AI noise suggestion contract and comparator.
-- Documented temporal-vs-spatial split policy.
+## PR5: Follow-Cam AI Contract And Root-Cause Routing
 
-## PR E: Follow-Cam Candidate Rerender Comparison
-
-**Purpose:** finish the follow-cam improvement loop by comparing rerendered candidates and deciding whether a new video is actually better.
-
-**Files:**
-
-- Modify: `python_backend/football_tracking/follow_cam.py` only if plan consumption needs a small compatibility hook.
-- Modify: `python_backend/football_tracking/api/service.py` only if explicit follow-cam render/promotion needs service wiring.
-- Create or modify: `python_backend/football_tracking/follow_cam_comparison.py`
-- Create or modify: `python_backend/tests/test_follow_cam_comparison.py`
-- Modify: `python_backend/tests/test_follow_cam.py`
-- Modify: `python_backend/tests/test_ai_improvement.py`
-- Modify: `python_backend/tests/test_ai_improvement_quality_gate.py`
+**Purpose:** Define what AI is allowed to suggest for shaky camera output before renderer mutation exists.
 
 **Build:**
 
-- Reuse existing AI routing: lost/predicted track context means tracking rerun before follow-cam tuning; stable track with camera spike may use follow-cam tuning.
-- Execute follow-cam rerender only through explicit approval/action.
-- After rerender, run `camera_motion_audit.json` on the candidate.
-- Write `follow_cam_comparison.json` using shared schema.
-- Compare baseline versus candidate using `review_event_count`, `max_pan_step_px`, `p95_pan_step_px`, zoom jumps, and final video presence.
-- Candidate fail prevents promotion even if the video file exists.
+- Update `python_backend/football_tracking/ai_contracts.py` and `ai_improvement.py`.
+- Reuse existing actions where already present:
+  - `adjust_follow_cam`
+  - `tracking_rerun_before_follow_cam`
+  - `human_review_camera_motion`
+- Do **not** introduce `tracking_recovery_then_follow_cam_rerender` unless this PR also carries it through schema, approval, executor, comparison, lifecycle, and tests. Default plan: do not add it yet.
+- Include `camera_motion_audit.json` events and nearby ball-track status in AI context.
+- Route Lost/Predicted overlap to tracking recovery first.
+- Route Detected-only camera spikes to follow-cam tuning.
+- Record follow-cam approvals as `pending_execution` or `unsupported` with clear reason until PR6 implements execution.
+- Surface the pending state through lifecycle from PR2/PR3.
 
 **Tests:**
 
-- Existing camera-routing tests still pass.
-- Plan file presence alone does not render.
-- Explicit approved action renders/plans a candidate only for selected action id.
-- Candidate camera audit regression fails.
-- Candidate camera audit improvement passes.
-- Final manifest records chosen follow-cam video only when comparison passes or is human-confirmed warning.
+- Camera-motion events appear in AI context.
+- Lost/Predicted overlap produces tracking-first action.
+- Detected-only motion spike may produce `adjust_follow_cam`.
+- Unknown camera actions are rejected by contract validation.
+- Pending follow-cam state is visible and not labeled as applied improvement.
 
-**Validation:**
+**Deliver:**
 
-```powershell
-$env:PYTHONPATH='python_backend'
-.\.venv\Scripts\python.exe -m pytest python_backend/tests/test_follow_cam.py python_backend/tests/test_follow_cam_comparison.py python_backend/tests/test_ai_improvement.py python_backend/tests/test_ai_improvement_quality_gate.py -q
-git diff --check
-```
+- Safe AI contract for shaky follow-cam cases.
+- No renderer mutation yet; this PR prevents ambiguous AI recommendations.
 
-**Deliverables:**
+---
 
-- `follow_cam_comparison.json`.
-- Candidate follow-cam promotion rule.
-- Final follow-cam video path in final manifest.
+## PR6: Follow-Cam Rerender Candidate And Comparison
 
-## PR F: Highlight Candidate Render Summary And Comparison
-
-**Purpose:** finish the highlight loop so generated goal/shot clips are tail-safe and promotion-ready.
-
-**Files:**
-
-- Modify: `python_backend/football_tracking/highlights.py`
-- Modify: `python_backend/football_tracking/accepted_highlights.py`
-- Modify: `python_backend/football_tracking/api/service.py` only if explicit render summary wiring is needed.
-- Create or modify: `python_backend/football_tracking/highlight_comparison.py`
-- Create or modify: `python_backend/tests/test_highlight_comparison.py`
-- Modify: `python_backend/tests/test_highlights.py`
-- Modify: `python_backend/tests/test_accepted_highlights.py`
-- Modify: `python_backend/tests/test_ai_improvement.py`
-- Modify: `python_backend/tests/test_ai_improvement_quality_gate.py`
+**Purpose:** Execute approved follow-cam candidates and prove smoother motion without hiding bad play coverage.
 
 **Build:**
 
-- Do not rebuild core/tail fundamentals already present.
-- Ensure approved highlight render writes a summary with source candidate id, approval id, requested window, rendered window, source-end clamp, and tail status.
-- Write `highlight_comparison.json` using shared schema.
-- Candidate passes only when rendered window includes the core action and required tail, unless clamped by source-video end.
-- Multiple highlight candidates should each have independent comparison and promotion status.
+- Create `python_backend/football_tracking/follow_cam_candidate_comparison.py`.
+- Execute approved candidates under `ai_candidates/follow_cam/<candidate_id>/`.
+- Candidate artifacts:
+  - `follow_cam.mp4`
+  - `camera_path.csv`
+  - `follow_cam_report.json`
+  - `camera_motion_audit.json`
+  - `follow_cam_candidate_comparison.json`
+  - `candidate_manifest.json`
+- Update parent output:
+  - `ai_candidate_registry.json`
+  - `ai_improvement_quality_gate.json`
+  - `final_ai_improvement_artifact_manifest.json`
+  - lifecycle summary
+- Compare baseline vs candidate:
+  - review event count
+  - p95 pan step
+  - max pan acceleration
+  - max zoom jump
+  - crop/ball coverage proxy
+  - excessive zoom-out ratio
+- Fail candidates that reduce shake by zooming too far out or losing the ball from the crop.
+- For tracking-first actions, require linked missing-ball candidate to pass before follow-cam rerender can pass.
+- Add stable workflow execution for selected follow-cam approvals.
 
 **Tests:**
 
-- Existing core/tail tests still pass.
-- Render summary records approved action id and actual rendered window.
-- Tail clipping fails unless source-video end clamps it.
-- Source-end clamp warns/passes according to policy.
-- Final manifest includes only promoted highlight clips.
+- Approved follow-cam-only candidate writes all artifacts.
+- Registry, quality gate, final manifest, and lifecycle summarize follow-cam candidate status.
+- Comparison passes when motion improves and coverage is preserved.
+- Comparison fails on excessive zoom-out.
+- Comparison fails when ball/crop coverage drops.
+- Comparison fails when motion metrics regress.
+- Follow-cam-only candidate does not mutate ball-track files.
+- Tracking-first candidate fails when linked missing-ball candidate fails.
+- Stable workflow executes a selected follow-cam candidate.
+- A short fixture/canary renders real `follow_cam.mp4` and `camera_path.csv`.
 
-**Validation:**
+**Deliver:**
 
-```powershell
-$env:PYTHONPATH='python_backend'
-.\.venv\Scripts\python.exe -m pytest python_backend/tests/test_highlights.py python_backend/tests/test_accepted_highlights.py python_backend/tests/test_highlight_comparison.py python_backend/tests/test_ai_improvement_quality_gate.py -q
-git diff --check
-```
+- Candidate follow-cam video with measurable stability proof.
+- A comparison report that separates "smoother" from "hid the problem".
 
-**Deliverables:**
+---
 
-- `highlight_comparison.json`.
-- Tail-safe highlight render summaries.
-- Promoted highlight clip list in final manifest.
+## PR7: Highlight AI Candidate, Comparison, And Publish Gate
 
-## PR G: Real-Video Stable Output Run And Final Promotion
-
-**Purpose:** prove the end-to-end flow on the real video/output and produce stable final outputs.
-
-**Files:**
-
-- Modify: `python_backend/scripts/run_stable_ai_improvement_workflow.py`
-- Modify: `python_backend/tests/test_stable_ai_improvement_workflow.py`
-- Modify: `python_backend/football_tracking/final_artifact_manifest.py`
-- Modify: `python_backend/tests/test_final_artifact_manifest.py`
-- Modify: `docs/operations/ai-improvement-workflow.md`
-- Modify: `README.md`
+**Purpose:** Let AI adjust highlight boundaries while preserving the goal/shot core and enough aftermath, and prevent AI-review-only clips from being published as improvements.
 
 **Build:**
 
-- Wire the workflow to collect comparison reports from PR B-F.
-- Add explicit promotion options:
-  - promote pass candidates automatically within workflow mode;
-  - require human confirmation for warn candidates;
-  - never promote fail candidates.
-- Run real-video workflow with a strong run-level improvement model when API key is available.
-- If provider is unavailable, run artifact-only mode and mark AI-dependent checks as unavailable/warn, not pass.
-- Inspect/report the frame-2079/right-bottom class in the final manifest.
-- Record generated final tracking/follow-cam/highlight paths.
+- Create `python_backend/football_tracking/highlight_candidate_comparison.py`.
+- Update:
+  - `python_backend/football_tracking/events.py`
+  - `python_backend/football_tracking/highlights.py`
+  - `python_backend/football_tracking/accepted_highlights.py`
+  - `python_backend/scripts/run_ai_visual_review.py`
+  - `python_backend/scripts/run_stable_ai_improvement_workflow.py`
+  - API service highlight render helpers, especially `create_highlight_render` and `_resolve_approved_highlight_selection`
+- Reuse existing event fields:
+  - `core_window`
+  - `render_window`
+  - `buffer_policy`
+- Execute selected `adjust_highlight_window` or `render_suggested_highlight` approvals under `ai_candidates/highlights/<candidate_id>/`.
+- Candidate artifacts:
+  - `highlight.mp4`
+  - `highlight_report.json`
+  - `highlight_candidate_comparison.json`
+  - `candidate_manifest.json`
+- Preserve default pre/post buffer as baseline.
+- Require `core_window` coverage.
+- Require post-event tail coverage unless source video end clamps it.
+- Record before/after window, reason, event id, source-end clamp, and tail coverage.
+- Accepted highlight publishing must require comparison-backed candidate evidence; visual-review-only `accept_highlight` is advisory unless paired with candidate comparison/pass or explicit legacy mode.
+- Update registry, quality gate, final manifest, and lifecycle for highlight candidates.
 
 **Tests:**
 
-- Dry-run final promotion records intended decisions without rendering.
-- Artifact-only final promotion handles unavailable provider safely.
-- Failed comparison prevents promotion.
-- Warning comparison requires human confirmation.
-- Final manifest records problem-specific comparison reports and selected final artifacts.
+- Default highlight includes core event and post-event tail.
+- AI window cutting core frames fails.
+- AI window cutting available tail fails.
+- End-of-video clamp records reason and preserves available tail.
+- Candidate render writes video/report/comparison artifacts.
+- Accepted highlight copier rejects visual-review-only clips as final AI improvements.
+- Accepted highlight copier accepts comparison-backed publishable clips.
+- Registry, quality gate, final manifest, and lifecycle summarize highlight status.
+- Short real or fixture clip is readable.
 
-**Real-Video Validation:**
+**Deliver:**
 
-```powershell
-$env:PYTHONPATH='python_backend'
-.\.venv\Scripts\python.exe python_backend\scripts\run_stable_ai_improvement_workflow.py `
-  --output-dir python_backend\outputs\full_workflow_latest_review_20260622_060600 `
-  --input-video python_backend\data\raw5760x144020fps.mp4 `
-  --parallel-mode temporal `
-  --mode real
-```
+- AI-adjusted highlight candidates with safe timing.
+- Goal/shot clips keep context after the event instead of cutting too early.
+- No AI-review-only clip is mislabeled as an AI improvement.
 
-Also run focused tests:
+---
 
-```powershell
-$env:PYTHONPATH='python_backend'
-.\.venv\Scripts\python.exe -m pytest python_backend/tests/test_stable_ai_improvement_workflow.py python_backend/tests/test_final_artifact_manifest.py python_backend/tests/test_ai_improvement_quality_gate.py -q
-git diff --check
-```
+## PR8: Promotion Controls And Product Polish
 
-**Deliverables:**
-
-- `final_ai_improvement_artifact_manifest.json`.
-- Final selected tracking/follow-cam/highlight artifacts.
-- Real-video quality status with the frame-2079 failure class explicitly reported.
-
-## PR H: Docs And Local Skill Capture
-
-**Purpose:** make the process repeatable by the user and future agents.
-
-**Files:**
-
-- Modify: `README.md`
-- Modify: `docs/operations/ai-improvement-workflow.md`
-- Modify: `docs/superpowers/plans/2026-06-23-ai-improvement-execution-plan.md`
-- After repository PRs merge and after explicit user confirmation, update local skill: `C:/Users/ferry/.codex/skills/football-tracking-real-video-tuning/SKILL.md`
+**Purpose:** Close the operator workflow after all candidate types exist.
 
 **Build:**
 
-- Explain AI review versus AI improvement.
-- Document the baseline/candidate/final artifact model.
-- Document exact commands for dry-run, artifact-only, real mode, approval selection, candidate comparison, promotion, follow-cam rerender, and highlight render.
-- Document model routing:
-  - `OPENAI_IMPROVEMENT_MODEL` or explicit `--model` for hard run-level decisions;
-  - smaller chat/visual model only for low-risk tagging or smoke checks.
-- Document temporal chunk strategy and why broad spatial slicing is not the default.
-- Document the frame-2079/right-bottom lost-ball pattern and expected gate behavior.
-- Capture skill notes after the verified real-video run.
+- Add promotion/rejection API controls.
+- Proposed endpoint shape:
+  - `POST /runs/{run_id}/ai/candidates/{candidate_id}/promote`
+  - request fields: `approval_id`, `candidate_id`, `problem_type`, `confirm_warn: bool = false`, `operator_note: str | null`
+  - reject without explicit `approval_id`.
+  - reject `warn` unless `confirm_warn` is true.
+  - reject `fail`, `unavailable`, `unsupported`, and review-only candidates.
+- Add rejection endpoint or request mode:
+  - `POST /runs/{run_id}/ai/candidates/{candidate_id}/reject`
+  - request fields: `approval_id`, `candidate_id`, `problem_type`, `rejection_reason`
+- Write promotion/rejection decisions into `final_ai_improvement_artifact_manifest.json`.
+- Show comparison details for missing-ball, noise, follow-cam, and highlight candidates.
+- UI language must distinguish:
+  - AI audit
+  - AI suggestion
+  - approved candidate
+  - executed candidate
+  - passed comparison
+  - promoted final output
 
 **Tests:**
 
-- Run documented focused commands.
-- Run `git diff --check`.
-- Manually scan docs for any claim that AI report or approval-file presence auto-mutates output.
+- Promotion accepts `pass`.
+- Promotion blocks `warn` without confirmation.
+- Promotion accepts `warn` with explicit confirmation and note.
+- Promotion blocks `fail`, `unavailable`, `unsupported`, and review-only candidates.
+- Rejection writes reason to final manifest and lifecycle.
+- UI shows comparison evidence and final manifest status.
+- Noise candidates can be promoted/rejected through the same controls.
+- UI never labels review-only notes as applied improvement.
 
-**Deliverables:**
+**Deliver:**
 
-- Updated README and operator docs.
-- Updated local skill after confirmation.
-- Final managed PR report listing all PRs, branches, checks, Copilot comments handled, merges, branch cleanup, artifacts, and remaining risks.
+- Complete visible lifecycle from AI idea to final artifact.
+- Human-safe promotion controls.
 
-## End-To-End Acceptance Criteria
+---
 
-- AI suggestions are evidence-backed and cannot invent ROI without packet/visual provenance.
-- Long missing-ball windows include whole-window/tail coverage or explicit uncovered explanations.
-- The frame-2079/right-bottom class cannot pass silently.
-- Approved `localize_ball_roi` can run as bounded recovery.
-- Candidate runs/renders are compared before promotion.
-- Bad candidates are rejected even if AI originally suggested them.
-- Noise suggestions are bounded and false-positive-tagged.
-- Temporal chunks remain the default full-video speed strategy.
-- Follow-cam final videos pass camera-motion comparison or require human confirmation.
-- Highlight clips preserve core action and shot/result tail.
-- Review/improvement-only phases preserve baseline track hashes.
-- Approval files remain inert unless explicitly consumed.
-- Final workflow emits machine-readable pass/warn/fail reports and concrete final artifacts.
+## PR9: Real-Video Verification, Docs, And Skill Capture
+
+**Purpose:** Prove the whole system on the real match video and preserve the workflow as documentation/skill.
+
+**Build:**
+
+- Use the real video: `python_backend/data/raw5760x144020fps.mp4`.
+- Produce a dated evidence output folder under `python_backend/outputs/` or the project-standard output location.
+- Run the full stable workflow with provider configuration when available; if the current environment lacks the API key, copy/use the configured key from the adjacent working environment only in the approved local secret flow.
+- Record:
+  - model settings
+  - output directory
+  - review packet media paths
+  - approval ids
+  - candidate ids
+  - comparison reports
+  - promoted/rejected decisions
+  - final follow-cam video
+  - final highlights
+- Manually inspect:
+  - the `2049-2544` right-bottom corner gap
+  - frame `2079` neighborhood
+  - noisy false-positive islands
+  - camera-motion spike windows
+  - highlight tails after goal/shot events
+- Update:
+  - `README.md`
+  - `python_backend/README.md`
+  - `docs/operations/ai-improvement-workflow.md`
+  - `python_backend/docs/operation-guide.zh.md`
+  - `python_backend/docs/operation-guide.en.md`
+- Create `docs/operations/real-video-ai-improvement-checklist.md`.
+- After repo docs merge, propose an update to `C:/Users/ferry/.codex/skills/football-tracking-real-video-tuning/SKILL.md`.
+
+**Tests:**
+
+- Full backend tests pass.
+- `pnpm run typecheck` and web build pass after docs/UI changes.
+- Real-video run produces review packets with media.
+- Real-video run produces at least one executable candidate for each available lane:
+  - missing-ball or evidence-backed `not_visible`
+  - noise cleanup
+  - follow-cam rerender or documented tracking-first block
+  - highlight candidate or documented no-event/no-safe-window block
+- Each executed real-video candidate has comparison, registry, quality gate, final manifest, and lifecycle evidence.
+- Final follow-cam renders and includes `camera_motion_audit.json`.
+- At least one highlight renders and passes tail coverage when event candidates exist.
+- Fixture-only proof is acceptable for unit/integration tests, but not for this PR's final sign-off.
+
+**Deliver:**
+
+- Updated user/operator docs.
+- Real-video evidence pack with commands, output dirs, model settings, approval ids, candidate decisions, final videos, and highlights.
+- Local skill update proposal after the workflow is proven stable.
+
+---
+
+## End-To-End Done Criteria
+
+- Ball-missing cases close only via comparison-backed recovery or full-window evidence-backed `not_visible`.
+- Noise cleanup reduces false-positive islands without damaging sustained true-ball signal.
+- Follow-cam candidates reduce motion spikes without hiding tracking loss.
+- Highlight clips preserve event core and post-event tail.
+- Review-only AI text cannot mutate artifacts and cannot appear as applied improvement.
+- Approved execution always requires explicit ids.
+- Final output is traceable from baseline to AI suggestion, approval, candidate, comparison, quality gate, manifest, and promoted artifact.
+- The real video `python_backend/data/raw5760x144020fps.mp4` has a recorded evidence pack and manual inspection notes.
+- Merged branches are deleted locally and remotely after each PR is merged.

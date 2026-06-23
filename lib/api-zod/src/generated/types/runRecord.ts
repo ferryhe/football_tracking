@@ -4,6 +4,7 @@
  * Api
  * OpenAPI spec version: 0.1.0
  */
+import type { AICandidateLifecycleReport } from "./aICandidateLifecycleReport";
 import type { ArtifactSummary } from "./artifactSummary";
 import type { RunProgress } from "./runProgress";
 import type { RunRecordModulesEnabled } from "./runRecordModulesEnabled";
@@ -25,6 +26,7 @@ export interface RunRecord {
   modules_enabled?: RunRecordModulesEnabled;
   artifacts?: ArtifactSummary[];
   stats?: RunRecordStats;
+  ai_candidate_lifecycle?: AICandidateLifecycleReport;
   progress?: RunProgress | null;
   notes?: string | null;
   error?: string | null;

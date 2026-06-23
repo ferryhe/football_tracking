@@ -94,6 +94,159 @@ export interface AIApprovedAction {
   [key: string]: unknown;
 }
 
+export type AICandidateLifecycleCandidateStage =
+  (typeof AICandidateLifecycleCandidateStage)[keyof typeof AICandidateLifecycleCandidateStage];
+
+export const AICandidateLifecycleCandidateStage = {
+  review_only: "review_only",
+  proposed: "proposed",
+  approved: "approved",
+  pending_execution: "pending_execution",
+  executed: "executed",
+  compared: "compared",
+  gated: "gated",
+  finalized: "finalized",
+} as const;
+
+export type AICandidateLifecycleCandidateComparisonStatus =
+  (typeof AICandidateLifecycleCandidateComparisonStatus)[keyof typeof AICandidateLifecycleCandidateComparisonStatus];
+
+export const AICandidateLifecycleCandidateComparisonStatus = {
+  pass: "pass",
+  warn: "warn",
+  fail: "fail",
+  unavailable: "unavailable",
+  none: "none",
+} as const;
+
+export type AICandidateLifecycleCandidatePromotionStatus =
+  (typeof AICandidateLifecycleCandidatePromotionStatus)[keyof typeof AICandidateLifecycleCandidatePromotionStatus];
+
+export const AICandidateLifecycleCandidatePromotionStatus = {
+  not_promoted: "not_promoted",
+  pending_confirmation: "pending_confirmation",
+  promoted: "promoted",
+  rejected: "rejected",
+  blocked: "blocked",
+} as const;
+
+export type AICandidateLifecycleCandidateResolutionStatus =
+  (typeof AICandidateLifecycleCandidateResolutionStatus)[keyof typeof AICandidateLifecycleCandidateResolutionStatus];
+
+export const AICandidateLifecycleCandidateResolutionStatus = {
+  none: "none",
+  resolved_not_visible: "resolved_not_visible",
+  candidate_output: "candidate_output",
+} as const;
+
+export type AICandidateLifecycleCandidateBlockingReasonsItem =
+  (typeof AICandidateLifecycleCandidateBlockingReasonsItem)[keyof typeof AICandidateLifecycleCandidateBlockingReasonsItem];
+
+export const AICandidateLifecycleCandidateBlockingReasonsItem = {
+  missing_evidence: "missing_evidence",
+  unsafe_window: "unsafe_window",
+  unsupported_type: "unsupported_type",
+  missing_candidate_id: "missing_candidate_id",
+  missing_comparison: "missing_comparison",
+  failed_quality_gate: "failed_quality_gate",
+  pending_api_execution: "pending_api_execution",
+  pending_human_confirmation: "pending_human_confirmation",
+} as const;
+
+export interface AICandidateLifecycleCandidate {
+  candidate_id?: string | null;
+  problem_type?: string | null;
+  improvement_ids?: string[];
+  approval_ids?: string[];
+  artifact_paths?: string[];
+  stage?: AICandidateLifecycleCandidateStage;
+  comparison_status?: AICandidateLifecycleCandidateComparisonStatus;
+  promotion_status?: AICandidateLifecycleCandidatePromotionStatus;
+  resolution_status?: AICandidateLifecycleCandidateResolutionStatus;
+  blocking_reasons?: AICandidateLifecycleCandidateBlockingReasonsItem[];
+}
+
+export type AICandidateLifecycleReportArtifacts = { [key: string]: string };
+
+export type AICandidateLifecycleSummaryStage =
+  (typeof AICandidateLifecycleSummaryStage)[keyof typeof AICandidateLifecycleSummaryStage];
+
+export const AICandidateLifecycleSummaryStage = {
+  review_only: "review_only",
+  proposed: "proposed",
+  approved: "approved",
+  pending_execution: "pending_execution",
+  executed: "executed",
+  compared: "compared",
+  gated: "gated",
+  finalized: "finalized",
+} as const;
+
+export type AICandidateLifecycleSummaryComparisonStatus =
+  (typeof AICandidateLifecycleSummaryComparisonStatus)[keyof typeof AICandidateLifecycleSummaryComparisonStatus];
+
+export const AICandidateLifecycleSummaryComparisonStatus = {
+  pass: "pass",
+  warn: "warn",
+  fail: "fail",
+  unavailable: "unavailable",
+  none: "none",
+} as const;
+
+export type AICandidateLifecycleSummaryPromotionStatus =
+  (typeof AICandidateLifecycleSummaryPromotionStatus)[keyof typeof AICandidateLifecycleSummaryPromotionStatus];
+
+export const AICandidateLifecycleSummaryPromotionStatus = {
+  not_promoted: "not_promoted",
+  pending_confirmation: "pending_confirmation",
+  promoted: "promoted",
+  rejected: "rejected",
+  blocked: "blocked",
+} as const;
+
+export type AICandidateLifecycleSummaryResolutionStatus =
+  (typeof AICandidateLifecycleSummaryResolutionStatus)[keyof typeof AICandidateLifecycleSummaryResolutionStatus];
+
+export const AICandidateLifecycleSummaryResolutionStatus = {
+  none: "none",
+  resolved_not_visible: "resolved_not_visible",
+  candidate_output: "candidate_output",
+} as const;
+
+export type AICandidateLifecycleSummaryBlockingReasonsItem =
+  (typeof AICandidateLifecycleSummaryBlockingReasonsItem)[keyof typeof AICandidateLifecycleSummaryBlockingReasonsItem];
+
+export const AICandidateLifecycleSummaryBlockingReasonsItem = {
+  missing_evidence: "missing_evidence",
+  unsafe_window: "unsafe_window",
+  unsupported_type: "unsupported_type",
+  missing_candidate_id: "missing_candidate_id",
+  missing_comparison: "missing_comparison",
+  failed_quality_gate: "failed_quality_gate",
+  pending_api_execution: "pending_api_execution",
+  pending_human_confirmation: "pending_human_confirmation",
+} as const;
+
+export interface AICandidateLifecycleSummary {
+  stage?: AICandidateLifecycleSummaryStage;
+  comparison_status?: AICandidateLifecycleSummaryComparisonStatus;
+  promotion_status?: AICandidateLifecycleSummaryPromotionStatus;
+  resolution_status?: AICandidateLifecycleSummaryResolutionStatus;
+  blocking_reasons?: AICandidateLifecycleSummaryBlockingReasonsItem[];
+  candidate_count?: number;
+  approved_action_count?: number;
+  comparison_report_count?: number;
+}
+
+export interface AICandidateLifecycleReport {
+  schema_version?: string;
+  generated_at?: string | null;
+  output_dir?: string | null;
+  summary?: AICandidateLifecycleSummary;
+  candidates?: AICandidateLifecycleCandidate[];
+  artifacts?: AICandidateLifecycleReportArtifacts;
+}
+
 export type AIConfigDiffRequestPatch = { [key: string]: unknown };
 
 export interface AIConfigDiffRequest {
@@ -550,6 +703,7 @@ export interface RunRecord {
   modules_enabled?: RunRecordModulesEnabled;
   artifacts?: ArtifactSummary[];
   stats?: RunRecordStats;
+  ai_candidate_lifecycle?: AICandidateLifecycleReport;
   progress?: RunProgress | null;
   notes?: string | null;
   error?: string | null;
