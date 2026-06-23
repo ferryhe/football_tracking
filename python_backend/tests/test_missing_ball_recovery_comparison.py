@@ -415,6 +415,300 @@ class MissingBallRecoveryComparisonTests(unittest.TestCase):
         failed_checks = {check["name"] for check in report["checks"] if check["status"] == "fail"}
         self.assertIn("packet_evidence_coverage", failed_checks)
 
+    def test_2079_fixture_requires_start_middle_end_tail_packet_labels(self) -> None:
+        fixture = json.loads(
+            (Path(__file__).parent / "fixtures" / "right_bottom_gap_2049_2544.json").read_text(encoding="utf-8")
+        )
+        gap = fixture["lost_gap"]
+        required_labels = fixture["required_packet_coverage_labels"]
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            baseline = output_dir / "baseline.csv"
+            candidate = output_dir / "candidate.csv"
+            review_packets = output_dir / "review_packets.json"
+            _write_track(baseline, lost_ranges=[(gap["start_frame"], gap["end_frame"])], frame_count=2600)
+            _write_track(candidate, lost_ranges=[], frame_count=2600)
+            review_packets.write_text(
+                json.dumps(
+                    {
+                        "packets": [
+                            _packet("packet_start", "start", 2049, 2099),
+                            _packet("packet_middle", "middle", 2100, 2479),
+                            _packet("packet_end", "end", 2480, 2520),
+                            _packet("packet_tail", "tail", 2521, 2544),
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            approval = {
+                "approval_id": "approval_2079",
+                "approved_action": "targeted_rerun",
+                "candidate_id": "candidate-2079",
+                "source_packet_id": "packet_start",
+                "rerun_scope": gap,
+                "required_packet_coverage_labels": required_labels,
+                "related_approvals": [
+                    {
+                        "approval_id": f"approval_2079_{label}",
+                        "approved_action": "targeted_rerun",
+                        "candidate_id": "candidate-2079",
+                        "source_packet_id": f"packet_{label}",
+                        "rerun_scope": gap,
+                    }
+                    for label in required_labels
+                ],
+            }
+
+            report = build_missing_ball_recovery_comparison(
+                baseline,
+                candidate,
+                candidate_id="candidate-2079",
+                approval=approval,
+                target_window=gap,
+                review_packets_path=review_packets,
+                require_packet_coverage=True,
+            )
+
+        packet_check = next(item for item in report["checks"] if item["name"] == "packet_evidence_coverage")
+        self.assertEqual("pass", packet_check["status"], packet_check)
+        self.assertEqual(required_labels, packet_check["required_labels"])
+        self.assertEqual(required_labels, packet_check["covered_labels"])
+        self.assertEqual([], packet_check["uncovered_ranges"])
+
+    def test_packet_labels_from_related_approvals_count_toward_required_coverage(self) -> None:
+        fixture = json.loads(
+            (Path(__file__).parent / "fixtures" / "right_bottom_gap_2049_2544.json").read_text(encoding="utf-8")
+        )
+        gap = fixture["lost_gap"]
+        required_labels = fixture["required_packet_coverage_labels"]
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            baseline = output_dir / "baseline.csv"
+            candidate = output_dir / "candidate.csv"
+            review_packets = output_dir / "review_packets.json"
+            _write_track(baseline, lost_ranges=[(gap["start_frame"], gap["end_frame"])], frame_count=2600)
+            _write_track(candidate, lost_ranges=[], frame_count=2600)
+            review_packets.write_text(
+                json.dumps(
+                    {
+                        "packets": [
+                            _packet("packet_start", "start", 2049, 2099),
+                            _packet("packet_middle", "middle", 2100, 2479),
+                            _packet("packet_end", "end", 2480, 2520),
+                            _packet("packet_tail", "tail", 2521, 2544),
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            approval = {
+                "approval_id": "approval_2079",
+                "approved_action": "targeted_rerun",
+                "candidate_id": "candidate-2079",
+                "source_packet_id": "packet_start",
+                "rerun_scope": gap,
+                "related_approvals": [
+                    {
+                        "approval_id": f"approval_2079_{label}",
+                        "approved_action": "targeted_rerun",
+                        "candidate_id": "candidate-2079",
+                        "source_packet_id": f"packet_{label}",
+                        "rerun_scope": gap,
+                        "required_packet_coverage_labels": [label],
+                    }
+                    for label in required_labels
+                ],
+            }
+
+            report = build_missing_ball_recovery_comparison(
+                baseline,
+                candidate,
+                candidate_id="candidate-2079",
+                approval=approval,
+                target_window=gap,
+                review_packets_path=review_packets,
+                require_packet_coverage=True,
+            )
+
+        packet_check = next(item for item in report["checks"] if item["name"] == "packet_evidence_coverage")
+        self.assertEqual("pass", packet_check["status"], packet_check)
+        self.assertEqual(required_labels, packet_check["required_labels"])
+        self.assertEqual(required_labels, packet_check["covered_labels"])
+        self.assertEqual([], packet_check["uncovered_ranges"])
+
+    def test_right_bottom_gap_packet_label_coverage_fails_when_ranges_are_uncovered(self) -> None:
+        fixture = json.loads(
+            (Path(__file__).parent / "fixtures" / "right_bottom_gap_2049_2544.json").read_text(encoding="utf-8")
+        )
+        gap = fixture["lost_gap"]
+        required_labels = fixture["required_packet_coverage_labels"]
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            baseline = output_dir / "baseline.csv"
+            candidate = output_dir / "candidate.csv"
+            review_packets = output_dir / "review_packets.json"
+            _write_track(baseline, lost_ranges=[(gap["start_frame"], gap["end_frame"])], frame_count=2600)
+            _write_track(candidate, lost_ranges=[], frame_count=2600)
+            review_packets.write_text(
+                json.dumps(
+                    {
+                        "packets": [
+                            _packet("packet_start", "start", 2049, 2099),
+                            _packet("packet_middle", "middle", 2200, 2250),
+                            _packet("packet_end", "end", 2480, 2520),
+                            _packet("packet_tail", "tail", 2521, 2544),
+                            {
+                                "packet_id": "packet_unlabeled_full",
+                                "source": {"kind": "test", "start_frame": 2049, "end_frame": 2544},
+                                "window": {"start_frame": 2049, "end_frame": 2544},
+                            },
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            approval = {
+                "approval_id": "approval_2079",
+                "approved_action": "targeted_rerun",
+                "candidate_id": "candidate-2079",
+                "source_packet_id": "packet_start",
+                "rerun_scope": gap,
+                "required_packet_coverage_labels": required_labels,
+                "related_approvals": [
+                    {
+                        "approval_id": f"approval_2079_{label}",
+                        "approved_action": "targeted_rerun",
+                        "candidate_id": "candidate-2079",
+                        "source_packet_id": f"packet_{label}",
+                        "rerun_scope": gap,
+                    }
+                    for label in required_labels
+                ]
+                + [
+                    {
+                        "approval_id": "approval_2079_unlabeled_full",
+                        "approved_action": "targeted_rerun",
+                        "candidate_id": "candidate-2079",
+                        "source_packet_id": "packet_unlabeled_full",
+                        "rerun_scope": gap,
+                    }
+                ],
+            }
+
+            report = build_missing_ball_recovery_comparison(
+                baseline,
+                candidate,
+                candidate_id="candidate-2079",
+                approval=approval,
+                target_window=gap,
+                review_packets_path=review_packets,
+                require_packet_coverage=True,
+            )
+
+        packet_check = next(item for item in report["checks"] if item["name"] == "packet_evidence_coverage")
+        self.assertEqual("fail", packet_check["status"], packet_check)
+        self.assertEqual(required_labels, packet_check["covered_labels"])
+        ignored = [
+            result
+            for result in packet_check["results"]
+            if result["packet_id"] == "packet_unlabeled_full"
+        ]
+        self.assertEqual(["ignored"], [result["status"] for result in ignored])
+        self.assertEqual(
+            [
+                {"start_frame": 2100, "end_frame": 2199},
+                {"start_frame": 2251, "end_frame": 2479},
+            ],
+            packet_check["uncovered_ranges"],
+        )
+
+    def test_packet_label_coverage_uses_combined_target_window_not_first_approval_window(self) -> None:
+        fixture = json.loads(
+            (Path(__file__).parent / "fixtures" / "right_bottom_gap_2049_2544.json").read_text(encoding="utf-8")
+        )
+        gap = fixture["lost_gap"]
+        required_labels = fixture["required_packet_coverage_labels"]
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            baseline = output_dir / "baseline.csv"
+            candidate = output_dir / "candidate.csv"
+            review_packets = output_dir / "review_packets.json"
+            _write_track(baseline, lost_ranges=[(gap["start_frame"], gap["end_frame"])], frame_count=2600)
+            _write_track(candidate, lost_ranges=[], frame_count=2600)
+            review_packets.write_text(
+                json.dumps(
+                    {
+                        "packets": [
+                            _packet("packet_start", "start", 2049, 2099),
+                            _packet("packet_middle", "middle", 2200, 2250),
+                            _packet("packet_end", "end", 2480, 2520),
+                            _packet("packet_tail", "tail", 2521, 2544),
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            approval = {
+                "approval_id": "approval_2079_start",
+                "approved_action": "targeted_rerun",
+                "candidate_id": "candidate-2079",
+                "source_packet_id": "packet_start",
+                "rerun_scope": {"start_frame": 2049, "end_frame": 2099},
+                "required_packet_coverage_labels": required_labels,
+                "related_approvals": [
+                    {
+                        "approval_id": "approval_2079_start",
+                        "approved_action": "targeted_rerun",
+                        "candidate_id": "candidate-2079",
+                        "source_packet_id": "packet_start",
+                        "rerun_scope": {"start_frame": 2049, "end_frame": 2099},
+                    },
+                    {
+                        "approval_id": "approval_2079_middle",
+                        "approved_action": "targeted_rerun",
+                        "candidate_id": "candidate-2079",
+                        "source_packet_id": "packet_middle",
+                        "rerun_scope": {"start_frame": 2200, "end_frame": 2250},
+                    },
+                    {
+                        "approval_id": "approval_2079_end",
+                        "approved_action": "targeted_rerun",
+                        "candidate_id": "candidate-2079",
+                        "source_packet_id": "packet_end",
+                        "rerun_scope": {"start_frame": 2480, "end_frame": 2520},
+                    },
+                    {
+                        "approval_id": "approval_2079_tail",
+                        "approved_action": "targeted_rerun",
+                        "candidate_id": "candidate-2079",
+                        "source_packet_id": "packet_tail",
+                        "rerun_scope": {"start_frame": 2521, "end_frame": 2544},
+                    },
+                ],
+            }
+
+            report = build_missing_ball_recovery_comparison(
+                baseline,
+                candidate,
+                candidate_id="candidate-2079",
+                approval=approval,
+                target_window=gap,
+                review_packets_path=review_packets,
+                require_packet_coverage=True,
+            )
+
+        packet_check = next(item for item in report["checks"] if item["name"] == "packet_evidence_coverage")
+        self.assertEqual("fail", packet_check["status"], packet_check)
+        self.assertEqual(required_labels, packet_check["covered_labels"])
+        self.assertEqual(
+            [
+                {"start_frame": 2100, "end_frame": 2199},
+                {"start_frame": 2251, "end_frame": 2479},
+            ],
+            packet_check["uncovered_ranges"],
+        )
+
     def test_uncertain_in_roi_localize_recovery_requires_human_confirmation(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:
             output_dir = Path(temp_name)
@@ -594,6 +888,15 @@ def _write_track_with_roi_escape(path: Path, frame_count: int = 80) -> None:
         else:
             rows.append(f"{frame},{100 + frame},{200 + frame},0.90,Detected")
     path.write_text("\n".join(rows) + "\n", encoding="utf-8")
+
+
+def _packet(packet_id: str, label: str, start: int, end: int) -> dict[str, object]:
+    return {
+        "packet_id": packet_id,
+        "coverage_label": label,
+        "window": {"start_frame": start, "end_frame": end},
+        "decision": {"label": label},
+    }
 
 
 def _hashes(*paths: Path) -> dict[str, str]:

@@ -78,6 +78,14 @@ _KNOWN_FALSE_POSITIVE_CLASSES = {
     "wall_background_drift",
     "unknown",
 }
+_WINDOWS_RESERVED_NAMES = {
+    "CON",
+    "PRN",
+    "AUX",
+    "NUL",
+    *(f"COM{index}" for index in range(1, 10)),
+    *(f"LPT{index}" for index in range(1, 10)),
+}
 _SOURCE_FRAME_COUNT_KEYS = ("total_source_frames", "source_frame_count", "source_total_frames", "video_frame_count")
 _PROVIDER_PATH_KEYS = {
     "output_dir",
@@ -583,9 +591,10 @@ def _approved_action_entry(
         raise ValueError(f"Approval {approval_id} localize_ball_roi requires local_search_roi.")
     if approved_action in {"localize_ball_roi", "targeted_rerun"}:
         candidate_id = action.get("candidate_id") or improvement.get("candidate_id")
-        if not isinstance(candidate_id, str) or not candidate_id.strip():
-            raise ValueError(f"Approval {approval_id} {approved_action} requires candidate_id.")
-        action["candidate_id"] = candidate_id.strip()
+        action["candidate_id"] = _safe_candidate_id(
+            candidate_id,
+            f"Approval {approval_id} {approved_action} candidate_id",
+        )
     if (
         approved_action == "localize_ball_roi"
         and "rerun_scope" not in action
@@ -615,9 +624,10 @@ def _approved_action_entry(
 
     if approved_action in {"adjust_highlight_window", "render_suggested_highlight"}:
         candidate_id = action.get("candidate_id") or improvement.get("candidate_id")
-        if not isinstance(candidate_id, str) or not candidate_id.strip():
-            raise ValueError(f"Approval {approval_id} {approved_action} requires candidate_id.")
-        action["candidate_id"] = candidate_id.strip()
+        action["candidate_id"] = _safe_candidate_id(
+            candidate_id,
+            f"Approval {approval_id} {approved_action} candidate_id",
+        )
         window_source = suggested_window_override if suggested_window_override is not None else improvement.get("suggested_window")
         action["suggested_window"] = _frame_window(window_source, f"Approval {approval_id} suggested_window")
         clip_action = clip_action_override if clip_action_override is not None else improvement.get("clip_action")
@@ -2323,6 +2333,28 @@ def _candidate_intent(value: str) -> str:
     if value not in _CANDIDATE_INTENTS:
         raise ValueError(f"candidate_intent must be one of: {', '.join(sorted(_CANDIDATE_INTENTS))}.")
     return value
+
+
+def _safe_candidate_id(value: Any, label: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{label} must be a safe single directory name.")
+    candidate_id = value.strip()
+    path = Path(candidate_id)
+    if (
+        candidate_id in {".", ".."}
+        or candidate_id != value
+        or candidate_id.rstrip(" .") != candidate_id
+        or path.is_absolute()
+        or path.name != candidate_id
+        or any(separator in candidate_id for separator in ("/", "\\"))
+        or ":" in candidate_id
+        or ".." in candidate_id
+        or ".." in path.parts
+        or any(ord(character) < 32 for character in candidate_id)
+        or path.stem.upper() in _WINDOWS_RESERVED_NAMES
+    ):
+        raise ValueError(f"{label} must be a safe single directory name.")
+    return candidate_id
 
 
 def _report(

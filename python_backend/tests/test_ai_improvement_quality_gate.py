@@ -136,6 +136,82 @@ class AiImprovementQualityGateTests(unittest.TestCase):
         self.assertEqual("pass", payload["checks"]["long_lost_gap_improvement_coverage"]["status"])
         self.assertEqual("pass", payload["checks"]["missing_ball_roi_or_not_visible_present"]["status"])
 
+    def test_real_mode_selected_missing_ball_approval_requires_comparison_report(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_tracks(output_dir)
+            write_track_hash_snapshot(output_dir, "before_review")
+            write_track_hash_snapshot(output_dir, "after_ai_improvement")
+            _write_2079_gap(output_dir)
+            _write_packet(output_dir, packet_id="packet_2079", start=2049, end=2544)
+            _write_ai_report(output_dir, [_missing_ball_improvement(start=2049, end=2544)])
+            approval = {**_targeted_rerun_approval(start=2049, end=2544), "candidate_id": "candidate_2079"}
+            approved_path = _write_approved_actions(output_dir, [approval])
+
+            payload = build_ai_improvement_quality_gate(output_dir, mode="real", approved_actions_path=approved_path)
+
+        self.assertNotEqual("pass", payload["summary"]["status"])
+        self.assertEqual("unavailable", payload["checks"]["candidate_comparisons_ok"]["status"])
+        self.assertTrue(
+            any(
+                report.get("artifact_status") == "selected_missing_ball_approval_missing_comparison"
+                for report in payload["checks"]["candidate_comparisons_ok"]["reports"]
+            )
+        )
+
+    def test_real_mode_selected_missing_ball_approval_ignores_other_problem_type_comparison(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_tracks(output_dir)
+            write_track_hash_snapshot(output_dir, "before_review")
+            write_track_hash_snapshot(output_dir, "after_ai_improvement")
+            _write_2079_gap(output_dir)
+            _write_packet(output_dir, packet_id="packet_2079", start=2049, end=2544)
+            _write_ai_report(output_dir, [_missing_ball_improvement(start=2049, end=2544)])
+            approval = {**_targeted_rerun_approval(start=2049, end=2544), "candidate_id": "candidate_2079"}
+            approved_path = _write_approved_actions(output_dir, [approval])
+            comparison = _comparison_payload("candidate_2079", "pass")
+            comparison["problem_type"] = "noise"
+            comparison["approval_id"] = approval["approval_id"]
+            comparison["consumed_approval_ids"] = [approval["approval_id"]]
+            _write_json(output_dir / "missing_ball_recovery_comparison.json", comparison)
+
+            payload = build_ai_improvement_quality_gate(output_dir, mode="real", approved_actions_path=approved_path)
+
+        self.assertEqual("unavailable", payload["checks"]["candidate_comparisons_ok"]["status"])
+        self.assertTrue(
+            any(
+                report.get("artifact_status") == "selected_missing_ball_approval_missing_comparison"
+                for report in payload["checks"]["candidate_comparisons_ok"]["reports"]
+            )
+        )
+
+    def test_real_mode_selected_missing_ball_approval_requires_consumed_approval_id(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_tracks(output_dir)
+            write_track_hash_snapshot(output_dir, "before_review")
+            write_track_hash_snapshot(output_dir, "after_ai_improvement")
+            _write_2079_gap(output_dir)
+            _write_packet(output_dir, packet_id="packet_2079", start=2049, end=2544)
+            _write_ai_report(output_dir, [_missing_ball_improvement(start=2049, end=2544)])
+            approval = {**_targeted_rerun_approval(start=2049, end=2544), "candidate_id": "candidate_2079"}
+            approved_path = _write_approved_actions(output_dir, [approval])
+            comparison = _comparison_payload("candidate_2079", "pass")
+            comparison["approval_id"] = "other_approval"
+            comparison["consumed_approval_ids"] = ["other_approval"]
+            _write_json(output_dir / "missing_ball_recovery_comparison.json", comparison)
+
+            payload = build_ai_improvement_quality_gate(output_dir, mode="real", approved_actions_path=approved_path)
+
+        self.assertEqual("unavailable", payload["checks"]["candidate_comparisons_ok"]["status"])
+        self.assertTrue(
+            any(
+                report.get("artifact_status") == "selected_missing_ball_approval_missing_comparison"
+                for report in payload["checks"]["candidate_comparisons_ok"]["reports"]
+            )
+        )
+
     def test_long_lost_gap_2079_fails_when_approval_lacks_provenance(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:
             output_dir = Path(temp_name)
@@ -534,7 +610,9 @@ class AiImprovementQualityGateTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_name:
             output_dir = Path(temp_name)
             report_path = output_dir / "reports" / "manifest_report.json"
-            _write_json(report_path, _comparison_payload("candidate-warn", "warn"))
+            report = _comparison_payload("candidate-warn", "warn")
+            report["comparison_report"] = "reports/manifest_report.json"
+            _write_json(report_path, report)
             _write_json(
                 output_dir / "final_ai_improvement_artifact_manifest.json",
                 {"comparison_reports": [{"path": "reports/manifest_report.json"}]},
@@ -547,6 +625,80 @@ class AiImprovementQualityGateTests(unittest.TestCase):
         self.assertEqual(1, comparison_check["report_count"])
         self.assertEqual(1, comparison_check["status_counts"]["warn"])
         self.assertEqual("candidate-warn", comparison_check["reports"][0]["candidate_id"])
+
+    def test_manifest_absolute_in_output_path_can_match_relative_payload_report(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            report_path = output_dir / "reports" / "manifest_report.json"
+            report = _comparison_payload("candidate-warn", "warn")
+            report["comparison_report"] = "reports/manifest_report.json"
+            _write_json(report_path, report)
+            _write_json(
+                output_dir / "final_ai_improvement_artifact_manifest.json",
+                {"comparison_reports": [{"path": str(report_path)}]},
+            )
+
+            payload = build_ai_improvement_quality_gate(output_dir)
+
+        comparison_check = payload["checks"]["candidate_comparisons_ok"]
+        self.assertEqual("warn", comparison_check["status"])
+        self.assertEqual(1, comparison_check["report_count"])
+        self.assertEqual("loaded", comparison_check["reports"][0]["artifact_status"])
+
+    def test_manifest_absolute_path_rejects_payload_basename_report(self) -> None:
+        for payload_report in ("manifest_report.json", "ports/manifest_report.json"):
+            with self.subTest(payload_report=payload_report):
+                with tempfile.TemporaryDirectory() as temp_name:
+                    output_dir = Path(temp_name)
+                    report_path = output_dir / "reports" / "manifest_report.json"
+                    report = _comparison_payload("candidate-warn", "warn")
+                    report["comparison_report"] = payload_report
+                    _write_json(report_path, report)
+                    _write_json(
+                        output_dir / "final_ai_improvement_artifact_manifest.json",
+                        {"comparison_reports": [{"path": str(report_path), "candidate_id": "candidate-warn"}]},
+                    )
+
+                    payload = build_ai_improvement_quality_gate(output_dir)
+
+                comparison_check = payload["checks"]["candidate_comparisons_ok"]
+                self.assertEqual("unavailable", comparison_check["status"])
+                self.assertEqual("manifest_comparison_mismatch", comparison_check["reports"][0]["artifact_status"])
+                self.assertEqual(["comparison_report"], comparison_check["reports"][0]["mismatched_fields"])
+
+    def test_manifest_comparison_mismatch_is_not_hidden_by_globbed_same_path(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            comparison = _comparison_payload("candidate-b", "pass")
+            comparison["comparison_report"] = "missing_ball_recovery_comparison.json"
+            _write_json(output_dir / "missing_ball_recovery_comparison.json", comparison)
+            _write_json(
+                output_dir / "final_ai_improvement_artifact_manifest.json",
+                {
+                    "comparison_reports": [
+                        {
+                            "path": "missing_ball_recovery_comparison.json",
+                            "candidate_id": "candidate-a",
+                            "problem_type": "missing_ball",
+                        }
+                    ]
+                },
+            )
+
+            payload = build_ai_improvement_quality_gate(output_dir)
+
+        comparison_check = payload["checks"]["candidate_comparisons_ok"]
+        self.assertEqual("unavailable", comparison_check["status"])
+        self.assertEqual(2, comparison_check["report_count"])
+        self.assertEqual(1, comparison_check["status_counts"]["pass"])
+        self.assertEqual(1, comparison_check["status_counts"]["unavailable"])
+        mismatch_reports = [
+            report
+            for report in comparison_check["reports"]
+            if report["artifact_status"] == "manifest_comparison_mismatch"
+        ]
+        self.assertEqual(1, len(mismatch_reports))
+        self.assertEqual(["candidate_id"], mismatch_reports[0]["mismatched_fields"])
 
     def test_candidate_comparison_absence_is_backward_compatible_pass(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:

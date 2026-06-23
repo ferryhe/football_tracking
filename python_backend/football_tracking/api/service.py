@@ -31,6 +31,7 @@ from football_tracking.ai_improvement import (
     compact_ai_improvement_summary,
     write_ai_improvement_report,
 )
+from football_tracking.ai_candidate_registry import load_candidate_registry, write_candidate_registry
 from football_tracking.ai_review_triggers import compact_ai_review_trigger_summary
 from football_tracking.api.ai_provider import OpenAIResponsesClient, load_provider_settings
 from football_tracking.ball_audit import build_ball_audit_report, compact_ball_audit_summary
@@ -46,6 +47,15 @@ from football_tracking.missing_ball_recovery_comparison import write_missing_bal
 from football_tracking.pipeline import BallTrackingPipeline
 from football_tracking.player_tracks import compact_player_tracks_summary
 from football_tracking.quality import assess_video_quality
+
+_WINDOWS_RESERVED_NAMES = {
+    "CON",
+    "PRN",
+    "AUX",
+    "NUL",
+    *(f"COM{index}" for index in range(1, 10)),
+    *(f"LPT{index}" for index in range(1, 10)),
+}
 
 
 def _utc_now_iso() -> str:
@@ -1641,8 +1651,11 @@ class ApiService:
                 + ", ".join(missing_candidate_ids)
             )
         recovery_candidate_ids = self._recovery_candidate_ids(selected_artifact)
+        if not recovery_candidate_ids:
+            raise ValueError("Approved child recovery requires selected recovery actions to include candidate_id.")
         if len(recovery_candidate_ids) > 1:
             raise ValueError("Approved child recovery requires selected recovery actions to share one candidate_id.")
+        candidate_id = next(iter(recovery_candidate_ids))
         selected_frame_budget = sum(
             int(window["end_frame"]) - int(window["start_frame"]) + 1 for window in executable_windows
         )
@@ -1659,7 +1672,7 @@ class ApiService:
             request.get("output_dir_name"),
             default=f"approved_{parent_run_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid4().hex[:6]}",
         )
-        config.output_dir = self._build_run_output_dir(run_id=run_id, input_video=config.input_video)
+        config.output_dir = self._missing_ball_candidate_output_dir(parent_output_dir, candidate_id)
         if config.output_dir.exists():
             raise FileExistsError(str(config.output_dir))
 
@@ -1722,6 +1735,9 @@ class ApiService:
             if config.output_dir.exists():
                 raise FileExistsError(str(config.output_dir))
             try:
+                registry = self._read_registry()
+                if any(run.get("run_id") == run_id for run in registry.get("runs", [])):
+                    raise ValueError(f"Run already exists: {run_id}")
                 config.output_dir.mkdir(parents=True, exist_ok=False)
                 output_created = True
                 self._copy_approved_child_inputs(
@@ -1732,8 +1748,6 @@ class ApiService:
                     csv_name=config.output.csv_name,
                 )
                 self._write_approved_child_config(child_config_path, config)
-                registry = self._read_registry()
-                registry["runs"] = [run for run in registry["runs"] if run["run_id"] != run_id]
                 registry["runs"].append(run_record)
                 self._write_registry(registry)
                 registry_written = True
@@ -1776,6 +1790,32 @@ class ApiService:
         if output_name != raw_name or output_name in {".", ".."}:
             raise ValueError("output_dir_name must be a safe single directory name.")
         return output_name
+
+    def _missing_ball_candidate_output_dir(self, parent_output_dir: Path, candidate_id: str) -> Path:
+        parent_output_dir = Path(parent_output_dir).resolve()
+        candidate_name = str(candidate_id or "").strip()
+        candidate_path = Path(candidate_name)
+        if (
+            not candidate_name
+            or candidate_name in {".", ".."}
+            or candidate_name != candidate_id
+            or candidate_name.rstrip(" .") != candidate_name
+            or candidate_path.is_absolute()
+            or candidate_path.name != candidate_name
+            or any(separator in candidate_name for separator in ("/", "\\"))
+            or ":" in candidate_name
+            or ".." in candidate_name
+            or ".." in candidate_path.parts
+            or any(ord(character) < 32 for character in candidate_name)
+            or candidate_path.stem.upper() in _WINDOWS_RESERVED_NAMES
+        ):
+            raise ValueError("candidate_id must be a safe single directory name for missing-ball candidate output.")
+        candidate_output_dir = (parent_output_dir / "ai_candidates" / "missing_ball" / candidate_name).resolve()
+        try:
+            candidate_output_dir.relative_to(parent_output_dir)
+        except ValueError as exc:
+            raise ValueError("candidate_id output path must stay within the parent output directory.") from exc
+        return candidate_output_dir
 
     def _validate_output_csv_name(self, value: str) -> None:
         csv_name = str(value or "").strip()
@@ -2427,7 +2467,11 @@ class ApiService:
                 cancel_event.is_set,
             )
             self._write_approved_child_candidate_audit(config)
-            self._write_approved_child_missing_ball_comparison(parent_run_id, config, high_recall_report=high_recall_report)
+            comparison_registration = self._write_approved_child_missing_ball_comparison(
+                parent_run_id,
+                config,
+                high_recall_report=high_recall_report,
+            )
             self._assert_parent_fingerprints_unchanged(parent_fingerprints)
             existing = self.get_run(run_id)
             updated = self._build_run_snapshot(
@@ -2459,6 +2503,8 @@ class ApiService:
                 updated["status"] = "failed"
                 updated["error"] = artifact_error
                 updated["progress"] = self._failed_progress(existing.get("progress"), existing.get("started_at"))
+            elif comparison_registration is not None:
+                self._register_approved_child_missing_ball_candidate(**comparison_registration)
             self._replace_run(run_id, updated)
         except CancelledError:
             existing = self.get_run(run_id)
@@ -2521,7 +2567,7 @@ class ApiService:
         config: AppConfig,
         *,
         high_recall_report: dict[str, Any] | None = None,
-    ) -> None:
+    ) -> dict[str, Any] | None:
         parent_run = self.get_run(parent_run_id)
         parent_output_dir = Path(parent_run["output_dir"]).resolve()
         selected_artifact_path = config.output_dir / APPROVED_ACTIONS_FILE_NAME
@@ -2537,7 +2583,7 @@ class ApiService:
             )
         ]
         if not recovery_actions:
-            return
+            return None
         recovery_actions = self._recovery_actions_with_execution_roi(recovery_actions, high_recall_report)
         approval = dict(recovery_actions[0])
         approval["related_approvals"] = recovery_actions
@@ -2546,7 +2592,7 @@ class ApiService:
             raise RuntimeError("Approved child recovery comparison requires candidate_id.")
         baseline_track = self._preferred_track_path(parent_output_dir, csv_name=config.output.csv_name)
         candidate_track = self._preferred_track_path(config.output_dir, csv_name=config.output.csv_name)
-        write_missing_ball_recovery_comparison(
+        comparison_path = write_missing_ball_recovery_comparison(
             config.output_dir,
             baseline_track,
             candidate_track,
@@ -2558,6 +2604,173 @@ class ApiService:
             review_packets_path=config.output_dir / "review_packets.json",
             require_packet_coverage=True,
         )
+        return {
+            "parent_output_dir": parent_output_dir,
+            "candidate_output_dir": config.output_dir,
+            "comparison_path": comparison_path,
+            "candidate_id": candidate_id,
+        }
+
+    def _register_approved_child_missing_ball_candidate(
+        self,
+        *,
+        parent_output_dir: Path,
+        candidate_output_dir: Path,
+        comparison_path: Path,
+        candidate_id: str,
+    ) -> None:
+        parent_output_dir = Path(parent_output_dir).resolve()
+        candidate_output_dir = Path(candidate_output_dir).resolve()
+        comparison_path = Path(comparison_path).resolve()
+        comparison_payload = json.loads(comparison_path.read_text(encoding="utf-8"))
+        comparison_payload["comparison_report"] = comparison_path.relative_to(parent_output_dir).as_posix()
+        comparison_payload["candidate_dir"] = candidate_output_dir.relative_to(parent_output_dir).as_posix()
+        manifest_path = candidate_output_dir / "candidate_manifest.json"
+        manifest_relative_path = manifest_path.relative_to(parent_output_dir).as_posix()
+        comparison_payload["candidate_manifest"] = manifest_relative_path
+        candidate_artifacts = self._missing_ball_candidate_artifacts(
+            parent_output_dir=parent_output_dir,
+            candidate_output_dir=candidate_output_dir,
+            comparison_path=comparison_path,
+            comparison_payload=comparison_payload,
+        )
+        if manifest_relative_path not in candidate_artifacts:
+            candidate_artifacts.append(manifest_relative_path)
+        comparison_payload["candidate_artifacts"] = candidate_artifacts
+        self._write_missing_ball_candidate_manifest(
+            parent_output_dir=parent_output_dir,
+            candidate_output_dir=candidate_output_dir,
+            comparison_path=comparison_path,
+            manifest_path=manifest_path,
+            comparison_payload=comparison_payload,
+        )
+        comparison_path.write_text(json.dumps(comparison_payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+        existing = load_candidate_registry(parent_output_dir)
+        artifact_status = existing.get("artifact_status")
+        if artifact_status not in {"loaded", "missing"}:
+            raise RuntimeError(f"Cannot update parent ai_candidate_registry.json while it is {artifact_status}.")
+        existing_records = existing.get("candidates") if artifact_status == "loaded" else []
+        records = [
+            record
+            for record in existing_records
+            if isinstance(record, dict) and record.get("candidate_id") != candidate_id
+        ]
+        write_candidate_registry(parent_output_dir, records=records, comparison_reports=[comparison_payload])
+
+    def _missing_ball_candidate_artifacts(
+        self,
+        *,
+        parent_output_dir: Path,
+        candidate_output_dir: Path,
+        comparison_path: Path,
+        comparison_payload: dict[str, Any],
+    ) -> list[str]:
+        artifacts: list[str] = []
+
+        def add_path(raw_path: Any) -> None:
+            if not isinstance(raw_path, str) or not raw_path.strip():
+                return
+            raw_path_obj = Path(raw_path)
+            candidate_paths = (
+                [raw_path_obj.resolve()]
+                if raw_path_obj.is_absolute()
+                else [
+                    (parent_output_dir / raw_path_obj).resolve(),
+                    (candidate_output_dir / raw_path_obj).resolve(),
+                ]
+            )
+            for path in candidate_paths:
+                try:
+                    path.relative_to(candidate_output_dir)
+                    relative = path.relative_to(parent_output_dir)
+                except ValueError:
+                    continue
+                if relative.as_posix() not in artifacts:
+                    artifacts.append(relative.as_posix())
+                return
+
+        for raw_artifact in comparison_payload.get("candidate_artifacts", []):
+            add_path(raw_artifact)
+        candidate = comparison_payload.get("candidate")
+        if isinstance(candidate, dict):
+            add_path(candidate.get("path"))
+        for path in (
+            candidate_output_dir / "ball_track.csv",
+            candidate_output_dir / "ball_track.cleaned.csv",
+        ):
+            if path.exists():
+                add_path(str(path))
+        for path in (
+            comparison_path,
+            candidate_output_dir / "candidate_manifest.json",
+            candidate_output_dir / "ball_audit.json",
+            candidate_output_dir / "metrics_report.json",
+            candidate_output_dir / "run_manifest.json",
+            candidate_output_dir / APPROVED_ACTIONS_FILE_NAME,
+            candidate_output_dir / "approved_recovery_config.yaml",
+        ):
+            if path.exists():
+                add_path(str(path))
+        return artifacts
+
+    def _write_missing_ball_candidate_manifest(
+        self,
+        *,
+        parent_output_dir: Path,
+        candidate_output_dir: Path,
+        comparison_path: Path,
+        manifest_path: Path,
+        comparison_payload: dict[str, Any],
+    ) -> None:
+        approval = comparison_payload.get("approval") if isinstance(comparison_payload.get("approval"), dict) else {}
+        related = approval.get("related_approvals") if isinstance(approval.get("related_approvals"), list) else []
+        approval_items = [item for item in related if isinstance(item, dict)] or ([approval] if approval else [])
+        source_packet_ids: list[str] = []
+        visual_review_ids: list[str] = []
+        effective_rois: list[dict[str, Any]] = []
+        for item in approval_items:
+            self._append_unique_string(source_packet_ids, item.get("source_packet_id"))
+            self._append_unique_string(visual_review_ids, item.get("visual_review_id"))
+            effective_roi = item.get("effective_roi")
+            if isinstance(effective_roi, list) and len(effective_roi) == 4:
+                effective_rois.append(
+                    {
+                        "approval_id": item.get("approval_id"),
+                        "effective_roi": list(effective_roi),
+                    }
+                )
+        metrics = comparison_payload.get("metrics") if isinstance(comparison_payload.get("metrics"), dict) else {}
+        target_window = metrics.get("target_window") if isinstance(metrics.get("target_window"), dict) else None
+        baseline = comparison_payload.get("baseline") if isinstance(comparison_payload.get("baseline"), dict) else {}
+        manifest = {
+            "schema_version": "1.0",
+            "generated_at": _utc_now_iso(),
+            "candidate_id": comparison_payload.get("candidate_id"),
+            "problem_type": "missing_ball",
+            "candidate_dir": candidate_output_dir.relative_to(parent_output_dir).as_posix(),
+            "baseline_output_dir": str(parent_output_dir),
+            "baseline_track": baseline.get("path"),
+            "source_approval_ids": comparison_payload.get("consumed_approval_ids")
+            if isinstance(comparison_payload.get("consumed_approval_ids"), list)
+            else [],
+            "frame_window": target_window,
+            "evidence_ids": {
+                "source_packet_ids": source_packet_ids,
+                "visual_review_ids": visual_review_ids,
+            },
+            "effective_rois": effective_rois,
+            "comparison_report": comparison_path.relative_to(parent_output_dir).as_posix(),
+            "comparison_status": comparison_payload.get("comparison_status"),
+            "generated_artifacts": comparison_payload.get("candidate_artifacts")
+            if isinstance(comparison_payload.get("candidate_artifacts"), list)
+            else [],
+        }
+        manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+    def _append_unique_string(self, target: list[str], value: Any) -> None:
+        if isinstance(value, str) and value.strip() and value.strip() not in target:
+            target.append(value.strip())
 
     def _recovery_actions_with_execution_roi(
         self,
