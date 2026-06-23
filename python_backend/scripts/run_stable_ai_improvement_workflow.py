@@ -18,6 +18,7 @@ from football_tracking.ai_improvement_quality_gate import (
 from football_tracking.ai_visual_review import write_ai_visual_review_report
 from football_tracking.final_artifact_manifest import write_final_artifact_manifest
 from football_tracking.metrics import build_metrics_report
+from football_tracking.noise_candidate_comparison import execute_noise_cleanup_candidate
 from football_tracking.review_packets import write_review_packet_report
 
 
@@ -149,7 +150,7 @@ def run_workflow(
         approved_action_id=approved_action_id,
         approved_actions_path=approved_actions_path,
     )
-    dispatcher_stage = _selected_approval_dispatcher_stage(approved_payload)
+    dispatcher_stage = _selected_approval_dispatcher_stage(output_dir=output_dir, approved_payload=approved_payload, dry_run=dry_run)
     stages.append(dispatcher_stage)
     stages.append(
         _approved_child_rerun_stage(
@@ -172,6 +173,12 @@ def run_workflow(
     if gate_approved_payload:
         gate_kwargs["approved_actions_payload"] = gate_approved_payload
     quality_gate = write_ai_improvement_quality_gate(output_dir, **gate_kwargs)
+    workflow_status = _workflow_status(stages)
+    quality_gate["summary"]["workflow_status"] = workflow_status
+    (output_dir / QUALITY_GATE_REPORT_NAME).write_text(
+        json.dumps(quality_gate, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
     stages.append(
         {
             "name": "quality_gate",
@@ -267,8 +274,8 @@ def main(argv: list[str] | None = None) -> int:
         parser.error(str(exc))
 
     print(json.dumps({"stable_ai_improvement_workflow": report["quality_gate"]["summary"]}, ensure_ascii=False, indent=2))
-    failed = report["quality_gate"]["summary"].get("status") == "fail"
-    return 1 if failed and not args.dry_run and (args.mode == "real") else 0
+    failed = report["quality_gate"]["summary"].get("status") == "fail" or report["quality_gate"]["summary"].get("workflow_status") == "failed"
+    return 1 if failed and not args.dry_run else 0
 
 
 def _metrics_artifacts_refresh(*, output_dir: Path, dry_run: bool, warnings: list[str]) -> dict[str, Any]:
@@ -674,9 +681,10 @@ def _approved_child_rerun_stage(
     }
 
 
-def _selected_approval_dispatcher_stage(approved_payload: dict[str, Any]) -> dict[str, Any]:
+def _selected_approval_dispatcher_stage(*, output_dir: Path, approved_payload: dict[str, Any], dry_run: bool) -> dict[str, Any]:
     actions = approved_payload.get("approved_actions") if isinstance(approved_payload.get("approved_actions"), list) else []
     missing_ball_actions: list[dict[str, Any]] = []
+    noise_actions: list[dict[str, Any]] = []
     unsupported_actions: list[dict[str, Any]] = []
     noop_actions: list[dict[str, Any]] = []
     for action in actions:
@@ -685,13 +693,16 @@ def _selected_approval_dispatcher_stage(approved_payload: dict[str, Any]) -> dic
         approved_action = str(action.get("approved_action") or "")
         if approved_action in MISSING_BALL_APPROVAL_ACTIONS:
             missing_ball_actions.append(action)
+        elif approved_action in NOISE_APPROVAL_ACTIONS:
+            noise_actions.append(action)
         elif _is_not_visible_noop_action(action):
             noop_actions.append(action)
-        elif approved_action in (NOISE_APPROVAL_ACTIONS | FOLLOW_CAM_APPROVAL_ACTIONS | HIGHLIGHT_APPROVAL_ACTIONS):
+        elif approved_action in (FOLLOW_CAM_APPROVAL_ACTIONS | HIGHLIGHT_APPROVAL_ACTIONS):
             unsupported_actions.append(_unsupported_action_summary(action))
+    noise_path = _noise_candidate_execution_path(output_dir=output_dir, actions=noise_actions, dry_run=dry_run)
     return {
         "name": "selected_approval_dispatcher",
-        "status": "completed",
+        "status": "failed" if noise_path.get("status") == "failed" else "completed",
         "missing_ball_execution_path": {
             "status": "pending_api_required" if missing_ball_actions else "skipped",
             "approval_ids": _approval_ids(missing_ball_actions),
@@ -710,7 +721,64 @@ def _selected_approval_dispatcher_stage(approved_payload: dict[str, Any]) -> dic
             "approval_ids": _approval_ids(noop_actions),
             "executor": "missing_ball_resolution",
         },
+        "noise_candidate_execution_path": noise_path,
         "unsupported_actions": unsupported_actions,
+    }
+
+
+def _noise_candidate_execution_path(*, output_dir: Path, actions: list[dict[str, Any]], dry_run: bool) -> dict[str, Any]:
+    if not actions:
+        return {
+            "status": "skipped",
+            "approval_ids": [],
+            "candidate_ids": [],
+            "execution_status": "not_run",
+            "reason": "No selected noise cleanup approvals.",
+        }
+    approval_ids = _approval_ids(actions)
+    if dry_run:
+        return {
+            "status": "planned",
+            "approval_ids": approval_ids,
+            "candidate_ids": [_noise_candidate_id(action) for action in actions],
+            "execution_status": "not_run",
+            "reason": "Dry-run records selected noise cleanup approvals without writing candidate artifacts.",
+        }
+    reports: list[dict[str, Any]] = []
+    errors: list[dict[str, Any]] = []
+    for action in actions:
+        try:
+            reports.append(execute_noise_cleanup_candidate(output_dir, action))
+        except Exception as exc:  # pragma: no cover - defensive workflow reporting
+            errors.append(
+                {
+                    "approval_id": _action_approval_id(action),
+                    "candidate_id": _noise_candidate_id(action),
+                    "error": str(exc),
+                }
+            )
+    candidate_outputs = [
+        {
+            "id": report.get("candidate_id"),
+            "candidate_id": report.get("candidate_id"),
+            "problem_type": "noise",
+            "path": report.get("candidate_dir"),
+            "status": report.get("comparison_status"),
+        }
+        for report in reports
+        if isinstance(report.get("candidate_id"), str)
+    ]
+    comparison_reports = [{**report, "path": report.get("comparison_report")} for report in reports]
+    return {
+        "status": "failed" if errors else "succeeded",
+        "approval_ids": approval_ids,
+        "candidate_ids": [str(report.get("candidate_id")) for report in reports if isinstance(report.get("candidate_id"), str)],
+        "execution_status": "failed" if errors else "executed",
+        "candidate_outputs": candidate_outputs,
+        "comparison_reports": comparison_reports,
+        "errors": errors,
+        "runs_full_video_sahi": False,
+        "strategy": "bounded_noise_cleanup_candidate",
     }
 
 
@@ -834,12 +902,24 @@ def _final_artifact_manifest_stage(
         pending_candidates = [_pending_candidate_summary(action) for action in actions if _action_approval_id(action) in missing_ids]
     unsupported = dispatcher_stage.get("unsupported_actions")
     unsupported_candidates = unsupported if isinstance(unsupported, list) else []
+    noise_path = dispatcher_stage.get("noise_candidate_execution_path")
+    noise_candidate_outputs = (
+        noise_path.get("candidate_outputs", [])
+        if isinstance(noise_path, dict) and isinstance(noise_path.get("candidate_outputs"), list)
+        else []
+    )
+    noise_comparison_reports = (
+        noise_path.get("comparison_reports", [])
+        if isinstance(noise_path, dict) and isinstance(noise_path.get("comparison_reports"), list)
+        else []
+    )
     manifest = write_final_artifact_manifest(
         output_dir,
         baseline_output={"path": str(output_dir), "status": "baseline"},
-        candidate_outputs=[],
+        candidate_outputs=noise_candidate_outputs,
         final_artifacts=[],
         consumed_approvals=[action for action in actions if isinstance(action, dict)],
+        comparison_reports=noise_comparison_reports,
         quality_gate_status=quality_gate_summary,
         pending_candidates=pending_candidates,
         unsupported_candidates=unsupported_candidates,
@@ -920,6 +1000,18 @@ def _problem_type_for_action(approved_action: str) -> str:
     if approved_action in HIGHLIGHT_APPROVAL_ACTIONS:
         return "highlight"
     return "unknown"
+
+
+def _workflow_status(stages: list[dict[str, Any]]) -> str:
+    return "failed" if any(stage.get("status") == "failed" for stage in stages) else "completed"
+
+
+def _noise_candidate_id(action: dict[str, Any]) -> str | None:
+    value = action.get("candidate_id")
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    approval_id = _action_approval_id(action)
+    return f"noise-{approval_id}" if approval_id else None
 
 
 def _resolution_from_action(action: dict[str, Any]) -> dict[str, Any]:
@@ -1059,6 +1151,7 @@ def _produced_artifacts(output_dir: Path, *, extra_names: list[str]) -> list[str
         MISSING_BALL_RESOLUTION_NAME,
         FINAL_ARTIFACT_MANIFEST_NAME,
         QUALITY_GATE_REPORT_NAME,
+        "ai_candidate_registry.json",
         *extra_names,
     ]
     return [name for name in names if (output_dir / name).exists() or name in extra_names]

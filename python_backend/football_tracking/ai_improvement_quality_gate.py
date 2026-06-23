@@ -49,6 +49,7 @@ FAILURE_TAG_ALIASES = {
 }
 ACCEPTED_FALSE_POSITIVE_TAGS = set(FAILURE_TAG_ALIASES.values())
 APPROVAL_ACTIONS_THAT_CAN_COVER_MISSING_BALL = {"targeted_rerun", "localize_ball_roi"}
+NOISE_APPROVAL_ACTIONS_THAT_REQUIRE_COMPARISON = {"noise_filter_adjustment", "tighten_noise_filter", "reject_noise"}
 
 
 def build_track_hash_snapshot(output_dir: Path, stage_name: str) -> dict[str, Any]:
@@ -1094,6 +1095,13 @@ def _check_candidate_comparisons(
             mode=mode,
         )
     )
+    reports.extend(
+        _selected_noise_approval_missing_comparison_reports(
+            reports,
+            approved_actions=approved_actions,
+            mode=mode,
+        )
+    )
     status_counts = {status: 0 for status in CANDIDATE_COMPARISON_STATUSES}
     for report in reports:
         status = report.get("status")
@@ -1228,6 +1236,79 @@ def _report_covers_selected_missing_ball_approval(
         return False
     path = report.get("path")
     if not isinstance(path, str) or Path(path).name != "missing_ball_recovery_comparison.json":
+        return False
+    consumed = report.get("consumed_approval_ids")
+    if approval_id is None:
+        return True
+    return isinstance(consumed, list) and approval_id in {
+        str(item).strip() for item in consumed if isinstance(item, str) and item.strip()
+    }
+
+
+def _selected_noise_approval_missing_comparison_reports(
+    reports: list[dict[str, Any]],
+    *,
+    approved_actions: dict[str, Any] | None,
+    mode: str,
+) -> list[dict[str, Any]]:
+    if mode != "real" or not isinstance(approved_actions, dict) or approved_actions.get("status") != "loaded":
+        return []
+    missing_reports: list[dict[str, Any]] = []
+    for action in _approval_items(approved_actions.get("payload")):
+        if str(action.get("approved_action") or "") not in NOISE_APPROVAL_ACTIONS_THAT_REQUIRE_COMPARISON:
+            continue
+        candidate_id = str(action.get("candidate_id") or "").strip()
+        approval_id = str(action.get("approval_id") or "").strip() or None
+        if not candidate_id:
+            missing_reports.append(
+                {
+                    "path": None,
+                    "problem_type": "noise",
+                    "candidate_id": None,
+                    "approval_id": approval_id,
+                    "status": "unavailable",
+                    "failed_check_count": 0,
+                    "warning_count": 0,
+                    "unavailable_count": 1,
+                    "artifact_status": "selected_noise_approval_missing_candidate_id",
+                    "reason": "selected noise approval must include explicit candidate_id",
+                }
+            )
+            continue
+        if candidate_id and any(
+            _report_covers_selected_noise_approval(report, candidate_id=candidate_id, approval_id=approval_id)
+            for report in reports
+        ):
+            continue
+        missing_reports.append(
+            {
+                "path": None,
+                "problem_type": "noise",
+                "candidate_id": candidate_id or None,
+                "approval_id": approval_id,
+                "status": "unavailable",
+                "failed_check_count": 0,
+                "warning_count": 0,
+                "unavailable_count": 1,
+                "artifact_status": "selected_noise_approval_missing_comparison",
+                "reason": "selected noise approval has no noise_candidate_comparison.json",
+            }
+        )
+    return missing_reports
+
+
+def _report_covers_selected_noise_approval(
+    report: dict[str, Any],
+    *,
+    candidate_id: str,
+    approval_id: str | None,
+) -> bool:
+    if report.get("problem_type") != "noise":
+        return False
+    if str(report.get("candidate_id") or "").strip() != candidate_id:
+        return False
+    path = report.get("path")
+    if not isinstance(path, str) or Path(path).name != "noise_candidate_comparison.json":
         return False
     consumed = report.get("consumed_approval_ids")
     if approval_id is None:

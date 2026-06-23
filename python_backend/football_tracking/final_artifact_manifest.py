@@ -98,6 +98,8 @@ def build_final_artifact_manifest(
             "pending_candidate_count": len(pending),
             "unsupported_candidate_count": len(unsupported),
             "resolved_noop_candidate_count": len(resolved_noop),
+            "comparison_counts_by_problem_type": _counts_by_key(comparisons, "problem_type"),
+            "comparison_counts_by_status": _counts_by_key(comparisons, "status"),
             "warning_count": len(manifest_warnings),
         },
     }
@@ -179,6 +181,17 @@ def _comparison_status_by_candidate(comparisons: list[dict[str, Any]]) -> dict[s
         if existing is None or STATUS_RANK[status] > STATUS_RANK[existing]:
             statuses[candidate_id] = status
     return statuses
+
+
+def _counts_by_key(items: list[dict[str, Any]], key: str) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for item in items:
+        value = item.get(key)
+        if not isinstance(value, str) or not value.strip():
+            continue
+        normalized = value.strip()
+        counts[normalized] = counts.get(normalized, 0) + 1
+    return dict(sorted(counts.items()))
 
 
 def _quality_gate_status(value: dict[str, Any] | str | None) -> dict[str, Any]:

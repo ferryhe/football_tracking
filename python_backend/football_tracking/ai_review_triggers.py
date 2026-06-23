@@ -13,6 +13,7 @@ EVENT_PRIORITIES = {
     "large_jump": "high",
     "candidate_ambiguity": "medium",
     "postprocess_action": "medium",
+    "short_tracklet": "medium",
 }
 LONG_LOST_GAP_MIN_FRAMES = 8
 DENSE_REVIEW_EVENT_MIN_COUNT = 5

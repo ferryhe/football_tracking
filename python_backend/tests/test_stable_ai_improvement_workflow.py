@@ -244,16 +244,17 @@ class StableAiImprovementWorkflowTests(unittest.TestCase):
         self.assertEqual("fail", report["quality_gate"]["summary"]["status"])
         self.assertEqual("skipped", _stage(report, "missing_ball_noop_resolution")["status"])
 
-    def test_dispatcher_records_unsupported_selected_candidate_types_without_child_execution(self) -> None:
+    def test_dispatcher_executes_selected_noise_candidate_and_keeps_other_types_unsupported(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:
             output_dir = Path(temp_name)
-            _write_tracks(output_dir)
+            _write_noise_tracks(output_dir)
+            _write_packet(output_dir, packet_id="packet_noise", start=0, end=79)
             approved_path = output_dir / "approved_actions.json"
             _write_json(
                 approved_path,
                 {
                     "approved_actions": [
-                        _noise_approval("noise_1", start=10, end=20),
+                        _noise_approval("noise_1", start=0, end=79),
                         _tracking_rerun_before_follow_cam_approval("camera_1", start=30, end=40),
                         _highlight_approval("highlight_1", start=50, end=70),
                     ]
@@ -266,21 +267,108 @@ class StableAiImprovementWorkflowTests(unittest.TestCase):
                 approved_actions_path=approved_path,
                 approval_ids=["noise_1", "camera_1", "highlight_1"],
             )
+            candidate_cleaned_exists = (
+                output_dir / "ai_candidates" / "noise" / "noise-candidate-1" / "ball_track.cleaned.csv"
+            ).exists()
+            registry = json.loads((output_dir / "ai_candidate_registry.json").read_text(encoding="utf-8"))
+            manifest = json.loads(
+                (output_dir / "final_ai_improvement_artifact_manifest.json").read_text(encoding="utf-8")
+            )
 
         dispatcher = _stage(report, "selected_approval_dispatcher")
         self.assertEqual("completed", dispatcher["status"])
         self.assertEqual([], dispatcher["missing_ball_execution_path"]["approval_ids"])
         self.assertEqual("skipped", dispatcher["missing_ball_execution_path"]["status"])
+        self.assertEqual("succeeded", dispatcher["noise_candidate_execution_path"]["status"])
+        self.assertEqual(["noise_1"], dispatcher["noise_candidate_execution_path"]["approval_ids"])
+        self.assertEqual(["noise-candidate-1"], dispatcher["noise_candidate_execution_path"]["candidate_ids"])
         self.assertEqual(
-            ["noise_1", "camera_1", "highlight_1"],
+            ["camera_1", "highlight_1"],
             [item["approval_id"] for item in dispatcher["unsupported_actions"]],
         )
         self.assertTrue(
             all(item["reason"] == "unsupported_candidate_type" for item in dispatcher["unsupported_actions"])
         )
+        self.assertTrue(candidate_cleaned_exists)
+        self.assertEqual(1, registry["summary"]["counts_by_problem_type"]["noise"])
+        self.assertEqual(1, manifest["summary"]["candidate_output_count"])
+        self.assertEqual("noise-candidate-1", manifest["candidate_outputs"][0]["candidate_id"])
+        self.assertEqual("pass", manifest["comparison_reports"][0]["status"])
+        self.assertNotEqual("invalid_checks", manifest["comparison_reports"][0]["artifact_status"])
         self.assertEqual("skipped", _stage(report, "approved_child_rerun")["status"])
         self.assertEqual("skipped", _stage(report, "follow_cam_rerender_plan")["status"])
         self.assertEqual("skipped", _stage(report, "highlight_render")["status"])
+
+    def test_noise_approval_file_presence_alone_does_not_execute_candidate(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_noise_tracks(output_dir)
+            approved_path = output_dir / "approved_actions.json"
+            _write_json(
+                approved_path,
+                {"approved_actions": [_noise_approval("noise_1", start=0, end=79)]},
+            )
+
+            report = run_workflow(output_dir=output_dir, dry_run=False, approved_actions_path=approved_path)
+            candidate_dir_exists = (output_dir / "ai_candidates" / "noise" / "noise-candidate-1").exists()
+
+        dispatcher = _stage(report, "selected_approval_dispatcher")
+        self.assertEqual("skipped", dispatcher["noise_candidate_execution_path"]["status"])
+        self.assertFalse(candidate_dir_exists)
+
+    def test_selected_noise_approval_missing_candidate_id_fails_without_candidate_artifacts(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_noise_tracks(output_dir)
+            _write_packet(output_dir, packet_id="packet_noise", start=0, end=79)
+            approved_path = output_dir / "approved_actions.json"
+            approval = _noise_approval("noise_1", start=0, end=79)
+            approval.pop("candidate_id")
+            _write_json(approved_path, {"approved_actions": [approval]})
+
+            report = run_workflow(
+                output_dir=output_dir,
+                dry_run=False,
+                approved_actions_path=approved_path,
+                approval_ids=["noise_1"],
+            )
+            candidate_parent_exists = (output_dir / "ai_candidates" / "noise").exists()
+            quality_gate = json.loads((output_dir / "ai_improvement_quality_gate.json").read_text(encoding="utf-8"))
+
+        dispatcher = _stage(report, "selected_approval_dispatcher")
+        self.assertEqual("failed", dispatcher["status"])
+        self.assertEqual("failed", dispatcher["noise_candidate_execution_path"]["status"])
+        self.assertIn("candidate_id", dispatcher["noise_candidate_execution_path"]["errors"][0]["error"])
+        self.assertFalse(candidate_parent_exists)
+        self.assertEqual("failed", report["quality_gate"]["summary"]["workflow_status"])
+        self.assertEqual("failed", quality_gate["summary"]["workflow_status"])
+
+    def test_main_returns_failure_when_selected_noise_execution_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_noise_tracks(output_dir)
+            _write_packet(output_dir, packet_id="packet_noise", start=0, end=79)
+            approved_path = output_dir / "approved_actions.json"
+            approval = _noise_approval("noise_1", start=0, end=79)
+            approval.pop("candidate_id")
+            _write_json(approved_path, {"approved_actions": [approval]})
+
+            stdout = io.StringIO()
+            with contextlib.redirect_stdout(stdout):
+                exit_code = main(
+                    [
+                        "--output-dir",
+                        temp_name,
+                        "--approved-actions-path",
+                        str(approved_path),
+                        "--approval-ids",
+                        "noise_1",
+                    ]
+                )
+
+        self.assertEqual(1, exit_code)
+        printed = json.loads(stdout.getvalue())
+        self.assertEqual("failed", printed["stable_ai_improvement_workflow"]["workflow_status"])
 
     def test_selected_not_visible_noop_writes_resolution_only_for_explicit_ids(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:
@@ -994,6 +1082,7 @@ def _noise_approval(approval_id: str, *, start: int, end: int) -> dict[str, obje
     return {
         "approval_id": approval_id,
         "improvement_id": "noise_imp_1",
+        "candidate_id": "noise-candidate-1",
         "problem_type": "noise",
         "approved_action": "noise_filter_adjustment",
         "start_frame": start,
@@ -1025,6 +1114,37 @@ def _write_tracks(output_dir: Path) -> None:
     text = "Frame,X,Y,Status\n1,10,20,Detected\n"
     (output_dir / "ball_track.csv").write_text(text, encoding="utf-8")
     (output_dir / "ball_track.cleaned.csv").write_text(text, encoding="utf-8")
+
+
+def _write_noise_tracks(output_dir: Path) -> None:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    rows = ["Frame,X,Y,Confidence,Status"]
+    detected_ranges = [(10, 24), (30, 31), (40, 40), (50, 51)]
+    for frame in range(80):
+        detected = any(start <= frame <= end for start, end in detected_ranges)
+        if detected:
+            rows.append(f"{frame},{100 + frame},{200 + frame},0.90,Detected")
+        else:
+            rows.append(f"{frame},,,0.00,Lost")
+    text = "\n".join(rows) + "\n"
+    (output_dir / "ball_track.csv").write_text(text, encoding="utf-8")
+    (output_dir / "ball_track.cleaned.csv").write_text(text, encoding="utf-8")
+    _write_json(
+        output_dir / "ball_audit.json",
+        {
+            "summary": {"review_event_count": 3},
+            "review_events": [
+                {
+                    "type": "short_tracklet",
+                    "start_frame": start,
+                    "end_frame": end,
+                    "frame_count": end - start + 1,
+                    "reason": "short false-positive island",
+                }
+                for start, end in detected_ranges[1:]
+            ],
+        },
+    )
 
 
 def _write_ai_report(output_dir: Path) -> None:
