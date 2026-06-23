@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import Literal, TypeAlias
 
+from football_tracking.ai_improvement_prompt_contract import AI_IMPROVEMENT_PROBLEM_TYPES, PUBLIC_EXECUTABLE_ACTIONS
+
 AIFailureTag: TypeAlias = Literal[
     "ball_lost",
     "foot_confusion",
@@ -59,3 +61,5 @@ AI_FAILURE_TAGS = set(AIFailureTag.__args__)
 AI_ROOT_CAUSE_MODULES = set(AIRootCauseModule.__args__)
 AI_RECOMMENDED_ACTIONS = set(AIRecommendedAction.__args__)
 AI_CLIP_ACTIONS = set(AIClipAction.__args__)
+AI_PROBLEM_TYPES = set(AI_IMPROVEMENT_PROBLEM_TYPES)
+AI_EXECUTABLE_ACTIONS = set(PUBLIC_EXECUTABLE_ACTIONS)

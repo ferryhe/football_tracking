@@ -10,6 +10,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from football_tracking.ai_contracts import AI_RECOMMENDED_ACTIONS
 from football_tracking.ai_improvement import (
     _instructions,
     approve_ai_improvement_actions,
@@ -18,7 +19,6 @@ from football_tracking.ai_improvement import (
     compact_ai_improvement_summary,
     write_ai_improvement_report,
 )
-from football_tracking.ai_contracts import AI_RECOMMENDED_ACTIONS
 from football_tracking.api.ai_provider import OpenAIProviderSettings, OpenAIResponsesClient
 from football_tracking.high_recall_windows import build_high_recall_windows
 from football_tracking.metrics import build_metrics_report, stats_from_metrics_report
@@ -255,6 +255,117 @@ class AiImprovementTests(unittest.TestCase):
         self.assertEqual([], improvement["candidate_contract"]["missing_fields"])
         self.assertEqual(1, report["summary"]["executable_candidate_count"])
 
+    def test_legacy_targeted_rerun_input_is_canonicalized_for_public_executable_output(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_minimal_artifacts(output_dir)
+            client = _FakeImprovementClient(
+                {
+                    "summary": {"status": "needs_rerun", "primary_issue": "tracking"},
+                    "improvements": [_candidate_ready_targeted_rerun()],
+                }
+            )
+
+            report = build_ai_improvement_report(
+                output_dir,
+                client=client,
+                candidate_intent="prepare_approved_candidates",
+            )
+            _write_json(output_dir / "ai_improvement_report.json", report)
+            artifact = approve_ai_improvement_actions(
+                output_dir,
+                run_id="run_123",
+                improvement_ids=["imp_candidate_ready"],
+            )
+
+        improvement = report["improvements"][0]
+        self.assertTrue(improvement["executable"])
+        self.assertEqual("rerun_ball_window", improvement["recommended_action"])
+        self.assertEqual("targeted_rerun", improvement["legacy_recommended_action"])
+        self.assertEqual("rerun_ball_window", improvement["candidate_contract"]["approved_action"])
+        self.assertEqual("rerun_ball_window", artifact["approved_actions"][0]["approved_action"])
+        self.assertEqual("targeted_rerun", artifact["approved_actions"][0]["legacy_approved_action"])
+
+    def test_action_problem_type_mismatch_is_review_only_and_approval_rejects_it(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_minimal_artifacts(output_dir)
+            payload = _candidate_ready_targeted_rerun()
+            payload["recommended_action"] = "rerun_ball_window"
+            payload["problem_type"] = "noise"
+            client = _FakeImprovementClient(
+                {
+                    "summary": {"status": "needs_rerun", "primary_issue": "tracking"},
+                    "improvements": [payload],
+                }
+            )
+
+            report = build_ai_improvement_report(
+                output_dir,
+                client=client,
+                candidate_intent="prepare_approved_candidates",
+            )
+            _write_json(output_dir / "ai_improvement_report.json", report)
+
+            with self.assertRaisesRegex(ValueError, "problem_type"):
+                approve_ai_improvement_actions(output_dir, run_id="run_123", improvement_ids=["imp_candidate_ready"])
+
+        improvement = report["improvements"][0]
+        self.assertFalse(improvement["executable"])
+        self.assertEqual("review_only", improvement["candidate_intent"])
+        self.assertIn("problem_type_mismatch", improvement["candidate_contract"]["missing_fields"])
+
+    def test_candidate_contract_accepts_traceable_evidence_id_without_evidence_array(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_minimal_artifacts(output_dir)
+            payload = _candidate_ready_targeted_rerun()
+            payload["recommended_action"] = "rerun_ball_window"
+            payload.pop("evidence", None)
+            client = _FakeImprovementClient(
+                {
+                    "summary": {"status": "needs_rerun", "primary_issue": "tracking"},
+                    "improvements": [payload],
+                }
+            )
+
+            report = build_ai_improvement_report(
+                output_dir,
+                client=client,
+                candidate_intent="prepare_approved_candidates",
+            )
+
+        improvement = report["improvements"][0]
+        self.assertTrue(improvement["executable"])
+        self.assertEqual([], improvement["candidate_contract"]["missing_fields"])
+
+    def test_follow_cam_candidate_contract_requires_camera_motion_event_id(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_minimal_artifacts(output_dir)
+            payload = _valid_improvement_for_action("adjust_follow_cam")
+            payload.pop("camera_motion_event_id", None)
+            payload["problem_type"] = "follow_cam"
+            payload["source_packet_id"] = "packet_001"
+            payload["expected_artifact"] = {"name": "follow_cam.mp4"}
+            payload["comparison_criteria"] = {"report": "follow_cam_candidate_comparison.json"}
+            client = _FakeImprovementClient(
+                {
+                    "summary": {"status": "needs_rerun", "primary_issue": "camera_motion"},
+                    "improvements": [payload],
+                }
+            )
+
+            report = build_ai_improvement_report(
+                output_dir,
+                client=client,
+                candidate_intent="prepare_approved_candidates",
+            )
+
+        improvement = report["improvements"][0]
+        self.assertFalse(improvement["executable"])
+        self.assertIn("camera_motion_event_id", improvement["candidate_contract"]["missing_fields"])
+
     def test_existing_ai_recommended_actions_remain_accepted(self) -> None:
         for action in sorted(AI_RECOMMENDED_ACTIONS):
             with self.subTest(action=action), tempfile.TemporaryDirectory() as temp_name:
@@ -269,7 +380,10 @@ class AiImprovementTests(unittest.TestCase):
                 report = build_ai_improvement_report(output_dir, client=client)
 
             self.assertNotEqual("error", report["summary"]["status"], report.get("error"))
-            self.assertEqual(action, report["improvements"][0]["recommended_action"])
+            expected_action = "rerun_ball_window" if action == "targeted_rerun" else action
+            self.assertEqual(expected_action, report["improvements"][0]["recommended_action"])
+            if action == "targeted_rerun":
+                self.assertEqual("targeted_rerun", report["improvements"][0]["legacy_recommended_action"])
 
     def test_write_ai_improvement_report_handles_missing_artifacts(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:
@@ -304,10 +418,7 @@ class AiImprovementTests(unittest.TestCase):
                 encoding="utf-8",
             )
             raw_path = output_dir / "ball_track.csv"
-            before = {
-                path.name: (_hash_file(path), path.stat().st_mtime_ns)
-                for path in (raw_path, cleaned_path)
-            }
+            before = {path.name: (_hash_file(path), path.stat().st_mtime_ns) for path in (raw_path, cleaned_path)}
             client = _FakeImprovementClient(
                 {
                     "summary": {"status": "needs_rerun", "primary_issue": "tracking"},
@@ -346,10 +457,7 @@ class AiImprovementTests(unittest.TestCase):
 
             write_ai_improvement_report(output_dir, client=client, model="gpt-improve")
 
-            after = {
-                path.name: (_hash_file(path), path.stat().st_mtime_ns)
-                for path in (raw_path, cleaned_path)
-            }
+            after = {path.name: (_hash_file(path), path.stat().st_mtime_ns) for path in (raw_path, cleaned_path)}
             artifact_exists = {
                 "report": (output_dir / "ai_improvement_report.json").exists(),
                 "config_patch": (output_dir / "ai_improvement_approved_config_patch.json").exists(),
@@ -587,7 +695,9 @@ class AiImprovementTests(unittest.TestCase):
                                 "description": "right channel near the player cluster",
                                 "confidence": 0.7,
                             },
-                            "evidence": [{"source_packet_id": "packet_001", "reason": "lost gap overlaps an active play packet"}],
+                            "evidence": [
+                                {"source_packet_id": "packet_001", "reason": "lost gap overlaps an active play packet"}
+                            ],
                             "confidence": 0.82,
                         }
                     ],
@@ -731,7 +841,9 @@ class AiImprovementTests(unittest.TestCase):
                             "rerun_scope": {"start_frame": 10, "end_frame": 30},
                             "source_packet_id": "packet_001",
                             "likely_ball_region": {"description": "not visible", "confidence": 0.0},
-                            "evidence": [{"source_packet_id": "packet_001", "reason": "packet decision marks ball_not_visible"}],
+                            "evidence": [
+                                {"source_packet_id": "packet_001", "reason": "packet decision marks ball_not_visible"}
+                            ],
                             "confidence": 0.6,
                         }
                     ],
@@ -881,7 +993,9 @@ class AiImprovementTests(unittest.TestCase):
         self.assertEqual("needs_rerun", report["summary"]["status"])
         self.assertEqual("localize_ball_roi", report["improvements"][0]["recommended_action"])
         self.assertEqual(4300.0, report["improvements"][0]["local_search_roi"]["x"])
-        self.assertEqual("ai_visual_review", report["improvements"][0]["evidence_payload"]["local_search_roi_provenance"]["source"])
+        self.assertEqual(
+            "ai_visual_review", report["improvements"][0]["evidence_payload"]["local_search_roi_provenance"]["source"]
+        )
 
     def test_localize_ball_roi_with_packet_but_no_usable_visual_evidence_becomes_error_report(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:
@@ -1513,7 +1627,12 @@ class AiImprovementTests(unittest.TestCase):
                     "packets": [
                         {
                             "packet_id": f"packet_{index:03d}",
-                            "source": {"kind": "trigger", "type": "lost_gap", "start_frame": index * 10, "end_frame": index * 10 + 2},
+                            "source": {
+                                "kind": "trigger",
+                                "type": "lost_gap",
+                                "start_frame": index * 10,
+                                "end_frame": index * 10 + 2,
+                            },
                             "window": {"start_frame": index * 10, "end_frame": index * 10 + 2},
                             **(
                                 {
@@ -1719,7 +1838,10 @@ class AiImprovementTests(unittest.TestCase):
                     "reason": "Long gap appears after the prompt item limit.",
                 }
             )
-            _write_json(output_dir / "ball_audit.json", {"summary": {"review_event_count": len(events)}, "review_events": events})
+            _write_json(
+                output_dir / "ball_audit.json",
+                {"summary": {"review_event_count": len(events)}, "review_events": events},
+            )
             _write_json(
                 output_dir / "review_packets.json",
                 {
@@ -2421,7 +2543,9 @@ class AiImprovementTests(unittest.TestCase):
                             "rerun_scope": {"start_frame": 10, "end_frame": 30},
                             "source_packet_id": "packet_001",
                             "likely_ball_region": {"description": "not visible", "confidence": 0.0},
-                            "evidence": [{"source_packet_id": "packet_001", "reason": "packet decision marks ball_not_visible"}],
+                            "evidence": [
+                                {"source_packet_id": "packet_001", "reason": "packet decision marks ball_not_visible"}
+                            ],
                             "confidence": 0.6,
                         }
                     ],
@@ -2450,7 +2574,7 @@ class AiImprovementTests(unittest.TestCase):
                                 "clip": str((output_dir / "packet_001.mp4").resolve()),
                             },
                         }
-                    ]
+                    ],
                 },
             )
             client = _FakeImprovementClient({"summary": {"status": "ok"}, "improvements": []})
@@ -2471,7 +2595,8 @@ class AiImprovementTests(unittest.TestCase):
 
         self.assertEqual([], client.calls)
         self.assertEqual("needs_rerun", report["summary"]["status"])
-        self.assertEqual("targeted_rerun", report["improvements"][0]["recommended_action"])
+        self.assertEqual("rerun_ball_window", report["improvements"][0]["recommended_action"])
+        self.assertEqual("targeted_rerun", report["improvements"][0]["legacy_recommended_action"])
         self.assertIn("rerun_scope", report["improvements"][0])
         self.assertEqual("not visible", report["improvements"][0]["likely_ball_region"]["description"])
         self.assertNotIn("local_search_roi", report["improvements"][0])
@@ -2606,7 +2731,9 @@ class AiImprovementTests(unittest.TestCase):
 
         self.assertEqual("needs_rerun", report["summary"]["status"])
         self.assertNotIn("local_search_roi", report["improvements"][0])
-        self.assertTrue(any("ignored invalid ai_visual_review local_search_roi" in warning for warning in report["warnings"]))
+        self.assertTrue(
+            any("ignored invalid ai_visual_review local_search_roi" in warning for warning in report["warnings"])
+        )
 
     def test_visual_review_not_visible_does_not_create_fake_roi(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:
@@ -3110,7 +3237,9 @@ class AiImprovementTests(unittest.TestCase):
                     }
                 },
             )
-            patch_artifact = json.loads((output_dir / "ai_improvement_approved_config_patch.json").read_text(encoding="utf-8"))
+            patch_artifact = json.loads(
+                (output_dir / "ai_improvement_approved_config_patch.json").read_text(encoding="utf-8")
+            )
 
         self.assertEqual({"selection": {"min_accept_score": 0.6}}, artifact["approved_actions"][0]["config_patch"])
         self.assertEqual("noise_candidate_001", artifact["approved_actions"][0]["candidate_id"])
@@ -3142,6 +3271,8 @@ class AiImprovementTests(unittest.TestCase):
                             "end_frame": 40,
                             "diagnosis": "Stable tracking but follow-cam jumped.",
                             "recommended_action": "adjust_follow_cam",
+                            "candidate_id": "follow_cam_candidate_001",
+                            "camera_motion_event_id": "cam_event_001",
                             "config_patch": {
                                 "follow_cam": {"glide_pan_smoothing": 0.2},
                                 "detector": {"confidence_threshold": 0.01},
@@ -3192,6 +3323,8 @@ class AiImprovementTests(unittest.TestCase):
                             "end_frame": 42,
                             "diagnosis": "Camera jump is track-driven.",
                             "recommended_action": "tracking_rerun_before_follow_cam",
+                            "candidate_id": "follow_cam_candidate_001",
+                            "camera_motion_event_id": "cam_event_001",
                             "rerun_scope": {"start_frame": 28, "end_frame": 54},
                             "confidence": 0.8,
                         }
@@ -3229,6 +3362,7 @@ class AiImprovementTests(unittest.TestCase):
                             "end_frame": 40,
                             "diagnosis": "Stable tracking but follow-cam jumped.",
                             "recommended_action": "adjust_follow_cam",
+                            "candidate_id": "follow_cam_candidate_adjust",
                             "config_patch": {"follow_cam": {"glide_pan_smoothing": 0.2}},
                             "camera_motion_event_id": "cam_event_001",
                             "confidence": 0.7,
@@ -3243,6 +3377,7 @@ class AiImprovementTests(unittest.TestCase):
                             "end_frame": 46,
                             "diagnosis": "Camera jump is track-driven.",
                             "recommended_action": "tracking_rerun_before_follow_cam",
+                            "candidate_id": "follow_cam_candidate_track",
                             "rerun_scope": {"start_frame": 32, "end_frame": 58},
                             "camera_motion_event_id": "cam_event_002",
                             "confidence": 0.8,
@@ -3387,6 +3522,7 @@ class AiImprovementTests(unittest.TestCase):
                             "diagnosis": "Missing suggested window.",
                             "recommended_action": "render_suggested_highlight",
                             "candidate_id": "candidate_001",
+                            "event_candidate_id": "cleaned:shot_candidate:10-20",
                             "confidence": 0.7,
                         }
                     ],
@@ -3438,7 +3574,8 @@ class AiImprovementTests(unittest.TestCase):
                             "root_cause_module": "event_scoring",
                             "diagnosis": "Trim the tail too aggressively.",
                             "recommended_action": "render_suggested_highlight",
-                            "candidate_id": "cleaned:shot_candidate:10-20",
+                            "candidate_id": "highlight_candidate_001",
+                            "event_candidate_id": "cleaned:shot_candidate:10-20",
                             "suggested_window": {"start_frame": 10, "end_frame": 50},
                             "clip_action": "trim_tail",
                             "confidence": 0.8,
@@ -3491,7 +3628,8 @@ class AiImprovementTests(unittest.TestCase):
                             "root_cause_module": "event_scoring",
                             "diagnosis": "Extend to the final source frame; no more tail exists.",
                             "recommended_action": "render_suggested_highlight",
-                            "candidate_id": "cleaned:shot_candidate:10-20",
+                            "candidate_id": "highlight_candidate_001",
+                            "event_candidate_id": "cleaned:shot_candidate:10-20",
                             "suggested_window": {"start_frame": 0, "end_frame": 50},
                             "clip_action": "extend_tail",
                             "confidence": 0.8,
@@ -3537,7 +3675,8 @@ class AiImprovementTests(unittest.TestCase):
                             "root_cause_module": "event_scoring",
                             "diagnosis": "Suggests frames beyond the source video.",
                             "recommended_action": "render_suggested_highlight",
-                            "candidate_id": "cleaned:shot_candidate:10-20",
+                            "candidate_id": "highlight_candidate_001",
+                            "event_candidate_id": "cleaned:shot_candidate:10-20",
                             "suggested_window": {"start_frame": 0, "end_frame": 999},
                             "clip_action": "extend_tail",
                             "confidence": 0.8,
@@ -3551,6 +3690,45 @@ class AiImprovementTests(unittest.TestCase):
 
         self.assertEqual("error", report["summary"]["status"])
         self.assertIn("source video end", report["error"])
+
+    def test_approving_highlight_action_preserves_event_candidate_id(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_minimal_artifacts(output_dir)
+            _write_json(
+                output_dir / "ai_improvement_report.json",
+                {
+                    "schema_version": "1.0",
+                    "generated_at": "2026-06-22T00:00:00+00:00",
+                    "model": "gpt-improve",
+                    "summary": {"status": "needs_rerun"},
+                    "improvements": [
+                        {
+                            "id": "imp_highlight",
+                            "priority": "P1",
+                            "area": "highlights",
+                            "failure_tags": ["post_roll_too_short"],
+                            "root_cause_module": "event_scoring",
+                            "diagnosis": "Extend result tail.",
+                            "recommended_action": "render_suggested_highlight",
+                            "problem_type": "highlight",
+                            "candidate_id": "highlight_candidate_001",
+                            "event_candidate_id": "cleaned:shot_candidate:10-20",
+                            "suggested_window": {"start_frame": 0, "end_frame": 45},
+                            "clip_action": "extend_tail",
+                            "expected_artifact": {"name": "highlight.mp4"},
+                            "comparison_criteria": {"report": "highlight_candidate_comparison.json"},
+                            "confidence": 0.8,
+                        }
+                    ],
+                },
+            )
+
+            artifact = approve_ai_improvement_actions(output_dir, run_id="run_123", improvement_ids=["imp_highlight"])
+
+        action = artifact["approved_actions"][0]
+        self.assertEqual("highlight_candidate_001", action["candidate_id"])
+        self.assertEqual("cleaned:shot_candidate:10-20", action["event_candidate_id"])
 
     def test_approving_highlight_action_fails_fast_when_event_candidates_missing_or_corrupt(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:
@@ -3571,7 +3749,8 @@ class AiImprovementTests(unittest.TestCase):
                             "root_cause_module": "event_scoring",
                             "diagnosis": "Extend result tail.",
                             "recommended_action": "render_suggested_highlight",
-                            "candidate_id": "cleaned:shot_candidate:10-20",
+                            "candidate_id": "highlight_candidate_001",
+                            "event_candidate_id": "cleaned:shot_candidate:10-20",
                             "suggested_window": {"start_frame": 0, "end_frame": 40},
                             "clip_action": "extend_tail",
                             "confidence": 0.8,
@@ -3823,6 +4002,7 @@ def _write_minimal_artifacts(output_dir: Path) -> None:
             ],
         },
     )
+    _write_camera_motion_event(output_dir, frame=40, severity="warn", max_step_px=110.0)
 
 
 def _write_long_lost_gap_review_inputs(output_dir: Path, *, start: int, end: int, total_frames: int) -> None:
@@ -4054,6 +4234,7 @@ def _valid_improvement_for_action(action: str, *, candidate_id: str = "candidate
                 "failure_tags": ["post_roll_too_short"],
                 "root_cause_module": "event_scoring",
                 "candidate_id": candidate_id,
+                "event_candidate_id": "cleaned:shot_candidate:10-20",
                 "suggested_window": {"start_frame": 0, "end_frame": 45},
                 "clip_action": "extend_tail",
             }
@@ -4064,6 +4245,8 @@ def _valid_improvement_for_action(action: str, *, candidate_id: str = "candidate
                 "area": "camera_motion",
                 "failure_tags": ["camera_catchup_spike"],
                 "root_cause_module": "follow_cam",
+                "candidate_id": candidate_id,
+                "camera_motion_event_id": "cam_event_001",
                 "config_patch": {"follow_cam": {"glide_pan_smoothing": 0.18}},
             }
         )
@@ -4073,6 +4256,8 @@ def _valid_improvement_for_action(action: str, *, candidate_id: str = "candidate
                 "area": "camera_motion",
                 "failure_tags": ["camera_catchup_spike"],
                 "root_cause_module": "follow_cam",
+                "candidate_id": candidate_id,
+                "camera_motion_event_id": "cam_event_001",
                 "rerun_scope": {"start_frame": 10, "end_frame": 30},
             }
         )
