@@ -1569,9 +1569,14 @@ def _has_uncovered_subwindow_explanation(item: dict[str, Any], uncovered_ranges:
     if not explanation_text:
         return False
     return all(
-        str(uncovered["start_frame"]) in explanation_text and str(uncovered["end_frame"]) in explanation_text
+        _text_mentions_frame_number(explanation_text, uncovered["start_frame"])
+        and _text_mentions_frame_number(explanation_text, uncovered["end_frame"])
         for uncovered in uncovered_ranges
     )
+
+
+def _text_mentions_frame_number(text: str, frame: int) -> bool:
+    return re.search(rf"(?<!\d){re.escape(str(frame))}(?!\d)", text) is not None
 
 
 def _windows_cover_uncovered_ranges(windows: list[dict[str, Any]], uncovered_ranges: list[dict[str, int]]) -> bool:

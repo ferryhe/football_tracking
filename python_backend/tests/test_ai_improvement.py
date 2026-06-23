@@ -1131,6 +1131,66 @@ class AiImprovementTests(unittest.TestCase):
         self.assertEqual("error", report["summary"]["status"])
         self.assertIn("explain uncovered subwindows", report["error"])
 
+    def test_uncovered_subwindow_explanation_requires_standalone_frame_numbers(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_minimal_artifacts(output_dir)
+            _write_json(
+                output_dir / "ball_audit.json",
+                {
+                    "summary": {"review_event_count": 1, "lost_gap_count": 1},
+                    "review_events": [
+                        {
+                            "type": "lost_gap",
+                            "severity": "fail",
+                            "start_frame": 10,
+                            "end_frame": 150,
+                            "frame_count": 141,
+                        }
+                    ],
+                },
+            )
+            _write_json(
+                output_dir / "review_packets.json",
+                {
+                    "summary": {"packet_count": 1},
+                    "packets": [
+                        {
+                            "packet_id": "packet_gap",
+                            "source": {"kind": "trigger", "type": "lost_gap", "start_frame": 10, "end_frame": 150},
+                            "window": {"start_frame": 10, "end_frame": 150},
+                        }
+                    ],
+                },
+            )
+            client = _FakeImprovementClient(
+                {
+                    "summary": {"status": "needs_rerun"},
+                    "improvements": [
+                        {
+                            "id": "imp_partial",
+                            "priority": "P0",
+                            "area": "tracking",
+                            "failure_tags": ["ball_lost"],
+                            "root_cause_module": "reacquisition",
+                            "diagnosis": "The explanation cites lookalike frame numbers, not the uncovered range.",
+                            "recommended_action": "targeted_rerun",
+                            "rerun_scope": {"start_frame": 10, "end_frame": 20},
+                            "source_packet_id": "packet_gap",
+                            "likely_ball_region": {"description": "right channel", "frame": 15, "confidence": 0.7},
+                            "coverage_explanation": "Frames 121-150 are not actionable in a different packet.",
+                            "evidence": [{"source_packet_id": "packet_gap"}],
+                            "confidence": 0.82,
+                        }
+                    ],
+                }
+            )
+
+            report = build_ai_improvement_report(output_dir, client=client)
+
+        self.assertEqual("error", report["summary"]["status"])
+        self.assertIn("explain uncovered subwindows", report["error"])
+
     def test_noise_filter_adjustment_requires_actionable_scope_and_patch(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:
             output_dir = Path(temp_name)
