@@ -49,6 +49,7 @@ def run_workflow(
     approved_actions_path: Path | None = None,
     approval_ids: list[str] | None = None,
     approved_action_id: str | None = None,
+    candidate_intent: str | None = None,
     quality_gate_mode: str | None = None,
     report_name: str = DEFAULT_REPORT_NAME,
 ) -> dict[str, Any]:
@@ -61,6 +62,8 @@ def run_workflow(
     gate_mode = quality_gate_mode or ("dry-run" if dry_run else "artifact-only")
     if gate_mode not in {"dry-run", "artifact-only", "real"}:
         raise ValueError("quality_gate_mode must be dry-run, artifact-only, or real")
+    if candidate_intent is not None and candidate_intent not in {"review_only", "suggest_candidates", "prepare_approved_candidates"}:
+        raise ValueError("candidate_intent must be review_only, suggest_candidates, or prepare_approved_candidates")
 
     approval_ids = _normalize_approval_ids(approval_ids or [])
     approved_action_id = _normalize_approval_id(approved_action_id)
@@ -109,6 +112,7 @@ def run_workflow(
             dry_run=dry_run,
             gate_mode=gate_mode,
             model=model,
+            candidate_intent=candidate_intent,
         )
     )
 
@@ -170,6 +174,7 @@ def run_workflow(
             "approved_actions_path": str(approved_actions_path) if approved_actions_path is not None else None,
             "approval_ids": approval_ids,
             "approved_action_id": approved_action_id,
+            "candidate_intent": candidate_intent,
             "approval_intent": approval_intent,
             "approval_selection": _approval_selection_summary(approved_payload, approved_actions_path=approved_actions_path),
         },
@@ -198,6 +203,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--approval-ids", default=None, help="Comma-separated or JSON-list approval ids.")
     parser.add_argument("--approved-action-id", default=None, help="Explicit approved highlight or camera follow-up action id.")
     parser.add_argument(
+        "--candidate-intent",
+        choices=("review_only", "suggest_candidates", "prepare_approved_candidates"),
+        default=None,
+        help="AI candidate intent, distinct from quality-gate mode.",
+    )
+    parser.add_argument(
         "--mode",
         choices=("dry-run", "artifact-only", "real"),
         default=None,
@@ -219,6 +230,7 @@ def main(argv: list[str] | None = None) -> int:
             approved_actions_path=args.approved_actions_path,
             approval_ids=approval_ids,
             approved_action_id=args.approved_action_id,
+            candidate_intent=args.candidate_intent,
             quality_gate_mode=args.mode,
             report_name=args.report_name,
         )
@@ -288,15 +300,33 @@ def _visual_review_stage(*, dry_run: bool) -> dict[str, Any]:
     }
 
 
-def _ai_improvement_stage(*, output_dir: Path, dry_run: bool, gate_mode: str, model: str | None) -> dict[str, Any]:
+def _ai_improvement_stage(
+    *,
+    output_dir: Path,
+    dry_run: bool,
+    gate_mode: str,
+    model: str | None,
+    candidate_intent: str | None,
+) -> dict[str, Any]:
     provider_dry_run = dry_run or gate_mode != "real"
-    report = write_ai_improvement_report(output_dir, model=model, dry_run=provider_dry_run)
+    resolved_candidate_intent = candidate_intent or ("review_only" if provider_dry_run else "suggest_candidates")
+    report = write_ai_improvement_report(
+        output_dir,
+        model=model,
+        dry_run=provider_dry_run,
+        candidate_intent=resolved_candidate_intent,
+    )
+    provider_mode = report.get("provider_mode") if isinstance(report.get("provider_mode"), str) else ("dry-run" if provider_dry_run else "real")
     return {
         "name": "ai_improvement",
         "status": "succeeded",
         "artifact": AI_IMPROVEMENT_REPORT_NAME,
         "dry_run": provider_dry_run,
+        "provider_dry_run": provider_dry_run,
+        "provider_mode": provider_mode,
+        "candidate_intent": report.get("candidate_intent") or resolved_candidate_intent,
         "model": report.get("model") or model,
+        "model_selection": report.get("model_selection") if isinstance(report.get("model_selection"), dict) else {},
         "summary": report.get("summary", {}),
     }
 

@@ -48,6 +48,43 @@ class StableAiImprovementWorkflowTests(unittest.TestCase):
         self.assertTrue(report["dry_run"])
         self.assertEqual("gpt-stable", report["model"])
         self.assertEqual(True, provider_calls[0]["dry_run"])
+        self.assertEqual("review_only", provider_calls[0]["candidate_intent"])
+        ai_stage = _stage(report, "ai_improvement")
+        self.assertTrue(ai_stage["provider_dry_run"])
+        self.assertEqual("dry-run", ai_stage["provider_mode"])
+        self.assertEqual("review_only", ai_stage["candidate_intent"])
+
+    def test_workflow_candidate_intent_is_independent_from_quality_gate_mode(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_tracks(output_dir)
+            provider_calls: list[dict[str, object]] = []
+
+            def fake_improvement(path: Path, **kwargs: object) -> dict[str, object]:
+                provider_calls.append(kwargs)
+                _write_ai_report(path)
+                return {
+                    "summary": {"status": "ok"},
+                    "candidate_intent": kwargs.get("candidate_intent"),
+                    "model": kwargs.get("model"),
+                    "improvements": [],
+                }
+
+            with patch(
+                "scripts.run_stable_ai_improvement_workflow.write_ai_improvement_report",
+                side_effect=fake_improvement,
+            ):
+                report = run_workflow(
+                    output_dir=output_dir,
+                    dry_run=False,
+                    quality_gate_mode="artifact-only",
+                    candidate_intent="prepare_approved_candidates",
+                )
+
+        self.assertEqual(True, provider_calls[0]["dry_run"])
+        self.assertEqual("prepare_approved_candidates", provider_calls[0]["candidate_intent"])
+        self.assertEqual("prepare_approved_candidates", report["inputs"]["candidate_intent"])
+        self.assertEqual("prepare_approved_candidates", _stage(report, "ai_improvement")["candidate_intent"])
 
     def test_workflow_records_before_and_after_hash_snapshots(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:

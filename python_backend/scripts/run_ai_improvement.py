@@ -15,6 +15,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--model", default=None, help="OpenAI model override.")
     parser.add_argument("--dry-run", action="store_true", help="Write deterministic suggestions without calling the model.")
     parser.add_argument("--max-items", type=int, default=20, help="Maximum items per artifact list to send in context.")
+    parser.add_argument(
+        "--candidate-intent",
+        choices=("review_only", "suggest_candidates", "prepare_approved_candidates"),
+        default=None,
+        help="AI candidate intent, distinct from --dry-run.",
+    )
     args = parser.parse_args(argv)
 
     if not args.output_dir.exists() or not args.output_dir.is_dir():
@@ -32,6 +38,7 @@ def main(argv: list[str] | None = None) -> int:
         model=args.model,
         dry_run=args.dry_run,
         max_items=args.max_items,
+        candidate_intent=args.candidate_intent,
     )
 
     metrics_path = args.output_dir / "metrics_report.json"
