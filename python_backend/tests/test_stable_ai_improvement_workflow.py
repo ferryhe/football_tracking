@@ -323,8 +323,13 @@ class StableAiImprovementWorkflowTests(unittest.TestCase):
         self.assertEqual("succeeded", dispatcher["noise_candidate_execution_path"]["status"])
         self.assertEqual(["noise_1"], dispatcher["noise_candidate_execution_path"]["approval_ids"])
         self.assertEqual(["noise-candidate-1"], dispatcher["noise_candidate_execution_path"]["candidate_ids"])
+        self.assertEqual("blocked", dispatcher["follow_cam_candidate_execution_path"]["status"])
         self.assertEqual(
-            ["camera_1", "highlight_1"],
+            "linked_tracking_candidate_evidence_required",
+            dispatcher["follow_cam_candidate_execution_path"]["reason"],
+        )
+        self.assertEqual(
+            ["highlight_1"],
             [item["approval_id"] for item in dispatcher["unsupported_actions"]],
         )
         self.assertTrue(
@@ -335,17 +340,25 @@ class StableAiImprovementWorkflowTests(unittest.TestCase):
         self.assertEqual(1, manifest["summary"]["candidate_output_count"])
         self.assertEqual("noise-candidate-1", manifest["candidate_outputs"][0]["candidate_id"])
         self.assertEqual([], manifest["final_selected_artifacts"])
-        self.assertEqual(["noise-candidate-1"], [item["candidate_id"] for item in manifest["pending_candidates"]])
+        self.assertEqual(
+            ["noise-candidate-1", "follow-cam-1"],
+            [item["candidate_id"] for item in manifest["pending_candidates"]],
+        )
+        self.assertEqual("blocked", manifest["pending_candidates"][1]["status"])
         self.assertEqual("pass", manifest["comparison_reports"][0]["status"])
         self.assertNotEqual("invalid_checks", manifest["comparison_reports"][0]["artifact_status"])
         self.assertEqual(report["quality_gate"]["summary"]["status"], manifest["quality_gate_status"]["status"])
         self.assertEqual("finalized", lifecycle["summary"]["stage"])
-        self.assertEqual("pass", lifecycle["summary"]["comparison_status"])
-        self.assertEqual("noise", lifecycle["candidates"][0]["problem_type"])
-        self.assertEqual("not_promoted", lifecycle["candidates"][0]["promotion_status"])
-        self.assertEqual(["noise_1"], lifecycle["candidates"][0]["approval_ids"])
+        self.assertEqual("unavailable", lifecycle["summary"]["comparison_status"])
+        lifecycle_by_id = {item["candidate_id"]: item for item in lifecycle["candidates"]}
+        self.assertEqual("noise", lifecycle_by_id["noise-candidate-1"]["problem_type"])
+        self.assertEqual("pass", lifecycle_by_id["noise-candidate-1"]["comparison_status"])
+        self.assertEqual("not_promoted", lifecycle_by_id["noise-candidate-1"]["promotion_status"])
+        self.assertEqual(["noise_1"], lifecycle_by_id["noise-candidate-1"]["approval_ids"])
+        self.assertEqual("follow_cam", lifecycle_by_id["follow-cam-1"]["problem_type"])
+        self.assertEqual(["camera_1"], lifecycle_by_id["follow-cam-1"]["approval_ids"])
         self.assertEqual("skipped", _stage(report, "approved_child_rerun")["status"])
-        self.assertEqual("skipped", _stage(report, "follow_cam_rerender_plan")["status"])
+        self.assertEqual("blocked", _stage(report, "follow_cam_rerender_plan")["status"])
         self.assertEqual("skipped", _stage(report, "highlight_render")["status"])
 
     def test_noise_approval_file_presence_alone_does_not_execute_candidate(self) -> None:
@@ -1212,7 +1225,7 @@ class StableAiImprovementWorkflowTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "non-empty string approval_id"):
                 run_workflow(output_dir=output_dir, dry_run=False, approved_actions_path=approved_path)
 
-    def test_tracking_rerun_before_follow_cam_is_recorded_unsupported_for_pr2(self) -> None:
+    def test_tracking_rerun_before_follow_cam_blocks_without_linked_tracking_evidence(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:
             output_dir = Path(temp_name)
             _write_tracks(output_dir)
@@ -1230,10 +1243,156 @@ class StableAiImprovementWorkflowTests(unittest.TestCase):
             )
 
         dispatcher = _stage(report, "selected_approval_dispatcher")
-        self.assertEqual(["camera_1"], [item["approval_id"] for item in dispatcher["unsupported_actions"]])
+        self.assertEqual([], dispatcher["unsupported_actions"])
+        follow_path = dispatcher["follow_cam_candidate_execution_path"]
+        self.assertEqual("blocked", follow_path["status"])
+        self.assertEqual(["camera_1"], follow_path["approval_ids"])
+        self.assertEqual("linked_tracking_candidate_evidence_required", follow_path["reason"])
         follow_stage = _stage(report, "follow_cam_rerender_plan")
-        self.assertEqual("skipped", follow_stage["status"])
-        self.assertEqual("unsupported_candidate_type", follow_stage["reason"])
+        self.assertEqual("blocked", follow_stage["status"])
+        self.assertEqual("linked_tracking_candidate_evidence_required", follow_stage["reason"])
+
+    def test_adjust_follow_cam_selected_action_executes_candidate_path(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            root = Path(temp_name)
+            output_dir = root / "outputs" / "baseline"
+            _write_tracks(output_dir)
+            input_video = root / "data" / "input.mp4"
+            config_path = _write_recovery_config(root, output_dir)
+            _write_json(
+                output_dir / "run_manifest.json",
+                {"config_path": str(config_path), "input_video": str(input_video)},
+            )
+            approved_path = output_dir / "approved_actions.json"
+            _write_json(
+                approved_path,
+                {"approved_actions": [_adjust_follow_cam_approval("camera_1")]},
+            )
+            expected_report = {
+                "candidate_id": "follow-cam-1",
+                "approval_id": "camera_1",
+                "problem_type": "follow_cam",
+                "candidate_dir": "ai_candidates/follow_cam/follow-cam-1",
+                "comparison_report": "ai_candidates/follow_cam/follow-cam-1/follow_cam_candidate_comparison.json",
+                "comparison_status": "pass",
+                "summary": {"status": "pass"},
+                "checks": [{"name": "ok", "status": "pass"}],
+                "candidate_artifacts": ["ai_candidates/follow_cam/follow-cam-1/follow_cam.mp4"],
+                "consumed_approval_ids": ["camera_1"],
+            }
+
+            with patch(
+                "scripts.run_stable_ai_improvement_workflow.execute_follow_cam_candidate",
+                return_value=expected_report,
+            ) as executor:
+                report = run_workflow(
+                    output_dir=output_dir,
+                    input_video=input_video,
+                    dry_run=False,
+                    approved_actions_path=approved_path,
+                    approval_ids=["camera_1"],
+                )
+            lifecycle = build_ai_candidate_lifecycle(output_dir)
+
+        executor.assert_called_once()
+        dispatcher = _stage(report, "selected_approval_dispatcher")
+        self.assertEqual([], dispatcher["unsupported_actions"])
+        follow_path = dispatcher["follow_cam_candidate_execution_path"]
+        self.assertEqual("succeeded", follow_path["status"])
+        self.assertEqual(["follow-cam-1"], follow_path["candidate_ids"])
+        follow_stage = _stage(report, "follow_cam_rerender_plan")
+        self.assertEqual("succeeded", follow_stage["status"])
+        manifest_stage = _stage(report, "final_artifact_manifest")
+        self.assertEqual(1, manifest_stage["summary"]["candidate_output_count"])
+        self.assertEqual("follow_cam", lifecycle["candidates"][0]["problem_type"])
+
+    def test_mixed_follow_cam_selection_executes_valid_action_and_blocks_missing_tracking_link(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            root = Path(temp_name)
+            output_dir = root / "outputs" / "baseline"
+            _write_tracks(output_dir)
+            input_video = root / "data" / "input.mp4"
+            config_path = _write_recovery_config(root, output_dir)
+            _write_json(
+                output_dir / "run_manifest.json",
+                {"config_path": str(config_path), "input_video": str(input_video)},
+            )
+            blocked_action = _tracking_rerun_before_follow_cam_approval("camera_2", start=50, end=80)
+            blocked_action["candidate_id"] = "follow-cam-blocked"
+            approved_path = output_dir / "approved_actions.json"
+            _write_json(
+                approved_path,
+                {"approved_actions": [_adjust_follow_cam_approval("camera_1"), blocked_action]},
+            )
+            expected_report = {
+                "candidate_id": "follow-cam-1",
+                "approval_id": "camera_1",
+                "problem_type": "follow_cam",
+                "candidate_dir": "ai_candidates/follow_cam/follow-cam-1",
+                "comparison_report": "ai_candidates/follow_cam/follow-cam-1/follow_cam_candidate_comparison.json",
+                "comparison_status": "pass",
+                "summary": {"status": "pass"},
+                "checks": [{"name": "ok", "status": "pass"}],
+                "candidate_artifacts": ["ai_candidates/follow_cam/follow-cam-1/follow_cam.mp4"],
+                "consumed_approval_ids": ["camera_1"],
+            }
+
+            with patch(
+                "scripts.run_stable_ai_improvement_workflow.execute_follow_cam_candidate",
+                return_value=expected_report,
+            ) as executor:
+                report = run_workflow(
+                    output_dir=output_dir,
+                    input_video=input_video,
+                    dry_run=False,
+                    approved_actions_path=approved_path,
+                    approval_ids=["camera_1", "camera_2"],
+                )
+            manifest = json.loads((output_dir / "final_ai_improvement_artifact_manifest.json").read_text(encoding="utf-8"))
+            lifecycle = build_ai_candidate_lifecycle(output_dir)
+
+        executor.assert_called_once()
+        dispatcher = _stage(report, "selected_approval_dispatcher")
+        self.assertEqual("failed", dispatcher["status"])
+        follow_path = dispatcher["follow_cam_candidate_execution_path"]
+        self.assertEqual("partial_failure", follow_path["status"])
+        self.assertEqual(["follow-cam-1"], [item["candidate_id"] for item in follow_path["candidate_outputs"]])
+        self.assertEqual(["follow-cam-blocked"], [item["candidate_id"] for item in follow_path["blocked"]])
+        self.assertEqual(
+            ["follow-cam-1", "follow-cam-blocked"],
+            [item["candidate_id"] for item in manifest["pending_candidates"]],
+        )
+        lifecycle_by_id = {item["candidate_id"]: item for item in lifecycle["candidates"]}
+        self.assertEqual("blocked", lifecycle_by_id["follow-cam-blocked"]["promotion_status"])
+        self.assertIn("missing_evidence", lifecycle_by_id["follow-cam-blocked"]["blocking_reasons"])
+
+    def test_follow_cam_preflight_failure_keeps_rejected_candidate_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_tracks(output_dir)
+            approved_path = output_dir / "approved_actions.json"
+            _write_json(
+                approved_path,
+                {"approved_actions": [_adjust_follow_cam_approval("camera_1")]},
+            )
+
+            report = run_workflow(
+                output_dir=output_dir,
+                dry_run=False,
+                approved_actions_path=approved_path,
+                approval_ids=["camera_1"],
+            )
+            manifest = json.loads((output_dir / "final_ai_improvement_artifact_manifest.json").read_text(encoding="utf-8"))
+
+        dispatcher = _stage(report, "selected_approval_dispatcher")
+        self.assertEqual("failed", dispatcher["status"])
+        follow_path = dispatcher["follow_cam_candidate_execution_path"]
+        self.assertEqual("failed", follow_path["status"])
+        self.assertEqual("follow-cam-1", follow_path["errors"][0]["candidate_id"])
+        self.assertEqual("camera_1", follow_path["errors"][0]["approval_id"])
+        self.assertEqual(1, manifest["summary"]["rejected_candidate_count"])
+        self.assertEqual("follow-cam-1", manifest["rejected_candidates"][0]["candidate_id"])
+        self.assertEqual(["camera_1"], manifest["rejected_candidates"][0]["approval_ids"])
 
     def test_follow_cam_approved_action_id_does_not_plan_highlight_render(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:
@@ -1580,8 +1739,21 @@ def _tracking_rerun_before_follow_cam_approval(approval_id: str, *, start: int, 
     return {
         "approval_id": approval_id,
         "improvement_id": "camera_imp_1",
+        "candidate_id": "follow-cam-1",
         "approved_action": "tracking_rerun_before_follow_cam",
         "rerun_scope": {"start_frame": start, "end_frame": end},
+        "source_packet_id": "packet_camera",
+    }
+
+
+def _adjust_follow_cam_approval(approval_id: str) -> dict[str, object]:
+    return {
+        "approval_id": approval_id,
+        "improvement_id": "camera_imp_1",
+        "candidate_id": "follow-cam-1",
+        "problem_type": "follow_cam",
+        "approved_action": "adjust_follow_cam",
+        "config_patch": {"follow_cam": {"glide_pan_smoothing": 0.07}},
         "source_packet_id": "packet_camera",
     }
 
