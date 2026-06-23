@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from football_tracking.ai_candidate_registry import REGISTRY_REPORT_NAME, load_candidate_registry
 from football_tracking.ai_candidate_comparison import CANDIDATE_STATUSES, comparison_payload_status
 from football_tracking.final_artifact_manifest import FINAL_ARTIFACT_MANIFEST_NAME
 
@@ -16,6 +17,7 @@ TRACK_FILES = ("ball_track.csv", "ball_track.cleaned.csv")
 LONG_LOST_GAP_THRESHOLD_FRAMES = 120
 CAMERA_REGRESSION_TOLERANCE = 1.05
 CANDIDATE_COMPARISON_STATUSES = CANDIDATE_STATUSES
+CANDIDATE_STATUS_RANK = {"pass": 0, "warn": 1, "unavailable": 2, "fail": 3}
 
 CHECK_NAMES = (
     "track_hash_unchanged",
@@ -979,42 +981,41 @@ def _candidate_comparison_reports(output_dir: Path, final_manifest: dict[str, An
         reports.append(_comparison_report_summary(loaded, path=path))
         seen_paths.add(str(path.resolve()))
 
-    if final_manifest["status"] != "loaded":
-        return reports
-    manifest_reports = final_manifest["payload"].get("comparison_reports")
-    if not isinstance(manifest_reports, list):
-        return reports
-    for item in manifest_reports:
-        if not isinstance(item, dict):
-            continue
-        path_value = item.get("path") or item.get("report_path")
-        if isinstance(path_value, str) and path_value.strip():
-            path = Path(path_value)
-            if not path.is_absolute():
-                path = output_dir / path
-            resolved_path = path.resolve()
-            if not _is_relative_to(resolved_path, output_root):
-                reports.append(
-                    {
-                        "path": str(path),
-                        "problem_type": item.get("problem_type"),
-                        "candidate_id": item.get("candidate_id"),
-                        "status": "unavailable",
-                        "failed_check_count": 0,
-                        "warning_count": 0,
-                        "unavailable_count": 1,
-                        "artifact_status": "path_outside_output_dir",
-                    }
-                )
-                continue
-            resolved = str(resolved_path)
-            if resolved in seen_paths:
-                continue
-            loaded = _load_artifact(path)
-            reports.append(_comparison_report_summary(loaded, path=path, manifest_entry=item))
-            seen_paths.add(resolved)
-        elif isinstance(item.get("summary"), dict):
-            reports.append(_comparison_payload_summary(item, path=None))
+    if final_manifest["status"] == "loaded":
+        manifest_reports = final_manifest["payload"].get("comparison_reports")
+        if isinstance(manifest_reports, list):
+            for item in manifest_reports:
+                if not isinstance(item, dict):
+                    continue
+                path_value = item.get("path") or item.get("report_path")
+                if isinstance(path_value, str) and path_value.strip():
+                    path = Path(path_value)
+                    if not path.is_absolute():
+                        path = output_dir / path
+                    resolved_path = path.resolve()
+                    if not _is_relative_to(resolved_path, output_root):
+                        reports.append(
+                            {
+                                "path": str(path),
+                                "problem_type": item.get("problem_type"),
+                                "candidate_id": item.get("candidate_id"),
+                                "status": "unavailable",
+                                "failed_check_count": 0,
+                                "warning_count": 0,
+                                "unavailable_count": 1,
+                                "artifact_status": "path_outside_output_dir",
+                            }
+                        )
+                        continue
+                    resolved = str(resolved_path)
+                    if resolved in seen_paths:
+                        continue
+                    loaded = _load_artifact(path)
+                    reports.append(_comparison_report_summary(loaded, path=path, manifest_entry=item))
+                    seen_paths.add(resolved)
+                elif isinstance(item.get("summary"), dict):
+                    reports.append(_comparison_payload_summary(item, path=None))
+    reports.extend(_registry_candidate_summaries(output_dir, seen_paths))
     return reports
 
 
@@ -1055,6 +1056,110 @@ def _comparison_payload_summary(payload: dict[str, Any], *, path: Path | None) -
         "unavailable_count": status_payload["unavailable_count"],
         "artifact_status": status_payload["artifact_status"],
     }
+
+
+def _registry_candidate_summaries(output_dir: Path, seen_paths: set[str]) -> list[dict[str, Any]]:
+    registry_path = output_dir / REGISTRY_REPORT_NAME
+    if not registry_path.exists():
+        return []
+    registry = load_candidate_registry(registry_path)
+    artifact_status = registry.get("artifact_status")
+    if artifact_status in {"corrupt", "invalid"}:
+        return [
+            {
+                "path": str(registry_path),
+                "problem_type": None,
+                "candidate_id": None,
+                "status": "unavailable",
+                "failed_check_count": 0,
+                "warning_count": 0,
+                "unavailable_count": 1,
+                "artifact_status": f"registry_{artifact_status}",
+            }
+        ]
+    candidates = registry.get("candidates")
+    if not isinstance(candidates, list):
+        return []
+    reports: list[dict[str, Any]] = []
+    for candidate in candidates:
+        if not isinstance(candidate, dict):
+            continue
+        comparison_report = candidate.get("comparison_report")
+        summary = _registry_candidate_report_summary(output_dir, registry_path, candidate, comparison_report)
+        summary_path = summary.get("path")
+        if isinstance(summary_path, str) and summary_path:
+            resolved_summary_path = str(Path(summary_path).resolve())
+            if resolved_summary_path in seen_paths:
+                continue
+            seen_paths.add(resolved_summary_path)
+        reports.append(summary)
+    return reports
+
+
+def _registry_candidate_report_summary(
+    output_dir: Path,
+    registry_path: Path,
+    candidate: dict[str, Any],
+    comparison_report: Any,
+) -> dict[str, Any]:
+    candidate_id = candidate.get("candidate_id")
+    registry_status = candidate.get("comparison_status")
+    if not isinstance(comparison_report, str) or not comparison_report.strip():
+        return _registry_unavailable_report(
+            registry_path,
+            candidate=candidate,
+            artifact_status="missing",
+            reason="registry candidate has no comparison_report",
+        )
+    path = output_dir / comparison_report
+    resolved_path = path.resolve()
+    output_root = output_dir.resolve()
+    if not _is_relative_to(resolved_path, output_root):
+        return _registry_unavailable_report(
+            path,
+            candidate=candidate,
+            artifact_status="path_outside_output_dir",
+            reason="registry comparison_report path is outside output_dir",
+        )
+    loaded = _load_artifact(path)
+    summary = _comparison_report_summary(loaded, path=path, manifest_entry={"candidate_id": candidate_id})
+    if loaded["status"] != "loaded":
+        return summary
+    if registry_status in CANDIDATE_COMPARISON_STATUSES and registry_status != summary["status"]:
+        summary = dict(summary)
+        summary["status"] = _worst_candidate_status([registry_status, summary["status"]])
+        summary["failed_check_count"] += 1 if summary["status"] == "fail" and summary["failed_check_count"] == 0 else 0
+        summary["warning_count"] += 1 if summary["status"] == "warn" and summary["warning_count"] == 0 else 0
+        summary["unavailable_count"] += 1 if summary["status"] == "unavailable" and summary["unavailable_count"] == 0 else 0
+        summary["artifact_status"] = "registry_status_mismatch"
+    return summary
+
+
+def _registry_unavailable_report(
+    path: Path,
+    *,
+    candidate: dict[str, Any],
+    artifact_status: str,
+    reason: str,
+) -> dict[str, Any]:
+    return {
+        "path": str(path),
+        "problem_type": candidate.get("problem_type"),
+        "candidate_id": candidate.get("candidate_id"),
+        "status": "unavailable",
+        "failed_check_count": 0,
+        "warning_count": 0,
+        "unavailable_count": 1,
+        "artifact_status": artifact_status,
+        "reason": reason,
+    }
+
+
+def _worst_candidate_status(statuses: list[Any]) -> str:
+    valid = [status for status in statuses if status in CANDIDATE_COMPARISON_STATUSES]
+    if not valid:
+        return "unavailable"
+    return max(valid, key=lambda status: CANDIDATE_STATUS_RANK[status])
 
 
 def _candidate_comparisons_summary(check: dict[str, Any]) -> dict[str, Any]:
