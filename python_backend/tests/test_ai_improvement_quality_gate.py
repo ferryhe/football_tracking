@@ -12,6 +12,7 @@ from football_tracking.ai_improvement_quality_gate import (
     write_ai_improvement_quality_gate,
     write_track_hash_snapshot,
 )
+from football_tracking.final_artifact_manifest import finalize_ai_candidate, write_final_artifact_manifest
 
 
 class AiImprovementQualityGateTests(unittest.TestCase):
@@ -960,6 +961,67 @@ class AiImprovementQualityGateTests(unittest.TestCase):
         self.assertEqual("unavailable", comparison_check["status"])
         self.assertEqual("candidate-missing", comparison_check["reports"][0]["candidate_id"])
         self.assertEqual("missing", comparison_check["reports"][0]["artifact_status"])
+
+    def test_finalized_missing_ball_and_noise_selections_remain_visible_to_quality_gate(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            missing_dir = output_dir / "ai_candidates" / "missing_ball" / "candidate-missing"
+            noise_dir = output_dir / "ai_candidates" / "noise" / "candidate-noise"
+            missing_dir.mkdir(parents=True)
+            noise_dir.mkdir(parents=True)
+            (missing_dir / "ball_track.csv").write_text("Frame,X,Y,Status\n1,10,20,Detected\n", encoding="utf-8")
+            (noise_dir / "ball_track.cleaned.csv").write_text("Frame,X,Y,Status\n1,10,20,Detected\n", encoding="utf-8")
+            missing_comparison = _comparison_payload("candidate-missing", "pass")
+            missing_comparison["problem_type"] = "missing_ball"
+            missing_comparison["path"] = "ai_candidates/missing_ball/candidate-missing/missing_ball_recovery_comparison.json"
+            missing_comparison["comparison_report"] = missing_comparison["path"]
+            missing_comparison["approval_id"] = "approval-missing"
+            missing_comparison["consumed_approval_ids"] = ["approval-missing"]
+            missing_comparison["candidate_artifacts"] = ["ai_candidates/missing_ball/candidate-missing/ball_track.csv"]
+            noise_comparison = _comparison_payload("candidate-noise", "pass")
+            noise_comparison["problem_type"] = "noise"
+            noise_comparison["path"] = "ai_candidates/noise/candidate-noise/noise_candidate_comparison.json"
+            noise_comparison["comparison_report"] = noise_comparison["path"]
+            noise_comparison["approval_id"] = "approval-noise"
+            noise_comparison["consumed_approval_ids"] = ["approval-noise"]
+            noise_comparison["candidate_artifacts"] = ["ai_candidates/noise/candidate-noise/ball_track.cleaned.csv"]
+            _write_json(missing_dir / "missing_ball_recovery_comparison.json", missing_comparison)
+            _write_json(noise_dir / "noise_candidate_comparison.json", noise_comparison)
+            write_final_artifact_manifest(
+                output_dir,
+                baseline_output={"path": "ball_track.csv"},
+                candidate_outputs=[
+                    {
+                        "id": "candidate-missing",
+                        "candidate_id": "candidate-missing",
+                        "problem_type": "missing_ball",
+                        "path": "ai_candidates/missing_ball/candidate-missing",
+                        "candidate_artifacts": ["ai_candidates/missing_ball/candidate-missing/ball_track.csv"],
+                    },
+                    {
+                        "id": "candidate-noise",
+                        "candidate_id": "candidate-noise",
+                        "problem_type": "noise",
+                        "path": "ai_candidates/noise/candidate-noise",
+                        "candidate_artifacts": ["ai_candidates/noise/candidate-noise/ball_track.cleaned.csv"],
+                    },
+                ],
+                final_artifacts=[],
+                consumed_approvals=[
+                    {"approval_id": "approval-missing", "candidate_id": "candidate-missing"},
+                    {"approval_id": "approval-noise", "candidate_id": "candidate-noise"},
+                ],
+                comparison_reports=[missing_comparison, noise_comparison],
+            )
+
+            finalize_ai_candidate(output_dir, problem_type="missing_ball", candidate_id="candidate-missing", approval_id="approval-missing", decision="promote", output_role="missing_ball_track")
+            finalize_ai_candidate(output_dir, problem_type="noise", candidate_id="candidate-noise", approval_id="approval-noise", decision="promote", output_role="noise_cleaned_track")
+            payload = build_ai_improvement_quality_gate(output_dir)
+
+        comparison_check = payload["checks"]["candidate_comparisons_ok"]
+        self.assertEqual("pass", comparison_check["status"])
+        self.assertEqual(2, comparison_check["report_count"])
+        self.assertEqual(["candidate-missing", "candidate-noise"], [item["candidate_id"] for item in comparison_check["reports"]])
 
     def test_cli_returns_nonzero_when_quality_gate_fails(self) -> None:
         from scripts.run_ai_improvement_quality_gate import main

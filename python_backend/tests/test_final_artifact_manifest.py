@@ -9,6 +9,7 @@ from unittest.mock import patch
 from football_tracking.final_artifact_manifest import (
     FINAL_ARTIFACT_MANIFEST_NAME,
     build_final_artifact_manifest,
+    finalize_ai_candidate,
     write_final_artifact_manifest,
 )
 
@@ -289,6 +290,613 @@ class FinalArtifactManifestTests(unittest.TestCase):
                     name="../escape.json",
                 )
 
+    def test_finalize_pass_candidate_promotes_missing_ball_track_with_operator_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_seed_manifest(
+                output_dir,
+                [
+                    _candidate_seed(
+                        output_dir,
+                        problem_type="missing_ball",
+                        candidate_id="candidate-pass",
+                        approval_id="approval-pass",
+                        status="pass",
+                    )
+                ],
+            )
+
+            result = finalize_ai_candidate(
+                output_dir,
+                problem_type="missing_ball",
+                candidate_id="candidate-pass",
+                approval_id="approval-pass",
+                decision="promote",
+                output_role="missing_ball_track",
+                note="operator checked the recovered window",
+            )
+            loaded = json.loads((output_dir / FINAL_ARTIFACT_MANIFEST_NAME).read_text(encoding="utf-8"))
+
+        self.assertEqual(loaded, result["manifest"])
+        self.assertEqual(["candidate-pass"], [item["candidate_id"] for item in loaded["final_selected_artifacts"]])
+        selected = loaded["final_selected_artifacts"][0]
+        self.assertEqual("missing_ball_track", selected["output_role"])
+        self.assertEqual("ai_candidates/missing_ball/candidate-pass/ball_track.csv", selected["path"])
+        self.assertEqual("approval-pass", selected["approval_id"])
+        self.assertEqual("promote", selected["operator_decision"]["decision"])
+        self.assertEqual("operator checked the recovered window", selected["operator_decision"]["note"])
+        self.assertFalse(selected["operator_decision"]["confirm_warn"])
+        self.assertEqual("promoted", result["lifecycle"]["summary"]["promotion_status"])
+
+    def test_finalize_warn_candidate_requires_explicit_confirmation(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_seed_manifest(
+                output_dir,
+                [
+                    _candidate_seed(
+                        output_dir,
+                        problem_type="noise",
+                        candidate_id="candidate-warn",
+                        approval_id="approval-warn",
+                        status="warn",
+                    )
+                ],
+            )
+
+            with self.assertRaisesRegex(ValueError, "confirmation"):
+                finalize_ai_candidate(
+                    output_dir,
+                    problem_type="noise",
+                    candidate_id="candidate-warn",
+                    approval_id="approval-warn",
+                    decision="promote",
+                    output_role="noise_cleaned_track",
+                )
+
+            result = finalize_ai_candidate(
+                output_dir,
+                problem_type="noise",
+                candidate_id="candidate-warn",
+                approval_id="approval-warn",
+                decision="promote",
+                confirm_warn=True,
+                output_role="noise_cleaned_track",
+                note="accepted warning after review",
+            )
+
+        selected = result["manifest"]["final_selected_artifacts"][0]
+        self.assertEqual("candidate-warn", selected["candidate_id"])
+        self.assertEqual("warn", selected["comparison_status"])
+        self.assertTrue(selected["operator_decision"]["confirm_warn"])
+
+    def test_finalize_blocks_unpromotable_candidate_statuses(self) -> None:
+        for status in ("fail", "unavailable"):
+            with self.subTest(status=status), tempfile.TemporaryDirectory() as temp_name:
+                output_dir = Path(temp_name)
+                _write_seed_manifest(
+                    output_dir,
+                    [
+                        _candidate_seed(
+                            output_dir,
+                            problem_type="missing_ball",
+                            candidate_id=f"candidate-{status}",
+                            approval_id=f"approval-{status}",
+                            status=status,
+                        )
+                    ],
+                )
+
+                with self.assertRaisesRegex(ValueError, status):
+                    finalize_ai_candidate(
+                        output_dir,
+                        problem_type="missing_ball",
+                        candidate_id=f"candidate-{status}",
+                        approval_id=f"approval-{status}",
+                        decision="promote",
+                        output_role="missing_ball_track",
+                    )
+
+                loaded = json.loads((output_dir / FINAL_ARTIFACT_MANIFEST_NAME).read_text(encoding="utf-8"))
+                self.assertEqual([], loaded["final_selected_artifacts"])
+
+    def test_finalize_blocks_unknown_missing_approval_and_missing_comparison(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_seed_manifest(
+                output_dir,
+                [
+                    _candidate_seed(
+                        output_dir,
+                        problem_type="missing_ball",
+                        candidate_id="candidate-known",
+                        approval_id="approval-known",
+                        status="pass",
+                    )
+                ],
+            )
+
+            with self.assertRaisesRegex(ValueError, "unknown candidate"):
+                finalize_ai_candidate(
+                    output_dir,
+                    problem_type="missing_ball",
+                    candidate_id="candidate-ghost",
+                    approval_id="approval-known",
+                    decision="promote",
+                    output_role="missing_ball_track",
+                )
+            with self.assertRaisesRegex(ValueError, "approval"):
+                finalize_ai_candidate(
+                    output_dir,
+                    problem_type="missing_ball",
+                    candidate_id="candidate-known",
+                    approval_id="approval-missing",
+                    decision="promote",
+                    output_role="missing_ball_track",
+                )
+
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_seed_manifest(
+                output_dir,
+                [
+                    {
+                        "candidate": {
+                            "id": "candidate-no-comparison",
+                            "candidate_id": "candidate-no-comparison",
+                            "problem_type": "missing_ball",
+                            "path": "ai_candidates/missing_ball/candidate-no-comparison",
+                        },
+                        "approval": {"approval_id": "approval-no-comparison", "candidate_id": "candidate-no-comparison"},
+                        "comparison": None,
+                    }
+                ],
+            )
+
+            with self.assertRaisesRegex(ValueError, "comparison"):
+                finalize_ai_candidate(
+                    output_dir,
+                    problem_type="missing_ball",
+                    candidate_id="candidate-no-comparison",
+                    approval_id="approval-no-comparison",
+                    decision="promote",
+                    output_role="missing_ball_track",
+                )
+
+    def test_finalize_promotion_requires_comparison_bound_to_requested_approval(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_seed_manifest(
+                output_dir,
+                [
+                    _candidate_seed(
+                        output_dir,
+                        problem_type="missing_ball",
+                        candidate_id="candidate-shared",
+                        approval_id="approval-a",
+                        status="pass",
+                    )
+                ],
+            )
+            manifest_path = output_dir / FINAL_ARTIFACT_MANIFEST_NAME
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest["consumed_approvals"].append(
+                {
+                    "approval_id": "approval-b",
+                    "candidate_id": "candidate-shared",
+                    "problem_type": "missing_ball",
+                    "status": "approved",
+                }
+            )
+            manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+            with self.assertRaisesRegex(ValueError, "missing comparison"):
+                finalize_ai_candidate(
+                    output_dir,
+                    problem_type="missing_ball",
+                    candidate_id="candidate-shared",
+                    approval_id="approval-b",
+                    decision="promote",
+                    output_role="missing_ball_track",
+                )
+
+            loaded = json.loads(manifest_path.read_text(encoding="utf-8"))
+
+        self.assertEqual([], loaded["final_selected_artifacts"])
+
+    def test_finalize_accepts_comparison_with_nested_approval_id(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_seed_manifest(
+                output_dir,
+                [
+                    _candidate_seed(
+                        output_dir,
+                        problem_type="missing_ball",
+                        candidate_id="candidate-nested",
+                        approval_id="approval-nested",
+                        status="pass",
+                    )
+                ],
+            )
+            comparison_path = (
+                output_dir
+                / "ai_candidates"
+                / "missing_ball"
+                / "candidate-nested"
+                / "missing_ball_recovery_comparison.json"
+            )
+            comparison = json.loads(comparison_path.read_text(encoding="utf-8"))
+            comparison.pop("approval_id", None)
+            comparison.pop("consumed_approval_ids", None)
+            comparison["approval"] = {"approval_id": "approval-nested", "candidate_id": "candidate-nested"}
+            comparison_path.write_text(json.dumps(comparison, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+            manifest_path = output_dir / FINAL_ARTIFACT_MANIFEST_NAME
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest["comparison_reports"][0].pop("approval_id", None)
+            manifest["comparison_reports"][0].pop("consumed_approval_ids", None)
+            manifest["comparison_reports"][0]["approval"] = {"approval_id": "approval-nested", "candidate_id": "candidate-nested"}
+            manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+            result = finalize_ai_candidate(
+                output_dir,
+                problem_type="missing_ball",
+                candidate_id="candidate-nested",
+                approval_id="approval-nested",
+                decision="promote",
+                output_role="missing_ball_track",
+            )
+
+        selected = result["manifest"]["final_selected_artifacts"][0]
+        self.assertEqual("candidate-nested", selected["candidate_id"])
+        comparison_ref = result["manifest"]["comparison_reports"][0]
+        self.assertEqual("approval-nested", comparison_ref["approval_id"])
+        self.assertEqual(["approval-nested"], comparison_ref["consumed_approval_ids"])
+
+    def test_finalize_blocks_review_only_and_unsupported_candidates(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_seed_manifest(
+                output_dir,
+                [
+                    _candidate_seed(
+                        output_dir,
+                        problem_type="missing_ball",
+                        candidate_id="candidate-review-only",
+                        approval_id="approval-review-only",
+                        status="pass",
+                    ),
+                    _candidate_seed(
+                        output_dir,
+                        problem_type="noise",
+                        candidate_id="candidate-unsupported",
+                        approval_id="approval-unsupported",
+                        status="pass",
+                    ),
+                ],
+            )
+            manifest_path = output_dir / FINAL_ARTIFACT_MANIFEST_NAME
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest["candidate_outputs"][0]["candidate_intent"] = "review_only"
+            manifest["unsupported_candidates"] = [
+                {
+                    "candidate_id": "candidate-unsupported",
+                    "approval_id": "approval-unsupported",
+                    "problem_type": "noise",
+                    "reason": "unsupported_type",
+                }
+            ]
+            manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+            with self.assertRaisesRegex(ValueError, "review_only"):
+                finalize_ai_candidate(
+                    output_dir,
+                    problem_type="missing_ball",
+                    candidate_id="candidate-review-only",
+                    approval_id="approval-review-only",
+                    decision="promote",
+                    output_role="missing_ball_track",
+                )
+            with self.assertRaisesRegex(ValueError, "unsupported_type"):
+                finalize_ai_candidate(
+                    output_dir,
+                    problem_type="noise",
+                    candidate_id="candidate-unsupported",
+                    approval_id="approval-unsupported",
+                    decision="promote",
+                    output_role="noise_cleaned_track",
+                )
+
+            loaded = json.loads(manifest_path.read_text(encoding="utf-8"))
+
+        self.assertEqual([], loaded["final_selected_artifacts"])
+
+    def test_finalize_repeating_same_promotion_is_idempotent(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_seed_manifest(
+                output_dir,
+                [
+                    _candidate_seed(
+                        output_dir,
+                        problem_type="missing_ball",
+                        candidate_id="candidate-pass",
+                        approval_id="approval-pass",
+                        status="pass",
+                    )
+                ],
+            )
+
+            finalize_ai_candidate(
+                output_dir,
+                problem_type="missing_ball",
+                candidate_id="candidate-pass",
+                approval_id="approval-pass",
+                decision="promote",
+                output_role="missing_ball_track",
+            )
+            second = finalize_ai_candidate(
+                output_dir,
+                problem_type="missing_ball",
+                candidate_id="candidate-pass",
+                approval_id="approval-pass",
+                decision="promote",
+                output_role="missing_ball_track",
+            )
+
+        self.assertEqual(1, len(second["manifest"]["final_selected_artifacts"]))
+        self.assertEqual(1, len(second["manifest"]["operator_decisions"]))
+
+    def test_finalize_rejects_candidate_path_outside_output_dir(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name) / "run"
+            outside_dir = Path(temp_name) / "outside"
+            output_dir.mkdir()
+            outside_dir.mkdir()
+            _write_seed_manifest(
+                output_dir,
+                [
+                    _candidate_seed(
+                        output_dir,
+                        problem_type="missing_ball",
+                        candidate_id="candidate-outside",
+                        approval_id="approval-outside",
+                        status="pass",
+                        candidate_path=str(outside_dir / "candidate-outside"),
+                    )
+                ],
+            )
+
+            with self.assertRaisesRegex(ValueError, "outside output_dir"):
+                finalize_ai_candidate(
+                    output_dir,
+                    problem_type="missing_ball",
+                    candidate_id="candidate-outside",
+                    approval_id="approval-outside",
+                    decision="promote",
+                    output_role="missing_ball_track",
+                )
+
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_seed_manifest(
+                output_dir,
+                [
+                    _candidate_seed(
+                        output_dir,
+                        problem_type="missing_ball",
+                        candidate_id="candidate-traversal",
+                        approval_id="approval-traversal",
+                        status="pass",
+                    )
+                ],
+            )
+            manifest_path = output_dir / FINAL_ARTIFACT_MANIFEST_NAME
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest["candidate_outputs"][0]["candidate_artifacts"] = ["../escape.csv"]
+            manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+            with self.assertRaisesRegex(ValueError, "path traversal"):
+                finalize_ai_candidate(
+                    output_dir,
+                    problem_type="missing_ball",
+                    candidate_id="candidate-traversal",
+                    approval_id="approval-traversal",
+                    decision="promote",
+                    output_role="missing_ball_track",
+                )
+
+    def test_finalize_uses_current_comparison_file_over_stale_manifest_status(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_seed_manifest(
+                output_dir,
+                [
+                    _candidate_seed(
+                        output_dir,
+                        problem_type="missing_ball",
+                        candidate_id="candidate-stale",
+                        approval_id="approval-stale",
+                        status="pass",
+                    )
+                ],
+            )
+            comparison_path = (
+                output_dir
+                / "ai_candidates"
+                / "missing_ball"
+                / "candidate-stale"
+                / "missing_ball_recovery_comparison.json"
+            )
+            current_comparison = _comparison(
+                "candidate-stale",
+                "fail",
+                "ai_candidates/missing_ball/candidate-stale/missing_ball_recovery_comparison.json",
+            )
+            current_comparison["approval_id"] = "approval-stale"
+            current_comparison["consumed_approval_ids"] = ["approval-stale"]
+            comparison_path.write_text(json.dumps(current_comparison, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+            with self.assertRaisesRegex(ValueError, "fail"):
+                finalize_ai_candidate(
+                    output_dir,
+                    problem_type="missing_ball",
+                    candidate_id="candidate-stale",
+                    approval_id="approval-stale",
+                    decision="promote",
+                    output_role="missing_ball_track",
+                )
+
+            loaded = json.loads((output_dir / FINAL_ARTIFACT_MANIFEST_NAME).read_text(encoding="utf-8"))
+
+        self.assertEqual([], loaded["final_selected_artifacts"])
+
+    def test_finalize_refuses_pathless_manifest_only_comparison(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_seed_manifest(
+                output_dir,
+                [
+                    _candidate_seed(
+                        output_dir,
+                        problem_type="missing_ball",
+                        candidate_id="candidate-pathless",
+                        approval_id="approval-pathless",
+                        status="pass",
+                    )
+                ],
+            )
+            manifest_path = output_dir / FINAL_ARTIFACT_MANIFEST_NAME
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest["comparison_reports"][0].pop("path", None)
+            manifest["comparison_reports"][0].pop("comparison_report", None)
+            manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+            with self.assertRaisesRegex(ValueError, "unavailable"):
+                finalize_ai_candidate(
+                    output_dir,
+                    problem_type="missing_ball",
+                    candidate_id="candidate-pathless",
+                    approval_id="approval-pathless",
+                    decision="promote",
+                    output_role="missing_ball_track",
+                )
+
+            loaded = json.loads(manifest_path.read_text(encoding="utf-8"))
+
+        self.assertEqual([], loaded["final_selected_artifacts"])
+
+    def test_finalize_refuses_to_overwrite_corrupt_final_manifest(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            manifest_path = output_dir / FINAL_ARTIFACT_MANIFEST_NAME
+            manifest_path.write_text("{", encoding="utf-8")
+
+            with self.assertRaisesRegex(ValueError, "corrupt"):
+                finalize_ai_candidate(
+                    output_dir,
+                    problem_type="missing_ball",
+                    candidate_id="candidate-corrupt",
+                    approval_id="approval-corrupt",
+                    decision="promote",
+                    output_role="missing_ball_track",
+                )
+
+            manifest_text = manifest_path.read_text(encoding="utf-8")
+
+        self.assertEqual("{", manifest_text)
+
+    def test_finalize_refuses_invalid_final_manifest_list_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            manifest_path = output_dir / FINAL_ARTIFACT_MANIFEST_NAME
+            manifest_path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": "1.0",
+                        "baseline_output": {"path": "ball_track.csv"},
+                        "candidate_outputs": {"candidate_id": "candidate-invalid"},
+                        "final_selected_artifacts": [],
+                        "consumed_approvals": [],
+                        "comparison_reports": [],
+                        "quality_gate_status": {"status": "pass"},
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(ValueError, "candidate_outputs"):
+                finalize_ai_candidate(
+                    output_dir,
+                    problem_type="missing_ball",
+                    candidate_id="candidate-invalid",
+                    approval_id="approval-invalid",
+                    decision="promote",
+                    output_role="missing_ball_track",
+                )
+
+            loaded = json.loads(manifest_path.read_text(encoding="utf-8"))
+
+        self.assertIsInstance(loaded["candidate_outputs"], dict)
+
+    def test_finalize_replacement_semantics_singletons_and_highlight_clips(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_seed_manifest(
+                output_dir,
+                [
+                    _candidate_seed(output_dir, problem_type="follow_cam", candidate_id="follow-1", approval_id="approval-follow-1", status="pass"),
+                    _candidate_seed(output_dir, problem_type="follow_cam", candidate_id="follow-2", approval_id="approval-follow-2", status="pass"),
+                    _candidate_seed(output_dir, problem_type="highlight", candidate_id="clip-1", approval_id="approval-clip-1", status="pass"),
+                    _candidate_seed(output_dir, problem_type="highlight", candidate_id="clip-2", approval_id="approval-clip-2", status="pass"),
+                ],
+            )
+
+            finalize_ai_candidate(output_dir, problem_type="follow_cam", candidate_id="follow-1", approval_id="approval-follow-1", decision="promote", output_role="follow_cam_video")
+            finalize_ai_candidate(output_dir, problem_type="follow_cam", candidate_id="follow-2", approval_id="approval-follow-2", decision="promote", output_role="follow_cam_video")
+            result = finalize_ai_candidate(output_dir, problem_type="highlight", candidate_id="clip-1", approval_id="approval-clip-1", decision="promote", output_role="highlight_clip")
+            result = finalize_ai_candidate(output_dir, problem_type="highlight", candidate_id="clip-2", approval_id="approval-clip-2", decision="promote", output_role="highlight_clip")
+
+        selected = result["manifest"]["final_selected_artifacts"]
+        self.assertEqual(["follow-2"], [item["candidate_id"] for item in selected if item["output_role"] == "follow_cam_video"])
+        self.assertEqual(["clip-1", "clip-2"], [item["candidate_id"] for item in selected if item["output_role"] == "highlight_clip"])
+
+    def test_finalize_rejection_records_reason_note_and_lifecycle_state(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_seed_manifest(
+                output_dir,
+                [
+                    _candidate_seed(
+                        output_dir,
+                        problem_type="noise",
+                        candidate_id="candidate-reject",
+                        approval_id="approval-reject",
+                        status="pass",
+                    )
+                ],
+            )
+
+            result = finalize_ai_candidate(
+                output_dir,
+                problem_type="noise",
+                candidate_id="candidate-reject",
+                approval_id="approval-reject",
+                decision="reject",
+                output_role="noise_cleaned_track",
+                note="cleanup removed too much continuity",
+            )
+
+        self.assertEqual([], result["manifest"]["final_selected_artifacts"])
+        rejected = result["manifest"]["rejected_candidates"][0]
+        self.assertEqual("candidate-reject", rejected["candidate_id"])
+        self.assertEqual("operator_rejected", rejected["reason"])
+        self.assertEqual("cleanup removed too much continuity", rejected["operator_decision"]["note"])
+        self.assertEqual("rejected", result["lifecycle"]["summary"]["promotion_status"])
+
 
 def _comparison(candidate_id: str, status: str, path: str) -> dict[str, object]:
     problem_type = "noise" if "noise" in path else "follow_cam" if "follow_cam" in path else "missing_ball"
@@ -305,6 +913,84 @@ def _comparison(candidate_id: str, status: str, path: str) -> dict[str, object]:
         },
         "checks": [{"name": "comparison", "status": status}],
     }
+
+
+def _candidate_seed(
+    output_dir: Path,
+    *,
+    problem_type: str,
+    candidate_id: str,
+    approval_id: str,
+    status: str,
+    candidate_path: str | None = None,
+) -> dict[str, object]:
+    candidate_dir = Path(candidate_path) if candidate_path is not None else output_dir / "ai_candidates" / problem_type / candidate_id
+    if not candidate_dir.is_absolute():
+        candidate_dir = output_dir / candidate_dir
+    candidate_dir.mkdir(parents=True, exist_ok=True)
+    if problem_type == "noise":
+        artifact_name = "ball_track.cleaned.csv"
+    elif problem_type == "follow_cam":
+        artifact_name = "follow_cam.mp4"
+    elif problem_type == "highlight":
+        artifact_name = "highlight.mp4"
+    else:
+        artifact_name = "ball_track.csv"
+    (candidate_dir / artifact_name).write_text("candidate-artifact\n", encoding="utf-8")
+    comparison_name = {
+        "missing_ball": "missing_ball_recovery_comparison.json",
+        "noise": "noise_candidate_comparison.json",
+        "follow_cam": "follow_cam_candidate_comparison.json",
+        "highlight": "highlight_candidate_comparison.json",
+    }[problem_type]
+    comparison_path = candidate_dir / comparison_name
+    relative_candidate_dir = _relative_or_string(candidate_dir, output_dir)
+    relative_comparison = _relative_or_string(comparison_path, output_dir)
+    comparison = _comparison(candidate_id, status, relative_comparison)
+    comparison["problem_type"] = problem_type
+    comparison["approval_id"] = approval_id
+    comparison["consumed_approval_ids"] = [approval_id]
+    comparison["candidate_dir"] = relative_candidate_dir
+    comparison["comparison_report"] = relative_comparison
+    comparison["candidate_artifacts"] = [f"{relative_candidate_dir}/{artifact_name}"]
+    comparison_path.write_text(json.dumps(comparison, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return {
+        "candidate": {
+            "id": candidate_id,
+            "candidate_id": candidate_id,
+            "problem_type": problem_type,
+            "path": relative_candidate_dir if candidate_path is None else candidate_path,
+            "candidate_artifacts": [f"{relative_candidate_dir}/{artifact_name}"],
+        },
+        "approval": {
+            "approval_id": approval_id,
+            "candidate_id": candidate_id,
+            "problem_type": problem_type,
+            "status": "approved",
+        },
+        "comparison": comparison,
+    }
+
+
+def _write_seed_manifest(output_dir: Path, seeds: list[dict[str, object]]) -> None:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    comparisons = [seed["comparison"] for seed in seeds if isinstance(seed.get("comparison"), dict)]
+    write_final_artifact_manifest(
+        output_dir,
+        baseline_output={"path": "ball_track.csv", "status": "baseline"},
+        candidate_outputs=[seed["candidate"] for seed in seeds if isinstance(seed.get("candidate"), dict)],
+        final_artifacts=[],
+        consumed_approvals=[seed["approval"] for seed in seeds if isinstance(seed.get("approval"), dict)],
+        comparison_reports=comparisons,
+        quality_gate_status={"status": "pass"},
+    )
+
+
+def _relative_or_string(path: Path, output_dir: Path) -> str:
+    try:
+        return path.resolve().relative_to(output_dir.resolve()).as_posix()
+    except ValueError:
+        return str(path)
 
 
 if __name__ == "__main__":

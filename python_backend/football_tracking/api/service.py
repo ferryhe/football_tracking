@@ -40,6 +40,7 @@ from football_tracking.calibration import build_pitch_calibration_from_field_pol
 from football_tracking.chunk_runner import run_high_recall_windows, run_temporal_chunks
 from football_tracking.config import DEFAULT_HIGH_RECALL_MAX_TOTAL_FRAMES, AppConfig, load_config
 from football_tracking.events import compact_event_candidate_summary
+from football_tracking.final_artifact_manifest import finalize_ai_candidate
 from football_tracking.follow_cam import FollowCamGenerator
 from football_tracking.highlights import render_highlight_clip
 from football_tracking.high_recall_windows import approved_action_windows_from_report
@@ -1026,6 +1027,33 @@ class ApiService:
             follow_cam_plan_path=follow_cam_plan_path,
         )
         return response
+
+    def ai_candidate_finalize(
+        self,
+        *,
+        run_id: str,
+        problem_type: str,
+        candidate_id: str,
+        approval_id: str,
+        decision: str,
+        output_role: str,
+        confirm_warn: bool = False,
+        note: str | None = None,
+    ) -> dict[str, Any]:
+        run = self.get_run(run_id)
+        output_dir = Path(run["output_dir"]).resolve()
+        result = finalize_ai_candidate(
+            output_dir,
+            problem_type=problem_type,
+            candidate_id=candidate_id,
+            approval_id=approval_id,
+            decision=decision,
+            output_role=output_role,
+            confirm_warn=confirm_warn,
+            note=note,
+        )
+        self._refresh_run_artifacts_and_stats(run_id, output_dir)
+        return result
 
     def _approval_summary(
         self,

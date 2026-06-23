@@ -295,12 +295,14 @@ class StableAiImprovementWorkflowTests(unittest.TestCase):
         self.assertEqual(1, registry["summary"]["counts_by_problem_type"]["noise"])
         self.assertEqual(1, manifest["summary"]["candidate_output_count"])
         self.assertEqual("noise-candidate-1", manifest["candidate_outputs"][0]["candidate_id"])
+        self.assertEqual([], manifest["final_selected_artifacts"])
         self.assertEqual("pass", manifest["comparison_reports"][0]["status"])
         self.assertNotEqual("invalid_checks", manifest["comparison_reports"][0]["artifact_status"])
         self.assertEqual(report["quality_gate"]["summary"]["status"], manifest["quality_gate_status"]["status"])
         self.assertEqual("finalized", lifecycle["summary"]["stage"])
         self.assertEqual("pass", lifecycle["summary"]["comparison_status"])
         self.assertEqual("noise", lifecycle["candidates"][0]["problem_type"])
+        self.assertEqual("not_promoted", lifecycle["candidates"][0]["promotion_status"])
         self.assertEqual(["noise_1"], lifecycle["candidates"][0]["approval_ids"])
         self.assertEqual("skipped", _stage(report, "approved_child_rerun")["status"])
         self.assertEqual("skipped", _stage(report, "follow_cam_rerender_plan")["status"])
@@ -370,6 +372,7 @@ class StableAiImprovementWorkflowTests(unittest.TestCase):
             self.assertEqual("executed", child_stage["execution_status"])
             self.assertEqual(1, manifest["summary"]["candidate_output_count"])
             self.assertEqual("candidate_2079", manifest["candidate_outputs"][0]["candidate_id"])
+            self.assertEqual([], manifest["final_selected_artifacts"])
             self.assertEqual(0, manifest["summary"]["pending_candidate_count"])
 
     def test_selected_missing_ball_recovery_executes_multiple_candidate_groups(self) -> None:

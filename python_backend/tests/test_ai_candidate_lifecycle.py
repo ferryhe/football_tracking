@@ -6,6 +6,7 @@ import unittest
 from pathlib import Path
 
 from football_tracking.ai_candidate_lifecycle import build_ai_candidate_lifecycle
+from football_tracking.final_artifact_manifest import finalize_ai_candidate, write_final_artifact_manifest
 
 
 class AiCandidateLifecycleTests(unittest.TestCase):
@@ -436,6 +437,83 @@ class AiCandidateLifecycleTests(unittest.TestCase):
         self.assertIn("missing_comparison", lifecycle["summary"]["blocking_reasons"])
         self.assertEqual("unavailable", lifecycle["candidates"][0]["comparison_status"])
         self.assertIn("missing_comparison", lifecycle["candidates"][0]["blocking_reasons"])
+
+    def test_pass_candidate_output_stays_not_promoted_until_finalization_decision(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_json(output_dir / "ai_candidates" / "missing_ball" / "candidate-pass" / "missing_ball_recovery_comparison.json", _comparison_payload("candidate-pass", "pass"))
+            write_final_artifact_manifest(
+                output_dir,
+                baseline_output={"path": "ball_track.csv", "status": "baseline"},
+                candidate_outputs=[
+                    {
+                        "id": "candidate-pass",
+                        "candidate_id": "candidate-pass",
+                        "problem_type": "missing_ball",
+                        "path": "ai_candidates/missing_ball/candidate-pass",
+                    }
+                ],
+                final_artifacts=[],
+                consumed_approvals=[{"approval_id": "approval-pass", "candidate_id": "candidate-pass"}],
+                comparison_reports=[
+                    {
+                        **_comparison_payload("candidate-pass", "pass"),
+                        "path": "ai_candidates/missing_ball/candidate-pass/missing_ball_recovery_comparison.json",
+                        "approval_id": "approval-pass",
+                        "consumed_approval_ids": ["approval-pass"],
+                    }
+                ],
+            )
+
+            lifecycle = build_ai_candidate_lifecycle(output_dir)
+
+        self.assertEqual("finalized", lifecycle["summary"]["stage"])
+        self.assertEqual("pass", lifecycle["summary"]["comparison_status"])
+        self.assertEqual("not_promoted", lifecycle["summary"]["promotion_status"])
+        self.assertEqual("not_promoted", lifecycle["candidates"][0]["promotion_status"])
+
+    def test_finalization_helper_promotion_is_visible_to_lifecycle(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            candidate_dir = output_dir / "ai_candidates" / "noise" / "candidate-promote"
+            candidate_dir.mkdir(parents=True)
+            (candidate_dir / "ball_track.cleaned.csv").write_text("Frame,X,Y,Status\n1,10,20,Detected\n", encoding="utf-8")
+            comparison = _comparison_payload("candidate-promote", "pass")
+            comparison["problem_type"] = "noise"
+            comparison["path"] = "ai_candidates/noise/candidate-promote/noise_candidate_comparison.json"
+            comparison["comparison_report"] = comparison["path"]
+            comparison["approval_id"] = "approval-promote"
+            comparison["consumed_approval_ids"] = ["approval-promote"]
+            comparison["candidate_artifacts"] = ["ai_candidates/noise/candidate-promote/ball_track.cleaned.csv"]
+            _write_json(candidate_dir / "noise_candidate_comparison.json", comparison)
+            write_final_artifact_manifest(
+                output_dir,
+                baseline_output={"path": "ball_track.cleaned.csv", "status": "baseline"},
+                candidate_outputs=[
+                    {
+                        "id": "candidate-promote",
+                        "candidate_id": "candidate-promote",
+                        "problem_type": "noise",
+                        "path": "ai_candidates/noise/candidate-promote",
+                        "candidate_artifacts": ["ai_candidates/noise/candidate-promote/ball_track.cleaned.csv"],
+                    }
+                ],
+                final_artifacts=[],
+                consumed_approvals=[{"approval_id": "approval-promote", "candidate_id": "candidate-promote"}],
+                comparison_reports=[comparison],
+            )
+
+            result = finalize_ai_candidate(
+                output_dir,
+                problem_type="noise",
+                candidate_id="candidate-promote",
+                approval_id="approval-promote",
+                decision="promote",
+                output_role="noise_cleaned_track",
+            )
+
+        self.assertEqual("promoted", result["lifecycle"]["summary"]["promotion_status"])
+        self.assertEqual("candidate_output", result["lifecycle"]["summary"]["resolution_status"])
 
     def test_final_manifest_comparison_count_dedupes_relative_and_absolute_paths(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:

@@ -32,6 +32,7 @@ from football_tracking.api.schemas import (
 from football_tracking.api.service import ApiService
 from football_tracking.chunk_runner import build_high_recall_window_config
 from football_tracking.config import load_config
+from football_tracking.final_artifact_manifest import write_final_artifact_manifest
 from football_tracking.high_recall_windows import approved_action_windows_from_report
 from football_tracking.metrics import write_run_artifacts
 
@@ -938,6 +939,75 @@ class ApiServiceSmokeTests(unittest.TestCase):
         self.assertEqual(1, len(runs))
         self.assertEqual(1, call_count)
         self.assertEqual("proposed", runs[0]["stats"]["ai_candidate_lifecycle"]["stage"])
+
+    def test_ai_candidate_finalize_promotes_and_refreshes_run_lifecycle(self) -> None:
+        output_dir = self.create_output_bundle("candidate_finalize_baseline")
+        candidate_dir = output_dir / "ai_candidates" / "missing_ball" / "candidate_api"
+        candidate_dir.mkdir(parents=True)
+        (candidate_dir / "ball_track.csv").write_text("Frame,X,Y,Status\n1,10,20,Detected\n", encoding="utf-8")
+        comparison = {
+            "schema_version": "1.0",
+            "problem_type": "missing_ball",
+            "candidate_id": "candidate_api",
+            "candidate": {"id": "candidate_api", "path": "ai_candidates/missing_ball/candidate_api/ball_track.csv"},
+            "path": "ai_candidates/missing_ball/candidate_api/missing_ball_recovery_comparison.json",
+            "comparison_report": "ai_candidates/missing_ball/candidate_api/missing_ball_recovery_comparison.json",
+            "approval_id": "approval_api",
+            "consumed_approval_ids": ["approval_api"],
+            "candidate_artifacts": ["ai_candidates/missing_ball/candidate_api/ball_track.csv"],
+            "summary": {"status": "pass", "check_count": 1, "failed_check_count": 0, "warning_count": 0, "unavailable_count": 0},
+            "checks": [{"name": "comparison", "status": "pass"}],
+        }
+        self.write_json(
+            "outputs/candidate_finalize_baseline/ai_candidates/missing_ball/candidate_api/missing_ball_recovery_comparison.json",
+            comparison,
+        )
+        write_final_artifact_manifest(
+            output_dir,
+            baseline_output={"path": "ball_track.csv"},
+            candidate_outputs=[
+                {
+                    "id": "candidate_api",
+                    "candidate_id": "candidate_api",
+                    "problem_type": "missing_ball",
+                    "path": "ai_candidates/missing_ball/candidate_api",
+                    "candidate_artifacts": ["ai_candidates/missing_ball/candidate_api/ball_track.csv"],
+                }
+            ],
+            final_artifacts=[],
+            consumed_approvals=[{"approval_id": "approval_api", "candidate_id": "candidate_api"}],
+            comparison_reports=[comparison],
+        )
+        self.service._write_registry(
+            {
+                "runs": [
+                    {
+                        "run_id": "run_finalize",
+                        "source": "test",
+                        "status": "completed",
+                        "created_at": "2026-01-01T00:00:00+00:00",
+                        "output_dir": str(output_dir),
+                        "modules_enabled": {},
+                    }
+                ]
+            }
+        )
+
+        response = self.service.ai_candidate_finalize(
+            run_id="run_finalize",
+            problem_type="missing_ball",
+            candidate_id="candidate_api",
+            approval_id="approval_api",
+            decision="promote",
+            output_role="missing_ball_track",
+            note="API operator promotion",
+        )
+        run = self.service.get_run("run_finalize")
+
+        self.assertEqual("candidate_api", response["manifest"]["final_selected_artifacts"][0]["candidate_id"])
+        self.assertEqual("promoted", response["lifecycle"]["summary"]["promotion_status"])
+        self.assertEqual("promoted", run["ai_candidate_lifecycle"]["summary"]["promotion_status"])
+        self.assertEqual("promoted", run["stats"]["ai_candidate_lifecycle"]["promotion_status"])
 
     def test_list_runs_collects_metrics_artifacts_and_stats(self) -> None:
         output_dir = self.create_output_bundle("kept_baseline")
