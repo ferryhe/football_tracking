@@ -137,6 +137,18 @@ class AiCandidateComparisonTests(unittest.TestCase):
         self.assertEqual("unavailable", payload["summary"]["status"])
         self.assertFalse(payload["summary"]["promotion_eligible"])
 
+    def test_approval_payload_is_json_ready(self) -> None:
+        with patch("football_tracking.ai_candidate_comparison._utc_now_iso", return_value=FIXED_NOW):
+            payload = build_candidate_comparison(
+                problem_type="missing_ball",
+                baseline={"path": "baseline/ball_track.csv"},
+                candidate={"id": "candidate-pass", "path": "candidate/ball_track.csv"},
+                approval={"approval_id": "approval-path", "source_path": Path("approvals/actions.json")},
+                checks=[{"name": "comparison", "status": "pass"}],
+            )
+
+        self.assertEqual(str(Path("approvals/actions.json")), payload["approval"]["source_path"])
+
     def test_candidate_comparison_requires_at_least_one_check(self) -> None:
         with self.assertRaisesRegex(ValueError, "at least one check"):
             build_candidate_comparison(

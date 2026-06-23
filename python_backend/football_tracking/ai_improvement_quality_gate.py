@@ -7,11 +7,11 @@ from pathlib import Path
 from typing import Any
 
 from football_tracking.ai_candidate_comparison import CANDIDATE_STATUSES, comparison_payload_status
+from football_tracking.final_artifact_manifest import FINAL_ARTIFACT_MANIFEST_NAME
 
 SCHEMA_VERSION = "1.0"
 QUALITY_GATE_REPORT_NAME = "ai_improvement_quality_gate.json"
 HASH_SNAPSHOT_REPORT_NAME = "ai_improvement_hash_snapshots.json"
-FINAL_ARTIFACT_MANIFEST_NAME = "final_ai_improvement_artifact_manifest.json"
 TRACK_FILES = ("ball_track.csv", "ball_track.cleaned.csv")
 LONG_LOST_GAP_THRESHOLD_FRAMES = 120
 CAMERA_REGRESSION_TOLERANCE = 1.05

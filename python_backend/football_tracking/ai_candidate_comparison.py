@@ -37,7 +37,7 @@ def build_candidate_comparison(
         "problem_type": problem_type,
         "baseline": _artifact_ref(baseline, role="baseline"),
         "candidate": _artifact_ref(candidate, role="candidate"),
-        "approval": approval,
+        "approval": _json_ready(approval) if approval is not None else None,
         "summary": summary,
         "checks": normalized_checks,
     }
