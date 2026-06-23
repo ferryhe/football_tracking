@@ -519,6 +519,70 @@ class ChunkRunnerConfigTests(unittest.TestCase):
         self.assertEqual([100, 50, 160, 110], window["effective_roi"])
         self.assertEqual((100, 50, 160, 110), config.filtering.roi)
 
+    def test_high_recall_localize_ball_roi_clamps_right_bottom_child_roi(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            base_dir = Path(temp_name)
+            config = make_app_config(base_dir)
+            config.mock.frame_width = 5760
+            config.mock.frame_height = 1440
+            window = {
+                "start_frame": 2049,
+                "end_frame": 2544,
+                "approved_action": "localize_ball_roi",
+                "local_search_roi": {
+                    "coordinate_space": "image",
+                    "frame": 2079,
+                    "x": 5700,
+                    "y": 1390,
+                    "width": 120,
+                    "height": 80,
+                    "confidence": 0.74,
+                },
+                "mode": "sahi",
+            }
+
+            window_config = build_high_recall_window_config(
+                config,
+                window,
+                base_dir / "outputs" / "source" / "high_recall_windows" / "window_000",
+            )
+
+        self.assertEqual((5668, 1358, 5760, 1440), window_config.filtering.roi)
+        self.assertEqual([5668, 1358, 5760, 1440], window["effective_roi"])
+        self.assertEqual("sahi_roi", window["sahi_policy"])
+        self.assertEqual("executable", window["execution_status"])
+
+    def test_high_recall_localize_ball_roi_empty_base_intersection_needs_manual_resolution(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            base_dir = Path(temp_name)
+            config = make_app_config(base_dir)
+            config.filtering.roi = (300, 300, 320, 320)
+            window = {
+                "start_frame": 10,
+                "end_frame": 20,
+                "approved_action": "localize_ball_roi",
+                "local_search_roi": {
+                    "coordinate_space": "image",
+                    "frame": 15,
+                    "x": 20,
+                    "y": 20,
+                    "width": 20,
+                    "height": 20,
+                    "confidence": 0.74,
+                },
+                "mode": "sahi",
+            }
+
+            with self.assertRaisesRegex(ValueError, "High-recall window is not executable"):
+                build_high_recall_window_config(
+                    config,
+                    window,
+                    base_dir / "outputs" / "source" / "high_recall_windows" / "window_000",
+                )
+
+        self.assertEqual("needs_manual_resolution", window["execution_status"])
+        self.assertEqual("blocked_empty_roi_intersection", window["sahi_policy"])
+
     def test_high_recall_empty_roi_intersection_marks_manual_resolution_and_does_not_run_sahi(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:
             base_dir = Path(temp_name)

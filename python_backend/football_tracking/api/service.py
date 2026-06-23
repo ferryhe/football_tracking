@@ -8,6 +8,7 @@ import json
 import mimetypes
 import re
 import shutil
+import tempfile
 import threading
 import unicodedata
 from concurrent.futures import CancelledError
@@ -32,7 +33,7 @@ from football_tracking.ai_improvement import (
 )
 from football_tracking.ai_review_triggers import compact_ai_review_trigger_summary
 from football_tracking.api.ai_provider import OpenAIResponsesClient, load_provider_settings
-from football_tracking.ball_audit import compact_ball_audit_summary
+from football_tracking.ball_audit import build_ball_audit_report, compact_ball_audit_summary
 from football_tracking.calibration import build_pitch_calibration_from_field_polygon
 from football_tracking.chunk_runner import run_high_recall_windows, run_temporal_chunks
 from football_tracking.config import DEFAULT_HIGH_RECALL_MAX_TOTAL_FRAMES, AppConfig, load_config
@@ -41,6 +42,7 @@ from football_tracking.follow_cam import FollowCamGenerator
 from football_tracking.highlights import render_highlight_clip
 from football_tracking.high_recall_windows import approved_action_windows_from_report
 from football_tracking.metrics import build_metrics_report, compute_track_metrics, stats_from_metrics_report, write_run_artifacts
+from football_tracking.missing_ball_recovery_comparison import write_missing_ball_recovery_comparison
 from football_tracking.pipeline import BallTrackingPipeline
 from football_tracking.player_tracks import compact_player_tracks_summary
 from football_tracking.quality import assess_video_quality
@@ -1600,7 +1602,7 @@ class ApiService:
     def _create_approved_child_run(self, request: dict[str, Any]) -> dict[str, Any]:
         parent_run_id = str(request.get("parent_run_id") or "").strip()
         if not parent_run_id:
-            raise ValueError("Approved child targeted rerun requires parent_run_id.")
+            raise ValueError("Approved child recovery requires parent_run_id.")
         parent_run = self.get_run(parent_run_id)
         if parent_run.get("status") != "completed":
             raise RuntimeError(f"Parent run must be completed before approved child rerun: {parent_run_id}")
@@ -1616,15 +1618,38 @@ class ApiService:
             request.get("approved_action_ids") or [],
         )
         selected_artifact["source_approved_actions_path"] = str(artifact_path)
-        executable_windows = approved_action_windows_from_report(selected_artifact, mode="sahi")
+        known_packet_ids, known_visual_ids = self._traceable_approval_provenance_ids(parent_output_dir)
+        executable_windows = approved_action_windows_from_report(
+            selected_artifact,
+            mode="sahi",
+            known_source_packet_ids=known_packet_ids,
+            known_visual_review_ids=known_visual_ids,
+        )
         if not executable_windows:
-            raise ValueError("Approved child targeted rerun requires at least one executable targeted_rerun action.")
+            raise ValueError("Approved child recovery requires at least one executable approved recovery action.")
+        source_total_frames = self._run_record_source_total_frames(parent_run)
+        if self._has_localize_window(executable_windows) and source_total_frames is None:
+            raise ValueError("Approved child recovery with localize_ball_roi requires a known source frame count.")
+        if self._has_full_video_localize_window(executable_windows, source_total_frames):
+            raise ValueError("Approved child recovery rejects full-video localize_ball_roi scope.")
+        if self._has_source_clamped_invalid_localize_window(executable_windows, source_total_frames):
+            raise ValueError("Approved child recovery rejects localize_ball_roi outside the source-clamped frame window.")
+        missing_candidate_ids = self._recovery_actions_without_candidate_id(selected_artifact)
+        if missing_candidate_ids:
+            raise ValueError(
+                "Approved child recovery requires candidate_id for selected recovery actions: "
+                + ", ".join(missing_candidate_ids)
+            )
+        recovery_candidate_ids = self._recovery_candidate_ids(selected_artifact)
+        if len(recovery_candidate_ids) > 1:
+            raise ValueError("Approved child recovery requires selected recovery actions to share one candidate_id.")
         selected_frame_budget = sum(
             int(window["end_frame"]) - int(window["start_frame"]) + 1 for window in executable_windows
         )
 
         config_path, relative_name = self._resolve_run_config_reference(parent_run)
         config = load_config(config_path)
+        self._validate_output_csv_name(config.output.csv_name)
         input_video = parent_run.get("input_video") or str(config.input_video)
         if not input_video:
             raise FileNotFoundError(f"Parent run {parent_run_id} is not linked to an input video.")
@@ -1640,7 +1665,7 @@ class ApiService:
 
         artifact_relative_path = APPROVED_ACTIONS_FILE_NAME
         child_artifact_path = config.output_dir / artifact_relative_path
-        child_config_path = config.output_dir / "approved_targeted_rerun_config.yaml"
+        child_config_path = config.output_dir / "approved_recovery_config.yaml"
         parent_fingerprints = self._capture_parent_run_fingerprints(
             parent_run,
             parent_output_dir,
@@ -1659,7 +1684,7 @@ class ApiService:
         max_approved_frames = config.high_recall_windows.max_total_frames or DEFAULT_HIGH_RECALL_MAX_TOTAL_FRAMES
         if max_approved_frames is not None and selected_frame_budget > int(max_approved_frames):
             raise ValueError(
-                f"Approved child targeted rerun frame budget {selected_frame_budget} exceeds "
+                f"Approved child recovery frame budget {selected_frame_budget} exceeds "
                 f"high_recall_windows.max_total_frames {max_approved_frames}."
             )
         config.high_recall_windows.max_total_frames = selected_frame_budget
@@ -1704,6 +1729,7 @@ class ApiService:
                     child_output_dir=config.output_dir,
                     child_artifact_path=child_artifact_path,
                     selected_artifact=selected_artifact,
+                    csv_name=config.output.csv_name,
                 )
                 self._write_approved_child_config(child_config_path, config)
                 registry = self._read_registry()
@@ -1714,7 +1740,7 @@ class ApiService:
                 cancel_event = threading.Event()
                 thread = threading.Thread(
                     target=self._execute_approved_child_run,
-                    args=(run_id, config, parent_run_id, parent_fingerprints, cancel_event),
+                    args=(run_id, config, parent_run_id, parent_fingerprints, source_total_frames, cancel_event),
                     name=f"football-tracking-approved-child-{run_id}",
                     daemon=True,
                 )
@@ -1751,6 +1777,176 @@ class ApiService:
             raise ValueError("output_dir_name must be a safe single directory name.")
         return output_name
 
+    def _validate_output_csv_name(self, value: str) -> None:
+        csv_name = str(value or "").strip()
+        path = Path(csv_name)
+        if (
+            not csv_name
+            or csv_name in {".", ".."}
+            or path.is_absolute()
+            or path.name != csv_name
+            or not csv_name.lower().endswith(".csv")
+        ):
+            raise ValueError("output.csv_name must be a safe single .csv filename.")
+
+    def _run_record_source_total_frames(self, run: dict[str, Any]) -> int | None:
+        stats = run.get("stats") if isinstance(run.get("stats"), dict) else {}
+        for source_name in ("cleaned", "raw"):
+            source_stats = stats.get(source_name) if isinstance(stats.get(source_name), dict) else {}
+            frame_count = self._optional_int(source_stats.get("frame_count"))
+            if frame_count is not None and frame_count > 0:
+                return frame_count
+        output_dir = Path(str(run.get("output_dir") or ""))
+        for name in ("ball_track.cleaned.csv", "ball_track.csv"):
+            frame_count = self._track_frame_count(output_dir / name)
+            if frame_count is not None and frame_count > 0:
+                return frame_count
+        return None
+
+    def _has_full_video_localize_window(self, windows: list[dict[str, Any]], source_total_frames: int | None) -> bool:
+        if source_total_frames is None or source_total_frames <= 0:
+            return False
+        localize_windows: list[dict[str, Any]] = []
+        for window in windows:
+            if not self._approved_window_is_localize_ball_roi(window):
+                continue
+            localize_windows.append(window)
+            start_frame = self._optional_int(window.get("start_frame"))
+            end_frame = self._optional_int(window.get("end_frame"))
+            if start_frame is not None and end_frame is not None and start_frame <= 0 and end_frame >= source_total_frames - 1:
+                return True
+        return self._localize_windows_cover_full_video(localize_windows, source_total_frames)
+
+    def _has_localize_window(self, windows: list[dict[str, Any]]) -> bool:
+        return any(self._approved_window_is_localize_ball_roi(window) for window in windows)
+
+    def _has_source_clamped_invalid_localize_window(
+        self,
+        windows: list[dict[str, Any]],
+        source_total_frames: int | None,
+    ) -> bool:
+        if source_total_frames is None or source_total_frames <= 0:
+            return False
+        for window in windows:
+            if not self._approved_window_is_localize_ball_roi(window):
+                continue
+            start_frame = self._optional_int(window.get("start_frame"))
+            end_frame = self._optional_int(window.get("end_frame"))
+            if start_frame is None or end_frame is None:
+                return True
+            if end_frame < start_frame:
+                start_frame, end_frame = end_frame, start_frame
+            if start_frame >= source_total_frames:
+                return True
+            end_frame = min(end_frame, source_total_frames - 1)
+            roi = window.get("local_search_roi") if isinstance(window.get("local_search_roi"), dict) else {}
+            roi_frame = self._optional_int(roi.get("frame"))
+            if roi_frame is None or roi_frame < start_frame or roi_frame > end_frame:
+                return True
+        return False
+
+    def _localize_windows_cover_full_video(self, windows: list[dict[str, Any]], source_total_frames: int) -> bool:
+        coverage_end = -1
+        for window in sorted(windows, key=lambda item: (int(item["start_frame"]), int(item["end_frame"]))):
+            start = int(window["start_frame"])
+            end = int(window["end_frame"])
+            if start > coverage_end + 1:
+                return False
+            coverage_end = max(coverage_end, end)
+            if coverage_end >= source_total_frames - 1:
+                return True
+        return False
+
+    def _approved_window_is_localize_ball_roi(self, window: dict[str, Any]) -> bool:
+        if window.get("approved_action") == "localize_ball_roi":
+            return True
+        provenance = window.get("approval_provenance")
+        if not isinstance(provenance, list):
+            return False
+        return any(isinstance(item, dict) and item.get("approved_action") == "localize_ball_roi" for item in provenance)
+
+    def _track_frame_count(self, path: Path) -> int | None:
+        if not path.exists():
+            return None
+        try:
+            with path.open("r", newline="", encoding="utf-8-sig") as handle:
+                reader = csv.DictReader(handle)
+                max_frame: int | None = None
+                for row in reader:
+                    frame = self._optional_int(row.get("Frame"))
+                    if frame is not None and (max_frame is None or frame > max_frame):
+                        max_frame = frame
+                return None if max_frame is None else max_frame + 1
+        except OSError:
+            return None
+
+    def _traceable_approval_provenance_ids(self, output_dir: Path) -> tuple[set[str] | None, set[str] | None]:
+        review_packets_path = output_dir / "review_packets.json"
+        visual_review_path = output_dir / "ai_visual_review.json"
+        packet_ids: set[str] = set()
+        visual_review_ids: set[str] = set()
+        review_packets = self._read_json_file(review_packets_path)
+        if isinstance(review_packets, dict):
+            for packet in self._list_dicts(review_packets.get("packets")):
+                for key in ("packet_id", "source_packet_id", "id"):
+                    self._add_string_value(packet_ids, packet.get(key))
+                source = packet.get("source") if isinstance(packet.get("source"), dict) else {}
+                for key in ("source_packet_id", "id"):
+                    self._add_string_value(packet_ids, source.get(key))
+
+        visual_review = self._read_json_file(visual_review_path)
+        if isinstance(visual_review, dict):
+            for item in self._list_dicts(visual_review.get("reviews")):
+                self._add_string_value(visual_review_ids, item.get("visual_review_id"))
+                for key in ("source_packet_id", "packet_id"):
+                    self._add_string_value(packet_ids, item.get(key))
+                review = item.get("review") if isinstance(item.get("review"), dict) else {}
+                self._add_string_value(visual_review_ids, review.get("visual_review_id"))
+                for key in ("source_packet_id", "packet_id"):
+                    self._add_string_value(packet_ids, review.get(key))
+                provenance = review.get("provenance") if isinstance(review.get("provenance"), dict) else {}
+                self._add_string_value(visual_review_ids, provenance.get("visual_review_id"))
+                self._add_string_value(packet_ids, provenance.get("source_packet_id"))
+        return packet_ids, visual_review_ids
+
+    def _recovery_candidate_ids(self, artifact: dict[str, Any]) -> set[str]:
+        candidate_ids: set[str] = set()
+        actions = artifact.get("approved_actions") if isinstance(artifact.get("approved_actions"), list) else []
+        for action in actions:
+            if not isinstance(action, dict) or action.get("approved_action") not in {"localize_ball_roi", "targeted_rerun"}:
+                continue
+            candidate_id = action.get("candidate_id")
+            if isinstance(candidate_id, str) and candidate_id.strip():
+                candidate_ids.add(candidate_id.strip())
+        return candidate_ids
+
+    def _recovery_actions_without_candidate_id(self, artifact: dict[str, Any]) -> list[str]:
+        missing: list[str] = []
+        actions = artifact.get("approved_actions") if isinstance(artifact.get("approved_actions"), list) else []
+        for action in actions:
+            if not isinstance(action, dict) or action.get("approved_action") not in {"localize_ball_roi", "targeted_rerun"}:
+                continue
+            candidate_id = action.get("candidate_id")
+            if not isinstance(candidate_id, str) or not candidate_id.strip():
+                missing.append(str(action.get("approval_id") or action.get("improvement_id") or "<unknown>"))
+        return missing
+
+    def _read_json_file(self, path: Path) -> dict[str, Any] | None:
+        if not path.exists():
+            return None
+        try:
+            loaded = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            return None
+        return loaded if isinstance(loaded, dict) else None
+
+    def _list_dicts(self, value: Any) -> list[dict[str, Any]]:
+        return [item for item in value if isinstance(item, dict)] if isinstance(value, list) else []
+
+    def _add_string_value(self, target: set[str], value: Any) -> None:
+        if isinstance(value, str) and value.strip():
+            target.add(value.strip())
+
     def _resolve_approved_actions_artifact_path(self, parent_output_dir: Path, requested_name: Any) -> Path:
         raw_name = str(requested_name or APPROVED_ACTIONS_FILE_NAME).strip()
         if not raw_name:
@@ -1781,17 +1977,24 @@ class ApiService:
             raise ValueError("Approved actions artifact invalid: approved_actions must be a list.")
         selected_ids = [str(item).strip() for item in approval_ids if str(item).strip()]
         if not selected_ids:
-            selected_actions = list(actions)
-        else:
-            actions_by_id = {
-                str(action.get("approval_id") or ""): action
-                for action in actions
-                if isinstance(action, dict)
-            }
-            missing = [approval_id for approval_id in selected_ids if approval_id not in actions_by_id]
-            if missing:
-                raise ValueError(f"Approved action IDs not found: {', '.join(missing)}")
-            selected_actions = [actions_by_id[approval_id] for approval_id in selected_ids]
+            raise ValueError("Approved child recovery requires at least one explicit approved_action_id.")
+        actions_by_id: dict[str, dict[str, Any]] = {}
+        duplicate_ids: set[str] = set()
+        for action in actions:
+            if not isinstance(action, dict):
+                continue
+            approval_id = str(action.get("approval_id") or "").strip()
+            if not approval_id:
+                continue
+            if approval_id in actions_by_id:
+                duplicate_ids.add(approval_id)
+            actions_by_id[approval_id] = action
+        if duplicate_ids:
+            raise ValueError(f"Duplicate approved action IDs: {', '.join(sorted(duplicate_ids))}")
+        missing = [approval_id for approval_id in selected_ids if approval_id not in actions_by_id]
+        if missing:
+            raise ValueError(f"Approved action IDs not found: {', '.join(missing)}")
+        selected_actions = [actions_by_id[approval_id] for approval_id in selected_ids]
         selected_artifact = dict(artifact)
         selected_artifact["approved_actions"] = selected_actions
         return selected_artifact
@@ -1803,8 +2006,16 @@ class ApiService:
         child_output_dir: Path,
         child_artifact_path: Path,
         selected_artifact: dict[str, Any],
+        csv_name: str,
     ) -> None:
-        for name in ("ball_track.csv", "ball_track.cleaned.csv"):
+        track_names = ["ball_track.csv", "ball_track.cleaned.csv"]
+        if csv_name and csv_name not in track_names:
+            track_names.insert(0, csv_name)
+        for name in track_names:
+            source_path = parent_output_dir / name
+            if source_path.is_file():
+                shutil.copy2(source_path, child_output_dir / name)
+        for name in ("review_packets.json", "ai_visual_review.json"):
             source_path = parent_output_dir / name
             if source_path.is_file():
                 shutil.copy2(source_path, child_output_dir / name)
@@ -2174,6 +2385,7 @@ class ApiService:
         config: AppConfig,
         parent_run_id: str,
         parent_fingerprints: dict[str, tuple[int, str] | None],
+        source_total_frames: int | None,
         cancel_event: threading.Event,
     ) -> None:
         progress_plan = self._progress_stage_plan(tracking=True, postprocess=False, render=False)
@@ -2192,23 +2404,30 @@ class ApiService:
             },
         )
         try:
+            high_recall_report: dict[str, Any] | None = None
+
             def run_child_high_recall(progress_callback=None, should_cancel=None) -> None:
+                nonlocal high_recall_report
                 report = run_high_recall_windows(
                     config,
+                    source_total_frames=source_total_frames,
                     progress_callback=progress_callback,
                     should_cancel=should_cancel,
                 )
+                high_recall_report = report if isinstance(report, dict) else None
                 windows = report.get("windows") if isinstance(report, dict) else None
                 execution = report.get("execution") if isinstance(report, dict) else None
                 execution_status = execution.get("status") if isinstance(execution, dict) else None
                 if not windows or execution_status == "skipped":
-                    raise RuntimeError("Approved child targeted rerun produced no executable windows.")
+                    raise RuntimeError("Approved child recovery produced no executable windows.")
 
             self._run_with_optional_progress(
                 run_child_high_recall,
                 lambda update: self._update_run_progress(run_id, update, progress_plan),
                 cancel_event.is_set,
             )
+            self._write_approved_child_candidate_audit(config)
+            self._write_approved_child_missing_ball_comparison(parent_run_id, config, high_recall_report=high_recall_report)
             self._assert_parent_fingerprints_unchanged(parent_fingerprints)
             existing = self.get_run(run_id)
             updated = self._build_run_snapshot(
@@ -2231,7 +2450,15 @@ class ApiService:
                 started_at=existing.get("started_at"),
                 completed_at=_utc_now_iso(),
                 progress=self._completed_progress(existing.get("progress"), existing.get("started_at")),
+                write_artifacts=False,
             )
+            artifact_error = self._write_run_manifest_and_metrics_preserving_candidate_audit(config.output_dir, updated)
+            updated["artifacts"] = self._collect_artifacts(config.output_dir)
+            updated["stats"] = self._collect_stats(config.output_dir)
+            if artifact_error is not None:
+                updated["status"] = "failed"
+                updated["error"] = artifact_error
+                updated["progress"] = self._failed_progress(existing.get("progress"), existing.get("started_at"))
             self._replace_run(run_id, updated)
         except CancelledError:
             existing = self.get_run(run_id)
@@ -2287,6 +2514,145 @@ class ApiService:
             with self._lock:
                 self._active_threads.pop(run_id, None)
                 self._cancel_events.pop(run_id, None)
+
+    def _write_approved_child_missing_ball_comparison(
+        self,
+        parent_run_id: str,
+        config: AppConfig,
+        *,
+        high_recall_report: dict[str, Any] | None = None,
+    ) -> None:
+        parent_run = self.get_run(parent_run_id)
+        parent_output_dir = Path(parent_run["output_dir"]).resolve()
+        selected_artifact_path = config.output_dir / APPROVED_ACTIONS_FILE_NAME
+        selected_artifact = self._load_approved_actions_artifact(selected_artifact_path)
+        recovery_actions = [
+            action
+            for action in selected_artifact.get("approved_actions", [])
+            if (
+                isinstance(action, dict)
+                and action.get("approved_action") in {"localize_ball_roi", "targeted_rerun"}
+                and isinstance(action.get("candidate_id"), str)
+                and action.get("candidate_id", "").strip()
+            )
+        ]
+        if not recovery_actions:
+            return
+        recovery_actions = self._recovery_actions_with_execution_roi(recovery_actions, high_recall_report)
+        approval = dict(recovery_actions[0])
+        approval["related_approvals"] = recovery_actions
+        candidate_id = str(approval.get("candidate_id") or "").strip()
+        if not candidate_id:
+            raise RuntimeError("Approved child recovery comparison requires candidate_id.")
+        baseline_track = self._preferred_track_path(parent_output_dir, csv_name=config.output.csv_name)
+        candidate_track = self._preferred_track_path(config.output_dir, csv_name=config.output.csv_name)
+        write_missing_ball_recovery_comparison(
+            config.output_dir,
+            baseline_track,
+            candidate_track,
+            candidate_id=candidate_id,
+            approval=approval,
+            target_window=self._combined_recovery_action_window(recovery_actions),
+            candidate_audit_path=config.output_dir / "ball_audit.json",
+            require_candidate_audit=True,
+            review_packets_path=config.output_dir / "review_packets.json",
+            require_packet_coverage=True,
+        )
+
+    def _recovery_actions_with_execution_roi(
+        self,
+        actions: list[dict[str, Any]],
+        high_recall_report: dict[str, Any] | None,
+    ) -> list[dict[str, Any]]:
+        effective_roi_by_approval_id: dict[str, list[Any]] = {}
+        windows = high_recall_report.get("windows") if isinstance(high_recall_report, dict) else None
+        if isinstance(windows, list):
+            for window in windows:
+                if not isinstance(window, dict):
+                    continue
+                effective_roi = window.get("effective_roi")
+                if not isinstance(effective_roi, list) or len(effective_roi) != 4:
+                    continue
+                approval_ids: set[str] = set()
+                approval_id = window.get("approval_id")
+                if isinstance(approval_id, str) and approval_id.strip():
+                    approval_ids.add(approval_id.strip())
+                provenance = window.get("approval_provenance")
+                if isinstance(provenance, list):
+                    for item in provenance:
+                        if not isinstance(item, dict):
+                            continue
+                        provenance_approval_id = item.get("approval_id")
+                        if isinstance(provenance_approval_id, str) and provenance_approval_id.strip():
+                            approval_ids.add(provenance_approval_id.strip())
+                for approval_id_value in approval_ids:
+                    effective_roi_by_approval_id[approval_id_value] = list(effective_roi)
+        enriched: list[dict[str, Any]] = []
+        for action in actions:
+            copied = dict(action)
+            approval_id = str(copied.get("approval_id") or "").strip()
+            if approval_id and "effective_roi" not in copied and approval_id in effective_roi_by_approval_id:
+                copied["effective_roi"] = effective_roi_by_approval_id[approval_id]
+            enriched.append(copied)
+        return enriched
+
+    def _write_approved_child_candidate_audit(self, config: AppConfig) -> None:
+        candidate_track = self._preferred_track_path(config.output_dir, csv_name=config.output.csv_name)
+        if not candidate_track.exists():
+            audit_payload = build_ball_audit_report(config.output_dir)
+        else:
+            with tempfile.TemporaryDirectory() as temp_name:
+                audit_source_dir = Path(temp_name)
+                shutil.copy2(candidate_track, audit_source_dir / "ball_track.csv")
+                audit_payload = build_ball_audit_report(audit_source_dir)
+        (config.output_dir / "ball_audit.json").write_text(
+            json.dumps(audit_payload, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+
+    def _write_run_manifest_and_metrics_preserving_candidate_audit(self, output_dir: Path, run: dict[str, Any]) -> str | None:
+        existing_audit = self._read_optional_json(output_dir / "ball_audit.json")
+        artifact_error = self._write_run_artifacts(output_dir, run)
+        if existing_audit is not None:
+            (output_dir / "ball_audit.json").write_text(
+                json.dumps(existing_audit, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            try:
+                (output_dir / "metrics_report.json").write_text(
+                    json.dumps(build_metrics_report(output_dir), ensure_ascii=False, indent=2) + "\n",
+                    encoding="utf-8",
+                )
+            except Exception as exc:
+                return self._append_artifact_error(artifact_error, f"Failed to rebuild metrics with candidate audit: {exc}")
+        return artifact_error
+
+    def _preferred_track_path(self, output_dir: Path, *, csv_name: str) -> Path:
+        preferred = output_dir / csv_name
+        if preferred.exists():
+            return preferred
+        raw = output_dir / "ball_track.csv"
+        if raw.exists():
+            return raw
+        cleaned = output_dir / "ball_track.cleaned.csv"
+        if cleaned.exists():
+            return cleaned
+        return preferred
+
+    def _combined_recovery_action_window(self, actions: list[dict[str, Any]]) -> dict[str, int] | None:
+        windows: list[dict[str, int]] = []
+        for action in actions:
+            window = action.get("rerun_scope") if isinstance(action.get("rerun_scope"), dict) else action
+            start = self._optional_int(window.get("start_frame")) if isinstance(window, dict) else None
+            end = self._optional_int(window.get("end_frame")) if isinstance(window, dict) else None
+            if start is not None and end is not None:
+                windows.append({"start_frame": min(start, end), "end_frame": max(start, end)})
+        if not windows:
+            return None
+        return {
+            "start_frame": min(window["start_frame"] for window in windows),
+            "end_frame": max(window["end_frame"] for window in windows),
+        }
 
     def _execute_follow_cam_render(
         self,

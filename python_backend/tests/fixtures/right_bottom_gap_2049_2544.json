@@ -1,0 +1,18 @@
+{
+  "lost_gap": {
+    "start_frame": 2049,
+    "end_frame": 2544
+  },
+  "key_frame": 2079,
+  "source_size": {
+    "width": 5760,
+    "height": 1440
+  },
+  "expected_region": "right_bottom",
+  "required_packet_coverage_labels": [
+    "start",
+    "middle",
+    "end",
+    "tail"
+  ]
+}

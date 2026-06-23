@@ -21,6 +21,10 @@ def _write_json(path: Path, payload: dict) -> None:
     path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
 
 
+def _write_review_packets(output_dir: Path, *packet_ids: str) -> None:
+    _write_json(output_dir / "review_packets.json", {"packets": [{"packet_id": packet_id} for packet_id in packet_ids]})
+
+
 class HighRecallWindowTests(unittest.TestCase):
     def test_build_combines_sources_applies_margin_and_merges_close_windows(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:
@@ -316,6 +320,11 @@ class HighRecallWindowTests(unittest.TestCase):
     def test_explicit_approved_targeted_rerun_creates_window_with_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:
             output_dir = Path(temp_name)
+            _write_review_packets(output_dir, "packet_001")
+            _write_json(
+                output_dir / "ai_visual_review.json",
+                {"reviews": [{"visual_review_id": "visual_review:packet_001", "source_packet_id": "packet_001"}]},
+            )
             approved_path = output_dir / "ai_improvement_approved_actions.json"
             _write_json(
                 approved_path,
@@ -325,6 +334,7 @@ class HighRecallWindowTests(unittest.TestCase):
                         {
                             "approval_id": "approval_001",
                             "improvement_id": "imp_001",
+                            "candidate_id": "candidate_001",
                             "approved_action": "targeted_rerun",
                             "approval_source": "api",
                             "rerun_scope": {"start_frame": 10, "end_frame": 20},
@@ -371,6 +381,7 @@ class HighRecallWindowTests(unittest.TestCase):
     def test_approved_targeted_rerun_with_local_search_roi_writes_roi_policy_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:
             output_dir = Path(temp_name)
+            _write_review_packets(output_dir, "packet_001")
             approved_path = output_dir / "ai_improvement_approved_actions.json"
             _write_json(
                 approved_path,
@@ -380,6 +391,7 @@ class HighRecallWindowTests(unittest.TestCase):
                         {
                             "approval_id": "approval_001",
                             "improvement_id": "imp_001",
+                            "candidate_id": "candidate_001",
                             "approved_action": "targeted_rerun",
                             "rerun_scope": {"start_frame": 10, "end_frame": 20},
                             "source_packet_id": "packet_001",
@@ -423,6 +435,7 @@ class HighRecallWindowTests(unittest.TestCase):
                         {
                             "approval_id": "approval_001",
                             "improvement_id": "imp_001",
+                            "candidate_id": "candidate_001",
                             "approved_action": "targeted_rerun",
                             "rerun_scope": {"start_frame": 10, "end_frame": 20},
                             "local_search_roi": {
@@ -531,6 +544,7 @@ class HighRecallWindowTests(unittest.TestCase):
                         {
                             "approval_id": "approval_001",
                             "improvement_id": "imp_001",
+                            "candidate_id": "candidate_001",
                             "approved_action": "targeted_rerun",
                             "rerun_scope": {"start_frame": 10.9, "end_frame": 20},
                         }
@@ -565,9 +579,10 @@ class HighRecallWindowTests(unittest.TestCase):
         self.assertEqual([], report["windows"])
         self.assertEqual(0, report["summary"]["candidate_window_count"])
 
-    def test_approved_localize_ball_roi_alone_does_not_create_window(self) -> None:
+    def test_approved_localize_ball_roi_with_bounded_frames_creates_roi_window(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:
             output_dir = Path(temp_name)
+            _write_review_packets(output_dir, "packet_001")
             approved_path = output_dir / "ai_improvement_approved_actions.json"
             _write_json(
                 approved_path,
@@ -577,7 +592,11 @@ class HighRecallWindowTests(unittest.TestCase):
                         {
                             "approval_id": "approval_001",
                             "improvement_id": "imp_001",
+                            "candidate_id": "candidate_001",
                             "approved_action": "localize_ball_roi",
+                            "start_frame": 10,
+                            "end_frame": 20,
+                            "source_packet_id": "packet_001",
                             "local_search_roi": {
                                 "coordinate_space": "image",
                                 "frame": 15,
@@ -592,10 +611,351 @@ class HighRecallWindowTests(unittest.TestCase):
                 },
             )
 
-            report = build_high_recall_windows(output_dir, approved_actions_path=approved_path)
+            report = build_high_recall_windows(
+                output_dir,
+                margin_frames=0,
+                merge_gap_frames=0,
+                max_total_frames=100,
+                total_frames=100,
+                approved_actions_path=approved_path,
+                approved_only=True,
+            )
 
+        self.assertEqual(1, report["summary"]["selected_window_count"])
+        window = report["windows"][0]
+        self.assertEqual((10, 20), (window["start_frame"], window["end_frame"]))
+        self.assertEqual("localize_ball_roi", window["approved_action"])
+        self.assertEqual("candidate_001", window["candidate_id"])
+        self.assertEqual("candidate_001", window["approval_provenance"][0]["candidate_id"])
+        self.assertEqual([120, 40, 200, 90], window["approved_roi"])
+        self.assertEqual([88, 8, 232, 122], window["effective_roi"])
+        self.assertEqual("sahi_roi", window["sahi_policy"])
+        self.assertEqual("packet_001", window["source_packet_id"])
+
+    def test_approved_localize_ball_roi_requires_bounded_frames(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            approved_path = output_dir / "ai_improvement_approved_actions.json"
+            _write_json(
+                approved_path,
+                {
+                    "schema_version": "1.0",
+                    "approved_actions": [
+                        {
+                            "approval_id": "approval_001",
+                            "improvement_id": "imp_001",
+                            "candidate_id": "candidate_001",
+                            "approved_action": "localize_ball_roi",
+                            "source_packet_id": "packet_001",
+                            "local_search_roi": {
+                                "coordinate_space": "image",
+                                "frame": 15,
+                                "x": 120,
+                                "y": 40,
+                                "width": 80,
+                                "height": 50,
+                                "confidence": 0.72,
+                            },
+                        }
+                    ],
+                },
+            )
+
+            with self.assertRaisesRegex(ValueError, "localize_ball_roi.*frame bounds"):
+                build_high_recall_windows(output_dir, approved_actions_path=approved_path)
+
+    def test_approved_localize_ball_roi_requires_candidate_id(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            approved_path = output_dir / "ai_improvement_approved_actions.json"
+            _write_json(
+                approved_path,
+                {
+                    "schema_version": "1.0",
+                    "approved_actions": [
+                        {
+                            "approval_id": "approval_001",
+                            "improvement_id": "imp_001",
+                            "approved_action": "localize_ball_roi",
+                            "start_frame": 10,
+                            "end_frame": 20,
+                            "source_packet_id": "packet_001",
+                            "local_search_roi": {
+                                "coordinate_space": "image",
+                                "frame": 15,
+                                "x": 120,
+                                "y": 40,
+                                "width": 80,
+                                "height": 50,
+                                "confidence": 0.72,
+                            },
+                        }
+                    ],
+                },
+            )
+
+            with self.assertRaisesRegex(ValueError, "localize_ball_roi.*candidate_id"):
+                build_high_recall_windows(output_dir, approved_actions_path=approved_path)
+
+    def test_approved_localize_ball_roi_rejects_unknown_packet_provenance(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_json(output_dir / "review_packets.json", {"packets": [{"packet_id": "packet_known"}]})
+            approved_path = output_dir / "ai_improvement_approved_actions.json"
+            _write_json(
+                approved_path,
+                {
+                    "schema_version": "1.0",
+                    "approved_actions": [
+                        {
+                            "approval_id": "approval_001",
+                            "improvement_id": "imp_001",
+                            "candidate_id": "candidate_001",
+                            "approved_action": "localize_ball_roi",
+                            "start_frame": 10,
+                            "end_frame": 20,
+                            "source_packet_id": "packet_fake",
+                            "local_search_roi": {
+                                "coordinate_space": "image",
+                                "frame": 15,
+                                "x": 120,
+                                "y": 40,
+                                "width": 80,
+                                "height": 50,
+                                "confidence": 0.72,
+                            },
+                        }
+                    ],
+                },
+            )
+
+            with self.assertRaisesRegex(ValueError, "source_packet_id does not match"):
+                build_high_recall_windows(output_dir, approved_actions_path=approved_path)
+
+    def test_approved_localize_ball_roi_rejects_roi_frame_outside_bounds(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_review_packets(output_dir, "packet_001")
+            approved_path = output_dir / "ai_improvement_approved_actions.json"
+            _write_json(
+                approved_path,
+                {
+                    "schema_version": "1.0",
+                    "approved_actions": [
+                        {
+                            "approval_id": "approval_001",
+                            "improvement_id": "imp_001",
+                            "candidate_id": "candidate_001",
+                            "approved_action": "localize_ball_roi",
+                            "start_frame": 10,
+                            "end_frame": 20,
+                            "source_packet_id": "packet_001",
+                            "local_search_roi": {
+                                "coordinate_space": "image",
+                                "frame": 25,
+                                "x": 120,
+                                "y": 40,
+                                "width": 80,
+                                "height": 50,
+                                "confidence": 0.72,
+                            },
+                        }
+                    ],
+                },
+            )
+
+            with self.assertRaisesRegex(ValueError, "localize_ball_roi.*frame must fall inside"):
+                build_high_recall_windows(output_dir, approved_actions_path=approved_path)
+
+    def test_approved_localize_ball_roi_rejects_roi_frame_outside_final_clamped_window(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_review_packets(output_dir, "packet_001")
+            approved_path = output_dir / "ai_improvement_approved_actions.json"
+            _write_json(
+                approved_path,
+                {
+                    "schema_version": "1.0",
+                    "approved_actions": [
+                        {
+                            "approval_id": "approval_001",
+                            "improvement_id": "imp_001",
+                            "candidate_id": "candidate_001",
+                            "approved_action": "localize_ball_roi",
+                            "start_frame": 95,
+                            "end_frame": 150,
+                            "source_packet_id": "packet_001",
+                            "local_search_roi": {
+                                "coordinate_space": "image",
+                                "frame": 120,
+                                "x": 120,
+                                "y": 40,
+                                "width": 80,
+                                "height": 50,
+                                "confidence": 0.72,
+                            },
+                        }
+                    ],
+                },
+            )
+
+            report = build_high_recall_windows(
+                output_dir,
+                margin_frames=0,
+                merge_gap_frames=0,
+                max_total_frames=None,
+                total_frames=100,
+                approved_actions_path=approved_path,
+                approved_only=True,
+            )
+
+        self.assertEqual("rejected", report["summary"]["status"])
+        self.assertEqual("local_search_roi_frame_outside_final_window", report["rejected_windows"][0]["rejection_reason"])
+
+    def test_approved_localize_ball_roi_honors_frame_budget(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_review_packets(output_dir, "packet_001")
+            approved_path = output_dir / "ai_improvement_approved_actions.json"
+            _write_json(
+                approved_path,
+                {
+                    "schema_version": "1.0",
+                    "approved_actions": [
+                        {
+                            "approval_id": "approval_001",
+                            "improvement_id": "imp_001",
+                            "candidate_id": "candidate_001",
+                            "approved_action": "localize_ball_roi",
+                            "start_frame": 10,
+                            "end_frame": 20,
+                            "source_packet_id": "packet_001",
+                            "local_search_roi": {
+                                "coordinate_space": "image",
+                                "frame": 15,
+                                "x": 120,
+                                "y": 40,
+                                "width": 80,
+                                "height": 50,
+                                "confidence": 0.72,
+                            },
+                        }
+                    ],
+                },
+            )
+
+            report = build_high_recall_windows(
+                output_dir,
+                margin_frames=0,
+                merge_gap_frames=0,
+                max_total_frames=5,
+                total_frames=100,
+                approved_actions_path=approved_path,
+                approved_only=True,
+            )
+
+        self.assertEqual("rejected", report["summary"]["status"])
         self.assertEqual([], report["windows"])
-        self.assertEqual(0, report["summary"]["candidate_window_count"])
+        self.assertEqual("max_total_frames_exceeded", report["rejected_windows"][0]["rejection_reason"])
+
+    def test_approved_localize_ball_roi_rejects_full_video_scope_without_budget(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_review_packets(output_dir, "packet_001")
+            approved_path = output_dir / "ai_improvement_approved_actions.json"
+            _write_json(
+                approved_path,
+                {
+                    "schema_version": "1.0",
+                    "approved_actions": [
+                        {
+                            "approval_id": "approval_001",
+                            "improvement_id": "imp_001",
+                            "candidate_id": "candidate_001",
+                            "approved_action": "localize_ball_roi",
+                            "start_frame": 0,
+                            "end_frame": 99,
+                            "source_packet_id": "packet_001",
+                            "local_search_roi": {
+                                "coordinate_space": "image",
+                                "frame": 15,
+                                "x": 120,
+                                "y": 40,
+                                "width": 80,
+                                "height": 50,
+                                "confidence": 0.72,
+                            },
+                        }
+                    ],
+                },
+            )
+
+            report = build_high_recall_windows(
+                output_dir,
+                margin_frames=0,
+                merge_gap_frames=0,
+                max_total_frames=None,
+                total_frames=100,
+                approved_actions_path=approved_path,
+                approved_only=True,
+            )
+
+        self.assertEqual("rejected", report["summary"]["status"])
+        self.assertEqual([], report["windows"])
+        self.assertEqual("full_video_localize_scope_rejected", report["rejected_windows"][0]["rejection_reason"])
+
+    def test_approved_localize_ball_roi_rejects_full_video_scope_after_merge(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_review_packets(output_dir, "packet_001")
+            approved_path = output_dir / "ai_improvement_approved_actions.json"
+            actions = []
+            for approval_id, start_frame, end_frame, roi_frame in [
+                ("approval_001", 0, 49, 20),
+                ("approval_002", 50, 99, 70),
+            ]:
+                actions.append(
+                    {
+                        "approval_id": approval_id,
+                        "improvement_id": f"imp_{approval_id[-3:]}",
+                        "candidate_id": f"candidate_{approval_id[-3:]}",
+                        "approved_action": "localize_ball_roi",
+                        "start_frame": start_frame,
+                        "end_frame": end_frame,
+                        "source_packet_id": "packet_001",
+                        "local_search_roi": {
+                            "coordinate_space": "image",
+                            "frame": roi_frame,
+                            "x": 120,
+                            "y": 40,
+                            "width": 80,
+                            "height": 50,
+                            "confidence": 0.72,
+                        },
+                    }
+                )
+            _write_json(approved_path, {"schema_version": "1.0", "approved_actions": actions})
+
+            report = build_high_recall_windows(
+                output_dir,
+                margin_frames=0,
+                merge_gap_frames=0,
+                max_total_frames=None,
+                total_frames=100,
+                approved_actions_path=approved_path,
+                approved_only=True,
+            )
+
+        self.assertEqual("rejected", report["summary"]["status"])
+        self.assertEqual([], report["windows"])
+        self.assertEqual(
+            ["full_video_localize_scope_rejected", "full_video_localize_scope_rejected"],
+            [window["rejection_reason"] for window in report["rejected_windows"]],
+        )
+        self.assertEqual(
+            [(0, 49), (50, 99)],
+            [(window["start_frame"], window["end_frame"]) for window in report["rejected_windows"]],
+        )
 
     def test_deterministic_windows_keep_priority_over_approved_ai_windows(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:
@@ -614,6 +974,7 @@ class HighRecallWindowTests(unittest.TestCase):
                     ],
                 },
             )
+            _write_review_packets(output_dir, "packet_001")
             approved_path = output_dir / "ai_improvement_approved_actions.json"
             _write_json(
                 approved_path,
@@ -623,8 +984,10 @@ class HighRecallWindowTests(unittest.TestCase):
                         {
                             "approval_id": "approval_001",
                             "improvement_id": "imp_001",
+                            "candidate_id": "candidate_001",
                             "approved_action": "targeted_rerun",
                             "rerun_scope": {"start_frame": 10, "end_frame": 40},
+                            "source_packet_id": "packet_001",
                         }
                     ],
                 },
@@ -644,6 +1007,7 @@ class HighRecallWindowTests(unittest.TestCase):
     def test_deterministic_window_is_not_merged_into_approved_roi_window(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:
             output_dir = Path(temp_name)
+            _write_review_packets(output_dir, "packet_001")
             _write_json(
                 output_dir / "ai_review_triggers.json",
                 {
@@ -667,6 +1031,7 @@ class HighRecallWindowTests(unittest.TestCase):
                         {
                             "approval_id": "approval_001",
                             "improvement_id": "imp_001",
+                            "candidate_id": "candidate_001",
                             "approved_action": "targeted_rerun",
                             "approval_source": "api",
                             "rerun_scope": {"start_frame": 15, "end_frame": 25},
@@ -705,6 +1070,7 @@ class HighRecallWindowTests(unittest.TestCase):
     def test_approved_targeted_reruns_with_different_rois_are_not_merged(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:
             output_dir = Path(temp_name)
+            _write_review_packets(output_dir, "packet_001", "packet_002")
             approved_path = output_dir / "ai_improvement_approved_actions.json"
             _write_json(
                 approved_path,
@@ -714,6 +1080,7 @@ class HighRecallWindowTests(unittest.TestCase):
                         {
                             "approval_id": "approval_001",
                             "improvement_id": "imp_001",
+                            "candidate_id": "candidate_001",
                             "approved_action": "targeted_rerun",
                             "rerun_scope": {"start_frame": 10, "end_frame": 20},
                             "source_packet_id": "packet_001",
@@ -730,6 +1097,7 @@ class HighRecallWindowTests(unittest.TestCase):
                         {
                             "approval_id": "approval_002",
                             "improvement_id": "imp_002",
+                            "candidate_id": "candidate_002",
                             "approved_action": "targeted_rerun",
                             "rerun_scope": {"start_frame": 21, "end_frame": 28},
                             "source_packet_id": "packet_002",
@@ -766,9 +1134,11 @@ class HighRecallWindowTests(unittest.TestCase):
                 {
                     "approval_id": "approval_001",
                     "improvement_id": "imp_001",
+                    "candidate_id": "candidate_001",
                     "approved_action": "targeted_rerun",
                     "approval_source": "api",
                     "rerun_scope": {"start_frame": 10, "end_frame": 12},
+                    "source_packet_id": "packet_001",
                 },
                 {
                     "approval_id": "approval_manual",
@@ -802,6 +1172,7 @@ class HighRecallWindowTests(unittest.TestCase):
                     ],
                 },
             )
+            _write_review_packets(output_dir, "packet_001")
             approved_path = output_dir / "ai_improvement_approved_actions.json"
             _write_json(
                 approved_path,
@@ -811,8 +1182,10 @@ class HighRecallWindowTests(unittest.TestCase):
                         {
                             "approval_id": "approval_001",
                             "improvement_id": "imp_001",
+                            "candidate_id": "candidate_001",
                             "approved_action": "targeted_rerun",
                             "rerun_scope": {"start_frame": 10, "end_frame": 12},
+                            "source_packet_id": "packet_001",
                         }
                     ],
                 },

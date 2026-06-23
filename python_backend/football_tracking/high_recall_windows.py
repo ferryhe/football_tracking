@@ -30,6 +30,8 @@ def build_high_recall_windows(
     safe_merge_gap = min(DEFAULT_MERGE_GAP_FRAMES, max(0, int(merge_gap_frames)))
     safe_max_total_frames = _positive_budget_or_none(max_total_frames)
     safe_total_frames = _positive_int_or_none(total_frames)
+    if safe_total_frames is None:
+        safe_total_frames = _infer_total_frames(output_dir)
 
     candidates = _collect_candidate_windows(
         output_dir=output_dir,
@@ -38,6 +40,11 @@ def build_high_recall_windows(
         mode=str(mode or "sahi"),
         approved_actions_path=approved_actions_path,
         approved_only=approved_only,
+    )
+    candidate_window_count = len(candidates)
+    candidates, scope_rejected_windows = _reject_unsafe_approved_windows(
+        candidates,
+        total_frames=safe_total_frames,
     )
     budgeted_candidates, budget_rejected_windows, _ = _apply_frame_budget(
         candidates,
@@ -48,11 +55,20 @@ def build_high_recall_windows(
         merge_gap_frames=safe_merge_gap,
         max_window_frames=safe_max_total_frames,
     )
+    merged_windows, merged_scope_rejected_windows = _reject_unsafe_approved_windows(
+        merged_windows,
+        total_frames=safe_total_frames,
+    )
     selected_windows, rejected_windows, status = _apply_frame_budget(
         merged_windows,
         max_total_frames=safe_max_total_frames,
     )
-    rejected_windows = [*budget_rejected_windows, *rejected_windows]
+    rejected_windows = [
+        *scope_rejected_windows,
+        *budget_rejected_windows,
+        *merged_scope_rejected_windows,
+        *rejected_windows,
+    ]
     status = _plan_status(selected_windows, rejected_windows)
 
     return {
@@ -71,7 +87,7 @@ def build_high_recall_windows(
         "rejected_windows": rejected_windows,
         "summary": {
             "status": status,
-            "candidate_window_count": len(candidates),
+            "candidate_window_count": candidate_window_count,
             "merged_window_count": len(merged_windows),
             "selected_window_count": len(selected_windows),
             "selected_total_frames": _total_window_frames(selected_windows),
@@ -96,10 +112,20 @@ def write_high_recall_window_report(
     return report
 
 
-def approved_action_windows_from_report(report: dict[str, Any], mode: str = "sahi") -> list[dict[str, Any]]:
-    """Return executable approved targeted-rerun windows from an approved actions artifact."""
+def approved_action_windows_from_report(
+    report: dict[str, Any],
+    mode: str = "sahi",
+    *,
+    known_source_packet_ids: set[str] | None = None,
+    known_visual_review_ids: set[str] | None = None,
+) -> list[dict[str, Any]]:
+    """Return executable approved recovery windows from an approved actions artifact."""
     return _normalize_windows(
-        _approved_action_windows(report),
+        _approved_action_windows(
+            report,
+            known_source_packet_ids=known_source_packet_ids,
+            known_visual_review_ids=known_visual_review_ids,
+        ),
         margin_frames=0,
         total_frames=None,
         mode=str(mode or "sahi"),
@@ -142,9 +168,14 @@ def _collect_candidate_windows(
             )
         )
     if approved_actions_path is not None:
+        known_source_packet_ids, known_visual_review_ids = _traceable_provenance_ids(output_dir)
         windows.extend(
             _normalize_windows(
-                _approved_action_windows(_read_required_approved_actions(Path(approved_actions_path))),
+                _approved_action_windows(
+                    _read_required_approved_actions(Path(approved_actions_path)),
+                    known_source_packet_ids=known_source_packet_ids,
+                    known_visual_review_ids=known_visual_review_ids,
+                ),
                 margin_frames=margin_frames,
                 total_frames=total_frames,
                 mode=mode,
@@ -256,7 +287,12 @@ def _event_candidate_windows(report: dict[str, Any] | None) -> list[dict[str, An
     return windows
 
 
-def _approved_action_windows(report: dict[str, Any] | None) -> list[dict[str, Any]]:
+def _approved_action_windows(
+    report: dict[str, Any] | None,
+    *,
+    known_source_packet_ids: set[str] | None = None,
+    known_visual_review_ids: set[str] | None = None,
+) -> list[dict[str, Any]]:
     if not isinstance(report, dict):
         return []
     actions = report.get("approved_actions")
@@ -267,31 +303,50 @@ def _approved_action_windows(report: dict[str, Any] | None) -> list[dict[str, An
     for index, action in enumerate(actions, start=1):
         if not isinstance(action, dict):
             raise ValueError(f"approved actions artifact invalid: approved_actions[{index}] must be an object.")
-        if action.get("approved_action") != "targeted_rerun":
+        approved_action = action.get("approved_action")
+        if approved_action not in {"targeted_rerun", "localize_ball_roi"}:
             continue
         action_label = str(action.get("approval_id") or action.get("improvement_id") or index)
-        approval_id = _required_string(action.get("approval_id"), f"approved targeted_rerun action {action_label} approval_id")
+        approval_id = _required_string(action.get("approval_id"), f"approved {approved_action} action {action_label} approval_id")
         improvement_id = _required_string(
             action.get("improvement_id"),
-            f"approved targeted_rerun action {action_label} improvement_id",
+            f"approved {approved_action} action {action_label} improvement_id",
         )
-        rerun_scope = action.get("rerun_scope")
-        rerun_window = _required_frame_window(
-            rerun_scope,
-            f"approved targeted_rerun action {action_label} rerun_scope",
+        rerun_window = (
+            _required_frame_window(
+                action.get("rerun_scope"),
+                f"approved targeted_rerun action {action_label} rerun_scope",
+            )
+            if approved_action == "targeted_rerun"
+            else _required_localize_frame_window(action, f"approved localize_ball_roi action {action_label}")
+        )
+        candidate_id = _required_string(
+            action.get("candidate_id"),
+            f"approved {approved_action} action {action_label} candidate_id",
+        )
+        _validate_recovery_action_provenance(
+            action,
+            f"approved {approved_action} action {action_label}",
+            known_source_packet_ids=known_source_packet_ids,
+            known_visual_review_ids=known_visual_review_ids,
         )
         roi_metadata = _approved_roi_metadata(
             action,
-            f"approved targeted_rerun action {action_label} local_search_roi",
+            f"approved {approved_action} action {action_label} local_search_roi",
+            known_source_packet_ids=known_source_packet_ids,
+            known_visual_review_ids=known_visual_review_ids,
         )
+        if approved_action == "localize_ball_roi":
+            if not roi_metadata:
+                raise ValueError(f"approved localize_ball_roi action {action_label} requires local_search_roi.")
+            _validate_localize_roi_frame(action, rerun_window, f"approved localize_ball_roi action {action_label}")
         raw_payload = dict(rerun_window)
         raw_payload.update(
             {
                 "approval_id": approval_id,
                 "improvement_id": improvement_id,
                 "approval_source": action.get("approval_source"),
-                "approved_action": action.get("approved_action"),
-                "rerun_scope": rerun_window,
+                "approved_action": approved_action,
                 "source_packet_id": action.get("source_packet_id"),
                 "visual_review_id": action.get("visual_review_id"),
                 "local_search_roi": action.get("local_search_roi"),
@@ -299,12 +354,16 @@ def _approved_action_windows(report: dict[str, Any] | None) -> list[dict[str, An
                 **roi_metadata,
             }
         )
+        if candidate_id:
+            raw_payload["candidate_id"] = candidate_id
+        if approved_action == "targeted_rerun" or isinstance(action.get("rerun_scope"), dict):
+            raw_payload["rerun_scope"] = rerun_window
         windows.append(
             _raw_window(
                 raw_payload,
                 source="ai_improvement",
                 priority="none",
-                reason=f"ai_improvement: approved targeted_rerun:{action.get('improvement_id') or 'unknown'}",
+                reason=f"ai_improvement: approved {approved_action}:{action.get('improvement_id') or 'unknown'}",
             )
         )
     return windows
@@ -321,6 +380,7 @@ def _raw_window(item: dict[str, Any], *, source: str, priority: str, reason: str
     for key in (
         "approval_id",
         "improvement_id",
+        "candidate_id",
         "approval_source",
         "approved_action",
         "rerun_scope",
@@ -388,6 +448,7 @@ def _window_metadata(raw_window: dict[str, Any]) -> dict[str, Any]:
     for key in (
         "approval_id",
         "improvement_id",
+        "candidate_id",
         "approval_source",
         "approved_action",
         "rerun_scope",
@@ -415,6 +476,7 @@ def _approval_provenance_entry(window: dict[str, Any]) -> dict[str, Any] | None:
     for key in (
         "approval_id",
         "improvement_id",
+        "candidate_id",
         "approval_source",
         "approved_action",
         "rerun_scope",
@@ -513,6 +575,7 @@ def _merge_window_metadata(target: dict[str, Any], incoming: dict[str, Any]) -> 
         for key in (
             "approval_id",
             "improvement_id",
+            "candidate_id",
             "approval_source",
             "approved_action",
             "rerun_scope",
@@ -529,12 +592,30 @@ def _merge_window_metadata(target: dict[str, Any], incoming: dict[str, Any]) -> 
                 target[key] = first[key]
 
 
-def _approved_roi_metadata(action: dict[str, Any], label: str) -> dict[str, Any]:
+def _approved_roi_metadata(
+    action: dict[str, Any],
+    label: str,
+    *,
+    known_source_packet_ids: set[str] | None = None,
+    known_visual_review_ids: set[str] | None = None,
+) -> dict[str, Any]:
     value = action.get("local_search_roi")
     if value in (None, "", {}):
         return {}
-    if action.get("source_packet_id") in (None, "") and action.get("visual_review_id") in (None, ""):
+    source_packet_id = str(action.get("source_packet_id") or "").strip()
+    visual_review_id = str(action.get("visual_review_id") or "").strip()
+    if not source_packet_id and not visual_review_id:
         raise ValueError(f"{label} requires source_packet_id or visual_review_id provenance.")
+    if known_source_packet_ids is not None and source_packet_id and source_packet_id not in known_source_packet_ids:
+        raise ValueError(f"{label} source_packet_id does not match review_packets.json.")
+    if known_visual_review_ids is not None and visual_review_id and visual_review_id not in known_visual_review_ids:
+        raise ValueError(f"{label} visual_review_id does not match ai_visual_review.json.")
+    if (
+        known_source_packet_ids is not None
+        and known_visual_review_ids is not None
+        and not (source_packet_id in known_source_packet_ids or visual_review_id in known_visual_review_ids)
+    ):
+        raise ValueError(f"{label} requires provenance that matches review_packets.json or ai_visual_review.json.")
     roi = _roi_from_local_search_roi(value, label)
     padded_roi = _pad_roi(roi, DEFAULT_APPROVED_ROI_PADDING_PX)
     return {
@@ -543,6 +624,53 @@ def _approved_roi_metadata(action: dict[str, Any], label: str) -> dict[str, Any]
         "effective_roi": padded_roi,
         "sahi_policy": "sahi_roi",
     }
+
+
+def _validate_recovery_action_provenance(
+    action: dict[str, Any],
+    label: str,
+    *,
+    known_source_packet_ids: set[str] | None = None,
+    known_visual_review_ids: set[str] | None = None,
+) -> None:
+    source_packet_id = str(action.get("source_packet_id") or "").strip()
+    visual_review_id = str(action.get("visual_review_id") or "").strip()
+    if not source_packet_id and not visual_review_id:
+        raise ValueError(f"{label} requires source_packet_id or visual_review_id provenance.")
+    if known_source_packet_ids is not None and source_packet_id and source_packet_id not in known_source_packet_ids:
+        raise ValueError(f"{label} source_packet_id does not match review_packets.json.")
+    if known_visual_review_ids is not None and visual_review_id and visual_review_id not in known_visual_review_ids:
+        raise ValueError(f"{label} visual_review_id does not match ai_visual_review.json.")
+    if (
+        known_source_packet_ids is not None
+        and known_visual_review_ids is not None
+        and not (source_packet_id in known_source_packet_ids or visual_review_id in known_visual_review_ids)
+    ):
+        raise ValueError(f"{label} requires provenance that matches review_packets.json or ai_visual_review.json.")
+
+
+def _required_localize_frame_window(action: dict[str, Any], label: str) -> dict[str, int]:
+    rerun_scope = action.get("rerun_scope")
+    if isinstance(rerun_scope, dict):
+        return _required_frame_window(rerun_scope, f"{label} rerun_scope")
+    start_frame = _strict_int(action.get("start_frame"))
+    end_frame = _strict_int(action.get("end_frame"))
+    if start_frame is None or end_frame is None:
+        raise ValueError(f"{label} requires frame bounds with integer start_frame and end_frame.")
+    if start_frame < 0 or end_frame < 0:
+        raise ValueError(f"{label} frame bounds must be non-negative.")
+    if end_frame < start_frame:
+        raise ValueError(f"{label} end_frame must be greater than or equal to start_frame.")
+    return {"start_frame": start_frame, "end_frame": end_frame}
+
+
+def _validate_localize_roi_frame(action: dict[str, Any], window: dict[str, int], label: str) -> None:
+    roi = action.get("local_search_roi")
+    frame = _strict_int(roi.get("frame")) if isinstance(roi, dict) else None
+    if frame is None:
+        raise ValueError(f"{label} local_search_roi.frame is required.")
+    if frame < window["start_frame"] or frame > window["end_frame"]:
+        raise ValueError(f"{label} local_search_roi.frame must fall inside frame bounds.")
 
 
 def _roi_from_local_search_roi(value: Any, label: str) -> list[int]:
@@ -614,6 +742,95 @@ def _apply_frame_budget(
     selected.sort(key=lambda item: (item["start_frame"], item["end_frame"]))
     rejected.sort(key=lambda item: (item["start_frame"], item["end_frame"]))
     return selected, rejected, "capped" if selected else "rejected"
+
+
+def _reject_unsafe_approved_windows(
+    windows: list[dict[str, Any]],
+    *,
+    total_frames: int | None,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    selected: list[dict[str, Any]] = []
+    rejected: list[dict[str, Any]] = []
+    if total_frames is None and any(_is_localize_ball_roi_window(window) for window in windows):
+        return [
+            window
+            for window in windows
+            if not _is_localize_ball_roi_window(window)
+        ], [
+            {
+                **_copy_window(window),
+                "rejection_reason": "localize_source_total_frames_unavailable",
+            }
+            for window in windows
+            if _is_localize_ball_roi_window(window)
+        ]
+    reject_all_localize = _localize_windows_cover_full_video(windows, total_frames=total_frames)
+    for window in windows:
+        rejection_reason = None
+        if _is_full_video_localize_window(window, total_frames=total_frames) or (
+            reject_all_localize and _is_localize_ball_roi_window(window)
+        ):
+            rejection_reason = "full_video_localize_scope_rejected"
+        elif _localize_roi_frame_outside_window(window):
+            rejection_reason = "local_search_roi_frame_outside_final_window"
+        if rejection_reason is not None:
+            rejected_window = _copy_window(window)
+            rejected_window["rejection_reason"] = rejection_reason
+            rejected.append(rejected_window)
+        else:
+            selected.append(window)
+    return selected, rejected
+
+
+def _is_full_video_localize_window(window: dict[str, Any], *, total_frames: int | None) -> bool:
+    if total_frames is None or total_frames <= 0:
+        return False
+    if not _is_localize_ball_roi_window(window):
+        return False
+    return int(window["start_frame"]) <= 0 and int(window["end_frame"]) >= total_frames - 1
+
+
+def _localize_windows_cover_full_video(windows: list[dict[str, Any]], *, total_frames: int | None) -> bool:
+    if total_frames is None or total_frames <= 0:
+        return False
+    localize_windows = sorted(
+        (window for window in windows if _is_localize_ball_roi_window(window)),
+        key=lambda item: (int(item["start_frame"]), int(item["end_frame"])),
+    )
+    if not localize_windows:
+        return False
+    coverage_end = -1
+    for window in localize_windows:
+        start = int(window["start_frame"])
+        end = int(window["end_frame"])
+        if start > coverage_end + 1:
+            if coverage_end < 0 and start <= 0:
+                coverage_end = max(coverage_end, end)
+                continue
+            return False
+        coverage_end = max(coverage_end, end)
+        if coverage_end >= total_frames - 1:
+            return localize_windows[0]["start_frame"] <= 0
+    return False
+
+
+def _localize_roi_frame_outside_window(window: dict[str, Any]) -> bool:
+    if not _is_localize_ball_roi_window(window):
+        return False
+    roi = window.get("local_search_roi")
+    frame = _strict_int(roi.get("frame")) if isinstance(roi, dict) else None
+    if frame is None:
+        return True
+    return frame < int(window["start_frame"]) or frame > int(window["end_frame"])
+
+
+def _is_localize_ball_roi_window(window: dict[str, Any]) -> bool:
+    if window.get("approved_action") == "localize_ball_roi":
+        return True
+    provenance = window.get("approval_provenance")
+    if not isinstance(provenance, list):
+        return False
+    return any(isinstance(item, dict) and item.get("approved_action") == "localize_ball_roi" for item in provenance)
 
 
 def _plan_status(selected: list[dict[str, Any]], rejected: list[dict[str, Any]]) -> str:
@@ -727,6 +944,91 @@ def _read_optional_json(path: Path) -> dict[str, Any] | None:
     except (OSError, UnicodeDecodeError, json.JSONDecodeError):
         return None
     return loaded if isinstance(loaded, dict) else None
+
+
+def _traceable_provenance_ids(output_dir: Path) -> tuple[set[str] | None, set[str] | None]:
+    packet_ids: set[str] = set()
+    visual_review_ids: set[str] = set()
+
+    review_packets_path = Path(output_dir) / "review_packets.json"
+    visual_review_path = Path(output_dir) / "ai_visual_review.json"
+    review_packets = _read_optional_json(review_packets_path)
+    if isinstance(review_packets, dict):
+        for packet in _list_dicts(review_packets.get("packets")):
+            for key in ("packet_id", "source_packet_id", "id"):
+                value = packet.get(key)
+                if isinstance(value, str) and value.strip():
+                    packet_ids.add(value.strip())
+            source = packet.get("source") if isinstance(packet.get("source"), dict) else {}
+            for key in ("source_packet_id", "id"):
+                value = source.get(key)
+                if isinstance(value, str) and value.strip():
+                    packet_ids.add(value.strip())
+
+    visual_review = _read_optional_json(visual_review_path)
+    if isinstance(visual_review, dict):
+        for item in _list_dicts(visual_review.get("reviews")):
+            value = item.get("visual_review_id")
+            if isinstance(value, str) and value.strip():
+                visual_review_ids.add(value.strip())
+            for key in ("source_packet_id", "packet_id"):
+                value = item.get(key)
+                if isinstance(value, str) and value.strip():
+                    packet_ids.add(value.strip())
+            review = item.get("review") if isinstance(item.get("review"), dict) else {}
+            value = review.get("visual_review_id")
+            if isinstance(value, str) and value.strip():
+                visual_review_ids.add(value.strip())
+            for key in ("source_packet_id", "packet_id"):
+                value = review.get(key)
+                if isinstance(value, str) and value.strip():
+                    packet_ids.add(value.strip())
+            provenance = review.get("provenance") if isinstance(review.get("provenance"), dict) else {}
+            value = provenance.get("visual_review_id")
+            if isinstance(value, str) and value.strip():
+                visual_review_ids.add(value.strip())
+            value = provenance.get("source_packet_id")
+            if isinstance(value, str) and value.strip():
+                packet_ids.add(value.strip())
+
+    return packet_ids, visual_review_ids
+
+
+def _list_dicts(value: Any) -> list[dict[str, Any]]:
+    return [item for item in value if isinstance(item, dict)] if isinstance(value, list) else []
+
+
+def _infer_total_frames(output_dir: Path) -> int | None:
+    for name in ("ball_track.cleaned.csv", "ball_track.csv"):
+        max_frame = _max_frame_in_csv(Path(output_dir) / name)
+        if max_frame is not None:
+            return max_frame + 1
+    return None
+
+
+def _max_frame_in_csv(path: Path) -> int | None:
+    if not path.exists():
+        return None
+    try:
+        lines = path.read_text(encoding="utf-8-sig").splitlines()
+    except OSError:
+        return None
+    if not lines:
+        return None
+    headers = [part.strip() for part in lines[0].split(",")]
+    try:
+        frame_index = headers.index("Frame")
+    except ValueError:
+        return None
+    max_frame: int | None = None
+    for line in lines[1:]:
+        parts = line.split(",")
+        if frame_index >= len(parts):
+            continue
+        frame = _parse_int(parts[frame_index])
+        if frame is not None and (max_frame is None or frame > max_frame):
+            max_frame = frame
+    return max_frame
 
 
 def _read_required_approved_actions(path: Path) -> dict[str, Any]:

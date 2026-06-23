@@ -30,7 +30,9 @@ from football_tracking.api.schemas import (
     HighlightRenderRequest,
 )
 from football_tracking.api.service import ApiService
+from football_tracking.chunk_runner import build_high_recall_window_config
 from football_tracking.config import load_config
+from football_tracking.high_recall_windows import approved_action_windows_from_report
 from football_tracking.metrics import write_run_artifacts
 
 
@@ -94,6 +96,21 @@ class ApiServiceSmokeTests(unittest.TestCase):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
         return path
+
+    def write_review_packets(self, output_name: str, *packet_ids: str) -> Path:
+        return self.write_json(
+            f"outputs/{output_name}/review_packets.json",
+            {
+                "packets": [
+                    {
+                        "packet_id": packet_id,
+                        "source": {"kind": "test", "start_frame": 1, "end_frame": 2},
+                        "window": {"start_frame": 1, "end_frame": 2},
+                    }
+                    for packet_id in packet_ids
+                ]
+            },
+        )
 
     def decode_preview_image(self, data_url: str) -> np.ndarray:
         encoded = data_url.split(",", 1)[1]
@@ -1184,6 +1201,34 @@ class ApiServiceSmokeTests(unittest.TestCase):
     def test_approved_child_run_executes_selected_id_without_mutating_parent(self) -> None:
         parent_output_dir = self.create_output_bundle("kept_baseline")
         self.write_json(
+            "outputs/kept_baseline/metrics_report.json",
+            {
+                "schema_version": "1.0",
+                "generated_at": "2026-06-22T00:00:00+00:00",
+                "tracks": {
+                    "raw": {"frame_count": 3000},
+                    "cleaned": {"frame_count": 3000},
+                },
+            },
+        )
+        self.write_json(
+            "outputs/kept_baseline/review_packets.json",
+            {
+                "packets": [
+                    {
+                        "packet_id": "packet_2079",
+                        "source": {"kind": "test", "start_frame": 4, "end_frame": 6},
+                        "window": {"start_frame": 4, "end_frame": 6},
+                    },
+                    {
+                        "packet_id": "packet_skip",
+                        "source": {"kind": "test", "start_frame": 20, "end_frame": 30},
+                        "window": {"start_frame": 20, "end_frame": 30},
+                    },
+                ]
+            },
+        )
+        self.write_json(
             "outputs/kept_baseline/ai_improvement_approved_actions.json",
             {
                 "schema_version": "1.0",
@@ -1193,19 +1238,23 @@ class ApiServiceSmokeTests(unittest.TestCase):
                     {
                         "approval_id": "approval_keep",
                         "improvement_id": "imp_keep",
+                        "candidate_id": "candidate_keep",
                         "approved_action": "targeted_rerun",
                         "approval_source": "api",
                         "approved_at": "2026-06-22T00:00:00+00:00",
                         "approved_by": "operator-a",
+                        "source_packet_id": "packet_2079",
                         "rerun_scope": {"start_frame": 4, "end_frame": 6},
                     },
                     {
                         "approval_id": "approval_skip",
                         "improvement_id": "imp_skip",
+                        "candidate_id": "candidate_skip",
                         "approved_action": "targeted_rerun",
                         "approval_source": "api",
                         "approved_at": "2026-06-22T00:00:00+00:00",
                         "approved_by": "operator-a",
+                        "source_packet_id": "packet_skip",
                         "rerun_scope": {"start_frame": 20, "end_frame": 30},
                     },
                 ],
@@ -1257,7 +1306,7 @@ class ApiServiceSmokeTests(unittest.TestCase):
         child = self.service.get_run(created["run_id"])
         child_output_dir = Path(child["output_dir"])
         selected_artifact = json.loads((child_output_dir / "ai_improvement_approved_actions.json").read_text(encoding="utf-8"))
-        child_config = yaml.safe_load((child_output_dir / "approved_targeted_rerun_config.yaml").read_text(encoding="utf-8"))
+        child_config = yaml.safe_load((child_output_dir / "approved_recovery_config.yaml").read_text(encoding="utf-8"))
         runner_config = rerun.call_args.args[0]
 
         self.assertEqual("completed", child["status"])
@@ -1267,7 +1316,7 @@ class ApiServiceSmokeTests(unittest.TestCase):
         self.assertTrue((child_output_dir / "ball_track.csv").exists())
         self.assertTrue((child_output_dir / "ball_track.cleaned.csv").exists())
         self.assertEqual(
-            (child_output_dir / "approved_targeted_rerun_config.yaml").resolve(),
+            (child_output_dir / "approved_recovery_config.yaml").resolve(),
             Path(child["config_path"]).resolve(),
         )
         self.assertTrue(child_config["high_recall_windows"]["approved_only"])
@@ -1284,8 +1333,379 @@ class ApiServiceSmokeTests(unittest.TestCase):
         self.assertFalse(runner_config.temporal_chunks.enabled)
         self.assertEqual(before, {path: self.file_fingerprint(path) for path in watched_paths})
 
-    def test_approved_child_artifact_only_custom_artifact_uses_all_actions_and_preserves_metadata(self) -> None:
+    def test_approved_child_run_executes_selected_localize_ball_roi_with_clamped_roi(self) -> None:
+        parent_output_dir = self.create_output_bundle("kept_baseline")
+        custom_config = build_sample_config("./outputs/kept_baseline")
+        custom_config["output"] = {"csv_name": "custom_track.csv", "debug_jsonl_name": "debug.jsonl"}
+        self.write_yaml("config/default.yaml", custom_config)
+        self.write_csv(
+            "outputs/kept_baseline/ball_track.csv",
+            [
+                {"Frame": frame, "X": "", "Y": "", "Confidence": "0.0000", "Status": "Lost"}
+                for frame in range(2049, 2545)
+            ],
+        )
+        self.write_csv(
+            "outputs/kept_baseline/custom_track.csv",
+            [
+                {"Frame": frame, "X": "", "Y": "", "Confidence": "0.0000", "Status": "Lost"}
+                for frame in range(2049, 2545)
+            ],
+        )
+        self.write_csv(
+            "outputs/kept_baseline/ball_track.cleaned.csv",
+            [
+                {"Frame": frame, "X": "", "Y": "", "Confidence": "0.0000", "Status": "Lost"}
+                for frame in range(2049, 2545)
+            ],
+        )
+        self.write_json(
+            "outputs/kept_baseline/metrics_report.json",
+            {
+                "schema_version": "1.0",
+                "generated_at": "2026-06-22T00:00:00+00:00",
+                "tracks": {
+                    "raw": {"frame_count": 3000},
+                    "cleaned": {"frame_count": 3000},
+                },
+            },
+        )
+        self.write_json(
+            "outputs/kept_baseline/review_packets.json",
+            {
+                "packets": [
+                    {
+                        "packet_id": "packet_2079",
+                        "source": {"kind": "test", "start_frame": 2049, "end_frame": 2544},
+                        "window": {"start_frame": 2049, "end_frame": 2544},
+                    },
+                    {
+                        "packet_id": "packet_skip",
+                        "source": {"kind": "test", "start_frame": 100, "end_frame": 120},
+                        "window": {"start_frame": 100, "end_frame": 120},
+                    },
+                ]
+            },
+        )
+        self.write_json(
+            "outputs/kept_baseline/ai_improvement_approved_actions.json",
+            {
+                "schema_version": "1.0",
+                "source_report": "ai_improvement_report.json",
+                "approved_actions": [
+                    {
+                        "approval_id": "approval_keep",
+                        "improvement_id": "imp_keep",
+                        "candidate_id": "candidate_keep",
+                        "approved_action": "localize_ball_roi",
+                        "approval_source": "api",
+                        "approved_at": "2026-06-22T00:00:00+00:00",
+                        "approved_by": "operator-a",
+                        "start_frame": 2049,
+                        "end_frame": 2544,
+                        "source_packet_id": "packet_2079",
+                        "match_ball_confirmed": True,
+                        "local_search_roi": {
+                            "coordinate_space": "image",
+                            "frame": 2079,
+                            "x": 5700,
+                            "y": 1390,
+                            "width": 120,
+                            "height": 80,
+                            "confidence": 0.74,
+                        },
+                    },
+                    {
+                        "approval_id": "approval_skip",
+                        "improvement_id": "imp_skip",
+                        "candidate_id": "candidate_skip",
+                        "approved_action": "localize_ball_roi",
+                        "approval_source": "api",
+                        "approved_at": "2026-06-22T00:00:00+00:00",
+                        "approved_by": "operator-a",
+                        "start_frame": 10,
+                        "end_frame": 12,
+                        "source_packet_id": "packet_skip",
+                        "local_search_roi": {
+                            "coordinate_space": "image",
+                            "frame": 11,
+                            "x": 120,
+                            "y": 40,
+                            "width": 80,
+                            "height": 50,
+                            "confidence": 0.72,
+                        },
+                    },
+                ],
+            },
+        )
+        parent_run = self.service.list_runs()[0]
+        watched_paths = [
+            parent_output_dir / "ball_track.csv",
+            parent_output_dir / "ball_track.cleaned.csv",
+            parent_output_dir / "follow_cam.mp4",
+            Path(parent_run["config_path"]),
+        ]
+        before = {path: self.file_fingerprint(path) for path in watched_paths}
+        observed: dict[str, object] = {}
+
+        class ImmediateThread:
+            def __init__(self, *, target, args, name, daemon) -> None:
+                self._target = target
+                self._args = args
+                self._alive = False
+
+            def start(self) -> None:
+                self._alive = True
+                try:
+                    self._target(*self._args)
+                finally:
+                    self._alive = False
+
+            def is_alive(self) -> bool:
+                return self._alive
+
+        def fake_high_recall_runner(config, **_kwargs):
+            config.mock.enabled = True
+            config.mock.frame_width = 5760
+            config.mock.frame_height = 1440
+            selected_artifact = json.loads((config.output_dir / "ai_improvement_approved_actions.json").read_text(encoding="utf-8"))
+            windows = approved_action_windows_from_report(selected_artifact, mode="sahi")
+            window_config = build_high_recall_window_config(
+                config,
+                windows[0],
+                config.output_dir / "high_recall_windows" / "window_000",
+            )
+            candidate_rows = ["Frame,X,Y,Confidence,Status"]
+            candidate_rows.extend(f"{frame},5700,1390,0.9000,Detected" for frame in range(2049, 2545))
+            (config.output_dir / "custom_track.csv").write_text("\n".join(candidate_rows) + "\n", encoding="utf-8")
+            observed["window_config_roi"] = window_config.filtering.roi
+            observed["window"] = windows[0]
+            return {
+                "windows": windows,
+                "execution": {"status": "succeeded"},
+            }
+
+        with (
+            mock.patch("football_tracking.api.service.threading.Thread", ImmediateThread),
+            mock.patch("football_tracking.api.service.run_high_recall_windows", side_effect=fake_high_recall_runner) as rerun,
+        ):
+            created = self.service.create_run(
+                {
+                    "parent_run_id": parent_run["run_id"],
+                    "approved_action_ids": ["approval_keep"],
+                    "output_dir_name": "approved_localize_child_run",
+                }
+            )
+
+        child = self.service.get_run(created["run_id"])
+        child_output_dir = Path(child["output_dir"])
+        selected_artifact = json.loads((child_output_dir / "ai_improvement_approved_actions.json").read_text(encoding="utf-8"))
+        child_config = yaml.safe_load((child_output_dir / "approved_recovery_config.yaml").read_text(encoding="utf-8"))
+        runner_config = rerun.call_args.args[0]
+
+        self.assertEqual("completed", child["status"])
+        self.assertEqual(["approval_keep"], [item["approval_id"] for item in selected_artifact["approved_actions"]])
+        self.assertEqual("candidate_keep", selected_artifact["approved_actions"][0]["candidate_id"])
+        self.assertEqual("localize_ball_roi", selected_artifact["approved_actions"][0]["approved_action"])
+        self.assertTrue((child_output_dir / "custom_track.csv").exists())
+        self.assertEqual((child_output_dir / "approved_recovery_config.yaml").resolve(), Path(child["config_path"]).resolve())
+        self.assertTrue(child_config["high_recall_windows"]["approved_only"])
+        self.assertEqual(496, runner_config.high_recall_windows.max_total_frames)
+        self.assertEqual(3000, rerun.call_args.kwargs["source_total_frames"])
+        self.assertEqual((5668, 1358, 5760, 1440), observed["window_config_roi"])
+        self.assertEqual([5668, 1358, 5760, 1440], observed["window"]["effective_roi"])
+        self.assertEqual("candidate_keep", observed["window"]["candidate_id"])
+        self.assertTrue((child_output_dir / "missing_ball_recovery_comparison.json").exists())
+        comparison = json.loads((child_output_dir / "missing_ball_recovery_comparison.json").read_text(encoding="utf-8"))
+        self.assertEqual("pass", comparison["summary"]["status"], comparison["checks"])
+        roi_check = next(check for check in comparison["checks"] if check["name"] == "localize_roi_plausibility")
+        self.assertEqual({"x": 5668.0, "y": 1358.0, "right": 5760.0, "bottom": 1440.0}, roi_check["results"][0]["roi"])
+        self.assertEqual(before, {path: self.file_fingerprint(path) for path in watched_paths})
+
+    def test_approved_child_candidate_audit_ignores_copied_cleaned_track(self) -> None:
+        output_dir = self.repo_root / "outputs" / "candidate_audit"
+        output_dir.mkdir(parents=True)
+        self.write_csv(
+            "outputs/candidate_audit/ball_track.csv",
+            [
+                {"Frame": frame, "X": 100 + frame, "Y": 200 + frame, "Confidence": "0.9000", "Status": "Detected"}
+                for frame in range(10, 61)
+            ],
+        )
+        self.write_csv(
+            "outputs/candidate_audit/ball_track.cleaned.csv",
+            [
+                {
+                    "Frame": frame,
+                    "X": 900 if frame == 35 else 100 + frame,
+                    "Y": 950 if frame == 35 else 200 + frame,
+                    "Confidence": "0.9000",
+                    "Status": "Detected",
+                }
+                for frame in range(10, 61)
+            ],
+        )
+        config = load_config(self.repo_root / "config" / "default.yaml")
+        config.output_dir = output_dir
+
+        self.service._write_approved_child_candidate_audit(config)
+        audit = json.loads((output_dir / "ball_audit.json").read_text(encoding="utf-8"))
+
+        self.assertEqual(["raw"], [source["name"] for source in audit["sources"]])
+        self.assertFalse(any(event["type"] == "large_jump" for event in audit["review_events"]))
+
+    def test_approved_child_run_rejects_full_video_localize_ball_roi_before_output(self) -> None:
         self.create_output_bundle("kept_baseline")
+        self.write_review_packets("kept_baseline", "packet_full")
+        self.write_json(
+            "outputs/kept_baseline/ai_improvement_approved_actions.json",
+            {
+                "schema_version": "1.0",
+                "source_report": "ai_improvement_report.json",
+                "approved_actions": [
+                    {
+                        "approval_id": "approval_full",
+                        "improvement_id": "imp_full",
+                        "candidate_id": "candidate_full",
+                        "approved_action": "localize_ball_roi",
+                        "approval_source": "api",
+                        "approved_at": "2026-06-22T00:00:00+00:00",
+                        "approved_by": "operator-a",
+                        "start_frame": 0,
+                        "end_frame": 2,
+                        "source_packet_id": "packet_full",
+                        "local_search_roi": {
+                            "coordinate_space": "image",
+                            "frame": 1,
+                            "x": 120,
+                            "y": 40,
+                            "width": 80,
+                            "height": 50,
+                            "confidence": 0.72,
+                        },
+                    }
+                ],
+            },
+        )
+        parent_run = self.service.list_runs()[0]
+
+        with self.assertRaisesRegex(ValueError, "full-video localize_ball_roi"):
+            self.service.create_run(
+                {
+                    "parent_run_id": parent_run["run_id"],
+                    "approved_action_ids": ["approval_full"],
+                    "output_dir_name": "approved_full_video_localize",
+                }
+            )
+
+        self.assertFalse((self.repo_root / "outputs" / "runs" / "input" / "approved_full_video_localize").exists())
+
+    def test_approved_child_run_rejects_split_full_video_localize_before_output(self) -> None:
+        self.create_output_bundle("kept_baseline")
+        self.write_review_packets("kept_baseline", "packet_a", "packet_b")
+        self.write_json(
+            "outputs/kept_baseline/ai_improvement_approved_actions.json",
+            {
+                "schema_version": "1.0",
+                "approved_actions": [
+                    {
+                        "approval_id": "approval_a",
+                        "improvement_id": "imp_a",
+                        "candidate_id": "candidate_a",
+                        "approved_action": "localize_ball_roi",
+                        "start_frame": 0,
+                        "end_frame": 1,
+                        "source_packet_id": "packet_a",
+                        "local_search_roi": {
+                            "coordinate_space": "image",
+                            "frame": 0,
+                            "x": 10,
+                            "y": 10,
+                            "width": 20,
+                            "height": 20,
+                            "confidence": 0.72,
+                        },
+                    },
+                    {
+                        "approval_id": "approval_b",
+                        "improvement_id": "imp_b",
+                        "candidate_id": "candidate_b",
+                        "approved_action": "localize_ball_roi",
+                        "start_frame": 2,
+                        "end_frame": 2,
+                        "source_packet_id": "packet_b",
+                        "local_search_roi": {
+                            "coordinate_space": "image",
+                            "frame": 2,
+                            "x": 80,
+                            "y": 40,
+                            "width": 20,
+                            "height": 20,
+                            "confidence": 0.72,
+                        },
+                    },
+                ],
+            },
+        )
+        parent_run = self.service.list_runs()[0]
+
+        with self.assertRaisesRegex(ValueError, "full-video localize_ball_roi"):
+            self.service.create_run(
+                {
+                    "parent_run_id": parent_run["run_id"],
+                    "approved_action_ids": ["approval_a", "approval_b"],
+                    "output_dir_name": "approved_split_full_video_localize",
+                }
+            )
+
+        self.assertFalse((self.repo_root / "outputs" / "runs" / "input" / "approved_split_full_video_localize").exists())
+
+    def test_approved_child_run_rejects_localize_roi_frame_outside_source_clamped_window_before_output(self) -> None:
+        self.create_output_bundle("kept_baseline")
+        self.write_review_packets("kept_baseline", "packet_late")
+        self.write_json(
+            "outputs/kept_baseline/ai_improvement_approved_actions.json",
+            {
+                "schema_version": "1.0",
+                "approved_actions": [
+                    {
+                        "approval_id": "approval_late",
+                        "improvement_id": "imp_late",
+                        "candidate_id": "candidate_late",
+                        "approved_action": "localize_ball_roi",
+                        "start_frame": 1,
+                        "end_frame": 10,
+                        "source_packet_id": "packet_late",
+                        "local_search_roi": {
+                            "coordinate_space": "image",
+                            "frame": 5,
+                            "x": 80,
+                            "y": 40,
+                            "width": 20,
+                            "height": 20,
+                            "confidence": 0.72,
+                        },
+                    }
+                ],
+            },
+        )
+        parent_run = self.service.list_runs()[0]
+
+        with self.assertRaisesRegex(ValueError, "source-clamped frame window"):
+            self.service.create_run(
+                {
+                    "parent_run_id": parent_run["run_id"],
+                    "approved_action_ids": ["approval_late"],
+                    "output_dir_name": "approved_clamped_invalid_localize",
+                }
+            )
+
+        self.assertFalse((self.repo_root / "outputs" / "runs" / "input" / "approved_clamped_invalid_localize").exists())
+
+    def test_approved_child_artifact_only_custom_artifact_uses_selected_action_and_preserves_metadata(self) -> None:
+        self.create_output_bundle("kept_baseline")
+        self.write_review_packets("kept_baseline", "packet_001")
         custom_artifact = self.write_json(
             "outputs/kept_baseline/approvals/custom_actions.json",
             {
@@ -1296,10 +1716,12 @@ class ApiServiceSmokeTests(unittest.TestCase):
                     {
                         "approval_id": "approval_001",
                         "improvement_id": "imp_001",
+                        "candidate_id": "candidate_001",
                         "approved_action": "targeted_rerun",
                         "approval_source": "api",
                         "approved_at": "2026-06-22T00:00:00+00:00",
                         "approved_by": "operator-a",
+                        "source_packet_id": "packet_001",
                         "rerun_scope": {"start_frame": 1, "end_frame": 1},
                     },
                     {
@@ -1330,6 +1752,7 @@ class ApiServiceSmokeTests(unittest.TestCase):
                 {
                     "parent_run_id": parent_run["run_id"],
                     "approved_actions_artifact_name": "approvals/custom_actions.json",
+                    "approved_action_ids": ["approval_001"],
                     "output_dir_name": "artifact_only_child",
                 }
             )
@@ -1338,13 +1761,119 @@ class ApiServiceSmokeTests(unittest.TestCase):
         child_artifact = json.loads(child_artifact_path.read_text(encoding="utf-8"))
 
         self.assertEqual("queued", created["status"])
-        self.assertEqual(["approval_001", "approval_manual"], [item["approval_id"] for item in child_artifact["approved_actions"]])
+        self.assertEqual(["approval_001"], [item["approval_id"] for item in child_artifact["approved_actions"]])
         self.assertEqual({"mode": "artifact-only"}, child_artifact["metadata"])
         self.assertEqual("custom_report.json", child_artifact["source_report"])
         self.assertEqual(str(custom_artifact), child_artifact["source_approved_actions_path"])
 
+    def test_approved_child_custom_artifact_requires_explicit_action_ids(self) -> None:
+        self.create_output_bundle("kept_baseline")
+        self.write_json(
+            "outputs/kept_baseline/approvals/custom_actions.json",
+            {
+                "schema_version": "1.0",
+                "approved_actions": [
+                    {
+                        "approval_id": "approval_001",
+                        "improvement_id": "imp_001",
+                        "candidate_id": "candidate_001",
+                        "approved_action": "targeted_rerun",
+                        "rerun_scope": {"start_frame": 1, "end_frame": 1},
+                    }
+                ],
+            },
+        )
+        parent_run = self.service.list_runs()[0]
+
+        with self.assertRaisesRegex(ValueError, "explicit approved_action_id"):
+            self.service.create_run(
+                {
+                    "parent_run_id": parent_run["run_id"],
+                    "approved_actions_artifact_name": "approvals/custom_actions.json",
+                    "output_dir_name": "implicit_custom_child",
+                }
+            )
+
+        self.assertFalse((self.repo_root / "outputs" / "runs" / "input" / "implicit_custom_child").exists())
+
+    def test_approved_child_rejects_duplicate_approval_ids(self) -> None:
+        self.create_output_bundle("kept_baseline")
+        self.write_review_packets("kept_baseline", "packet_001", "packet_002")
+        self.write_json(
+            "outputs/kept_baseline/ai_improvement_approved_actions.json",
+            {
+                "schema_version": "1.0",
+                "approved_actions": [
+                    {
+                        "approval_id": "approval_001",
+                        "improvement_id": "imp_001",
+                        "candidate_id": "candidate_001",
+                        "approved_action": "targeted_rerun",
+                        "source_packet_id": "packet_001",
+                        "rerun_scope": {"start_frame": 1, "end_frame": 1},
+                    },
+                    {
+                        "approval_id": "approval_001",
+                        "improvement_id": "imp_002",
+                        "candidate_id": "candidate_001",
+                        "approved_action": "targeted_rerun",
+                        "source_packet_id": "packet_002",
+                        "rerun_scope": {"start_frame": 2, "end_frame": 2},
+                    },
+                ],
+            },
+        )
+        parent_run = self.service.list_runs()[0]
+
+        with self.assertRaisesRegex(ValueError, "Duplicate approved action IDs"):
+            self.service.create_run(
+                {
+                    "parent_run_id": parent_run["run_id"],
+                    "approved_action_ids": ["approval_001"],
+                    "output_dir_name": "duplicate_approval_child",
+                }
+            )
+
+        self.assertFalse((self.repo_root / "outputs" / "runs" / "input" / "duplicate_approval_child").exists())
+
+    def test_approved_child_rejects_unsafe_output_csv_name_before_output(self) -> None:
+        self.create_output_bundle("kept_baseline")
+        unsafe_config = build_sample_config("./outputs/kept_baseline")
+        unsafe_config["output"] = {"csv_name": "../evil.csv", "debug_jsonl_name": "debug.jsonl"}
+        self.write_yaml("config/default.yaml", unsafe_config)
+        self.write_review_packets("kept_baseline", "packet_001")
+        self.write_json(
+            "outputs/kept_baseline/ai_improvement_approved_actions.json",
+            {
+                "schema_version": "1.0",
+                "approved_actions": [
+                    {
+                        "approval_id": "approval_001",
+                        "improvement_id": "imp_001",
+                        "candidate_id": "candidate_001",
+                        "approved_action": "targeted_rerun",
+                        "source_packet_id": "packet_001",
+                        "rerun_scope": {"start_frame": 1, "end_frame": 1},
+                    }
+                ],
+            },
+        )
+        parent_run = self.service.list_runs()[0]
+
+        with self.assertRaisesRegex(ValueError, "output.csv_name"):
+            self.service.create_run(
+                {
+                    "parent_run_id": parent_run["run_id"],
+                    "approved_action_ids": ["approval_001"],
+                    "output_dir_name": "unsafe_csv_child",
+                }
+            )
+
+        self.assertFalse((self.repo_root / "outputs" / "runs" / "input" / "unsafe_csv_child").exists())
+
     def test_approved_child_rejects_frame_budget_over_config_limit_before_output(self) -> None:
         self.create_output_bundle("kept_baseline")
+        self.write_review_packets("kept_baseline", "packet_huge")
         self.write_json(
             "outputs/kept_baseline/ai_improvement_approved_actions.json",
             {
@@ -1353,7 +1882,9 @@ class ApiServiceSmokeTests(unittest.TestCase):
                     {
                         "approval_id": "approval_huge",
                         "improvement_id": "imp_huge",
+                        "candidate_id": "candidate_huge",
                         "approved_action": "targeted_rerun",
+                        "source_packet_id": "packet_huge",
                         "rerun_scope": {"start_frame": 0, "end_frame": 1800},
                     }
                 ],
@@ -1374,6 +1905,7 @@ class ApiServiceSmokeTests(unittest.TestCase):
 
     def test_approved_child_rejects_fractional_frame_before_output_dir_creation(self) -> None:
         self.create_output_bundle("kept_baseline")
+        self.write_review_packets("kept_baseline", "packet_bad")
         self.write_json(
             "outputs/kept_baseline/ai_improvement_approved_actions.json",
             {
@@ -1382,7 +1914,9 @@ class ApiServiceSmokeTests(unittest.TestCase):
                     {
                         "approval_id": "approval_bad",
                         "improvement_id": "imp_bad",
+                        "candidate_id": "candidate_bad",
                         "approved_action": "targeted_rerun",
+                        "source_packet_id": "packet_bad",
                         "rerun_scope": {"start_frame": 1.5, "end_frame": 4},
                     }
                 ],
@@ -1403,6 +1937,7 @@ class ApiServiceSmokeTests(unittest.TestCase):
 
     def test_approved_child_rejects_unsafe_output_dir_name_before_output_dir_creation(self) -> None:
         self.create_output_bundle("kept_baseline")
+        self.write_review_packets("kept_baseline", "packet_001")
         self.write_json(
             "outputs/kept_baseline/ai_improvement_approved_actions.json",
             {
@@ -1411,7 +1946,9 @@ class ApiServiceSmokeTests(unittest.TestCase):
                     {
                         "approval_id": "approval_001",
                         "improvement_id": "imp_001",
+                        "candidate_id": "candidate_001",
                         "approved_action": "targeted_rerun",
+                        "source_packet_id": "packet_001",
                         "rerun_scope": {"start_frame": 1, "end_frame": 2},
                     }
                 ],
@@ -1432,6 +1969,7 @@ class ApiServiceSmokeTests(unittest.TestCase):
 
     def test_approved_child_rejects_active_run_before_output_dir_creation(self) -> None:
         self.create_output_bundle("kept_baseline")
+        self.write_review_packets("kept_baseline", "packet_001")
         self.write_json(
             "outputs/kept_baseline/ai_improvement_approved_actions.json",
             {
@@ -1440,7 +1978,9 @@ class ApiServiceSmokeTests(unittest.TestCase):
                     {
                         "approval_id": "approval_001",
                         "improvement_id": "imp_001",
+                        "candidate_id": "candidate_001",
                         "approved_action": "targeted_rerun",
+                        "source_packet_id": "packet_001",
                         "rerun_scope": {"start_frame": 1, "end_frame": 2},
                     }
                 ],
@@ -1468,6 +2008,7 @@ class ApiServiceSmokeTests(unittest.TestCase):
 
     def test_approved_child_existing_empty_output_dir_is_not_deleted(self) -> None:
         self.create_output_bundle("kept_baseline")
+        self.write_review_packets("kept_baseline", "packet_001")
         self.write_json(
             "outputs/kept_baseline/ai_improvement_approved_actions.json",
             {
@@ -1476,7 +2017,9 @@ class ApiServiceSmokeTests(unittest.TestCase):
                     {
                         "approval_id": "approval_001",
                         "improvement_id": "imp_001",
+                        "candidate_id": "candidate_001",
                         "approved_action": "targeted_rerun",
+                        "source_packet_id": "packet_001",
                         "rerun_scope": {"start_frame": 1, "end_frame": 2},
                     }
                 ],
@@ -1500,6 +2043,7 @@ class ApiServiceSmokeTests(unittest.TestCase):
 
     def test_approved_child_no_executable_runner_windows_marks_failed(self) -> None:
         self.create_output_bundle("kept_baseline")
+        self.write_review_packets("kept_baseline", "packet_001")
         self.write_json(
             "outputs/kept_baseline/ai_improvement_approved_actions.json",
             {
@@ -1508,7 +2052,9 @@ class ApiServiceSmokeTests(unittest.TestCase):
                     {
                         "approval_id": "approval_001",
                         "improvement_id": "imp_001",
+                        "candidate_id": "candidate_001",
                         "approved_action": "targeted_rerun",
+                        "source_packet_id": "packet_001",
                         "rerun_scope": {"start_frame": 1, "end_frame": 2},
                     }
                 ],
@@ -1548,6 +2094,7 @@ class ApiServiceSmokeTests(unittest.TestCase):
 
     def test_approved_child_failed_runner_still_reports_parent_mutation(self) -> None:
         parent_output = self.create_output_bundle("kept_baseline")
+        self.write_review_packets("kept_baseline", "packet_001")
         self.write_json(
             "outputs/kept_baseline/ai_improvement_approved_actions.json",
             {
@@ -1556,7 +2103,9 @@ class ApiServiceSmokeTests(unittest.TestCase):
                     {
                         "approval_id": "approval_001",
                         "improvement_id": "imp_001",
+                        "candidate_id": "candidate_001",
                         "approved_action": "targeted_rerun",
+                        "source_packet_id": "packet_001",
                         "rerun_scope": {"start_frame": 1, "end_frame": 2},
                     }
                 ],
@@ -1599,6 +2148,7 @@ class ApiServiceSmokeTests(unittest.TestCase):
     def test_approved_child_detects_parent_artifact_created_during_run(self) -> None:
         parent_output = self.create_output_bundle("kept_baseline")
         self.assertFalse((parent_output / "highlight.mp4").exists())
+        self.write_review_packets("kept_baseline", "packet_001")
         self.write_json(
             "outputs/kept_baseline/ai_improvement_approved_actions.json",
             {
@@ -1607,7 +2157,9 @@ class ApiServiceSmokeTests(unittest.TestCase):
                     {
                         "approval_id": "approval_001",
                         "improvement_id": "imp_001",
+                        "candidate_id": "candidate_001",
                         "approved_action": "targeted_rerun",
+                        "source_packet_id": "packet_001",
                         "rerun_scope": {"start_frame": 1, "end_frame": 2},
                     }
                 ],
@@ -1648,6 +2200,7 @@ class ApiServiceSmokeTests(unittest.TestCase):
 
     def test_approved_child_thread_start_failure_cleans_registry_and_output(self) -> None:
         self.create_output_bundle("kept_baseline")
+        self.write_review_packets("kept_baseline", "packet_001")
         self.write_json(
             "outputs/kept_baseline/ai_improvement_approved_actions.json",
             {
@@ -1656,7 +2209,9 @@ class ApiServiceSmokeTests(unittest.TestCase):
                     {
                         "approval_id": "approval_001",
                         "improvement_id": "imp_001",
+                        "candidate_id": "candidate_001",
                         "approved_action": "targeted_rerun",
+                        "source_packet_id": "packet_001",
                         "rerun_scope": {"start_frame": 1, "end_frame": 2},
                     }
                 ],
@@ -2720,6 +3275,7 @@ class ApiServiceSmokeTests(unittest.TestCase):
                 "improvements": [
                     {
                         "id": "imp_001",
+                        "candidate_id": "candidate_001",
                         "priority": "P0",
                         "area": "tracking",
                         "failure_tags": ["ball_lost"],

@@ -452,10 +452,10 @@ class CreateRunRequest(BaseModel):
         is_approved_child = bool(approved_ids or has_approved_artifact)
         if is_approved_child:
             if not self.parent_run_id:
-                raise ValueError("Approved child targeted rerun requires parent_run_id.")
+                raise ValueError("Approved child recovery requires parent_run_id.")
             return self
         if not self.config_name:
-            raise ValueError("Create run requires config_name unless approved child targeted rerun fields are provided.")
+            raise ValueError("Create run requires config_name unless approved child recovery fields are provided.")
         return self
 
 
