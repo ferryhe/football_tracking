@@ -2,6 +2,12 @@
 
 This workflow runs against an existing tracking output directory. It is meant to make AI review repeatable without letting advisory artifacts mutate tracking output by surprise.
 
+## Contract Reference
+
+The stable worker/operator contract lives in [ai-improvement-contract.md](ai-improvement-contract.md). Treat that document as authoritative for lifecycle stages, `candidate_id` / `approval_id` / `problem_type` traceability, model policy, missing-ball closure rules, follow-cam thresholds, highlight comparison, and final-output gating.
+
+This workflow document explains how to run the stable workflow. If a later executor or UI needs to decide whether an AI artifact is review-only, executable, comparable, promotable, rejected, or final, use the contract document first.
+
 ## Command
 
 ```powershell
@@ -14,6 +20,16 @@ $env:PYTHONPATH='python_backend'
 ```
 
 The workflow writes `stable_ai_improvement_workflow_report.json` with the planned stages, hash snapshots, produced artifacts, quality-gate summary, strategy, warnings, and explicit approval intent.
+
+Stable rules summary:
+
+- Review-only AI output is advisory and cannot mutate artifacts or become final output.
+- Executable candidates require `candidate_id`, `approval_id`, `problem_type`, traceable evidence, a bounded frame window, expected artifacts, and comparison criteria.
+- Missing-ball closure is either a bounded recovery candidate with `missing_ball_recovery_comparison.json` or an evidence-backed full-window `missing_ball_resolution.json`.
+- The `2049-2544` long missing-ball window cannot be closed by only proving a short frame `2079` neighborhood.
+- Follow-cam candidates must improve or stay below motion thresholds while preserving Detected/Predicted crop coverage; sparse data warns instead of silently passing.
+- Highlight candidates must preserve the event `core_window` and required post-event tail, with source-video-end clamps recorded as evidence.
+- Final output requires explicit approval, candidate artifacts or a valid resolved-noop, comparison, quality gate, and `final_ai_improvement_artifact_manifest.json`.
 
 ## Stage Order
 
@@ -62,11 +78,11 @@ The workflow report records `approval_selection` with `approval_source`, request
 
 `--mode artifact-only` is the default when `--dry-run` is not set. It checks existing artifacts without requiring a real provider run.
 
-`--mode real` treats missing required artifacts as failures. The CLI returns nonzero only for a failing quality gate in non-dry-run real mode.
+`--mode real` treats missing required artifacts as quality-gate failures. Quality-gate failures return exit code `1` according to the selected workflow mode. Other CLI failures, such as invalid arguments or approval-selection errors, can also return nonzero.
 
 ## Candidate Comparison And Promotion
 
-AI improvement artifacts use three shared roles:
+AI improvement artifacts use three shared roles. The full status and promotion policy is defined in the contract document; this section is the workflow-facing summary:
 
 - `baseline`: the existing output used as the comparison source.
 - `candidate`: an alternative output produced by a bounded improvement attempt.
@@ -87,11 +103,11 @@ The quality gate reads direct `*_comparison.json` reports and comparison referen
 
 ## Model Guidance
 
-Use a stronger model for run-level improvement and hard recovery cases. Reserve smaller or cheaper models for low-risk tagging and dry-run smoke checks.
+Use the configured strong model for run-level improvement and hard recovery cases. Reserve smaller or cheaper models for low-risk tagging and dry-run smoke checks. Provider mode, candidate intent, and model selection should be visible in the workflow report so operators can distinguish strong-model candidate work from low-risk review-only output.
 
 ## AI Suggestion Contract
 
-Run-level AI suggestions must be evidence-backed before they are eligible for approval:
+Run-level AI suggestions must be evidence-backed before they are eligible for approval. See the contract document for the final gating rules; the stable workflow enforces these operator-facing constraints:
 
 - Long missing-ball or lost-gap suggestions must cover the full lost gap, or explicitly describe uncovered subwindows.
 - ROI and localization suggestions must cite a `source_packet_id` or `visual_review_id`.

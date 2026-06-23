@@ -1,0 +1,119 @@
+# AI Improvement Contract
+
+This contract is the stable reference for AI improvement workers and operators. It defines when AI output is only review text, when it becomes an executable candidate, and when a candidate may become final output. Executors for missing-ball recovery, follow-cam rerendering, and highlights must satisfy this document before they mutate or publish artifacts.
+
+## Lifecycle
+
+Candidate lifecycle stages are ordered as follows:
+
+| Stage | Meaning |
+| --- | --- |
+| `review_only` | AI produced advisory text or a dry-run note. It is not executable and cannot be final output. |
+| `proposed` | AI proposed a bounded, traceable candidate shape. |
+| `approved` | An operator explicitly approved an action by id. Approval-file presence alone is not approval. |
+| `pending_execution` | The approved action still needs a candidate executor or API-backed run. |
+| `executed` | Candidate artifacts were written under an `ai_candidates/<problem_type>/<candidate_id>/` lane. |
+| `compared` | A candidate comparison report exists and is valid enough to derive status. |
+| `gated` | The quality gate consumed candidate evidence. |
+| `finalized` | A final manifest recorded promotion, rejection, pending confirmation, unsupported status, or resolved-noop status. |
+
+Comparison report statuses are `pass`, `warn`, `fail`, and `unavailable`. Lifecycle summaries may use `none` only to mean no comparison exists yet; `none` is not a valid comparison report status.
+
+Promotion statuses are:
+
+| Status | Meaning |
+| --- | --- |
+| `not_promoted` | Default state before final selection. |
+| `pending_confirmation` | A `warn` candidate needs explicit human confirmation before final promotion. |
+| `promoted` | The candidate is selected in `final_ai_improvement_artifact_manifest.json`. |
+| `rejected` | The candidate is recorded as rejected. |
+| `blocked` | Promotion is impossible until a contract problem is fixed. |
+
+Blocking reasons are `missing_evidence`, `unsafe_window`, `unsupported_type`, `missing_candidate_id`, `missing_comparison`, `failed_quality_gate`, `pending_api_execution`, and `pending_human_confirmation`.
+
+| Blocking reason | Meaning |
+| --- | --- |
+| `missing_evidence` | The candidate or resolution lacks packet, visual, approval, or artifact evidence required for its problem type. |
+| `unsafe_window` | The requested frame window is invalid, too broad, outside source bounds, or would use an unsafe recovery scope. |
+| `unsupported_type` | The candidate problem type or action is not supported by the current executor/promotion path. |
+| `missing_candidate_id` | An executable or promotable item lacks a stable `candidate_id`. |
+| `missing_comparison` | Candidate artifacts exist or are selected, but no usable comparison report is linked. |
+| `failed_quality_gate` | The run-level quality gate failed and blocks final promotion. |
+| `pending_api_execution` | Approval exists, but the candidate still needs an executor or API-backed run. |
+| `pending_human_confirmation` | A `warn` candidate needs explicit human confirmation before promotion. |
+
+## Traceability
+
+Executable candidates must carry these fields from suggestion through approval, candidate artifacts, comparison, quality gate, and final manifest:
+
+| Field | Contract |
+| --- | --- |
+| `candidate_id` | Required for executable candidates. It must be stable, path-safe, unique within the run, and reused in candidate artifact refs, comparison reports, lifecycle state, and final manifest entries. |
+| `approval_id` | Required for any operator-approved execution or promotion. It must come from an explicitly supplied approval file or promotion action and must be recorded as consumed evidence. |
+| `problem_type` | Required for candidate workflows. Valid values are `missing_ball`, `noise`, `follow_cam`, and `highlight`. |
+| Artifact refs | Candidate artifacts stay under `ai_candidates/<problem_type>/<candidate_id>/`. Reports reference paths and statuses only; comparison and final manifest builders must not copy media or mutate baseline tracks. |
+
+An executable candidate must also include evidence ids, a bounded frame window, `expected_artifact`, and `comparison_criteria`. Evidence ids may be packet ids, visual review ids, camera motion event ids, or event candidate ids as appropriate for the problem type.
+
+## Model Policy
+
+Use the configured strong model for run-level improvement and hard recovery decisions, including missing-ball localization, long-gap reasoning, and any decision that could produce candidate artifacts.
+
+Smaller or cheaper models may be used only for low-risk tagging, operator labeling, or dry-run smoke checks. Dry-run output remains review-only unless a later real run produces the required approval, candidate, comparison, and gate evidence.
+
+Workflow reports must record provider mode, candidate intent, and model selection so an operator can tell whether the output came from a strong-model candidate path or a low-risk review path.
+
+## Missing-Ball Closure
+
+Missing-ball problems have exactly two valid closures.
+
+| Closure | Required artifact | Contract |
+| --- | --- | --- |
+| Bounded recovery candidate | `missing_ball_recovery_comparison.json` | Runs a bounded rerun or ROI candidate under `ai_candidates/missing_ball/<candidate_id>/`, writes candidate artifacts, and compares candidate recovery against baseline plus approval evidence. |
+| Evidence-backed not-visible resolution | `missing_ball_resolution.json` | Records that the ball is hidden, off-frame, or impossible to identify for the full requested window, backed by packet or visual evidence. This is a resolution lane, not a recovery candidate. |
+
+The long right-bottom gap `2049-2544` is protected as a full-window requirement. A short neighborhood around frame `2079` may be useful evidence, but it cannot close `2049-2544` unless packet, visual, AI suggestion, approval, recovery comparison, or not-visible resolution evidence covers the entire long window or explicitly records uncovered subwindows.
+
+Broad full-video SAHI is not a stable closure path. SAHI/ROI work belongs inside approved bounded recovery windows with packet or visual provenance.
+
+## Follow-Cam Thresholds
+
+Follow-cam candidates must prove smoother motion without hiding bad tracking by zooming out. Compare the baseline and candidate `camera_motion_audit.json`, `camera_path.csv`, and `ball_track.csv` over the same evaluable window.
+
+| Check | Pass rule |
+| --- | --- |
+| Review events | Candidate `summary.review_event_count` is no greater than baseline. |
+| P95 pan step | Candidate `p95_pan_step_px` is at least 10% lower than baseline, or both baseline and candidate are below `PAN_STEP_WARN_PX` (`90.0`). |
+| Max pan acceleration | Candidate `max_pan_accel_px` is at least 10% lower than baseline, or both baseline and candidate are below `PAN_ACCEL_WARN_PX` (`80.0`). |
+| Max zoom step | Candidate `max_zoom_step_px` is not more than 10% worse than baseline and remains below `ZOOM_STEP_FAIL_PX` (`48.0`). |
+| P95 crop height | Candidate p95 crop height is no more than 15% above baseline. |
+| Max crop height | Candidate max crop height is no more than 20% above baseline. |
+| Detected/Predicted crop coverage | For frames with enough matching ball/camera rows, candidate coverage is at least `baseline_coverage - 0.02` and at least `0.95`. |
+
+Crop coverage is computed from Detected or Predicted `ball_track.csv` frames and `camera_path.csv`: a frame is covered when the ball center lies inside the crop rectangle. Sparse data must produce `warn` or `unavailable` evidence with sample counts and reasons; it must not silently pass.
+
+If a camera event overlaps Lost/Predicted tracking or nearby tracking instability, the valid action is `tracking_rerun_before_follow_cam`, not `adjust_follow_cam`, until linked tracking recovery passes.
+
+## Highlight Comparison
+
+Highlight candidates compare event candidate metadata to the rendered candidate clip.
+
+The candidate `render_window` must contain the event `core_window`. It must also contain the required post-event tail through `core_window.end_frame + buffer_policy.min_tail_frames`, clamped by the source video end.
+
+When the source-video end clamps the tail, the comparison must record that clamp as explicit pass or warn evidence. It must not silently trim the tail. A candidate that cuts the core event, cuts available tail, uses an invalid frame range, or mismatches the source event id/candidate id fails comparison.
+
+Review-only highlight clips cannot be accepted or published as AI improvements. Accepted highlights need comparison-backed candidate evidence unless a separate legacy/manual mode is explicitly documented.
+
+## Final Output
+
+Review-only artifacts cannot mutate `ball_track.csv`, `ball_track.cleaned.csv`, follow-cam videos, highlight clips, or final manifests as applied improvements. They cannot be final output.
+
+Final output requires all of the following:
+
+- Explicit operator approval with a consumed `approval_id`.
+- Candidate artifacts under the correct `ai_candidates/<problem_type>/<candidate_id>/` lane, or a valid `missing_ball_resolution.json` resolved-noop for not-visible closure.
+- A candidate comparison report whose status is derived from non-empty `checks`; summary/check mismatches are not clean passes.
+- Quality-gate evidence in `ai_improvement_quality_gate.json`.
+- A `final_ai_improvement_artifact_manifest.json` entry that records baseline output, candidate output, comparison report, consumed approvals, quality gate status, final selection or rejection, and warnings.
+
+`pass` candidates may be promoted. `warn` candidates require `requires_human_confirmation: true` on the final artifact plus a consumed approval for the same `candidate_id` with `approval_type: human_confirmation`. `fail` candidates are rejected. `unavailable` candidates stay out of final output until usable comparison evidence exists.
