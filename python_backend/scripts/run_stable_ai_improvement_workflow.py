@@ -1099,6 +1099,11 @@ def _final_artifact_manifest_stage(
         if isinstance(noise_path, dict) and isinstance(noise_path.get("comparison_reports"), list)
         else []
     )
+    noise_rejected_candidates = (
+        [_noise_rejected_candidate_summary(item) for item in noise_path.get("errors", [])]
+        if isinstance(noise_path, dict) and isinstance(noise_path.get("errors"), list)
+        else []
+    )
     manifest = write_final_artifact_manifest(
         output_dir,
         baseline_output={"path": str(output_dir), "status": "baseline"},
@@ -1107,7 +1112,7 @@ def _final_artifact_manifest_stage(
         consumed_approvals=[action for action in actions if isinstance(action, dict)],
         comparison_reports=[*missing_ball_comparison_reports, *noise_comparison_reports],
         quality_gate_status=quality_gate_summary,
-        rejected_candidates=missing_ball_rejected_candidates,
+        rejected_candidates=[*missing_ball_rejected_candidates, *noise_rejected_candidates],
         pending_candidates=pending_candidates,
         unsupported_candidates=unsupported_candidates,
         resolved_noop_candidates=resolved_noop_candidates,
@@ -1193,6 +1198,30 @@ def _missing_ball_rejected_candidate_summary(error: dict[str, Any]) -> dict[str,
         "problem_type": "missing_ball",
         "reason": "comparison_unavailable",
         "error": str(error.get("error") or "Missing-ball recovery candidate execution failed."),
+        "status": "rejected",
+        "execution_status": str(error.get("execution_status") or error.get("status") or "failed"),
+        "comparison_status": "unavailable",
+    }
+
+
+def _noise_rejected_candidate_summary(error: dict[str, Any]) -> dict[str, Any]:
+    candidate_id = _first_string(error, ("candidate_id",))
+    if candidate_id is None:
+        candidate_ids = error.get("candidate_ids")
+        if isinstance(candidate_ids, list):
+            candidate_id = next((item.strip() for item in candidate_ids if isinstance(item, str) and item.strip()), None)
+    approval_id = _first_string(error, ("approval_id",))
+    approval_ids = [item for item in error.get("approval_ids", []) if isinstance(item, str) and item.strip()]
+    if approval_id is not None and approval_id not in approval_ids:
+        approval_ids.insert(0, approval_id)
+    return {
+        "candidate_id": candidate_id,
+        "candidate_ids": [candidate_id] if candidate_id else [],
+        "approval_id": approval_id,
+        "approval_ids": approval_ids,
+        "problem_type": "noise",
+        "reason": "comparison_unavailable",
+        "error": str(error.get("error") or "Noise cleanup candidate execution failed."),
         "status": "rejected",
         "execution_status": str(error.get("execution_status") or error.get("status") or "failed"),
         "comparison_status": "unavailable",

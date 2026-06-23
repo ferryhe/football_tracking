@@ -160,6 +160,88 @@ class NoiseCandidateComparisonTests(unittest.TestCase):
         self.assertEqual("fail", provenance["status"])
         self.assertIn("unbounded", provenance["reason"])
 
+    def test_full_video_sahi_flag_fails_even_with_bounded_strategy_name(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            baseline = output_dir / "baseline.csv"
+            candidate = output_dir / "candidate.csv"
+            _write_track(baseline, detected_ranges=[(10, 24), (40, 40), (50, 50)], frame_count=80)
+            _write_track(candidate, detected_ranges=[(10, 24)], frame_count=80)
+
+            report = build_noise_candidate_comparison(
+                baseline,
+                candidate,
+                candidate_id="noise-sahi",
+                approval=_approval("noise-sahi"),
+                target_window={"start_frame": 0, "end_frame": 79},
+                strategy_provenance={
+                    "strategy": "bounded_full_video_sahi",
+                    "full_video_sahi": True,
+                    "start_frame": 0,
+                    "end_frame": 79,
+                },
+            )
+
+        self.assertEqual("fail", report["summary"]["status"])
+        provenance = next(check for check in report["checks"] if check["name"] == "bounded_strategy_provenance")
+        self.assertEqual("fail", provenance["status"])
+        self.assertIn("unbounded", provenance["reason"])
+
+    def test_full_video_spatial_split_flag_fails_even_with_bounded_strategy_name(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            baseline = output_dir / "baseline.csv"
+            candidate = output_dir / "candidate.csv"
+            _write_track(baseline, detected_ranges=[(10, 24), (40, 40), (50, 50)], frame_count=80)
+            _write_track(candidate, detected_ranges=[(10, 24)], frame_count=80)
+
+            report = build_noise_candidate_comparison(
+                baseline,
+                candidate,
+                candidate_id="noise-spatial",
+                approval=_approval("noise-spatial"),
+                target_window={"start_frame": 0, "end_frame": 79},
+                strategy_provenance={
+                    "strategy": "bounded_full_video_spatial_split",
+                    "full_video_spatial_split": True,
+                    "start_frame": 0,
+                    "end_frame": 79,
+                },
+            )
+
+        self.assertEqual("fail", report["summary"]["status"])
+        provenance = next(check for check in report["checks"] if check["name"] == "bounded_strategy_provenance")
+        self.assertEqual("fail", provenance["status"])
+        self.assertIn("unbounded", provenance["reason"])
+
+    def test_full_video_strategy_name_fails_even_without_boolean_flags(self) -> None:
+        unsafe_strategies = ("bounded_full_video_sahi", "bounded_full_video_spatial_split")
+        for strategy in unsafe_strategies:
+            with self.subTest(strategy=strategy), tempfile.TemporaryDirectory() as temp_name:
+                output_dir = Path(temp_name)
+                baseline = output_dir / "baseline.csv"
+                candidate = output_dir / "candidate.csv"
+                _write_track(baseline, detected_ranges=[(10, 24), (40, 40), (50, 50)], frame_count=80)
+                _write_track(candidate, detected_ranges=[(10, 24)], frame_count=80)
+
+                report = build_noise_candidate_comparison(
+                    baseline,
+                    candidate,
+                    candidate_id="noise-full-video-name",
+                    approval=_approval("noise-full-video-name"),
+                    target_window={"start_frame": 0, "end_frame": 79},
+                    strategy_provenance={
+                        "strategy": strategy,
+                        "start_frame": 0,
+                        "end_frame": 79,
+                    },
+                )
+
+                self.assertEqual("fail", report["summary"]["status"])
+                provenance = next(check for check in report["checks"] if check["name"] == "bounded_strategy_provenance")
+                self.assertEqual("fail", provenance["status"])
+                self.assertIn("unbounded", provenance["reason"])
+
     def test_execute_cleanup_writes_isolated_candidate_artifacts_and_preserves_baseline(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:
             output_dir = Path(temp_name)
@@ -243,6 +325,118 @@ class NoiseCandidateComparisonTests(unittest.TestCase):
                     output_dir,
                     _approval("noise-exec", approval_id="noise_1", start=0, end=79),
                 )
+
+            candidate_dir_exists = (output_dir / "ai_candidates" / "noise" / "noise-exec").exists()
+
+        self.assertFalse(candidate_dir_exists)
+
+    def test_execute_cleanup_refuses_unbounded_full_video_sahi_before_writing_candidate(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_track(
+                output_dir / "ball_track.cleaned.csv",
+                detected_ranges=[(10, 24), (30, 31), (40, 40), (50, 51)],
+                frame_count=80,
+            )
+            (output_dir / "ball_track.csv").write_text(
+                (output_dir / "ball_track.cleaned.csv").read_text(encoding="utf-8"),
+                encoding="utf-8",
+            )
+            write_ball_audit_report(output_dir)
+            _write_review_packet(output_dir, packet_id="packet_noise", start=0, end=79)
+            approval = _approval("noise-exec", approval_id="noise_1", start=0, end=79)
+            approval["strategy_provenance"] = {"strategy": "full_video_sahi", "full_video_sahi": True}
+
+            with self.assertRaisesRegex(ValueError, "unbounded full-video spatial/SAHI"):
+                execute_noise_cleanup_candidate(output_dir, approval)
+
+            candidate_dir_exists = (output_dir / "ai_candidates" / "noise" / "noise-exec").exists()
+
+        self.assertFalse(candidate_dir_exists)
+
+    def test_execute_cleanup_refuses_full_video_sahi_flag_with_bounded_strategy_name_before_writing_candidate(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_track(
+                output_dir / "ball_track.cleaned.csv",
+                detected_ranges=[(10, 24), (30, 31), (40, 40), (50, 51)],
+                frame_count=80,
+            )
+            (output_dir / "ball_track.csv").write_text(
+                (output_dir / "ball_track.cleaned.csv").read_text(encoding="utf-8"),
+                encoding="utf-8",
+            )
+            write_ball_audit_report(output_dir)
+            _write_review_packet(output_dir, packet_id="packet_noise", start=0, end=79)
+            approval = _approval("noise-exec", approval_id="noise_1", start=0, end=79)
+            approval["strategy_provenance"] = {
+                "strategy": "bounded_full_video_sahi",
+                "full_video_sahi": True,
+                "start_frame": 0,
+                "end_frame": 79,
+            }
+
+            with self.assertRaisesRegex(ValueError, "unbounded full-video spatial/SAHI"):
+                execute_noise_cleanup_candidate(output_dir, approval)
+
+            candidate_dir_exists = (output_dir / "ai_candidates" / "noise" / "noise-exec").exists()
+
+        self.assertFalse(candidate_dir_exists)
+
+    def test_execute_cleanup_refuses_full_video_spatial_flag_with_bounded_strategy_name_before_writing_candidate(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_track(
+                output_dir / "ball_track.cleaned.csv",
+                detected_ranges=[(10, 24), (30, 31), (40, 40), (50, 51)],
+                frame_count=80,
+            )
+            (output_dir / "ball_track.csv").write_text(
+                (output_dir / "ball_track.cleaned.csv").read_text(encoding="utf-8"),
+                encoding="utf-8",
+            )
+            write_ball_audit_report(output_dir)
+            _write_review_packet(output_dir, packet_id="packet_noise", start=0, end=79)
+            approval = _approval("noise-exec", approval_id="noise_1", start=0, end=79)
+            approval["strategy_provenance"] = {
+                "strategy": "bounded_full_video_spatial_split",
+                "full_video_spatial_split": True,
+                "start_frame": 0,
+                "end_frame": 79,
+            }
+
+            with self.assertRaisesRegex(ValueError, "unbounded full-video spatial/SAHI"):
+                execute_noise_cleanup_candidate(output_dir, approval)
+
+            candidate_dir_exists = (output_dir / "ai_candidates" / "noise" / "noise-exec").exists()
+
+        self.assertFalse(candidate_dir_exists)
+
+    def test_execute_cleanup_refuses_full_video_strategy_name_without_flag_before_writing_candidate(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_track(
+                output_dir / "ball_track.cleaned.csv",
+                detected_ranges=[(10, 24), (30, 31), (40, 40), (50, 51)],
+                frame_count=80,
+            )
+            (output_dir / "ball_track.csv").write_text(
+                (output_dir / "ball_track.cleaned.csv").read_text(encoding="utf-8"),
+                encoding="utf-8",
+            )
+            write_ball_audit_report(output_dir)
+            _write_review_packet(output_dir, packet_id="packet_noise", start=0, end=79)
+            approval = _approval("noise-exec", approval_id="noise_1", start=0, end=79)
+            approval["strategy_provenance"] = {
+                "strategy": "bounded_full_video_sahi",
+                "start_frame": 0,
+                "end_frame": 79,
+            }
+
+            with self.assertRaisesRegex(ValueError, "unbounded full-video spatial/SAHI"):
+                execute_noise_cleanup_candidate(output_dir, approval)
 
             candidate_dir_exists = (output_dir / "ai_candidates" / "noise" / "noise-exec").exists()
 

@@ -275,6 +275,7 @@ class StableAiImprovementWorkflowTests(unittest.TestCase):
             manifest = json.loads(
                 (output_dir / "final_ai_improvement_artifact_manifest.json").read_text(encoding="utf-8")
             )
+            lifecycle = build_ai_candidate_lifecycle(output_dir)
 
         dispatcher = _stage(report, "selected_approval_dispatcher")
         self.assertEqual("completed", dispatcher["status"])
@@ -296,6 +297,11 @@ class StableAiImprovementWorkflowTests(unittest.TestCase):
         self.assertEqual("noise-candidate-1", manifest["candidate_outputs"][0]["candidate_id"])
         self.assertEqual("pass", manifest["comparison_reports"][0]["status"])
         self.assertNotEqual("invalid_checks", manifest["comparison_reports"][0]["artifact_status"])
+        self.assertEqual(report["quality_gate"]["summary"]["status"], manifest["quality_gate_status"]["status"])
+        self.assertEqual("finalized", lifecycle["summary"]["stage"])
+        self.assertEqual("pass", lifecycle["summary"]["comparison_status"])
+        self.assertEqual("noise", lifecycle["candidates"][0]["problem_type"])
+        self.assertEqual(["noise_1"], lifecycle["candidates"][0]["approval_ids"])
         self.assertEqual("skipped", _stage(report, "approved_child_rerun")["status"])
         self.assertEqual("skipped", _stage(report, "follow_cam_rerender_plan")["status"])
         self.assertEqual("skipped", _stage(report, "highlight_render")["status"])
@@ -656,6 +662,74 @@ class StableAiImprovementWorkflowTests(unittest.TestCase):
         self.assertFalse(candidate_parent_exists)
         self.assertEqual("failed", report["quality_gate"]["summary"]["workflow_status"])
         self.assertEqual("failed", quality_gate["summary"]["workflow_status"])
+
+    def test_selected_noise_execution_failure_records_manifest_and_lifecycle_rejection(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_noise_tracks(output_dir)
+            approved_path = output_dir / "approved_actions.json"
+            _write_json(approved_path, {"approved_actions": [_noise_approval("noise_1", start=0, end=79)]})
+
+            report = run_workflow(
+                output_dir=output_dir,
+                dry_run=False,
+                approved_actions_path=approved_path,
+                approval_ids=["noise_1"],
+            )
+            manifest = json.loads(
+                (output_dir / "final_ai_improvement_artifact_manifest.json").read_text(encoding="utf-8")
+            )
+            lifecycle = build_ai_candidate_lifecycle(output_dir)
+
+        dispatcher = _stage(report, "selected_approval_dispatcher")
+        self.assertEqual("failed", dispatcher["noise_candidate_execution_path"]["status"])
+        self.assertEqual("noise-candidate-1", dispatcher["noise_candidate_execution_path"]["errors"][0]["candidate_id"])
+        self.assertEqual(1, manifest["summary"]["rejected_candidate_count"])
+        self.assertEqual("noise-candidate-1", manifest["rejected_candidates"][0]["candidate_id"])
+        self.assertEqual(["noise_1"], manifest["rejected_candidates"][0]["approval_ids"])
+        self.assertEqual("noise", manifest["rejected_candidates"][0]["problem_type"])
+        self.assertIn("traceable packet or visual evidence", manifest["rejected_candidates"][0]["error"])
+        self.assertEqual("finalized", lifecycle["summary"]["stage"])
+        self.assertEqual("rejected", lifecycle["summary"]["promotion_status"])
+        self.assertEqual(["noise_1"], lifecycle["candidates"][0]["approval_ids"])
+
+    def test_selected_noise_full_video_sahi_failure_records_manifest_and_lifecycle_rejection(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_noise_tracks(output_dir)
+            _write_packet(output_dir, packet_id="packet_noise", start=0, end=79)
+            approved_path = output_dir / "approved_actions.json"
+            approval = _noise_approval("noise_1", start=0, end=79)
+            approval["strategy_provenance"] = {
+                "strategy": "bounded_full_video_sahi",
+                "full_video_sahi": True,
+                "start_frame": 0,
+                "end_frame": 79,
+            }
+            _write_json(approved_path, {"approved_actions": [approval]})
+
+            report = run_workflow(
+                output_dir=output_dir,
+                dry_run=False,
+                approved_actions_path=approved_path,
+                approval_ids=["noise_1"],
+            )
+            manifest = json.loads(
+                (output_dir / "final_ai_improvement_artifact_manifest.json").read_text(encoding="utf-8")
+            )
+            lifecycle = build_ai_candidate_lifecycle(output_dir)
+            candidate_dir_exists = (output_dir / "ai_candidates" / "noise" / "noise-candidate-1").exists()
+
+        dispatcher = _stage(report, "selected_approval_dispatcher")
+        self.assertEqual("failed", dispatcher["noise_candidate_execution_path"]["status"])
+        self.assertFalse(candidate_dir_exists)
+        self.assertEqual(1, manifest["summary"]["rejected_candidate_count"])
+        self.assertEqual("noise-candidate-1", manifest["rejected_candidates"][0]["candidate_id"])
+        self.assertEqual(["noise_1"], manifest["rejected_candidates"][0]["approval_ids"])
+        self.assertIn("unbounded full-video spatial/SAHI", manifest["rejected_candidates"][0]["error"])
+        self.assertEqual("finalized", lifecycle["summary"]["stage"])
+        self.assertEqual("rejected", lifecycle["summary"]["promotion_status"])
+        self.assertEqual(["noise_1"], lifecycle["candidates"][0]["approval_ids"])
 
     def test_main_returns_failure_when_selected_noise_execution_fails(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:

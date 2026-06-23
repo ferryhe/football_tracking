@@ -353,6 +353,9 @@ def _apply_final_manifest(
             candidate_id,
             fallback_key=f"rejected:{candidate_id or len(state['candidates'])}",
         )
+        _append_unique(candidate["approval_ids"], _optional_string(item.get("approval_id")))
+        for approval_id in _string_items(item.get("approval_ids")):
+            _append_unique(candidate["approval_ids"], approval_id)
         _advance_candidate_stage(candidate, "finalized")
         _set_promotion_status(candidate, "rejected")
         _apply_manifest_rejection_reason(candidate, _optional_string(item.get("reason")))

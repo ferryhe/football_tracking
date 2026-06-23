@@ -161,6 +161,10 @@ def execute_noise_cleanup_candidate(
     window = _target_window(normalized_approval, baseline_rows["rows"], baseline_rows["rows"])
     if not _has_traceable_noise_evidence(output_dir, normalized_approval, window):
         raise ValueError("noise approval requires traceable packet or visual evidence")
+    strategy = _strategy_provenance_from_approval(normalized_approval, window)
+    provenance_check = _strategy_provenance_check(strategy, normalized_approval)
+    if provenance_check["status"] == "fail":
+        raise ValueError(str(provenance_check["reason"]))
     existing_records = _existing_registry_records_for_update(output_dir, candidate_id)
 
     candidate_dir = output_dir / "ai_candidates" / "noise" / candidate_id
@@ -177,7 +181,6 @@ def execute_noise_cleanup_candidate(
     _write_track_rows(candidate_cleaned_path, baseline_rows["fieldnames"], candidate_rows)
     _write_track_rows(candidate_dir / "ball_track.csv", baseline_rows["fieldnames"], candidate_rows)
 
-    strategy = _strategy_provenance_from_approval(normalized_approval, window)
     cleanup_report = _cleanup_report(
         normalized_approval,
         candidate_id=candidate_id,
@@ -444,6 +447,7 @@ def _strategy_provenance_check(strategy_provenance: dict[str, Any], approval: di
     strategy = str(strategy_provenance.get("strategy") or "").casefold()
     full_video_sahi = strategy_provenance.get("full_video_sahi") is True
     full_video_spatial = strategy_provenance.get("full_video_spatial_split") is True
+    name_implies_full_video = "full_video_sahi" in strategy or "full_video_spatial_split" in strategy
     unbounded_strategy = strategy in {
         "full_video_sahi",
         "full_video_spatial_split",
@@ -454,10 +458,7 @@ def _strategy_provenance_check(strategy_provenance: dict[str, Any], approval: di
     bounded_window = _window_from_mapping(strategy_provenance) or (
         _window_from_mapping(approval) if isinstance(approval, dict) else None
     )
-    evidence_ids = _approval_evidence_ids(approval) if isinstance(approval, dict) else []
-    if (full_video_sahi or full_video_spatial or unbounded_strategy) and not (
-        strategy.startswith("bounded") and bounded_window is not None and evidence_ids
-    ):
+    if full_video_sahi or full_video_spatial or name_implies_full_video or unbounded_strategy:
         return {
             "name": "bounded_strategy_provenance",
             "status": "fail",
