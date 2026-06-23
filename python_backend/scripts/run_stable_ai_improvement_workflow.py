@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import sys
 from datetime import datetime, timezone
@@ -8,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 PYTHON_BACKEND_ROOT = Path(__file__).resolve().parents[1]
+REPO_ROOT = PYTHON_BACKEND_ROOT.parent
 sys.path.insert(0, str(PYTHON_BACKEND_ROOT))
 
 from football_tracking.ai_improvement import write_ai_improvement_report
@@ -16,8 +18,11 @@ from football_tracking.ai_improvement_quality_gate import (
     write_track_hash_snapshot,
 )
 from football_tracking.ai_visual_review import write_ai_visual_review_report
+from football_tracking.chunk_runner import run_high_recall_windows
+from football_tracking.config import load_config
 from football_tracking.final_artifact_manifest import write_final_artifact_manifest
 from football_tracking.metrics import build_metrics_report
+from football_tracking.missing_ball_candidate_executor import execute_missing_ball_candidate
 from football_tracking.noise_candidate_comparison import execute_noise_cleanup_candidate
 from football_tracking.review_packets import write_review_packet_report
 
@@ -150,13 +155,19 @@ def run_workflow(
         approved_action_id=approved_action_id,
         approved_actions_path=approved_actions_path,
     )
-    dispatcher_stage = _selected_approval_dispatcher_stage(output_dir=output_dir, approved_payload=approved_payload, dry_run=dry_run)
+    dispatcher_stage = _selected_approval_dispatcher_stage(
+        output_dir=output_dir,
+        input_video=input_video,
+        approved_payload=approved_payload,
+        dry_run=dry_run,
+    )
     stages.append(dispatcher_stage)
     stages.append(
         _approved_child_rerun_stage(
             dry_run=dry_run,
             approval_intent=approval_intent,
             bounded_windows=bounded_windows,
+            missing_ball_execution_path=dispatcher_stage.get("missing_ball_execution_path"),
         )
     )
     stages.append(_follow_cam_rerender_plan_stage(approval_intent=approval_intent, approved_payload=approved_payload))
@@ -649,6 +660,7 @@ def _approved_child_rerun_stage(
     dry_run: bool,
     approval_intent: dict[str, Any],
     bounded_windows: list[dict[str, Any]],
+    missing_ball_execution_path: Any = None,
 ) -> dict[str, Any]:
     if not approval_intent["has_explicit_approval_intent"]:
         return {
@@ -656,6 +668,28 @@ def _approved_child_rerun_stage(
             "status": "skipped",
             "reason": "No explicit approved actions path or approval ids supplied.",
             "runs_full_video_sahi": False,
+        }
+    if isinstance(missing_ball_execution_path, dict) and missing_ball_execution_path.get("status") in {
+        "succeeded",
+        "failed",
+        "partial_failure",
+        "planned",
+    }:
+        return {
+            "name": "approved_child_rerun",
+            "status": missing_ball_execution_path.get("status"),
+            "dry_run": dry_run,
+            "execution_status": missing_ball_execution_path.get("execution_status", "not_run"),
+            "api_required": False,
+            "approval_ids": missing_ball_execution_path.get("approval_ids", []),
+            "candidate_ids": missing_ball_execution_path.get("candidate_ids", []),
+            "candidate_outputs": missing_ball_execution_path.get("candidate_outputs", []),
+            "comparison_reports": missing_ball_execution_path.get("comparison_reports", []),
+            "errors": missing_ball_execution_path.get("errors", []),
+            "intended_rerun_mode": "sahi_roi" if any(window.get("has_roi") for window in bounded_windows) else "direct_full_frame",
+            "bounded_windows": [{key: window[key] for key in ("approval_id", "start_frame", "end_frame")} for window in bounded_windows],
+            "runs_full_video_sahi": False,
+            "strategy": missing_ball_execution_path.get("strategy", "bounded_missing_ball_recovery_candidate"),
         }
     if not bounded_windows:
         return {
@@ -681,7 +715,13 @@ def _approved_child_rerun_stage(
     }
 
 
-def _selected_approval_dispatcher_stage(*, output_dir: Path, approved_payload: dict[str, Any], dry_run: bool) -> dict[str, Any]:
+def _selected_approval_dispatcher_stage(
+    *,
+    output_dir: Path,
+    input_video: Path | None,
+    approved_payload: dict[str, Any],
+    dry_run: bool,
+) -> dict[str, Any]:
     actions = approved_payload.get("approved_actions") if isinstance(approved_payload.get("approved_actions"), list) else []
     missing_ball_actions: list[dict[str, Any]] = []
     noise_actions: list[dict[str, Any]] = []
@@ -699,23 +739,22 @@ def _selected_approval_dispatcher_stage(*, output_dir: Path, approved_payload: d
             noop_actions.append(action)
         elif approved_action in (FOLLOW_CAM_APPROVAL_ACTIONS | HIGHLIGHT_APPROVAL_ACTIONS):
             unsupported_actions.append(_unsupported_action_summary(action))
+    missing_ball_path = _missing_ball_candidate_execution_path(
+        output_dir=output_dir,
+        input_video=input_video,
+        actions=missing_ball_actions,
+        approved_payload=approved_payload,
+        dry_run=dry_run,
+    )
     noise_path = _noise_candidate_execution_path(output_dir=output_dir, actions=noise_actions, dry_run=dry_run)
+    dispatcher_failed = noise_path.get("status") == "failed" or missing_ball_path.get("status") in {
+        "failed",
+        "partial_failure",
+    }
     return {
         "name": "selected_approval_dispatcher",
-        "status": "failed" if noise_path.get("status") == "failed" else "completed",
-        "missing_ball_execution_path": {
-            "status": "pending_api_required" if missing_ball_actions else "skipped",
-            "approval_ids": _approval_ids(missing_ball_actions),
-            "execution_status": "not_run",
-            "api_required": bool(missing_ball_actions),
-            "required_executor": "api_missing_ball_candidate_execution",
-            "reason": (
-                "Selected missing-ball approvals are executable only through the PR #46 API/service child-run path; "
-                "this workflow does not execute or promote those candidates directly."
-                if missing_ball_actions
-                else "No selected missing-ball recovery approvals."
-            ),
-        },
+        "status": "failed" if dispatcher_failed else "completed",
+        "missing_ball_execution_path": missing_ball_path,
         "noop_resolution_path": {
             "status": "supported" if noop_actions else "skipped",
             "approval_ids": _approval_ids(noop_actions),
@@ -724,6 +763,115 @@ def _selected_approval_dispatcher_stage(*, output_dir: Path, approved_payload: d
         "noise_candidate_execution_path": noise_path,
         "unsupported_actions": unsupported_actions,
     }
+
+
+def _missing_ball_candidate_execution_path(
+    *,
+    output_dir: Path,
+    input_video: Path | None,
+    actions: list[dict[str, Any]],
+    approved_payload: dict[str, Any],
+    dry_run: bool,
+) -> dict[str, Any]:
+    if not actions:
+        return {
+            "status": "skipped",
+            "approval_ids": [],
+            "candidate_ids": [],
+            "execution_status": "not_run",
+            "reason": "No selected missing-ball recovery approvals.",
+            "runs_full_video_sahi": False,
+            "strategy": "bounded_missing_ball_recovery_candidate",
+        }
+    approval_ids = _approval_ids(actions)
+    candidate_ids = _missing_ball_candidate_ids(actions)
+    if dry_run:
+        return {
+            "status": "planned",
+            "approval_ids": approval_ids,
+            "candidate_ids": candidate_ids,
+            "execution_status": "not_run",
+            "reason": "Dry-run records selected missing-ball recovery approvals without writing candidate artifacts.",
+            "runs_full_video_sahi": False,
+            "strategy": "bounded_missing_ball_recovery_candidate",
+        }
+    try:
+        config_path = _recovery_config_path(output_dir)
+        resolved_input_video = input_video or _recovery_input_video(output_dir, config_path)
+        if resolved_input_video is None:
+            raise ValueError("Selected missing-ball recovery requires input_video or run_manifest/config input_video.")
+        reports: list[dict[str, Any]] = []
+        errors: list[dict[str, Any]] = []
+        source_total_frames = _source_total_frames(output_dir)
+        for candidate_id, group_actions in _group_missing_ball_actions_by_candidate_id(actions).items():
+            group_approval_ids = _approval_ids(group_actions)
+            try:
+                reports.append(
+                    execute_missing_ball_candidate(
+                        output_dir,
+                        {**approved_payload, "approved_actions": group_actions},
+                        config_path=config_path,
+                        input_video=resolved_input_video,
+                        source_total_frames=source_total_frames,
+                        runner=run_high_recall_windows,
+                    )
+                )
+            except Exception as exc:
+                errors.append(
+                    {
+                        "candidate_id": candidate_id,
+                        "candidate_ids": [candidate_id] if candidate_id else [],
+                        "approval_ids": group_approval_ids,
+                        "status": "failed",
+                        "execution_status": "failed",
+                        "error": str(exc),
+                    }
+                )
+        candidate_outputs = [
+            {
+                "id": report.get("candidate_id"),
+                "candidate_id": report.get("candidate_id"),
+                "problem_type": "missing_ball",
+                "path": report.get("candidate_dir"),
+                "status": report.get("comparison_status"),
+            }
+            for report in reports
+            if isinstance(report.get("candidate_id"), str)
+        ]
+        comparison_reports = [{**report, "path": report.get("comparison_report")} for report in reports]
+        status = "partial_failure" if reports and errors else "failed" if errors else "succeeded"
+        return {
+            "status": status,
+            "approval_ids": approval_ids,
+            "candidate_ids": candidate_ids,
+            "execution_status": "partial_failure" if status == "partial_failure" else "failed" if errors else "executed",
+            "candidate_outputs": candidate_outputs,
+            "comparison_reports": comparison_reports,
+            "errors": errors,
+            "runs_full_video_sahi": False,
+            "strategy": "bounded_missing_ball_recovery_candidate",
+        }
+    except Exception as exc:
+        return {
+            "status": "failed",
+            "approval_ids": approval_ids,
+            "candidate_ids": candidate_ids,
+            "execution_status": "failed",
+            "candidate_outputs": [],
+            "comparison_reports": [],
+            "errors": [
+                {
+                    "candidate_id": candidate_ids[0] if len(candidate_ids) == 1 else None,
+                    "approval_ids": approval_ids,
+                    "candidate_ids": candidate_ids,
+                    "status": "failed",
+                    "execution_status": "failed",
+                    "error": str(exc),
+                }
+            ],
+            "runs_full_video_sahi": False,
+            "strategy": "bounded_missing_ball_recovery_candidate",
+        }
 
 
 def _noise_candidate_execution_path(*, output_dir: Path, actions: list[dict[str, Any]], dry_run: bool) -> dict[str, Any]:
@@ -785,6 +933,23 @@ def _noise_candidate_execution_path(*, output_dir: Path, actions: list[dict[str,
         "runs_full_video_sahi": False,
         "strategy": "bounded_noise_cleanup_candidate",
     }
+
+
+def _group_missing_ball_actions_by_candidate_id(actions: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for action in actions:
+        candidate_id = _missing_ball_candidate_id(action)
+        grouped.setdefault(candidate_id or "", []).append(action)
+    return grouped
+
+
+def _missing_ball_candidate_ids(actions: list[dict[str, Any]]) -> list[str]:
+    candidate_ids: list[str] = []
+    for action in actions:
+        candidate_id = _missing_ball_candidate_id(action)
+        if candidate_id is not None and candidate_id not in candidate_ids:
+            candidate_ids.append(candidate_id)
+    return candidate_ids
 
 
 def _follow_cam_rerender_plan_stage(*, approval_intent: dict[str, Any], approved_payload: dict[str, Any]) -> dict[str, Any]:
@@ -898,7 +1063,7 @@ def _final_artifact_manifest_stage(
     actions = approved_payload.get("approved_actions") if isinstance(approved_payload.get("approved_actions"), list) else []
     missing_ball_path = dispatcher_stage.get("missing_ball_execution_path")
     pending_candidates = []
-    if isinstance(missing_ball_path, dict):
+    if isinstance(missing_ball_path, dict) and missing_ball_path.get("status") == "pending_api_required":
         missing_ids = {
             approval_id
             for approval_id in missing_ball_path.get("approval_ids", [])
@@ -908,6 +1073,22 @@ def _final_artifact_manifest_stage(
     unsupported = dispatcher_stage.get("unsupported_actions")
     unsupported_candidates = unsupported if isinstance(unsupported, list) else []
     noise_path = dispatcher_stage.get("noise_candidate_execution_path")
+    missing_ball_path = dispatcher_stage.get("missing_ball_execution_path")
+    missing_ball_candidate_outputs = (
+        missing_ball_path.get("candidate_outputs", [])
+        if isinstance(missing_ball_path, dict) and isinstance(missing_ball_path.get("candidate_outputs"), list)
+        else []
+    )
+    missing_ball_comparison_reports = (
+        missing_ball_path.get("comparison_reports", [])
+        if isinstance(missing_ball_path, dict) and isinstance(missing_ball_path.get("comparison_reports"), list)
+        else []
+    )
+    missing_ball_rejected_candidates = (
+        [_missing_ball_rejected_candidate_summary(item) for item in missing_ball_path.get("errors", [])]
+        if isinstance(missing_ball_path, dict) and isinstance(missing_ball_path.get("errors"), list)
+        else []
+    )
     noise_candidate_outputs = (
         noise_path.get("candidate_outputs", [])
         if isinstance(noise_path, dict) and isinstance(noise_path.get("candidate_outputs"), list)
@@ -921,11 +1102,12 @@ def _final_artifact_manifest_stage(
     manifest = write_final_artifact_manifest(
         output_dir,
         baseline_output={"path": str(output_dir), "status": "baseline"},
-        candidate_outputs=noise_candidate_outputs,
+        candidate_outputs=[*missing_ball_candidate_outputs, *noise_candidate_outputs],
         final_artifacts=[],
         consumed_approvals=[action for action in actions if isinstance(action, dict)],
-        comparison_reports=noise_comparison_reports,
+        comparison_reports=[*missing_ball_comparison_reports, *noise_comparison_reports],
         quality_gate_status=quality_gate_summary,
+        rejected_candidates=missing_ball_rejected_candidates,
         pending_candidates=pending_candidates,
         unsupported_candidates=unsupported_candidates,
         resolved_noop_candidates=resolved_noop_candidates,
@@ -997,6 +1179,26 @@ def _pending_candidate_summary(action: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _missing_ball_rejected_candidate_summary(error: dict[str, Any]) -> dict[str, Any]:
+    candidate_id = _first_string(error, ("candidate_id",))
+    if candidate_id is None:
+        candidate_ids = error.get("candidate_ids")
+        if isinstance(candidate_ids, list):
+            candidate_id = next((item.strip() for item in candidate_ids if isinstance(item, str) and item.strip()), None)
+    approval_ids = [item for item in error.get("approval_ids", []) if isinstance(item, str) and item.strip()]
+    return {
+        "candidate_id": candidate_id,
+        "candidate_ids": [candidate_id] if candidate_id else [],
+        "approval_ids": approval_ids,
+        "problem_type": "missing_ball",
+        "reason": "comparison_unavailable",
+        "error": str(error.get("error") or "Missing-ball recovery candidate execution failed."),
+        "status": "rejected",
+        "execution_status": str(error.get("execution_status") or error.get("status") or "failed"),
+        "comparison_status": "unavailable",
+    }
+
+
 def _problem_type_for_action(approved_action: str) -> str:
     if approved_action in NOISE_APPROVAL_ACTIONS:
         return "noise"
@@ -1012,6 +1214,13 @@ def _workflow_status(stages: list[dict[str, Any]]) -> str:
 
 
 def _noise_candidate_id(action: dict[str, Any]) -> str | None:
+    value = action.get("candidate_id")
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    return None
+
+
+def _missing_ball_candidate_id(action: dict[str, Any]) -> str | None:
     value = action.get("candidate_id")
     if isinstance(value, str) and value.strip():
         return value.strip()
@@ -1209,6 +1418,75 @@ def _quality_gate_approved_payload(
             )
         ]
     return {**approved_payload, "approved_actions": actions}
+
+
+def _recovery_config_path(output_dir: Path) -> Path:
+    run_manifest = _read_json_if_available(output_dir / "run_manifest.json")
+    config_path = run_manifest.get("config_path")
+    if isinstance(config_path, str) and config_path.strip():
+        path = _resolve_run_manifest_path(config_path, output_dir=output_dir, must_exist=True)
+        if path is not None:
+            return path
+    fallback = _resolve_run_manifest_path(Path("config") / "default.yaml", output_dir=output_dir, must_exist=True)
+    if fallback is not None:
+        return fallback
+    raise ValueError("Selected missing-ball recovery requires run_manifest.json with a valid config_path.")
+
+
+def _recovery_input_video(output_dir: Path, config_path: Path) -> Path | None:
+    run_manifest = _read_json_if_available(output_dir / "run_manifest.json")
+    manifest_video = run_manifest.get("input_video")
+    if isinstance(manifest_video, str) and manifest_video.strip():
+        return _resolve_run_manifest_path(manifest_video, output_dir=output_dir, must_exist=False)
+    try:
+        config = load_config(config_path)
+    except Exception:
+        return None
+    return Path(config.input_video) if config.input_video else None
+
+
+def _resolve_run_manifest_path(value: str | Path, *, output_dir: Path, must_exist: bool) -> Path | None:
+    path = Path(value)
+    if path.is_absolute():
+        return path if not must_exist or path.exists() else None
+    candidates = [Path(output_dir) / path, REPO_ROOT / path]
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return None if must_exist else candidates[0]
+
+
+def _source_total_frames(output_dir: Path) -> int | None:
+    metrics = _read_json_if_available(output_dir / "metrics_report.json")
+    tracks = metrics.get("tracks") if isinstance(metrics.get("tracks"), dict) else {}
+    for source_name in ("cleaned", "raw"):
+        source = tracks.get(source_name) if isinstance(tracks.get(source_name), dict) else {}
+        frame_count = _optional_int(source.get("frame_count"))
+        if frame_count is not None and frame_count > 0:
+            return frame_count
+    for name in ("ball_track.cleaned.csv", "ball_track.csv"):
+        frame_count = _track_frame_count(output_dir / name)
+        if frame_count is not None and frame_count > 0:
+            return frame_count
+    return None
+
+
+def _track_frame_count(path: Path) -> int | None:
+    if not path.exists():
+        return None
+    try:
+        max_frame: int | None = None
+        with path.open("r", encoding="utf-8-sig") as handle:
+            reader = csv.DictReader(handle)
+            if reader.fieldnames is None or "Frame" not in reader.fieldnames:
+                return None
+            for row in reader:
+                frame = _optional_int(row.get("Frame"))
+                if frame is not None and (max_frame is None or frame > max_frame):
+                    max_frame = frame
+        return None if max_frame is None else max_frame + 1
+    except OSError:
+        return None
 
 
 def _parse_approval_ids(value: str | None) -> list[str]:

@@ -44,6 +44,22 @@ from football_tracking.follow_cam import FollowCamGenerator
 from football_tracking.highlights import render_highlight_clip
 from football_tracking.high_recall_windows import approved_action_windows_from_report
 from football_tracking.metrics import build_metrics_report, compute_track_metrics, stats_from_metrics_report, write_run_artifacts
+from football_tracking.missing_ball_candidate_executor import (
+    assert_parent_fingerprints_unchanged,
+    capture_parent_fingerprints,
+    combined_recovery_action_window,
+    copy_candidate_inputs,
+    missing_ball_candidate_artifacts,
+    missing_ball_candidate_output_dir,
+    preferred_track_path,
+    register_missing_ball_candidate,
+    traceable_approval_provenance_ids,
+    validate_output_csv_name,
+    write_candidate_audit,
+    write_missing_ball_candidate_manifest,
+    write_recovery_config,
+    write_run_manifest_and_metrics_preserving_candidate_audit,
+)
 from football_tracking.missing_ball_recovery_comparison import write_missing_ball_recovery_comparison
 from football_tracking.pipeline import BallTrackingPipeline
 from football_tracking.player_tracks import compact_player_tracks_summary
@@ -1795,42 +1811,10 @@ class ApiService:
         return output_name
 
     def _missing_ball_candidate_output_dir(self, parent_output_dir: Path, candidate_id: str) -> Path:
-        parent_output_dir = Path(parent_output_dir).resolve()
-        candidate_name = str(candidate_id or "").strip()
-        candidate_path = Path(candidate_name)
-        if (
-            not candidate_name
-            or candidate_name in {".", ".."}
-            or candidate_name != candidate_id
-            or candidate_name.rstrip(" .") != candidate_name
-            or candidate_path.is_absolute()
-            or candidate_path.name != candidate_name
-            or any(separator in candidate_name for separator in ("/", "\\"))
-            or ":" in candidate_name
-            or ".." in candidate_name
-            or ".." in candidate_path.parts
-            or any(ord(character) < 32 for character in candidate_name)
-            or candidate_path.stem.upper() in _WINDOWS_RESERVED_NAMES
-        ):
-            raise ValueError("candidate_id must be a safe single directory name for missing-ball candidate output.")
-        candidate_output_dir = (parent_output_dir / "ai_candidates" / "missing_ball" / candidate_name).resolve()
-        try:
-            candidate_output_dir.relative_to(parent_output_dir)
-        except ValueError as exc:
-            raise ValueError("candidate_id output path must stay within the parent output directory.") from exc
-        return candidate_output_dir
+        return missing_ball_candidate_output_dir(parent_output_dir, candidate_id)
 
     def _validate_output_csv_name(self, value: str) -> None:
-        csv_name = str(value or "").strip()
-        path = Path(csv_name)
-        if (
-            not csv_name
-            or csv_name in {".", ".."}
-            or path.is_absolute()
-            or path.name != csv_name
-            or not csv_name.lower().endswith(".csv")
-        ):
-            raise ValueError("output.csv_name must be a safe single .csv filename.")
+        validate_output_csv_name(value)
 
     def _run_record_source_total_frames(self, run: dict[str, Any]) -> int | None:
         stats = run.get("stats") if isinstance(run.get("stats"), dict) else {}
@@ -1924,33 +1908,7 @@ class ApiService:
             return None
 
     def _traceable_approval_provenance_ids(self, output_dir: Path) -> tuple[set[str] | None, set[str] | None]:
-        review_packets_path = output_dir / "review_packets.json"
-        visual_review_path = output_dir / "ai_visual_review.json"
-        packet_ids: set[str] = set()
-        visual_review_ids: set[str] = set()
-        review_packets = self._read_json_file(review_packets_path)
-        if isinstance(review_packets, dict):
-            for packet in self._list_dicts(review_packets.get("packets")):
-                for key in ("packet_id", "source_packet_id", "id"):
-                    self._add_string_value(packet_ids, packet.get(key))
-                source = packet.get("source") if isinstance(packet.get("source"), dict) else {}
-                for key in ("source_packet_id", "id"):
-                    self._add_string_value(packet_ids, source.get(key))
-
-        visual_review = self._read_json_file(visual_review_path)
-        if isinstance(visual_review, dict):
-            for item in self._list_dicts(visual_review.get("reviews")):
-                self._add_string_value(visual_review_ids, item.get("visual_review_id"))
-                for key in ("source_packet_id", "packet_id"):
-                    self._add_string_value(packet_ids, item.get(key))
-                review = item.get("review") if isinstance(item.get("review"), dict) else {}
-                self._add_string_value(visual_review_ids, review.get("visual_review_id"))
-                for key in ("source_packet_id", "packet_id"):
-                    self._add_string_value(packet_ids, review.get(key))
-                provenance = review.get("provenance") if isinstance(review.get("provenance"), dict) else {}
-                self._add_string_value(visual_review_ids, provenance.get("visual_review_id"))
-                self._add_string_value(packet_ids, provenance.get("source_packet_id"))
-        return packet_ids, visual_review_ids
+        return traceable_approval_provenance_ids(output_dir)
 
     def _recovery_candidate_ids(self, artifact: dict[str, Any]) -> set[str]:
         candidate_ids: set[str] = set()
@@ -2051,17 +2009,12 @@ class ApiService:
         selected_artifact: dict[str, Any],
         csv_name: str,
     ) -> None:
-        track_names = ["ball_track.csv", "ball_track.cleaned.csv"]
-        if csv_name and csv_name not in track_names:
-            track_names.insert(0, csv_name)
-        for name in track_names:
-            source_path = parent_output_dir / name
-            if source_path.is_file():
-                shutil.copy2(source_path, child_output_dir / name)
-        for name in ("review_packets.json", "ai_visual_review.json"):
-            source_path = parent_output_dir / name
-            if source_path.is_file():
-                shutil.copy2(source_path, child_output_dir / name)
+        copy_candidate_inputs(
+            parent_output_dir=parent_output_dir,
+            candidate_output_dir=child_output_dir,
+            selected_artifact=selected_artifact,
+            csv_name=csv_name,
+        )
         child_artifact_path.parent.mkdir(parents=True, exist_ok=True)
         child_artifact_path.write_text(
             json.dumps(selected_artifact, ensure_ascii=False, indent=2) + "\n",
@@ -2069,8 +2022,7 @@ class ApiService:
         )
 
     def _write_approved_child_config(self, config_path: Path, config: AppConfig) -> None:
-        with config_path.open("w", encoding="utf-8") as handle:
-            yaml.safe_dump(_jsonable(config), handle, sort_keys=False, allow_unicode=False)
+        write_recovery_config(config_path, config)
 
     def _capture_parent_run_fingerprints(
         self,
@@ -2080,31 +2032,16 @@ class ApiService:
         *,
         input_video_path: Path | None = None,
     ) -> dict[str, tuple[int, str] | None]:
-        watched_paths = [
-            parent_output_dir / "ball_track.csv",
-            parent_output_dir / "ball_track.cleaned.csv",
-            parent_output_dir / "follow_cam.mp4",
-            parent_output_dir / "highlight.mp4",
-        ]
+        watched_paths: list[Path] = []
         run_config_path = Path(parent_run["config_path"]).resolve() if parent_run.get("config_path") else config_path
         if run_config_path is not None:
             watched_paths.append(run_config_path)
         if input_video_path is not None:
             watched_paths.append(input_video_path)
-        return {
-            str(path.resolve()): self._file_fingerprint(path) if path.is_file() else None
-            for path in watched_paths
-        }
+        return capture_parent_fingerprints(parent_output_dir, watched_paths=watched_paths)
 
     def _assert_parent_fingerprints_unchanged(self, fingerprints: dict[str, tuple[int, str] | None]) -> None:
-        for path_text, expected in fingerprints.items():
-            path = Path(path_text)
-            if expected is None:
-                if path.exists():
-                    raise RuntimeError(f"Parent run artifact changed during approved child rerun: {path.name}")
-                continue
-            if not path.is_file() or self._file_fingerprint(path) != expected:
-                raise RuntimeError(f"Parent run artifact changed during approved child rerun: {path.name}")
+        assert_parent_fingerprints_unchanged(fingerprints)
 
     def _parent_fingerprint_error(self, fingerprints: dict[str, tuple[int, str] | None]) -> str | None:
         try:
@@ -2624,44 +2561,12 @@ class ApiService:
         comparison_path: Path,
         candidate_id: str,
     ) -> None:
-        parent_output_dir = Path(parent_output_dir).resolve()
-        candidate_output_dir = Path(candidate_output_dir).resolve()
-        comparison_path = Path(comparison_path).resolve()
-        comparison_payload = json.loads(comparison_path.read_text(encoding="utf-8"))
-        comparison_payload["comparison_report"] = comparison_path.relative_to(parent_output_dir).as_posix()
-        comparison_payload["candidate_dir"] = candidate_output_dir.relative_to(parent_output_dir).as_posix()
-        manifest_path = candidate_output_dir / "candidate_manifest.json"
-        manifest_relative_path = manifest_path.relative_to(parent_output_dir).as_posix()
-        comparison_payload["candidate_manifest"] = manifest_relative_path
-        candidate_artifacts = self._missing_ball_candidate_artifacts(
+        register_missing_ball_candidate(
             parent_output_dir=parent_output_dir,
             candidate_output_dir=candidate_output_dir,
             comparison_path=comparison_path,
-            comparison_payload=comparison_payload,
+            candidate_id=candidate_id,
         )
-        if manifest_relative_path not in candidate_artifacts:
-            candidate_artifacts.append(manifest_relative_path)
-        comparison_payload["candidate_artifacts"] = candidate_artifacts
-        self._write_missing_ball_candidate_manifest(
-            parent_output_dir=parent_output_dir,
-            candidate_output_dir=candidate_output_dir,
-            comparison_path=comparison_path,
-            manifest_path=manifest_path,
-            comparison_payload=comparison_payload,
-        )
-        comparison_path.write_text(json.dumps(comparison_payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-
-        existing = load_candidate_registry(parent_output_dir)
-        artifact_status = existing.get("artifact_status")
-        if artifact_status not in {"loaded", "missing"}:
-            raise RuntimeError(f"Cannot update parent ai_candidate_registry.json while it is {artifact_status}.")
-        existing_records = existing.get("candidates") if artifact_status == "loaded" else []
-        records = [
-            record
-            for record in existing_records
-            if isinstance(record, dict) and record.get("candidate_id") != candidate_id
-        ]
-        write_candidate_registry(parent_output_dir, records=records, comparison_reports=[comparison_payload])
 
     def _missing_ball_candidate_artifacts(
         self,
@@ -2671,53 +2576,12 @@ class ApiService:
         comparison_path: Path,
         comparison_payload: dict[str, Any],
     ) -> list[str]:
-        artifacts: list[str] = []
-
-        def add_path(raw_path: Any) -> None:
-            if not isinstance(raw_path, str) or not raw_path.strip():
-                return
-            raw_path_obj = Path(raw_path)
-            candidate_paths = (
-                [raw_path_obj.resolve()]
-                if raw_path_obj.is_absolute()
-                else [
-                    (parent_output_dir / raw_path_obj).resolve(),
-                    (candidate_output_dir / raw_path_obj).resolve(),
-                ]
-            )
-            for path in candidate_paths:
-                try:
-                    path.relative_to(candidate_output_dir)
-                    relative = path.relative_to(parent_output_dir)
-                except ValueError:
-                    continue
-                if relative.as_posix() not in artifacts:
-                    artifacts.append(relative.as_posix())
-                return
-
-        for raw_artifact in comparison_payload.get("candidate_artifacts", []):
-            add_path(raw_artifact)
-        candidate = comparison_payload.get("candidate")
-        if isinstance(candidate, dict):
-            add_path(candidate.get("path"))
-        for path in (
-            candidate_output_dir / "ball_track.csv",
-            candidate_output_dir / "ball_track.cleaned.csv",
-        ):
-            if path.exists():
-                add_path(str(path))
-        for path in (
-            comparison_path,
-            candidate_output_dir / "candidate_manifest.json",
-            candidate_output_dir / "ball_audit.json",
-            candidate_output_dir / "metrics_report.json",
-            candidate_output_dir / "run_manifest.json",
-            candidate_output_dir / APPROVED_ACTIONS_FILE_NAME,
-            candidate_output_dir / "approved_recovery_config.yaml",
-        ):
-            if path.exists():
-                add_path(str(path))
-        return artifacts
+        return missing_ball_candidate_artifacts(
+            parent_output_dir=parent_output_dir,
+            candidate_output_dir=candidate_output_dir,
+            comparison_path=comparison_path,
+            comparison_payload=comparison_payload,
+        )
 
     def _write_missing_ball_candidate_manifest(
         self,
@@ -2728,50 +2592,13 @@ class ApiService:
         manifest_path: Path,
         comparison_payload: dict[str, Any],
     ) -> None:
-        approval = comparison_payload.get("approval") if isinstance(comparison_payload.get("approval"), dict) else {}
-        related = approval.get("related_approvals") if isinstance(approval.get("related_approvals"), list) else []
-        approval_items = [item for item in related if isinstance(item, dict)] or ([approval] if approval else [])
-        source_packet_ids: list[str] = []
-        visual_review_ids: list[str] = []
-        effective_rois: list[dict[str, Any]] = []
-        for item in approval_items:
-            self._append_unique_string(source_packet_ids, item.get("source_packet_id"))
-            self._append_unique_string(visual_review_ids, item.get("visual_review_id"))
-            effective_roi = item.get("effective_roi")
-            if isinstance(effective_roi, list) and len(effective_roi) == 4:
-                effective_rois.append(
-                    {
-                        "approval_id": item.get("approval_id"),
-                        "effective_roi": list(effective_roi),
-                    }
-                )
-        metrics = comparison_payload.get("metrics") if isinstance(comparison_payload.get("metrics"), dict) else {}
-        target_window = metrics.get("target_window") if isinstance(metrics.get("target_window"), dict) else None
-        baseline = comparison_payload.get("baseline") if isinstance(comparison_payload.get("baseline"), dict) else {}
-        manifest = {
-            "schema_version": "1.0",
-            "generated_at": _utc_now_iso(),
-            "candidate_id": comparison_payload.get("candidate_id"),
-            "problem_type": "missing_ball",
-            "candidate_dir": candidate_output_dir.relative_to(parent_output_dir).as_posix(),
-            "baseline_output_dir": str(parent_output_dir),
-            "baseline_track": baseline.get("path"),
-            "source_approval_ids": comparison_payload.get("consumed_approval_ids")
-            if isinstance(comparison_payload.get("consumed_approval_ids"), list)
-            else [],
-            "frame_window": target_window,
-            "evidence_ids": {
-                "source_packet_ids": source_packet_ids,
-                "visual_review_ids": visual_review_ids,
-            },
-            "effective_rois": effective_rois,
-            "comparison_report": comparison_path.relative_to(parent_output_dir).as_posix(),
-            "comparison_status": comparison_payload.get("comparison_status"),
-            "generated_artifacts": comparison_payload.get("candidate_artifacts")
-            if isinstance(comparison_payload.get("candidate_artifacts"), list)
-            else [],
-        }
-        manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        write_missing_ball_candidate_manifest(
+            parent_output_dir=parent_output_dir,
+            candidate_output_dir=candidate_output_dir,
+            comparison_path=comparison_path,
+            manifest_path=manifest_path,
+            comparison_payload=comparison_payload,
+        )
 
     def _append_unique_string(self, target: list[str], value: Any) -> None:
         if isinstance(value, str) and value.strip() and value.strip() not in target:
@@ -2782,95 +2609,25 @@ class ApiService:
         actions: list[dict[str, Any]],
         high_recall_report: dict[str, Any] | None,
     ) -> list[dict[str, Any]]:
-        effective_roi_by_approval_id: dict[str, list[Any]] = {}
-        windows = high_recall_report.get("windows") if isinstance(high_recall_report, dict) else None
-        if isinstance(windows, list):
-            for window in windows:
-                if not isinstance(window, dict):
-                    continue
-                effective_roi = window.get("effective_roi")
-                if not isinstance(effective_roi, list) or len(effective_roi) != 4:
-                    continue
-                approval_ids: set[str] = set()
-                approval_id = window.get("approval_id")
-                if isinstance(approval_id, str) and approval_id.strip():
-                    approval_ids.add(approval_id.strip())
-                provenance = window.get("approval_provenance")
-                if isinstance(provenance, list):
-                    for item in provenance:
-                        if not isinstance(item, dict):
-                            continue
-                        provenance_approval_id = item.get("approval_id")
-                        if isinstance(provenance_approval_id, str) and provenance_approval_id.strip():
-                            approval_ids.add(provenance_approval_id.strip())
-                for approval_id_value in approval_ids:
-                    effective_roi_by_approval_id[approval_id_value] = list(effective_roi)
-        enriched: list[dict[str, Any]] = []
-        for action in actions:
-            copied = dict(action)
-            approval_id = str(copied.get("approval_id") or "").strip()
-            if approval_id and "effective_roi" not in copied and approval_id in effective_roi_by_approval_id:
-                copied["effective_roi"] = effective_roi_by_approval_id[approval_id]
-            enriched.append(copied)
-        return enriched
+        from football_tracking.missing_ball_candidate_executor import _recovery_actions_with_execution_roi
+
+        return _recovery_actions_with_execution_roi(actions, high_recall_report)
 
     def _write_approved_child_candidate_audit(self, config: AppConfig) -> None:
-        candidate_track = self._preferred_track_path(config.output_dir, csv_name=config.output.csv_name)
-        if not candidate_track.exists():
-            audit_payload = build_ball_audit_report(config.output_dir)
-        else:
-            with tempfile.TemporaryDirectory() as temp_name:
-                audit_source_dir = Path(temp_name)
-                shutil.copy2(candidate_track, audit_source_dir / "ball_track.csv")
-                audit_payload = build_ball_audit_report(audit_source_dir)
-        (config.output_dir / "ball_audit.json").write_text(
-            json.dumps(audit_payload, ensure_ascii=False, indent=2) + "\n",
-            encoding="utf-8",
-        )
+        write_candidate_audit(config.output_dir, csv_name=config.output.csv_name)
 
     def _write_run_manifest_and_metrics_preserving_candidate_audit(self, output_dir: Path, run: dict[str, Any]) -> str | None:
-        existing_audit = self._read_optional_json(output_dir / "ball_audit.json")
-        artifact_error = self._write_run_artifacts(output_dir, run)
-        if existing_audit is not None:
-            (output_dir / "ball_audit.json").write_text(
-                json.dumps(existing_audit, ensure_ascii=False, indent=2) + "\n",
-                encoding="utf-8",
-            )
-            try:
-                (output_dir / "metrics_report.json").write_text(
-                    json.dumps(build_metrics_report(output_dir), ensure_ascii=False, indent=2) + "\n",
-                    encoding="utf-8",
-                )
-            except Exception as exc:
-                return self._append_artifact_error(artifact_error, f"Failed to rebuild metrics with candidate audit: {exc}")
-        return artifact_error
+        try:
+            write_run_manifest_and_metrics_preserving_candidate_audit(output_dir, run)
+            return None
+        except Exception as exc:
+            return str(exc)
 
     def _preferred_track_path(self, output_dir: Path, *, csv_name: str) -> Path:
-        preferred = output_dir / csv_name
-        if preferred.exists():
-            return preferred
-        raw = output_dir / "ball_track.csv"
-        if raw.exists():
-            return raw
-        cleaned = output_dir / "ball_track.cleaned.csv"
-        if cleaned.exists():
-            return cleaned
-        return preferred
+        return preferred_track_path(output_dir, csv_name=csv_name)
 
     def _combined_recovery_action_window(self, actions: list[dict[str, Any]]) -> dict[str, int] | None:
-        windows: list[dict[str, int]] = []
-        for action in actions:
-            window = action.get("rerun_scope") if isinstance(action.get("rerun_scope"), dict) else action
-            start = self._optional_int(window.get("start_frame")) if isinstance(window, dict) else None
-            end = self._optional_int(window.get("end_frame")) if isinstance(window, dict) else None
-            if start is not None and end is not None:
-                windows.append({"start_frame": min(start, end), "end_frame": max(start, end)})
-        if not windows:
-            return None
-        return {
-            "start_frame": min(window["start_frame"] for window in windows),
-            "end_frame": max(window["end_frame"] for window in windows),
-        }
+        return combined_recovery_action_window(actions)
 
     def _execute_follow_cam_render(
         self,
