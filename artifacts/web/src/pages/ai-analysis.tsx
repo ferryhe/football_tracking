@@ -1,6 +1,23 @@
 import { useEffect, useMemo, useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/lib/api";
+import {
+  buildLifecycleCandidateIndex,
+  createProposedLifecycleCandidate,
+  getRunLifecycle,
+  hasConcreteApprovalId,
+  inferAIImprovementProblemType,
+  lifecycleBlockingReasonLabel,
+  lifecycleOperatorStateLabel,
+  lifecycleProblemTypeLabel,
+  lifecycleStatusLabel,
+  presentLifecycleCandidate,
+  presentLifecycleSummary,
+  resolveImprovementLifecycleCandidate,
+  type LifecycleCandidatePresentation,
+  type LifecycleSummaryPresentation,
+  type LifecycleTone,
+} from "@/lib/aiLifecycle";
 import { cn, formatBytes, formatDateTime, runMoment, statusBadgeClass } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
@@ -42,6 +59,7 @@ import type {
   AIImproveApprovalResponse,
   AIImproveResponse,
   AISuggestion,
+  AICandidateLifecycleCandidate,
   ArtifactSummary,
   FieldPreviewResponse,
 } from "@/lib/types";
@@ -104,29 +122,10 @@ function frameWindowLabel(item: {
 }
 
 function classifyImprovement(item: AIImprovementItem): ImprovementGroupKey {
-  const action = item.recommended_action;
-  const area = item.area.toLowerCase();
-  const tags = (item.failure_tags ?? []).join(" ").toLowerCase();
-  if (
-    FOLLOW_CAM_ACTIONS.has(action) ||
-    area.includes("camera") ||
-    tags.includes("camera") ||
-    !!item.camera_motion_event_id
-  ) {
-    return "cameraMotion";
-  }
-  if (
-    HIGHLIGHT_ACTIONS.has(action) ||
-    area.includes("highlight") ||
-    tags.includes("highlight") ||
-    tags.includes("post_roll") ||
-    !!item.candidate_id
-  ) {
-    return "highlightBoundary";
-  }
-  if (MISSING_BALL_ACTIONS.has(action) || area.includes("missing") || tags.includes("ball_lost") || !!item.likely_ball_region) {
-    return "missingBall";
-  }
+  const problemType = inferAIImprovementProblemType(item);
+  if (problemType === "follow_cam" || problemType === "camera_motion") return "cameraMotion";
+  if (problemType === "highlight") return "highlightBoundary";
+  if (problemType === "missing_ball") return "missingBall";
   return "noise";
 }
 
@@ -135,6 +134,69 @@ function approvalForImprovement(
   improvementId: string,
 ): AIApprovedAction | null {
   return approval?.approved_actions.find((action) => action.improvement_id === improvementId) ?? null;
+}
+
+function problemTypeForGroup(group: ImprovementGroupKey): string {
+  if (group === "missingBall") return "missing_ball";
+  if (group === "cameraMotion") return "camera_motion";
+  if (group === "highlightBoundary") return "highlight";
+  return "noise";
+}
+
+function lifecycleStateText(labels: AIAnalysisLabels, presentation: LifecycleCandidatePresentation | LifecycleSummaryPresentation): string {
+  return lifecycleOperatorStateLabel(presentation.state, labels.lifecycleStates);
+}
+
+function lifecycleProblemText(
+  labels: AIAnalysisLabels,
+  problemType: string | null | undefined,
+  fallback: string | null = null,
+): string | null {
+  if (!problemType) return fallback;
+  return (labels.lifecycleProblemTypes as Record<string, string>)[problemType] ?? fallback ?? lifecycleProblemTypeLabel(problemType);
+}
+
+function lifecycleBlockingText(labels: AIAnalysisLabels, reason: string): string {
+  return (labels.lifecycleBlockingLabels as Record<string, string>)[reason] ?? lifecycleBlockingReasonLabel(reason);
+}
+
+function lifecycleStatusText(labels: AIAnalysisLabels, status: string): string {
+  return (labels.lifecycleStatusValues as Record<string, string>)[status] ?? lifecycleStatusLabel(status) ?? status;
+}
+
+function lifecycleToneClass(tone: LifecycleTone): string {
+  switch (tone) {
+    case "success":
+      return "border-emerald-200 bg-emerald-50 text-emerald-700";
+    case "warning":
+      return "border-amber-200 bg-amber-50 text-amber-700";
+    case "danger":
+      return "border-red-200 bg-red-50 text-red-700";
+    case "pending":
+      return "border-sky-200 bg-sky-50 text-sky-700";
+    case "approved":
+      return "border-blue-200 bg-blue-50 text-blue-700";
+    case "info":
+      return "border-slate-200 bg-slate-50 text-slate-700";
+    case "muted":
+    default:
+      return "border-muted bg-muted/50 text-muted-foreground";
+  }
+}
+
+function lifecycleCandidateFromHighlight(adjustment: AIHighlightAdjustment): AICandidateLifecycleCandidate {
+  return {
+    candidate_id: adjustment.candidate_id,
+    problem_type: "highlight",
+    improvement_ids: [],
+    approval_ids: [],
+    artifact_paths: [],
+    stage: "proposed",
+    comparison_status: "none",
+    promotion_status: "not_promoted",
+    resolution_status: "none",
+    blocking_reasons: [],
+  };
 }
 
 function summaryFlagEntries(summary: Record<string, unknown>): [string, string][] {
@@ -265,6 +327,143 @@ function JsonBlock({ value }: { value: unknown }) {
   );
 }
 
+function LifecycleStatusBadge({
+  labels,
+  presentation,
+}: {
+  labels: AIAnalysisLabels;
+  presentation: LifecycleCandidatePresentation | LifecycleSummaryPresentation;
+}) {
+  return (
+    <Badge variant="outline" className={cn("max-w-full truncate", lifecycleToneClass(presentation.tone))}>
+      {lifecycleStateText(labels, presentation)}
+    </Badge>
+  );
+}
+
+function LifecycleSummaryPanel({
+  labels,
+  lifecycle,
+}: {
+  labels: AIAnalysisLabels;
+  lifecycle: ReturnType<typeof getRunLifecycle>;
+}) {
+  const presentation = presentLifecycleSummary(lifecycle);
+  const blockingReasons = lifecycle?.summary?.blocking_reasons ?? [];
+  return (
+    <div className="rounded-md border bg-muted/30 p-3 space-y-2" data-testid="ai-lifecycle-summary">
+      <div className="flex flex-wrap items-center gap-2">
+        <p className="text-sm font-medium">{labels.lifecycleSummary}</p>
+        <LifecycleStatusBadge labels={labels} presentation={presentation} />
+        <Badge variant="outline">{presentation.candidateCount}</Badge>
+      </div>
+      <div className="flex flex-wrap gap-1.5 text-xs">
+        <Badge variant="secondary">
+          {labels.approvedIntent}: {presentation.approvedActionCount}
+        </Badge>
+        <Badge variant="secondary">
+          {labels.lifecycleEvidence}: {presentation.comparisonReportCount}
+        </Badge>
+      </div>
+      {blockingReasons.length > 0 && (
+        <div className="flex flex-wrap gap-1.5">
+          {blockingReasons.map((reason) => (
+            <Badge key={reason} variant="outline" className="border-amber-200 bg-amber-50 text-amber-700">
+              {lifecycleBlockingText(labels, reason)}
+            </Badge>
+          ))}
+        </div>
+      )}
+      {!lifecycle && <p className="text-xs text-muted-foreground">{labels.lifecycleNoEvidence}</p>}
+    </div>
+  );
+}
+
+function LifecycleEvidencePanel({
+  labels,
+  candidate,
+  presentation,
+}: {
+  labels: AIAnalysisLabels;
+  candidate: AICandidateLifecycleCandidate;
+  presentation: LifecycleCandidatePresentation;
+}) {
+  const problemLabel = lifecycleProblemText(labels, candidate.problem_type, presentation.problemLabel);
+  const blockingReasons = candidate.blocking_reasons ?? [];
+  const hasCandidateEvidence =
+    !!candidate.candidate_id ||
+    !!problemLabel ||
+    !!candidate.improvement_ids?.length ||
+    !!candidate.approval_ids?.length ||
+    !!candidate.artifact_paths?.length ||
+    (!!candidate.comparison_status && candidate.comparison_status !== "none") ||
+    (!!candidate.promotion_status && candidate.promotion_status !== "not_promoted") ||
+    (!!candidate.resolution_status && candidate.resolution_status !== "none");
+
+  return (
+    <div className="rounded-md border bg-muted/20 p-3 space-y-2" data-testid="ai-lifecycle-candidate">
+      <div className="flex flex-wrap items-center gap-1.5">
+        <span className="text-xs font-medium">{labels.lifecycleState}</span>
+        <LifecycleStatusBadge labels={labels} presentation={presentation} />
+        {problemLabel && (
+          <Badge variant="secondary">
+            {labels.lifecycleProblemType}: {problemLabel}
+          </Badge>
+        )}
+      </div>
+
+      {hasCandidateEvidence ? (
+        <div className="flex flex-wrap gap-1.5">
+          {candidate.candidate_id && (
+            <Badge variant="outline" className="max-w-full truncate font-mono">
+              {labels.candidateIdLabel}: {candidate.candidate_id}
+            </Badge>
+          )}
+          {!!candidate.improvement_ids?.length && (
+            <Badge variant="outline" className="max-w-full truncate font-mono">
+              {labels.lifecycleEvidence}: {candidate.improvement_ids.join(", ")}
+            </Badge>
+          )}
+          {!!candidate.approval_ids?.length && (
+            <Badge variant="outline" className="max-w-full truncate font-mono">
+              {labels.approvalId}: {candidate.approval_ids.join(", ")}
+            </Badge>
+          )}
+          {candidate.comparison_status && candidate.comparison_status !== "none" && (
+            <Badge variant="outline">{labels.lifecycleComparison}: {lifecycleStatusText(labels, candidate.comparison_status)}</Badge>
+          )}
+          {candidate.promotion_status && candidate.promotion_status !== "not_promoted" && (
+            <Badge variant="outline">{labels.lifecyclePromotion}: {lifecycleStatusText(labels, candidate.promotion_status)}</Badge>
+          )}
+          {candidate.resolution_status && candidate.resolution_status !== "none" && (
+            <Badge variant="outline">{labels.lifecycleResolution}: {lifecycleStatusText(labels, candidate.resolution_status)}</Badge>
+          )}
+          {!!candidate.artifact_paths?.length && (
+            <Badge variant="outline">
+              {labels.artifacts}: {candidate.artifact_paths.length}
+            </Badge>
+          )}
+        </div>
+      ) : (
+        <p className="text-xs text-muted-foreground">{labels.lifecycleNoEvidence}</p>
+      )}
+
+      {blockingReasons.length > 0 && (
+        <div className="space-y-1">
+          <p className="text-xs font-medium">{labels.lifecycleBlockingReasons}</p>
+          <div className="flex flex-wrap gap-1.5">
+            {blockingReasons.map((reason) => (
+              <Badge key={reason} variant="outline" className="border-amber-200 bg-amber-50 text-amber-700">
+                {lifecycleBlockingText(labels, reason)}
+              </Badge>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function ApprovalPanel({
   labels,
   approval,
@@ -285,8 +484,11 @@ function ApprovalPanel({
   const artifactName = approval.summary.artifacts?.approved_actions?.name ?? approval.artifact_name;
   const flags = summaryFlagEntries(approval.summary);
   const artifacts = artifactEntries(approval.summary);
-  const canQueueRerun = !!action && EXECUTABLE_RERUN_ACTIONS.has(action.approved_action) && !!artifactName;
-  const canRenderHighlight = !!action && HIGHLIGHT_ACTIONS.has(action.approved_action);
+  const hasApprovalId = hasConcreteApprovalId(action);
+  const shouldShowQueueRerun = !!action && EXECUTABLE_RERUN_ACTIONS.has(action.approved_action) && !!artifactName;
+  const shouldShowRenderHighlight = !!action && HIGHLIGHT_ACTIONS.has(action.approved_action);
+  const canQueueRerun = shouldShowQueueRerun && hasApprovalId;
+  const canRenderHighlight = shouldShowRenderHighlight && hasApprovalId;
   const isFollowCam = !!action && FOLLOW_CAM_ACTIONS.has(action.approved_action);
 
   return (
@@ -366,13 +568,13 @@ function ApprovalPanel({
       )}
 
       <div className="flex flex-wrap gap-2">
-        {canQueueRerun && action && (
+        {shouldShowQueueRerun && action && (
           <Button
             type="button"
             size="sm"
             onClick={() => onQueueRerun(action, artifactName)}
-            disabled={queuePending}
-            data-testid={`button-queue-approved-rerun-${action.approval_id}`}
+            disabled={queuePending || !canQueueRerun}
+            data-testid={`button-queue-approved-rerun-${action.approval_id || action.improvement_id}`}
           >
             {queuePending ? (
               <>
@@ -387,14 +589,14 @@ function ApprovalPanel({
             )}
           </Button>
         )}
-        {canRenderHighlight && action && (
+        {shouldShowRenderHighlight && action && (
           <Button
             type="button"
             size="sm"
             variant="outline"
             onClick={() => onRenderHighlight(action)}
-            disabled={renderPending}
-            data-testid={`button-render-approved-highlight-${action.approval_id}`}
+            disabled={renderPending || !canRenderHighlight}
+            data-testid={`button-render-approved-highlight-${action.approval_id || action.improvement_id}`}
           >
             {renderPending ? (
               <>
@@ -432,6 +634,8 @@ function ImprovementItemPanel({
   item,
   approval,
   approvedAction,
+  lifecycleCandidate,
+  lifecyclePresentation,
   approvePending,
   onApprove,
   onQueueRerun,
@@ -443,6 +647,8 @@ function ImprovementItemPanel({
   item: AIImprovementItem;
   approval?: AIImproveApprovalResponse;
   approvedAction: AIApprovedAction | null;
+  lifecycleCandidate: AICandidateLifecycleCandidate;
+  lifecyclePresentation: LifecycleCandidatePresentation;
   approvePending: boolean;
   onApprove: (id: string) => void;
   onQueueRerun: (action: AIApprovedAction, artifactName: string) => void;
@@ -465,6 +671,12 @@ function ImprovementItemPanel({
             <Badge variant="secondary" className="font-mono">{item.id}</Badge>
             {item.priority && <Badge variant="outline">{item.priority}</Badge>}
             <Badge>{item.recommended_action}</Badge>
+            <LifecycleStatusBadge labels={labels} presentation={lifecyclePresentation} />
+            {lifecycleProblemText(labels, lifecycleCandidate.problem_type, lifecyclePresentation.problemLabel) && (
+              <Badge variant="outline">
+                {lifecycleProblemText(labels, lifecycleCandidate.problem_type, lifecyclePresentation.problemLabel)}
+              </Badge>
+            )}
           </div>
           {item.diagnosis && <p className="text-sm text-muted-foreground">{item.diagnosis}</p>}
         </div>
@@ -505,6 +717,8 @@ function ImprovementItemPanel({
         <FieldRow label={labels.rootCauseModuleLabel} value={item.root_cause_module} />
         <FieldRow label={labels.candidateIdLabel} value={item.candidate_id} />
       </div>
+
+      <LifecycleEvidencePanel labels={labels} candidate={lifecycleCandidate} presentation={lifecyclePresentation} />
 
       {!!item.failure_tags?.length && (
         <div>
@@ -589,7 +803,17 @@ function ImprovementItemPanel({
   );
 }
 
-function HighlightAdjustmentPanel({ labels, adjustment }: { labels: AIAnalysisLabels; adjustment: AIHighlightAdjustment }) {
+function HighlightAdjustmentPanel({
+  labels,
+  adjustment,
+  lifecycleCandidate,
+  lifecyclePresentation,
+}: {
+  labels: AIAnalysisLabels;
+  adjustment: AIHighlightAdjustment;
+  lifecycleCandidate: AICandidateLifecycleCandidate;
+  lifecyclePresentation: LifecycleCandidatePresentation;
+}) {
   const boundaryWarnings = [...(adjustment.boundary_warnings ?? []), ...(adjustment.warnings ?? [])];
   return (
     <div className="rounded-md border p-3 space-y-2">
@@ -597,7 +821,9 @@ function HighlightAdjustmentPanel({ labels, adjustment }: { labels: AIAnalysisLa
         <Badge variant="secondary" className="font-mono">{adjustment.candidate_id}</Badge>
         {adjustment.clip_action && <Badge>{adjustment.clip_action}</Badge>}
         {adjustment.confidence != null && <Badge variant="outline">{labels.confidence}: {adjustment.confidence.toFixed(2)}</Badge>}
+        <LifecycleStatusBadge labels={labels} presentation={lifecyclePresentation} />
       </div>
+      <LifecycleEvidencePanel labels={labels} candidate={lifecycleCandidate} presentation={lifecyclePresentation} />
       <div className="grid gap-3 sm:grid-cols-3">
         <FieldRow label={labels.coreWindow} value={adjustment.core_window ? frameWindowLabel({ suggested_window: adjustment.core_window }) : null} />
         <FieldRow label={labels.renderWindow} value={adjustment.render_window ? frameWindowLabel({ suggested_window: adjustment.render_window }) : null} />
@@ -660,6 +886,8 @@ export default function AIAnalysisPage() {
   const playbackUrl = selectedRun && playbackArtifact ? artifactUrl(selectedRun.run_id, playbackArtifact) : null;
   const existingImprovementReportArtifact = artifactByName(selectedRun, "ai_improvement_report.json");
   const existingApprovalActionsArtifact = artifactByName(selectedRun, "ai_improvement_approved_actions.json");
+  const runLifecycle = useMemo(() => getRunLifecycle(selectedRun), [selectedRun]);
+  const lifecycleIndex = useMemo(() => buildLifecycleCandidateIndex(runLifecycle), [runLifecycle]);
 
   const {
     data: configDetail,
@@ -1071,6 +1299,8 @@ export default function AIAnalysisPage() {
             <AlertDescription>{t.aiAnalysis.advisoryOnlyHint}</AlertDescription>
           </Alert>
 
+          {selectedRun && <LifecycleSummaryPanel labels={t.aiAnalysis} lifecycle={runLifecycle} />}
+
           {improvementReport && (
             <div className="space-y-4">
               <div className="rounded-md border bg-muted/30 p-3 space-y-3">
@@ -1107,6 +1337,19 @@ export default function AIAnalysisPage() {
                           {group.items.map((item) => {
                             const approval = approvalsByImprovementId[item.id];
                             const approvedAction = approvalForImprovement(approval, item.id);
+                            const linkedLifecycleCandidate = resolveImprovementLifecycleCandidate(
+                              item,
+                              lifecycleIndex,
+                              approvedAction,
+                            );
+                            const inferredProblemType = inferAIImprovementProblemType(item) ?? problemTypeForGroup(group.key);
+                            const lifecycleCandidate = linkedLifecycleCandidate
+                              ? {
+                                  ...linkedLifecycleCandidate,
+                                  problem_type: linkedLifecycleCandidate.problem_type ?? inferredProblemType,
+                                }
+                              : createProposedLifecycleCandidate(item, inferredProblemType);
+                            const lifecyclePresentation = presentLifecycleCandidate(lifecycleCandidate);
                             return (
                               <ImprovementItemPanel
                                 key={item.id}
@@ -1114,6 +1357,8 @@ export default function AIAnalysisPage() {
                                 item={item}
                                 approval={approval}
                                 approvedAction={approvedAction}
+                                lifecycleCandidate={lifecycleCandidate}
+                                lifecyclePresentation={lifecyclePresentation}
                                 approvePending={approveImprovement.isPending}
                                 onApprove={(id) =>
                                   approveImprovement.mutate({
@@ -1147,13 +1392,25 @@ export default function AIAnalysisPage() {
                 <section className="space-y-2">
                   <h2 className="text-sm font-semibold">{t.aiAnalysis.highlightAdjustments}</h2>
                   <div className="space-y-3">
-                    {improvementReport.highlight_adjustments.map((adjustment) => (
-                      <HighlightAdjustmentPanel
-                        key={`${adjustment.candidate_id}-${adjustment.suggested_window.start_frame}-${adjustment.suggested_window.end_frame}`}
-                        labels={t.aiAnalysis}
-                        adjustment={adjustment}
-                      />
-                    ))}
+                    {improvementReport.highlight_adjustments.map((adjustment) => {
+                      const linkedLifecycleCandidate = lifecycleIndex.byCandidateId.get(adjustment.candidate_id);
+                      const lifecycleCandidate = linkedLifecycleCandidate
+                        ? {
+                            ...linkedLifecycleCandidate,
+                            problem_type: linkedLifecycleCandidate.problem_type ?? "highlight",
+                          }
+                        : lifecycleCandidateFromHighlight(adjustment);
+                      const lifecyclePresentation = presentLifecycleCandidate(lifecycleCandidate);
+                      return (
+                        <HighlightAdjustmentPanel
+                          key={`${adjustment.candidate_id}-${adjustment.suggested_window.start_frame}-${adjustment.suggested_window.end_frame}`}
+                          labels={t.aiAnalysis}
+                          adjustment={adjustment}
+                          lifecycleCandidate={lifecycleCandidate}
+                          lifecyclePresentation={lifecyclePresentation}
+                        />
+                      );
+                    })}
                   </div>
                 </section>
               )}

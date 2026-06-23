@@ -69,6 +69,71 @@ export interface RunProgress {
   updated_at: string | null;
 }
 
+export type AICandidateLifecycleStage =
+  | "review_only"
+  | "proposed"
+  | "approved"
+  | "pending_execution"
+  | "executed"
+  | "compared"
+  | "gated"
+  | "finalized";
+
+export type AICandidateLifecycleComparisonStatus = "pass" | "warn" | "fail" | "unavailable" | "none";
+
+export type AICandidateLifecyclePromotionStatus =
+  | "not_promoted"
+  | "pending_confirmation"
+  | "promoted"
+  | "rejected"
+  | "blocked";
+
+export type AICandidateLifecycleResolutionStatus = "none" | "resolved_not_visible" | "candidate_output";
+
+export type AICandidateLifecycleBlockingReason =
+  | "missing_evidence"
+  | "unsafe_window"
+  | "unsupported_type"
+  | "missing_candidate_id"
+  | "missing_comparison"
+  | "failed_quality_gate"
+  | "pending_api_execution"
+  | "pending_human_confirmation"
+  | (string & {});
+
+export interface AICandidateLifecycleCandidate {
+  candidate_id?: string | null;
+  problem_type?: string | null;
+  improvement_ids?: string[];
+  approval_ids?: string[];
+  artifact_paths?: string[];
+  stage?: AICandidateLifecycleStage;
+  comparison_status?: AICandidateLifecycleComparisonStatus;
+  promotion_status?: AICandidateLifecyclePromotionStatus;
+  resolution_status?: AICandidateLifecycleResolutionStatus;
+  blocking_reasons?: AICandidateLifecycleBlockingReason[];
+}
+
+export interface AICandidateLifecycleSummary {
+  stage?: AICandidateLifecycleStage;
+  comparison_status?: AICandidateLifecycleComparisonStatus;
+  promotion_status?: AICandidateLifecyclePromotionStatus;
+  resolution_status?: AICandidateLifecycleResolutionStatus;
+  blocking_reasons?: AICandidateLifecycleBlockingReason[];
+  candidate_count?: number;
+  approved_action_count?: number;
+  comparison_report_count?: number;
+}
+
+export interface AICandidateLifecycleReport {
+  schema_version?: string;
+  generated_at?: string | null;
+  output_dir?: string | null;
+  summary?: AICandidateLifecycleSummary;
+  candidates?: AICandidateLifecycleCandidate[];
+  artifacts?: Record<string, string>;
+}
+
 export interface RunRecord {
   run_id: string;
   source: string;
@@ -83,7 +148,10 @@ export interface RunRecord {
   output_dir: string;
   modules_enabled: Record<string, boolean>;
   artifacts: ArtifactSummary[];
-  stats: Record<string, unknown>;
+  stats: Record<string, unknown> & {
+    ai_candidate_lifecycle?: AICandidateLifecycleSummary | AICandidateLifecycleReport | null;
+  };
+  ai_candidate_lifecycle?: AICandidateLifecycleReport | null;
   progress?: RunProgress | null;
   notes: string | null;
   error: string | null;
