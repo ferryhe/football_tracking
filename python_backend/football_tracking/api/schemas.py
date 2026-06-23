@@ -10,6 +10,29 @@ RunStatus = Literal["queued", "running", "completed", "failed", "cancelled"]
 AIResponseLanguage = Literal["en", "zh"]
 QualityStatus = Literal["pass", "warn", "fail"]
 AIReviewPriority = Literal["none", "low", "medium", "high"]
+CandidateLifecycleStage = Literal[
+    "review_only",
+    "proposed",
+    "approved",
+    "pending_execution",
+    "executed",
+    "compared",
+    "gated",
+    "finalized",
+]
+CandidateComparisonStatus = Literal["pass", "warn", "fail", "unavailable", "none"]
+CandidatePromotionStatus = Literal["not_promoted", "pending_confirmation", "promoted", "rejected", "blocked"]
+CandidateResolutionStatus = Literal["none", "resolved_not_visible", "candidate_output"]
+CandidateBlockingReason = Literal[
+    "missing_evidence",
+    "unsafe_window",
+    "unsupported_type",
+    "missing_candidate_id",
+    "missing_comparison",
+    "failed_quality_gate",
+    "pending_api_execution",
+    "pending_human_confirmation",
+]
 Point2DPayload = tuple[float, float]
 QuadPointsPayload = tuple[Point2DPayload, Point2DPayload, Point2DPayload, Point2DPayload]
 MatrixRowPayload = tuple[float, float, float]
@@ -378,6 +401,39 @@ class EventCandidateReport(BaseModel):
     warnings: list[str] = Field(default_factory=list)
 
 
+class AICandidateLifecycleSummary(BaseModel):
+    stage: CandidateLifecycleStage = "review_only"
+    comparison_status: CandidateComparisonStatus = "none"
+    promotion_status: CandidatePromotionStatus = "not_promoted"
+    resolution_status: CandidateResolutionStatus = "none"
+    blocking_reasons: list[CandidateBlockingReason] = Field(default_factory=list)
+    candidate_count: int = 0
+    approved_action_count: int = 0
+    comparison_report_count: int = 0
+
+
+class AICandidateLifecycleCandidate(BaseModel):
+    candidate_id: str | None = None
+    problem_type: str | None = None
+    improvement_ids: list[str] = Field(default_factory=list)
+    approval_ids: list[str] = Field(default_factory=list)
+    artifact_paths: list[str] = Field(default_factory=list)
+    stage: CandidateLifecycleStage = "review_only"
+    comparison_status: CandidateComparisonStatus = "none"
+    promotion_status: CandidatePromotionStatus = "not_promoted"
+    resolution_status: CandidateResolutionStatus = "none"
+    blocking_reasons: list[CandidateBlockingReason] = Field(default_factory=list)
+
+
+class AICandidateLifecycleReport(BaseModel):
+    schema_version: str = "1.0"
+    generated_at: str | None = None
+    output_dir: str | None = None
+    summary: AICandidateLifecycleSummary = Field(default_factory=AICandidateLifecycleSummary)
+    candidates: list[AICandidateLifecycleCandidate] = Field(default_factory=list)
+    artifacts: dict[str, str] = Field(default_factory=dict)
+
+
 class RunProgress(BaseModel):
     stage: str
     current_frame: int | None = None
@@ -405,6 +461,7 @@ class RunRecord(BaseModel):
     modules_enabled: dict[str, bool] = Field(default_factory=dict)
     artifacts: list[ArtifactSummary] = Field(default_factory=list)
     stats: dict[str, Any] = Field(default_factory=dict)
+    ai_candidate_lifecycle: AICandidateLifecycleReport = Field(default_factory=AICandidateLifecycleReport)
     progress: RunProgress | None = None
     notes: str | None = None
     error: str | None = None

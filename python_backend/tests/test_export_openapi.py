@@ -115,6 +115,47 @@ class ExportOpenApiTests(unittest.TestCase):
             self.assertIn(field, react_schemas)
             self.assertIn(field, zod_api)
 
+    def test_openapi_run_record_exposes_ai_candidate_lifecycle_schema(self) -> None:
+        document = build_openapi_document()
+        run_record = document["components"]["schemas"]["RunRecord"]
+        lifecycle_ref = run_record["properties"]["ai_candidate_lifecycle"]
+
+        self.assertEqual("#/components/schemas/AICandidateLifecycleReport", lifecycle_ref["$ref"])
+        lifecycle = document["components"]["schemas"]["AICandidateLifecycleSummary"]
+        candidate = document["components"]["schemas"]["AICandidateLifecycleCandidate"]
+        for field in (
+            "stage",
+            "comparison_status",
+            "promotion_status",
+            "resolution_status",
+            "blocking_reasons",
+        ):
+            self.assertIn(field, lifecycle["properties"])
+            self.assertIn(field, candidate["properties"])
+
+    def test_generated_clients_expose_ai_candidate_lifecycle_fields(self) -> None:
+        react_schemas = Path("lib/api-client-react/src/generated/api.schemas.ts").read_text(encoding="utf-8")
+        zod_report = Path("lib/api-zod/src/generated/types/aICandidateLifecycleReport.ts").read_text(encoding="utf-8")
+        zod_summary = Path("lib/api-zod/src/generated/types/aICandidateLifecycleSummary.ts").read_text(encoding="utf-8")
+        zod_candidate = Path("lib/api-zod/src/generated/types/aICandidateLifecycleCandidate.ts").read_text(
+            encoding="utf-8"
+        )
+
+        for field in (
+            "ai_candidate_lifecycle",
+            "stage",
+            "comparison_status",
+            "promotion_status",
+            "resolution_status",
+            "blocking_reasons",
+        ):
+            self.assertIn(field, react_schemas)
+        for field in ("summary", "candidates"):
+            self.assertIn(field, zod_report)
+        for field in ("stage", "comparison_status", "promotion_status", "resolution_status", "blocking_reasons"):
+            self.assertIn(field, zod_summary)
+            self.assertIn(field, zod_candidate)
+
 
 if __name__ == "__main__":
     unittest.main()

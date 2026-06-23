@@ -23,6 +23,7 @@ import cv2
 import numpy as np
 import yaml
 
+from football_tracking.ai_candidate_lifecycle import build_ai_candidate_lifecycle
 from football_tracking.ai_improvement import (
     APPROVED_ACTIONS_FILE_NAME,
     APPROVED_CONFIG_PATCH_FILE_NAME,
@@ -1580,6 +1581,7 @@ class ApiService:
             "notes": request.get("notes"),
             "error": None,
         }
+        self._attach_ai_candidate_lifecycle(run_record)
 
         with self._lock:
             self._assert_no_active_run_locked()
@@ -1726,6 +1728,7 @@ class ApiService:
             "notes": request.get("notes"),
             "error": None,
         }
+        self._attach_ai_candidate_lifecycle(run_record)
 
         thread: threading.Thread | None = None
         with self._lock:
@@ -2183,6 +2186,7 @@ class ApiService:
             "notes": render_notes,
             "error": None,
         }
+        self._attach_ai_candidate_lifecycle(run_record)
 
         with self._lock:
             self._assert_no_active_run_locked()
@@ -2268,6 +2272,7 @@ class ApiService:
             "notes": render_notes,
             "error": None,
         }
+        self._attach_ai_candidate_lifecycle(run_record)
 
         with self._lock:
             self._assert_no_active_run_locked()
@@ -3135,6 +3140,8 @@ class ApiService:
             for run in registry["runs"]:
                 if run["run_id"] == run_id:
                     run.update(patch)
+                    if "stats" in patch or "artifacts" in patch:
+                        self._attach_ai_candidate_lifecycle(run)
                     self._write_registry(registry)
                     return
         raise KeyError(run_id)
@@ -3287,6 +3294,7 @@ class ApiService:
             return None
 
     def _replace_run(self, run_id: str, replacement: dict[str, Any]) -> None:
+        self._attach_ai_candidate_lifecycle(replacement)
         with self._lock:
             registry = self._read_registry()
             for index, run in enumerate(registry["runs"]):
@@ -3304,6 +3312,7 @@ class ApiService:
                     continue
                 run["artifacts"] = self._collect_artifacts(output_dir)
                 run["stats"] = self._collect_stats(output_dir)
+                self._attach_ai_candidate_lifecycle(run)
                 self._write_registry(registry)
                 return
         raise KeyError(run_id)
@@ -3341,6 +3350,7 @@ class ApiService:
                 run = known_by_output[resolved_output_dir]
                 run["artifacts"] = self._collect_artifacts(output_dir)
                 run["stats"] = self._collect_stats(output_dir)
+                self._attach_ai_candidate_lifecycle(run)
                 continue
 
             config_meta = config_index.get(resolved_output_dir)
@@ -3429,10 +3439,12 @@ class ApiService:
             "notes": notes,
             "error": None,
         }
+        self._attach_ai_candidate_lifecycle(snapshot)
         if write_artifacts:
             artifact_error = self._write_run_artifacts(output_dir, snapshot)
             snapshot["artifacts"] = self._collect_artifacts(output_dir)
             snapshot["stats"] = self._collect_stats(output_dir)
+            self._attach_ai_candidate_lifecycle(snapshot)
             if artifact_error is not None:
                 snapshot["status"] = "failed"
                 snapshot["error"] = artifact_error
@@ -4527,6 +4539,19 @@ class ApiService:
         if suffix == ".json":
             return "json"
         return "file"
+
+    def _attach_ai_candidate_lifecycle(self, run: dict[str, Any]) -> None:
+        output_dir = run.get("output_dir")
+        if not output_dir:
+            return
+        lifecycle = self._collect_ai_candidate_lifecycle(Path(output_dir))
+        run["ai_candidate_lifecycle"] = lifecycle
+        stats = run.get("stats") if isinstance(run.get("stats"), dict) else {}
+        stats["ai_candidate_lifecycle"] = lifecycle["summary"]
+        run["stats"] = stats
+
+    def _collect_ai_candidate_lifecycle(self, output_dir: Path) -> dict[str, Any]:
+        return build_ai_candidate_lifecycle(output_dir)
 
     def _collect_stats(self, output_dir: Path) -> dict[str, Any]:
         metrics_report = self._read_optional_json(output_dir / "metrics_report.json")
