@@ -959,6 +959,68 @@ class AiImprovementTests(unittest.TestCase):
         self.assertEqual("error", report["summary"]["status"])
         self.assertIn("usable visual evidence", report["error"])
 
+    def test_visual_review_roi_without_frame_dimensions_is_not_usable_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_minimal_artifacts(output_dir)
+            _write_json(
+                output_dir / "ai_visual_review.json",
+                {
+                    "reviews": [
+                        {
+                            "visual_review_id": "visual_review:packet_001",
+                            "packet_id": "packet_001",
+                            "source_packet_id": "packet_001",
+                            "visible": True,
+                            "local_search_roi": {
+                                "coordinate_space": "image",
+                                "frame": 15,
+                                "x": 120.0,
+                                "y": 40.0,
+                                "width": 80.0,
+                                "height": 50.0,
+                                "confidence": 0.72,
+                            },
+                            "provenance": {"source": "ai_visual_review", "model": "vision-test"},
+                        }
+                    ]
+                },
+            )
+            client = _FakeImprovementClient(
+                {
+                    "summary": {"status": "needs_rerun"},
+                    "improvements": [
+                        {
+                            "id": "imp_001",
+                            "priority": "P0",
+                            "area": "tracking",
+                            "failure_tags": ["ball_lost"],
+                            "root_cause_module": "reacquisition",
+                            "diagnosis": "Visual review ROI has no frame dimensions.",
+                            "recommended_action": "localize_ball_roi",
+                            **_candidate_contract_fields(),
+                            "source_packet_id": "packet_001",
+                            "local_search_roi": {
+                                "coordinate_space": "image",
+                                "frame": 15,
+                                "x": 120,
+                                "y": 40,
+                                "width": 80,
+                                "height": 50,
+                                "confidence": 0.72,
+                            },
+                            "evidence": [{"source_packet_id": "packet_001"}],
+                            "confidence": 0.78,
+                        }
+                    ],
+                }
+            )
+
+            report = build_ai_improvement_report(output_dir, client=client)
+
+        self.assertEqual("error", report["summary"]["status"])
+        self.assertIn("usable visual evidence", report["error"])
+
     def test_external_visual_review_media_path_is_not_usable_evidence(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name, tempfile.TemporaryDirectory() as external_temp:
             output_dir = Path(temp_name)

@@ -2187,7 +2187,8 @@ def _candidate_media_paths(raw_path: str, context: dict[str, Any] | None) -> lis
 
 def _path_has_image_signature(path: Path) -> bool:
     try:
-        header = path.read_bytes()[:12]
+        with path.open("rb") as handle:
+            header = handle.read(12)
     except OSError:
         return False
     if not header:
@@ -2209,6 +2210,8 @@ def _review_has_valid_local_search_roi(review: dict[str, Any]) -> bool:
     dimensions = review.get("frame_dimensions") if isinstance(review.get("frame_dimensions"), dict) else {}
     frame_width = _optional_int(dimensions.get("width"))
     frame_height = _optional_int(dimensions.get("height"))
+    if frame_width is None or frame_height is None or frame_width <= 0 or frame_height <= 0:
+        return False
     if frame_width is not None and roi["x"] + roi["width"] > frame_width:
         return False
     if frame_height is not None and roi["y"] + roi["height"] > frame_height:
