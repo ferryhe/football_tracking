@@ -257,10 +257,18 @@ def _safe_relative_path_list(value: Any, field_name: str) -> list[str]:
 
 
 def _safe_relative_path(value: str, field_name: str) -> str:
-    path = Path(value)
-    if path.is_absolute() or path.drive or ".." in path.parts or "\\" in value:
+    stripped = value.strip()
+    path = Path(stripped)
+    if (
+        path.is_absolute()
+        or path.drive
+        or ":" in stripped
+        or stripped.startswith(("/", "\\"))
+        or ".." in path.parts
+        or "\\" in stripped
+    ):
         raise ValueError(f"{field_name} must contain safe relative paths")
-    return value.strip()
+    return stripped
 
 
 def _validate_identifier(value: str, field_name: str) -> None:

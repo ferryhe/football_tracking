@@ -1108,7 +1108,7 @@ def _registry_candidate_report_summary(
         return _registry_unavailable_report(
             registry_path,
             candidate=candidate,
-            artifact_status="missing",
+            artifact_status="registry_missing_comparison_report",
             reason="registry candidate has no comparison_report",
         )
     path = output_dir / comparison_report

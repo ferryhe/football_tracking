@@ -193,6 +193,26 @@ class AiCandidateRegistryTests(unittest.TestCase):
         self.assertEqual(1, comparison_check["report_count"])
         self.assertEqual("missing", comparison_check["reports"][0]["artifact_status"])
 
+    def test_quality_gate_registry_missing_comparison_report_field_has_distinct_status(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            write_candidate_registry(
+                output_dir,
+                records=[
+                    {
+                        **_record("candidate-001", status="pass"),
+                        "comparison_report": None,
+                    }
+                ],
+            )
+
+            gate = build_ai_improvement_quality_gate(output_dir)
+
+        comparison_check = gate["checks"]["candidate_comparisons_ok"]
+        self.assertEqual("unavailable", comparison_check["status"])
+        self.assertEqual(1, comparison_check["report_count"])
+        self.assertEqual("registry_missing_comparison_report", comparison_check["reports"][0]["artifact_status"])
+
     def test_quality_gate_registry_report_is_not_hidden_by_same_candidate_id_glob_report(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:
             output_dir = Path(temp_name)
@@ -236,6 +256,12 @@ class AiCandidateRegistryTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "candidate_artifacts"):
             normalize_candidate_record({**_record("candidate-001"), "candidate_artifacts": ["../escape.csv"]})
+
+        with self.assertRaisesRegex(ValueError, "candidate_artifacts"):
+            normalize_candidate_record({**_record("candidate-001"), "candidate_artifacts": ["C:/tmp/file.csv"]})
+
+        with self.assertRaisesRegex(ValueError, "candidate_artifacts"):
+            normalize_candidate_record({**_record("candidate-001"), "candidate_artifacts": ["C:tmp/file.csv"]})
 
         with tempfile.TemporaryDirectory() as temp_name:
             with self.assertRaisesRegex(ValueError, "candidate_artifacts"):
