@@ -78,7 +78,7 @@ The workflow report records `approval_selection` with `approval_source`, request
 
 `--mode artifact-only` is the default when `--dry-run` is not set. It checks existing artifacts without requiring a real provider run.
 
-`--mode real` treats missing required artifacts as quality-gate failures. Quality-gate failures return exit code `1` according to the selected workflow mode. Other CLI failures, such as invalid arguments or approval-selection errors, can also return nonzero.
+`--mode real` treats missing required artifacts as quality-gate failures. Quality-gate or workflow failures return exit code `1` only when `--dry-run` is not set. Other CLI failures, such as invalid arguments or approval-selection errors, can also return nonzero.
 
 ## Candidate Comparison And Promotion
 

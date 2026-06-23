@@ -1,6 +1,6 @@
 # AI Improvement Productized Loop Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use `managed-pr-development` for the full program. Each PR starts from latest `main`, uses a fresh branch and worker, receives independent plan/code review, waits for remote CI/Copilot comments, merges only after valid feedback is resolved, and deletes merged local/remote branches after merge.
+> **For Codex-managed execution:** use the local `managed-pr-development` skill when it is installed. Repository-only contributors should follow the **Managed PR Gates** section in this document. Each PR starts from latest `main`, uses a fresh branch and worker/reviewer split where available, waits for remote CI/Copilot comments, merges only after valid feedback is resolved, and deletes merged local/remote branches after merge.
 
 **Goal:** turn AI from "review text" into an operator-approved improvement loop that can recover missing balls, reduce noisy false positives, stabilize follow-cam motion, and produce safe highlight clips with comparison-backed final output.
 
