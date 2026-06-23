@@ -2626,26 +2626,17 @@ class ApiService:
         comparison_payload["comparison_report"] = comparison_path.relative_to(parent_output_dir).as_posix()
         comparison_payload["candidate_dir"] = candidate_output_dir.relative_to(parent_output_dir).as_posix()
         manifest_path = candidate_output_dir / "candidate_manifest.json"
-        comparison_payload["candidate_manifest"] = manifest_path.relative_to(parent_output_dir).as_posix()
-        comparison_payload["candidate_artifacts"] = self._missing_ball_candidate_artifacts(
+        manifest_relative_path = manifest_path.relative_to(parent_output_dir).as_posix()
+        comparison_payload["candidate_manifest"] = manifest_relative_path
+        candidate_artifacts = self._missing_ball_candidate_artifacts(
             parent_output_dir=parent_output_dir,
             candidate_output_dir=candidate_output_dir,
             comparison_path=comparison_path,
             comparison_payload=comparison_payload,
         )
-        self._write_missing_ball_candidate_manifest(
-            parent_output_dir=parent_output_dir,
-            candidate_output_dir=candidate_output_dir,
-            comparison_path=comparison_path,
-            manifest_path=manifest_path,
-            comparison_payload=comparison_payload,
-        )
-        comparison_payload["candidate_artifacts"] = self._missing_ball_candidate_artifacts(
-            parent_output_dir=parent_output_dir,
-            candidate_output_dir=candidate_output_dir,
-            comparison_path=comparison_path,
-            comparison_payload=comparison_payload,
-        )
+        if manifest_relative_path not in candidate_artifacts:
+            candidate_artifacts.append(manifest_relative_path)
+        comparison_payload["candidate_artifacts"] = candidate_artifacts
         self._write_missing_ball_candidate_manifest(
             parent_output_dir=parent_output_dir,
             candidate_output_dir=candidate_output_dir,

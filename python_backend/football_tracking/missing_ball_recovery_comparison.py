@@ -649,7 +649,7 @@ def _packet_label_coverage_check(
     required_labels: list[str],
     target_window: tuple[int, int],
 ) -> dict[str, Any]:
-    required_window = target_window or _packet_required_window(approval)
+    required_window = target_window
     results: list[dict[str, Any]] = []
     packet_windows: list[dict[str, int]] = []
     covered_labels: list[str] = []
