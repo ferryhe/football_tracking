@@ -25,6 +25,7 @@ MAX_CONTEXT_ITEMS = 100
 CAMERA_TRACK_CONTEXT_RADIUS_FRAMES = 12
 FAST_PLAY_MIN_TRACK_STEP_PX = 80.0
 TRACK_JUMP_REVIEW_MIN_STEP_PX = 160.0
+LONG_LOST_GAP_THRESHOLD_FRAMES = 120
 
 _SOURCE_ARTIFACTS: tuple[tuple[str, str], ...] = (
     ("ball_audit", "ball_audit.json"),
@@ -52,9 +53,11 @@ _KNOWN_FALSE_POSITIVE_CLASSES = {
     "player_head",
     "shoe_confusion",
     "sideline_confusion",
+    "unknown_false_positive",
     "wall_background_drift",
     "unknown",
 }
+_SOURCE_FRAME_COUNT_KEYS = ("total_source_frames", "source_frame_count", "source_total_frames", "video_frame_count")
 _PROVIDER_PATH_KEYS = {
     "output_dir",
     "path",
@@ -76,6 +79,7 @@ def build_ai_improvement_context(output_dir: Path, max_items: int = 20) -> dict[
     output_dir = Path(output_dir)
     artifacts: dict[str, Any] = {}
     provenance_artifacts: dict[str, Any] = {}
+    validation_artifacts: dict[str, Any] = {}
     artifact_status: dict[str, str] = {}
     source_artifacts: dict[str, str | None] = {}
     warnings: list[str] = []
@@ -90,6 +94,8 @@ def build_ai_improvement_context(output_dir: Path, max_items: int = 20) -> dict[
         if loaded is not None:
             if artifact_key in {"review_packets", "ai_visual_review"}:
                 provenance_artifacts[artifact_key] = loaded
+            if artifact_key in {"ball_audit", "ai_review_triggers"}:
+                validation_artifacts[artifact_key] = loaded
             artifacts[artifact_key] = _limit_artifact_payload(artifact_key, _strip_data_urls(loaded), max_items=max_items)
 
     if isinstance(artifacts.get("camera_motion_audit"), dict):
@@ -105,6 +111,9 @@ def build_ai_improvement_context(output_dir: Path, max_items: int = 20) -> dict[
         "artifact_status": artifact_status,
         "available_artifact_count": len(artifacts),
         "traceable_provenance": _traceable_provenance_payload({"artifacts": provenance_artifacts}),
+        "validation_facts": {
+            "long_lost_gap_windows": _long_lost_gap_windows_from_artifacts(validation_artifacts),
+        },
         "artifacts": artifacts,
         "warnings": warnings,
     }
@@ -695,7 +704,7 @@ def _visual_review_says_visible(review: dict[str, Any]) -> bool | None:
     if match_value == "no":
         return False
     region = review.get("likely_ball_region") if isinstance(review.get("likely_ball_region"), dict) else {}
-    if str(region.get("description") or "").strip().casefold() == "not visible":
+    if _description_is_not_visible(region.get("description")):
         return False
     return None
 
@@ -728,7 +737,11 @@ def _roi_confidence(value: Any) -> float:
 def _likely_region_is_not_visible(value: Any) -> bool:
     if not isinstance(value, dict):
         return True
-    return str(value.get("description") or "").strip().casefold() == "not visible"
+    return _description_is_not_visible(value.get("description"))
+
+
+def _description_is_not_visible(value: Any) -> bool:
+    return isinstance(value, str) and _text_says_not_visible(value)
 
 
 def _packet_id_for_window(context: dict[str, Any], *, start_frame: int, end_frame: int) -> str | None:
@@ -1182,6 +1195,7 @@ def _validate_model_report(
             )
         warnings.extend(patch_warnings)
         improvements.append(improvement)
+    _validate_long_lost_gap_suggestion_coverage(improvements, context)
 
     raw_highlight_adjustments = response.get("highlight_adjustments")
     if raw_highlight_adjustments is None:
@@ -1298,6 +1312,7 @@ def _validate_improvement(raw: Any, index: int, *, context: dict[str, Any] | Non
         item["clip_action"] = clip_action
     if isinstance(raw.get("follow_cam_rerender_plan"), dict):
         item["follow_cam_rerender_plan"] = dict(raw["follow_cam_rerender_plan"])
+    _copy_uncovered_subwindow_explanation(raw, item, index)
     _validate_action_specific_improvement(item, index, context=context)
     return item, patch_warnings
 
@@ -1309,6 +1324,8 @@ def _validate_action_specific_improvement(
     context: dict[str, Any] | None = None,
 ) -> None:
     action = item.get("recommended_action")
+    if _is_missing_ball_item(item):
+        _validate_missing_ball_evidence_contract(item, index, context)
     if action == "localize_ball_roi":
         if "local_search_roi" not in item:
             raise ValueError(f"Improvement {index} localize_ball_roi requires local_search_roi.")
@@ -1340,6 +1357,16 @@ def _validate_action_specific_improvement(
             raise ValueError(f"Improvement {index} {action} requires supported clip_action.")
     if action == "adjust_follow_cam" and not item.get("config_patch") and not item.get("follow_cam_rerender_plan"):
         raise ValueError(f"Improvement {index} adjust_follow_cam requires config_patch or follow_cam_rerender_plan.")
+    if action == "adjust_follow_cam" and _camera_event_has_tracking_issue(item, context):
+        raise ValueError(
+            f"Improvement {index} adjust_follow_cam overlaps Lost/Predicted track context; "
+            "use tracking_rerun_before_follow_cam before follow-cam tuning."
+        )
+    if action == "adjust_follow_cam" and _camera_event_reference_is_unknown(item, context):
+        raise ValueError(
+            f"Improvement {index} adjust_follow_cam references unknown camera_motion_event_id: "
+            f"{item.get('camera_motion_event_id')}"
+        )
     if action == "tracking_rerun_before_follow_cam" and "rerun_scope" not in item:
         raise ValueError(f"Improvement {index} tracking_rerun_before_follow_cam requires rerun_scope.")
     if action == "human_review_camera_motion":
@@ -1349,6 +1376,218 @@ def _validate_action_specific_improvement(
             raise ValueError(f"Improvement {index} human_review_camera_motion requires start_frame and end_frame.")
         if not item.get("evidence"):
             raise ValueError(f"Improvement {index} human_review_camera_motion requires evidence.")
+
+
+def _validate_missing_ball_evidence_contract(
+    item: dict[str, Any],
+    index: int,
+    context: dict[str, Any] | None,
+) -> None:
+    likely_region = item.get("likely_ball_region")
+    if not isinstance(likely_region, dict):
+        return
+    if _likely_region_is_not_visible(likely_region):
+        if not _has_evidence_backed_not_visible(item, context):
+            raise ValueError(
+                f"Improvement {index} not_visible requires source_packet_id or visual_review_id evidence "
+                "showing the ball is hidden, off-frame, or impossible to identify."
+            )
+        return
+    if not _has_traceable_packet_or_visual_provenance(item, context):
+        raise ValueError(
+            f"Improvement {index} likely_ball_region requires source_packet_id or visual_review_id provenance "
+            "that matches review_packets.json or ai_visual_review.json."
+        )
+
+
+def _copy_uncovered_subwindow_explanation(raw: dict[str, Any], item: dict[str, Any], index: int) -> None:
+    for key in ("coverage_explanation", "uncovered_subwindow_explanation"):
+        value = raw.get(key)
+        if isinstance(value, str) and value.strip():
+            item[key] = value.strip()
+    raw_subwindows = raw.get("uncovered_subwindows")
+    if not isinstance(raw_subwindows, list):
+        return
+    subwindows: list[dict[str, Any]] = []
+    for subwindow_index, raw_subwindow in enumerate(raw_subwindows, start=1):
+        window = _frame_window(raw_subwindow, f"Improvement {index} uncovered_subwindows[{subwindow_index}]")
+        reason = raw_subwindow.get("reason") if isinstance(raw_subwindow, dict) else None
+        explanation = raw_subwindow.get("explanation") if isinstance(raw_subwindow, dict) else None
+        if isinstance(reason, str) and reason.strip():
+            window["reason"] = reason.strip()
+        if isinstance(explanation, str) and explanation.strip():
+            window["explanation"] = explanation.strip()
+        subwindows.append(window)
+    if subwindows:
+        item["uncovered_subwindows"] = subwindows
+
+
+def _validate_long_lost_gap_suggestion_coverage(
+    improvements: list[dict[str, Any]],
+    context: dict[str, Any] | None,
+) -> None:
+    if not improvements:
+        return
+    for gap in _long_lost_gap_windows(context):
+        start = gap["start_frame"]
+        end = gap["end_frame"]
+        overlapping_items: list[dict[str, Any]] = []
+        coverages: list[dict[str, int]] = []
+        for item in improvements:
+            if not _is_missing_ball_item(item):
+                continue
+            coverage = _improvement_coverage_window(item)
+            if coverage is None or not _windows_overlap(coverage, start, end):
+                continue
+            overlapping_items.append(item)
+            coverages.append(coverage)
+        if not overlapping_items or _windows_cover_range(coverages, start, end):
+            continue
+        uncovered_ranges = _uncovered_ranges(coverages, start, end)
+        if uncovered_ranges and any(_has_uncovered_subwindow_explanation(item, uncovered_ranges) for item in overlapping_items):
+            continue
+        raise ValueError(
+            f"Missing-ball suggestions for long lost gap {start}-{end} must cover the entire lost gap "
+            "or explain uncovered subwindows."
+        )
+
+
+def _long_lost_gap_windows(context: dict[str, Any] | None) -> list[dict[str, int]]:
+    if not isinstance(context, dict):
+        return []
+    validation_facts = context.get("validation_facts") if isinstance(context.get("validation_facts"), dict) else {}
+    fact_windows = validation_facts.get("long_lost_gap_windows") if isinstance(validation_facts.get("long_lost_gap_windows"), list) else []
+    parsed_fact_windows = [_optional_frame_window(item) for item in fact_windows if isinstance(item, dict)]
+    parsed_fact_windows = [window for window in parsed_fact_windows if window is not None]
+    if parsed_fact_windows:
+        return parsed_fact_windows
+    artifacts = context.get("artifacts") if isinstance(context.get("artifacts"), dict) else {}
+    return _long_lost_gap_windows_from_artifacts(artifacts)
+
+
+def _long_lost_gap_windows_from_artifacts(artifacts: dict[str, Any]) -> list[dict[str, int]]:
+    windows: list[dict[str, int]] = []
+    for artifact_key, list_keys in (("ball_audit", ("review_events", "events")), ("ai_review_triggers", ("triggers",))):
+        artifact = artifacts.get(artifact_key) if isinstance(artifacts.get(artifact_key), dict) else {}
+        for list_key in list_keys:
+            events = artifact.get(list_key) if isinstance(artifact.get(list_key), list) else []
+            for event in events:
+                if not isinstance(event, dict):
+                    continue
+                if str(event.get("type") or "").casefold() != "lost_gap":
+                    continue
+                window = _optional_frame_window(event)
+                if window is None:
+                    continue
+                frame_count = _optional_int(event.get("frame_count"))
+                if frame_count is None:
+                    frame_count = window["end_frame"] - window["start_frame"] + 1
+                if frame_count >= LONG_LOST_GAP_THRESHOLD_FRAMES:
+                    windows.append(window)
+    return windows
+
+
+def _is_missing_ball_item(item: dict[str, Any]) -> bool:
+    tags = {str(tag).casefold() for tag in item.get("failure_tags", []) if str(tag).strip()}
+    if tags & _MISSING_BALL_TAGS:
+        return True
+    text = " ".join(
+        str(item.get(key) or "")
+        for key in ("area", "root_cause_module", "diagnosis", "recommended_action")
+    ).casefold()
+    return "missing ball" in text or "lost ball" in text or "lost_gap" in text
+
+
+def _improvement_coverage_window(item: dict[str, Any]) -> dict[str, int] | None:
+    for key in ("rerun_scope", "suggested_window"):
+        window = _optional_frame_window(item.get(key))
+        if window is not None:
+            return window
+    return _optional_frame_window(item)
+
+
+def _windows_overlap(window: dict[str, int], start: int, end: int) -> bool:
+    return max(window["start_frame"], start) <= min(window["end_frame"], end)
+
+
+def _windows_cover_range(windows: list[dict[str, int]], start: int, end: int) -> bool:
+    cursor = start
+    for window in sorted(windows, key=lambda item: item["start_frame"]):
+        if window["end_frame"] < cursor:
+            continue
+        if window["start_frame"] > cursor:
+            return False
+        cursor = max(cursor, window["end_frame"] + 1)
+        if cursor > end:
+            return True
+    return cursor > end
+
+
+def _uncovered_ranges(windows: list[dict[str, int]], start: int, end: int) -> list[dict[str, int]]:
+    clipped = sorted(
+        (
+            {"start_frame": max(start, window["start_frame"]), "end_frame": min(end, window["end_frame"])}
+            for window in windows
+            if _windows_overlap(window, start, end)
+        ),
+        key=lambda window: (window["start_frame"], window["end_frame"]),
+    )
+    uncovered: list[dict[str, int]] = []
+    cursor = start
+    for window in clipped:
+        if window["start_frame"] > cursor:
+            uncovered.append({"start_frame": cursor, "end_frame": window["start_frame"] - 1})
+        cursor = max(cursor, window["end_frame"] + 1)
+    if cursor <= end:
+        uncovered.append({"start_frame": cursor, "end_frame": end})
+    return uncovered
+
+
+def _has_uncovered_subwindow_explanation(item: dict[str, Any], uncovered_ranges: list[dict[str, int]]) -> bool:
+    if not uncovered_ranges:
+        return True
+    subwindows = item.get("uncovered_subwindows")
+    if isinstance(subwindows, list) and subwindows:
+        explained = [
+            subwindow
+            for subwindow in subwindows
+            if isinstance(subwindow, dict)
+            and (
+                (isinstance(subwindow.get("reason"), str) and subwindow["reason"].strip())
+                or (isinstance(subwindow.get("explanation"), str) and subwindow["explanation"].strip())
+            )
+            and _optional_frame_window(subwindow) is not None
+        ]
+        if _windows_cover_uncovered_ranges(explained, uncovered_ranges):
+            return True
+
+    explanation_text = " ".join(
+        item[key].strip()
+        for key in ("coverage_explanation", "uncovered_subwindow_explanation")
+        if isinstance(item.get(key), str) and item[key].strip()
+    )
+    if not explanation_text:
+        return False
+    return all(
+        _text_mentions_frame_number(explanation_text, uncovered["start_frame"])
+        and _text_mentions_frame_number(explanation_text, uncovered["end_frame"])
+        for uncovered in uncovered_ranges
+    )
+
+
+def _text_mentions_frame_number(text: str, frame: int) -> bool:
+    return re.search(rf"(?<!\d){re.escape(str(frame))}(?!\d)", text) is not None
+
+
+def _windows_cover_uncovered_ranges(windows: list[dict[str, Any]], uncovered_ranges: list[dict[str, int]]) -> bool:
+    parsed = [_optional_frame_window(window) for window in windows]
+    parsed_windows = [window for window in parsed if window is not None]
+    if not parsed_windows:
+        return False
+    return all(
+        _windows_cover_range(parsed_windows, uncovered["start_frame"], uncovered["end_frame"])
+        for uncovered in uncovered_ranges
+    )
 
 
 def _has_traceable_packet_or_visual_provenance(item: dict[str, Any], context: dict[str, Any] | None) -> bool:
@@ -1462,6 +1701,167 @@ def _traceable_provenance_payload(context: dict[str, Any]) -> dict[str, list[str
     }
 
 
+def _has_evidence_backed_not_visible(item: dict[str, Any], context: dict[str, Any] | None) -> bool:
+    if not _has_traceable_packet_or_visual_provenance(item, context):
+        return False
+    packet_values = _packet_provenance_values(item)
+    visual_values = _visual_review_provenance_values(item)
+    for packet in _review_packets_for_ids(context, packet_values):
+        if _packet_says_not_visible(packet):
+            return True
+    for review in _visual_reviews_for_ids(context, packet_values=packet_values, visual_values=visual_values):
+        if _visual_review_says_visible(review) is False:
+            return True
+    return False
+
+
+def _review_packets_for_ids(context: dict[str, Any] | None, packet_values: set[str]) -> list[dict[str, Any]]:
+    if not packet_values or not isinstance(context, dict):
+        return []
+    artifacts = context.get("artifacts") if isinstance(context.get("artifacts"), dict) else {}
+    packet_report = artifacts.get("review_packets") if isinstance(artifacts.get("review_packets"), dict) else {}
+    packets = packet_report.get("packets") if isinstance(packet_report.get("packets"), list) else []
+    matches: list[dict[str, Any]] = []
+    for packet in packets:
+        if not isinstance(packet, dict):
+            continue
+        packet_ids = {
+            value.strip()
+            for key in ("packet_id", "id", "source_packet_id")
+            for value in (packet.get(key),)
+            if isinstance(value, str) and value.strip()
+        }
+        if packet_ids & packet_values:
+            matches.append(packet)
+    return matches
+
+
+def _visual_reviews_for_ids(
+    context: dict[str, Any] | None,
+    *,
+    packet_values: set[str],
+    visual_values: set[str],
+) -> list[dict[str, Any]]:
+    if not isinstance(context, dict):
+        return []
+    artifacts = context.get("artifacts") if isinstance(context.get("artifacts"), dict) else {}
+    visual_report = artifacts.get("ai_visual_review") if isinstance(artifacts.get("ai_visual_review"), dict) else {}
+    reviews = visual_report.get("reviews") if isinstance(visual_report.get("reviews"), list) else []
+    matches: list[dict[str, Any]] = []
+    for item in reviews:
+        if not isinstance(item, dict):
+            continue
+        review = item.get("review") if isinstance(item.get("review"), dict) else item
+        packet_ids: set[str] = set()
+        visual_ids: set[str] = set()
+        for source in (item, review):
+            for key in ("source_packet_id", "packet_id"):
+                value = source.get(key)
+                if isinstance(value, str) and value.strip():
+                    packet_ids.add(value.strip())
+            value = source.get("visual_review_id")
+            if isinstance(value, str) and value.strip():
+                visual_ids.add(value.strip())
+        if (packet_ids & packet_values) or (visual_ids & visual_values):
+            matches.append(dict(review))
+    return matches
+
+
+def _packet_says_not_visible(packet: dict[str, Any]) -> bool:
+    return _not_visible_text_in_payload(packet)
+
+
+def _not_visible_text_in_payload(value: Any) -> bool:
+    if isinstance(value, dict):
+        return any(_not_visible_text_in_payload(child) for child in value.values())
+    if isinstance(value, list):
+        return any(_not_visible_text_in_payload(item) for item in value)
+    if not isinstance(value, str):
+        return False
+    return _text_says_not_visible(value)
+
+
+def _text_says_not_visible(value: str) -> bool:
+    text = value.strip().casefold().replace("_", " ")
+    return any(
+        phrase in text
+        for phrase in (
+            "not visible",
+            "ball not visible",
+            "hidden",
+            "occluded",
+            "off frame",
+            "off-frame",
+            "out of frame",
+            "impossible to identify",
+            "cannot identify",
+            "unable to identify",
+            "unidentifiable",
+        )
+    )
+
+
+def _camera_event_has_tracking_issue(item: dict[str, Any], context: dict[str, Any] | None) -> bool:
+    event = _camera_event_for_improvement(item, context)
+    if event is None:
+        return False
+    track_context = event.get("nearby_ball_track") if isinstance(event.get("nearby_ball_track"), dict) else {}
+    if track_context.get("has_tracking_issue") is True:
+        return True
+    status_counts = track_context.get("status_counts") if isinstance(track_context.get("status_counts"), dict) else {}
+    return any(_safe_int(status_counts.get(status)) > 0 for status in ("Lost", "Predicted"))
+
+
+def _camera_event_reference_is_unknown(item: dict[str, Any], context: dict[str, Any] | None) -> bool:
+    event_id = item.get("camera_motion_event_id")
+    if not isinstance(event_id, str) or not event_id.strip():
+        return False
+    return _camera_event_by_id(event_id.strip(), context) is None
+
+
+def _camera_event_by_id(event_id: str, context: dict[str, Any] | None) -> dict[str, Any] | None:
+    for event in _camera_motion_events(context):
+        if event.get("id") == event_id:
+            return event
+    return None
+
+
+def _camera_event_for_improvement(item: dict[str, Any], context: dict[str, Any] | None) -> dict[str, Any] | None:
+    event_id = item.get("camera_motion_event_id")
+    if isinstance(event_id, str) and event_id.strip():
+        event = _camera_event_by_id(event_id.strip(), context)
+        if event is not None:
+            return event
+    overlapping_event: dict[str, Any] | None = None
+    for event in _camera_motion_events(context):
+        if _event_overlaps_item(event, item) and overlapping_event is None:
+            overlapping_event = event
+    return overlapping_event
+
+
+def _camera_motion_events(context: dict[str, Any] | None) -> list[dict[str, Any]]:
+    if not isinstance(context, dict):
+        return []
+    artifacts = context.get("artifacts") if isinstance(context.get("artifacts"), dict) else {}
+    camera_audit = artifacts.get("camera_motion_audit") if isinstance(artifacts.get("camera_motion_audit"), dict) else {}
+    result: list[dict[str, Any]] = []
+    for event_key in ("review_events", "events", "motion_events"):
+        events = camera_audit.get(event_key) if isinstance(camera_audit.get(event_key), list) else []
+        for event in events:
+            if not isinstance(event, dict):
+                continue
+            result.append(event)
+    return result
+
+
+def _event_overlaps_item(event: dict[str, Any], item: dict[str, Any]) -> bool:
+    event_range = _event_frame_range(event)
+    item_window = _improvement_coverage_window(item)
+    if event_range is None or item_window is None:
+        return False
+    return _windows_overlap(item_window, event_range[0], event_range[1])
+
+
 def _validate_highlight_adjustment(raw: Any, index: int) -> dict[str, Any]:
     if not isinstance(raw, dict):
         raise ValueError(f"Highlight adjustment {index} must be a JSON object.")
@@ -1495,13 +1895,17 @@ def _event_candidate_lookup(event_candidates: Any) -> dict[str, dict[str, Any]]:
     candidates = event_candidates.get("candidates")
     if not isinstance(candidates, list):
         return {}
+    source_frame_count = _source_frame_count(event_candidates)
     lookup: dict[str, dict[str, Any]] = {}
     for candidate in candidates:
         if not isinstance(candidate, dict):
             continue
         candidate_id = candidate.get("id")
         if isinstance(candidate_id, str) and candidate_id.strip():
-            lookup[candidate_id.strip()] = candidate
+            item = dict(candidate)
+            if source_frame_count is not None and _source_frame_count(item) is None:
+                item["_event_candidates_source_frame_count"] = source_frame_count
+            lookup[candidate_id.strip()] = item
     return lookup
 
 
@@ -1523,8 +1927,18 @@ def _validate_highlight_window_invariants(
     if window["start_frame"] > core_window["start_frame"] or window["end_frame"] < core_window["end_frame"]:
         raise ValueError(f"{label} must include candidate core_window {core_window}.")
     min_tail = _candidate_min_post_event_frames(candidate)
+    source_frame_count = _candidate_source_frame_count(candidate)
+    if source_frame_count is not None:
+        last_source_frame = max(0, source_frame_count - 1)
+        if window["end_frame"] > last_source_frame:
+            raise ValueError(
+                f"{label} must not extend beyond the source video end for {candidate_id}: "
+                f"end_frame {window['end_frame']} > last source frame {last_source_frame}."
+            )
     if min_tail > 0:
         required_end = core_window["end_frame"] + min_tail
+        if source_frame_count is not None:
+            required_end = min(required_end, max(0, source_frame_count - 1))
         if window["end_frame"] < required_end:
             raise ValueError(
                 f"{label} must preserve the minimum post-event tail for {candidate_id}: "
@@ -1563,6 +1977,27 @@ def _candidate_min_post_event_frames(candidate: dict[str, Any]) -> int:
     if value is None:
         value = _optional_int(buffer_policy.get("post_buffer_frames"))
     return max(0, value or 0)
+
+
+def _candidate_source_frame_count(candidate: dict[str, Any]) -> int | None:
+    value = _source_frame_count(candidate)
+    if value is not None:
+        return value
+    value = _optional_int(candidate.get("_event_candidates_source_frame_count"))
+    return value if value is not None and value > 0 else None
+
+
+def _source_frame_count(payload: dict[str, Any]) -> int | None:
+    for key in _SOURCE_FRAME_COUNT_KEYS:
+        value = _optional_int(payload.get(key))
+        if value is not None and value > 0:
+            return value
+    summary = payload.get("summary") if isinstance(payload.get("summary"), dict) else {}
+    for key in _SOURCE_FRAME_COUNT_KEYS:
+        value = _optional_int(summary.get(key))
+        if value is not None and value > 0:
+            return value
+    return None
 
 
 def _optional_clip_action(value: Any, index: int) -> dict[str, str]:
@@ -1684,14 +2119,19 @@ def _instructions(language: str | None) -> str:
         "Each improvement must include priority, area, failure_tags, root_cause_module, recommended_action, confidence. "
         "targeted_rerun improvements must include rerun_scope. "
         "Missing-ball suggestions must use targeted_rerun, localize_ball_roi, or likely_ball_region.description='not visible'; "
+        "long missing-ball or lost-gap suggestions must cover the entire lost gap or explain uncovered subwindows. "
         "localize_ball_roi and any local_search_roi require a traceable source_packet_id or visual_review_id from the supplied packet evidence. "
-        "Noise suggestions must include false_positive_class, bounded start_frame/end_frame, and use noise_filter_adjustment "
+        "not_visible is acceptable only when packet or visual evidence shows the ball is hidden, off-frame, or impossible to identify. "
+        "Noise suggestions must include false_positive_class, bounded start_frame/end_frame, and use accepted classes "
+        "extra_ball, shoe_confusion, foot_confusion, player_head, advertising_board, sideline_confusion, "
+        "wall_background_drift, unknown_false_positive, or unknown. Use noise_filter_adjustment "
         "with a safe config_patch or reject_noise for confirmed false positives. "
         "Camera-motion suggestions must use adjust_follow_cam for stable Detected tracking with sudden camera movement, "
         "tracking_rerun_before_follow_cam when the camera event overlaps Lost/Predicted or nearby tracking issues, "
         "or human_review_camera_motion when evidence is ambiguous; continuous stable high-speed play is evidence, not an automatic failure. "
         "Highlight suggestions must include candidate.core_window, preserve candidate.buffer_policy.min_tail_frames, "
-        "and do not trim result tail after a shot or goal. "
+        "respect source-video boundary constraints, and do not trim result tail after a shot or goal. "
+        "Use a stronger model for run-level improvement and hard recovery; reserve smaller models for low-risk tagging or dry-run smoke. "
         "config_patch is advisory only and may only suggest known fields under follow_cam, postprocess, "
         "scene_bias.dynamic_air_recovery, selection, or tracking. "
         "Do not include image base64 or claim files that are not present in the supplied context. "

@@ -41,12 +41,22 @@ class _FakeImprovementClient:
 
 
 class AiImprovementTests(unittest.TestCase):
-    def test_improvement_prompt_protects_highlight_core_window_and_tail(self) -> None:
+    def test_improvement_prompt_describes_pr2_contract_and_model_routing(self) -> None:
         instructions = _instructions(language="en")
 
+        self.assertIn("cover the entire lost gap", instructions)
+        self.assertIn("explain uncovered subwindows", instructions)
+        self.assertIn("source_packet_id or visual_review_id", instructions)
+        self.assertIn("not_visible", instructions)
+        self.assertIn("hidden, off-frame, or impossible to identify", instructions)
+        self.assertIn("unknown_false_positive", instructions)
+        self.assertIn("tracking_rerun_before_follow_cam", instructions)
+        self.assertIn("adjust_follow_cam", instructions)
         self.assertIn("candidate.core_window", instructions)
         self.assertIn("candidate.buffer_policy.min_tail_frames", instructions)
         self.assertIn("do not trim result tail", instructions)
+        self.assertIn("stronger model", instructions)
+        self.assertIn("dry-run smoke", instructions)
 
     def test_write_ai_improvement_report_handles_missing_artifacts(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:
@@ -99,11 +109,13 @@ class AiImprovementTests(unittest.TestCase):
                             "recommended_action": "targeted_rerun",
                             "config_patch": {"tracking": {"max_lost_frames": 30}},
                             "rerun_scope": {"start_frame": 8, "end_frame": 18},
+                            "source_packet_id": "packet_001",
                             "likely_ball_region": {
                                 "description": "right channel near the player cluster",
                                 "frame": 11,
                                 "confidence": 0.7,
                             },
+                            "evidence": [{"source_packet_id": "packet_001"}],
                             "confidence": 0.82,
                         }
                     ],
@@ -356,12 +368,13 @@ class AiImprovementTests(unittest.TestCase):
                                 "detector": {"confidence_threshold": 0.01},
                             },
                             "rerun_scope": {"start_frame": 0, "end_frame": 40},
+                            "source_packet_id": "packet_001",
                             "likely_ball_region": {
                                 "frame": 15,
                                 "description": "right channel near the player cluster",
                                 "confidence": 0.7,
                             },
-                            "evidence": ["lost gap overlaps an active play packet"],
+                            "evidence": [{"source_packet_id": "packet_001", "reason": "lost gap overlaps an active play packet"}],
                             "confidence": 0.82,
                         }
                     ],
@@ -497,7 +510,9 @@ class AiImprovementTests(unittest.TestCase):
                             "diagnosis": "Ball went missing.",
                             "recommended_action": "targeted_rerun",
                             "rerun_scope": {"start_frame": 10, "end_frame": 30},
+                            "source_packet_id": "packet_001",
                             "likely_ball_region": {"description": "not visible", "confidence": 0.0},
+                            "evidence": [{"source_packet_id": "packet_001", "reason": "packet decision marks ball_not_visible"}],
                             "confidence": 0.6,
                         }
                     ],
@@ -684,6 +699,116 @@ class AiImprovementTests(unittest.TestCase):
         self.assertEqual("error", report["summary"]["status"])
         self.assertIn("source_packet_id or visual_review_id", report["error"])
 
+    def test_missing_ball_likely_region_without_packet_or_visual_provenance_becomes_error_report(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_minimal_artifacts(output_dir)
+            client = _FakeImprovementClient(
+                {
+                    "summary": {"status": "needs_rerun"},
+                    "improvements": [
+                        {
+                            "id": "imp_001",
+                            "priority": "P0",
+                            "area": "tracking",
+                            "failure_tags": ["ball_lost"],
+                            "root_cause_module": "reacquisition",
+                            "diagnosis": "Ball is likely in the lower-right corner, but no packet evidence is cited.",
+                            "recommended_action": "targeted_rerun",
+                            "rerun_scope": {"start_frame": 10, "end_frame": 20},
+                            "likely_ball_region": {
+                                "description": "lower-right corner near the touchline",
+                                "frame": 15,
+                                "confidence": 0.74,
+                            },
+                            "evidence": ["unlinked visual impression"],
+                            "confidence": 0.78,
+                        }
+                    ],
+                }
+            )
+
+            report = build_ai_improvement_report(output_dir, client=client)
+
+        self.assertEqual("error", report["summary"]["status"])
+        self.assertIn("likely_ball_region requires source_packet_id or visual_review_id", report["error"])
+
+    def test_not_visible_without_packet_or_visual_evidence_becomes_error_report(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_minimal_artifacts(output_dir)
+            client = _FakeImprovementClient(
+                {
+                    "summary": {"status": "needs_rerun"},
+                    "improvements": [
+                        {
+                            "id": "imp_001",
+                            "priority": "P0",
+                            "area": "tracking",
+                            "failure_tags": ["ball_lost"],
+                            "root_cause_module": "reacquisition",
+                            "diagnosis": "The model guesses that the ball is not visible.",
+                            "recommended_action": "targeted_rerun",
+                            "rerun_scope": {"start_frame": 10, "end_frame": 20},
+                            "likely_ball_region": {"description": "not_visible", "confidence": 0.0},
+                            "evidence": ["not visible guess without packet or visual citation"],
+                            "confidence": 0.52,
+                        }
+                    ],
+                }
+            )
+
+            report = build_ai_improvement_report(output_dir, client=client)
+
+        self.assertEqual("error", report["summary"]["status"])
+        self.assertIn("not_visible", report["error"])
+
+    def test_not_visible_cannot_self_certify_with_unrelated_packet_provenance(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_minimal_artifacts(output_dir)
+            _write_json(
+                output_dir / "review_packets.json",
+                {
+                    "summary": {"packet_count": 1},
+                    "packets": [
+                        {
+                            "packet_id": "packet_001",
+                            "source": {"kind": "trigger", "type": "lost_gap", "start_frame": 10, "end_frame": 20},
+                            "window": {"start_frame": 10, "end_frame": 20},
+                            "decision": {"label": "manual_review"},
+                            "visual_evidence": ["ball appears in the packet crop"],
+                        }
+                    ],
+                },
+            )
+            client = _FakeImprovementClient(
+                {
+                    "summary": {"status": "needs_rerun"},
+                    "improvements": [
+                        {
+                            "id": "imp_001",
+                            "priority": "P0",
+                            "area": "tracking",
+                            "failure_tags": ["ball_lost"],
+                            "root_cause_module": "reacquisition",
+                            "diagnosis": "The model claims the ball is not visible, but the cited packet does not.",
+                            "recommended_action": "targeted_rerun",
+                            "rerun_scope": {"start_frame": 10, "end_frame": 20},
+                            "source_packet_id": "packet_001",
+                            "likely_ball_region": {"description": "not_visible", "confidence": 0.0},
+                            "evidence": [{"source_packet_id": "packet_001", "reason": "model says not visible"}],
+                            "confidence": 0.52,
+                        }
+                    ],
+                }
+            )
+
+            report = build_ai_improvement_report(output_dir, client=client)
+
+        self.assertEqual("error", report["summary"]["status"])
+        self.assertIn("not_visible", report["error"])
+
     def test_localize_ball_roi_rejects_unknown_packet_provenance(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:
             output_dir = Path(temp_name)
@@ -815,6 +940,257 @@ class AiImprovementTests(unittest.TestCase):
         self.assertEqual("error", report["summary"]["status"])
         self.assertIn("local_search_roi requires traceable packet or visual review provenance", report["error"])
 
+    def test_partial_long_gap_suggestion_without_uncovered_subwindow_explanation_becomes_error_report(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_minimal_artifacts(output_dir)
+            _write_json(
+                output_dir / "ball_audit.json",
+                {
+                    "summary": {"review_event_count": 1, "lost_gap_count": 1},
+                    "review_events": [
+                        {
+                            "type": "lost_gap",
+                            "severity": "fail",
+                            "start_frame": 100,
+                            "end_frame": 260,
+                            "frame_count": 161,
+                            "reason": "Ball track is lost for a long sequence.",
+                        }
+                    ],
+                },
+            )
+            _write_json(
+                output_dir / "review_packets.json",
+                {
+                    "summary": {"packet_count": 1},
+                    "packets": [
+                        {
+                            "packet_id": "packet_long_gap",
+                            "source": {"kind": "trigger", "type": "lost_gap", "start_frame": 100, "end_frame": 260},
+                            "window": {"start_frame": 100, "end_frame": 260},
+                        }
+                    ],
+                },
+            )
+            client = _FakeImprovementClient(
+                {
+                    "summary": {"status": "needs_rerun"},
+                    "improvements": [
+                        {
+                            "id": "imp_partial",
+                            "priority": "P0",
+                            "area": "tracking",
+                            "failure_tags": ["ball_lost"],
+                            "root_cause_module": "reacquisition",
+                            "diagnosis": "Only the first part of the long gap has a proposed recovery window.",
+                            "recommended_action": "targeted_rerun",
+                            "rerun_scope": {"start_frame": 100, "end_frame": 150},
+                            "source_packet_id": "packet_long_gap",
+                            "likely_ball_region": {
+                                "description": "right channel near the player cluster",
+                                "frame": 125,
+                                "confidence": 0.7,
+                            },
+                            "evidence": [{"source_packet_id": "packet_long_gap"}],
+                            "confidence": 0.82,
+                        }
+                    ],
+                }
+            )
+
+            report = build_ai_improvement_report(output_dir, client=client)
+
+        self.assertEqual("error", report["summary"]["status"])
+        self.assertIn("cover the entire lost gap", report["error"])
+
+    def test_long_gap_validation_uses_full_artifact_not_truncated_prompt_context(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_minimal_artifacts(output_dir)
+            events = [
+                {
+                    "type": "large_jump",
+                    "severity": "warn",
+                    "start_frame": index * 10,
+                    "end_frame": index * 10 + 1,
+                    "frame_count": 2,
+                }
+                for index in range(20)
+            ]
+            events.append(
+                {
+                    "type": "lost_gap",
+                    "severity": "fail",
+                    "start_frame": 1000,
+                    "end_frame": 1180,
+                    "frame_count": 181,
+                    "reason": "Long gap appears after the prompt item limit.",
+                }
+            )
+            _write_json(output_dir / "ball_audit.json", {"summary": {"review_event_count": len(events)}, "review_events": events})
+            _write_json(
+                output_dir / "review_packets.json",
+                {
+                    "summary": {"packet_count": 1},
+                    "packets": [
+                        {
+                            "packet_id": "packet_late_gap",
+                            "source": {"kind": "trigger", "type": "lost_gap", "start_frame": 1000, "end_frame": 1180},
+                            "window": {"start_frame": 1000, "end_frame": 1180},
+                        }
+                    ],
+                },
+            )
+            client = _FakeImprovementClient(
+                {
+                    "summary": {"status": "needs_rerun"},
+                    "improvements": [
+                        {
+                            "id": "imp_partial_late",
+                            "priority": "P0",
+                            "area": "tracking",
+                            "failure_tags": ["ball_lost"],
+                            "root_cause_module": "reacquisition",
+                            "diagnosis": "Only covers the first part of a long gap outside the prompt limit.",
+                            "recommended_action": "targeted_rerun",
+                            "rerun_scope": {"start_frame": 1000, "end_frame": 1040},
+                            "source_packet_id": "packet_late_gap",
+                            "likely_ball_region": {"description": "right channel", "frame": 1020, "confidence": 0.7},
+                            "evidence": [{"source_packet_id": "packet_late_gap"}],
+                            "confidence": 0.82,
+                        }
+                    ],
+                }
+            )
+
+            report = build_ai_improvement_report(output_dir, client=client, max_items=20)
+
+        self.assertEqual("error", report["summary"]["status"])
+        self.assertIn("cover the entire lost gap", report["error"])
+
+    def test_unrelated_uncovered_subwindow_explanation_does_not_cover_long_gap_tail(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_minimal_artifacts(output_dir)
+            _write_json(
+                output_dir / "ball_audit.json",
+                {
+                    "summary": {"review_event_count": 1, "lost_gap_count": 1},
+                    "review_events": [
+                        {
+                            "type": "lost_gap",
+                            "severity": "fail",
+                            "start_frame": 100,
+                            "end_frame": 260,
+                            "frame_count": 161,
+                        }
+                    ],
+                },
+            )
+            _write_json(
+                output_dir / "review_packets.json",
+                {
+                    "summary": {"packet_count": 1},
+                    "packets": [
+                        {
+                            "packet_id": "packet_long_gap",
+                            "source": {"kind": "trigger", "type": "lost_gap", "start_frame": 100, "end_frame": 260},
+                            "window": {"start_frame": 100, "end_frame": 260},
+                        }
+                    ],
+                },
+            )
+            client = _FakeImprovementClient(
+                {
+                    "summary": {"status": "needs_rerun"},
+                    "improvements": [
+                        {
+                            "id": "imp_partial",
+                            "priority": "P0",
+                            "area": "tracking",
+                            "failure_tags": ["ball_lost"],
+                            "root_cause_module": "reacquisition",
+                            "diagnosis": "Explains an unrelated window, not the uncovered long-gap tail.",
+                            "recommended_action": "targeted_rerun",
+                            "rerun_scope": {"start_frame": 100, "end_frame": 150},
+                            "source_packet_id": "packet_long_gap",
+                            "likely_ball_region": {"description": "right channel", "frame": 125, "confidence": 0.7},
+                            "uncovered_subwindows": [
+                                {"start_frame": 10, "end_frame": 20, "reason": "unrelated packet"}
+                            ],
+                            "evidence": [{"source_packet_id": "packet_long_gap"}],
+                            "confidence": 0.82,
+                        }
+                    ],
+                }
+            )
+
+            report = build_ai_improvement_report(output_dir, client=client)
+
+        self.assertEqual("error", report["summary"]["status"])
+        self.assertIn("explain uncovered subwindows", report["error"])
+
+    def test_uncovered_subwindow_explanation_requires_standalone_frame_numbers(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_minimal_artifacts(output_dir)
+            _write_json(
+                output_dir / "ball_audit.json",
+                {
+                    "summary": {"review_event_count": 1, "lost_gap_count": 1},
+                    "review_events": [
+                        {
+                            "type": "lost_gap",
+                            "severity": "fail",
+                            "start_frame": 10,
+                            "end_frame": 150,
+                            "frame_count": 141,
+                        }
+                    ],
+                },
+            )
+            _write_json(
+                output_dir / "review_packets.json",
+                {
+                    "summary": {"packet_count": 1},
+                    "packets": [
+                        {
+                            "packet_id": "packet_gap",
+                            "source": {"kind": "trigger", "type": "lost_gap", "start_frame": 10, "end_frame": 150},
+                            "window": {"start_frame": 10, "end_frame": 150},
+                        }
+                    ],
+                },
+            )
+            client = _FakeImprovementClient(
+                {
+                    "summary": {"status": "needs_rerun"},
+                    "improvements": [
+                        {
+                            "id": "imp_partial",
+                            "priority": "P0",
+                            "area": "tracking",
+                            "failure_tags": ["ball_lost"],
+                            "root_cause_module": "reacquisition",
+                            "diagnosis": "The explanation cites lookalike frame numbers, not the uncovered range.",
+                            "recommended_action": "targeted_rerun",
+                            "rerun_scope": {"start_frame": 10, "end_frame": 20},
+                            "source_packet_id": "packet_gap",
+                            "likely_ball_region": {"description": "right channel", "frame": 15, "confidence": 0.7},
+                            "coverage_explanation": "Frames 121-150 are not actionable in a different packet.",
+                            "evidence": [{"source_packet_id": "packet_gap"}],
+                            "confidence": 0.82,
+                        }
+                    ],
+                }
+            )
+
+            report = build_ai_improvement_report(output_dir, client=client)
+
+        self.assertEqual("error", report["summary"]["status"])
+        self.assertIn("explain uncovered subwindows", report["error"])
+
     def test_noise_filter_adjustment_requires_actionable_scope_and_patch(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:
             output_dir = Path(temp_name)
@@ -917,10 +1293,44 @@ class AiImprovementTests(unittest.TestCase):
         self.assertEqual("extra_ball", improvement["false_positive_class"])
         self.assertFalse(any("false_positive_class normalized to unknown" in warning for warning in report["warnings"]))
 
+    def test_unknown_false_positive_noise_class_is_preserved(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_minimal_artifacts(output_dir)
+            client = _FakeImprovementClient(
+                {
+                    "summary": {"status": "needs_rerun", "primary_issue": "noise"},
+                    "improvements": [
+                        {
+                            "id": "imp_noise",
+                            "priority": "P1",
+                            "area": "tracking",
+                            "failure_tags": ["unknown"],
+                            "root_cause_module": "selection",
+                            "start_frame": 120,
+                            "end_frame": 142,
+                            "diagnosis": "Packet has a false positive, but the specific class is uncertain.",
+                            "recommended_action": "noise_filter_adjustment",
+                            "false_positive_class": "unknown_false_positive",
+                            "config_patch": {"selection": {"min_accept_score": 0.62}},
+                            "evidence": ["dense-noise packet shows an unknown off-ball detection"],
+                            "confidence": 0.73,
+                        }
+                    ],
+                }
+            )
+
+            report = build_ai_improvement_report(output_dir, client=client)
+
+        improvement = report["improvements"][0]
+        self.assertEqual("unknown_false_positive", improvement["false_positive_class"])
+        self.assertFalse(any("false_positive_class normalized to unknown" in warning for warning in report["warnings"]))
+
     def test_camera_actions_are_validated_and_strip_invalid_follow_cam_patch_names(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:
             output_dir = Path(temp_name)
             _write_minimal_artifacts(output_dir)
+            _write_camera_motion_event(output_dir, frame=40, severity="warn", max_step_px=100.0)
             client = _FakeImprovementClient(
                 {
                     "summary": {"status": "needs_rerun", "primary_issue": "camera_motion"},
@@ -979,6 +1389,116 @@ class AiImprovementTests(unittest.TestCase):
         self.assertTrue(any("follow_cam.max_pan_per_frame_x" in warning for warning in report["warnings"]))
         self.assertTrue(any("follow_cam.unknown_knob" in warning for warning in report["warnings"]))
         self.assertTrue(any("detector.confidence_threshold" in warning for warning in report["warnings"]))
+
+    def test_camera_adjust_follow_cam_is_rejected_when_event_overlaps_lost_track_context(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_minimal_artifacts(output_dir)
+            _write_camera_motion_event(output_dir, frame=40, severity="fail", max_step_px=150.0)
+            _write_ball_track(
+                output_dir,
+                [
+                    (38, "Detected", 100, 100),
+                    (39, "Detected", 110, 100),
+                    (40, "Lost", "", ""),
+                    (41, "Predicted", 130, 100),
+                    (42, "Detected", 140, 100),
+                ],
+            )
+            client = _FakeImprovementClient(
+                {
+                    "summary": {"status": "needs_rerun", "primary_issue": "camera_motion"},
+                    "improvements": [
+                        {
+                            "id": "imp_camera",
+                            "priority": "P0",
+                            "area": "camera_motion",
+                            "failure_tags": ["camera_catchup_spike"],
+                            "root_cause_module": "follow_cam",
+                            "diagnosis": "Incorrectly treats a tracking-loss camera spike as follow-cam tuning.",
+                            "recommended_action": "adjust_follow_cam",
+                            "config_patch": {"follow_cam": {"pan_smoothing": 0.82}},
+                            "camera_motion_event_id": "cam_event_001",
+                            "confidence": 0.7,
+                        }
+                    ],
+                }
+            )
+
+            report = build_ai_improvement_report(output_dir, client=client)
+
+        self.assertEqual("error", report["summary"]["status"])
+        self.assertIn("tracking_rerun_before_follow_cam", report["error"])
+
+    def test_camera_adjust_follow_cam_with_unknown_event_id_still_checks_overlapping_track_context(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_minimal_artifacts(output_dir)
+            _write_camera_motion_event(output_dir, frame=40, severity="fail", max_step_px=150.0)
+            _write_ball_track(
+                output_dir,
+                [
+                    (39, "Detected", 110, 100),
+                    (40, "Lost", "", ""),
+                    (41, "Predicted", 130, 100),
+                ],
+            )
+            client = _FakeImprovementClient(
+                {
+                    "summary": {"status": "needs_rerun", "primary_issue": "camera_motion"},
+                    "improvements": [
+                        {
+                            "id": "imp_camera",
+                            "priority": "P0",
+                            "area": "camera_motion",
+                            "failure_tags": ["camera_catchup_spike"],
+                            "root_cause_module": "follow_cam",
+                            "start_frame": 40,
+                            "end_frame": 40,
+                            "diagnosis": "Uses a typo event id while overlapping a tracking-loss camera spike.",
+                            "recommended_action": "adjust_follow_cam",
+                            "config_patch": {"follow_cam": {"pan_smoothing": 0.82}},
+                            "camera_motion_event_id": "cam_event_typo",
+                            "confidence": 0.7,
+                        }
+                    ],
+                }
+            )
+
+            report = build_ai_improvement_report(output_dir, client=client)
+
+        self.assertEqual("error", report["summary"]["status"])
+        self.assertIn("tracking_rerun_before_follow_cam", report["error"])
+
+    def test_camera_adjust_follow_cam_with_unknown_event_id_and_no_window_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_minimal_artifacts(output_dir)
+            _write_camera_motion_event(output_dir, frame=40, severity="fail", max_step_px=150.0)
+            client = _FakeImprovementClient(
+                {
+                    "summary": {"status": "needs_rerun", "primary_issue": "camera_motion"},
+                    "improvements": [
+                        {
+                            "id": "imp_camera",
+                            "priority": "P0",
+                            "area": "camera_motion",
+                            "failure_tags": ["camera_catchup_spike"],
+                            "root_cause_module": "follow_cam",
+                            "diagnosis": "Uses a typo event id without a fallback frame window.",
+                            "recommended_action": "adjust_follow_cam",
+                            "config_patch": {"follow_cam": {"pan_smoothing": 0.82}},
+                            "camera_motion_event_id": "cam_event_typo",
+                            "confidence": 0.7,
+                        }
+                    ],
+                }
+            )
+
+            report = build_ai_improvement_report(output_dir, client=client)
+
+        self.assertEqual("error", report["summary"]["status"])
+        self.assertIn("unknown camera_motion_event_id", report["error"])
 
     def test_noise_filter_adjustment_without_false_positive_class_becomes_error_report(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:
@@ -1057,7 +1577,9 @@ class AiImprovementTests(unittest.TestCase):
                             "recommended_action": "targeted_rerun",
                             "config_patch": {"tracking.max_lost_frames": 32},
                             "rerun_scope": {"start_frame": 10, "end_frame": 30},
+                            "source_packet_id": "packet_001",
                             "likely_ball_region": {"description": "not visible", "confidence": 0.0},
+                            "evidence": [{"source_packet_id": "packet_001", "reason": "packet decision marks ball_not_visible"}],
                             "confidence": 0.6,
                         }
                     ],
@@ -1802,6 +2324,105 @@ class AiImprovementTests(unittest.TestCase):
 
         self.assertEqual("error", report["summary"]["status"])
         self.assertIn("minimum post-event tail", report["error"])
+
+    def test_highlight_tail_can_clamp_at_source_video_end(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_minimal_artifacts(output_dir)
+            _write_json(
+                output_dir / "event_candidates.json",
+                {
+                    "summary": {"candidate_count": 1, "total_source_frames": 51},
+                    "candidates": [
+                        {
+                            "id": "cleaned:shot_candidate:10-20",
+                            "type": "shot_candidate",
+                            "start_frame": 10,
+                            "end_frame": 20,
+                            "core_window": {"start_frame": 10, "end_frame": 20},
+                            "render_window": {"start_frame": 0, "end_frame": 50},
+                            "buffer_policy": {
+                                "fps": 20.0,
+                                "post_buffer_frames": 90,
+                                "min_post_event_frames": 90,
+                                "min_tail_frames": 90,
+                            },
+                        }
+                    ],
+                },
+            )
+            client = _FakeImprovementClient(
+                {
+                    "summary": {"status": "needs_rerun"},
+                    "improvements": [
+                        {
+                            "id": "imp_source_end",
+                            "priority": "P1",
+                            "area": "highlights",
+                            "failure_tags": ["post_roll_too_short"],
+                            "root_cause_module": "event_scoring",
+                            "diagnosis": "Extend to the final source frame; no more tail exists.",
+                            "recommended_action": "render_suggested_highlight",
+                            "candidate_id": "cleaned:shot_candidate:10-20",
+                            "suggested_window": {"start_frame": 0, "end_frame": 50},
+                            "clip_action": "extend_tail",
+                            "confidence": 0.8,
+                        }
+                    ],
+                    "highlight_adjustments": [],
+                }
+            )
+
+            report = build_ai_improvement_report(output_dir, client=client)
+
+        self.assertEqual("needs_rerun", report["summary"]["status"])
+        self.assertEqual({"start_frame": 0, "end_frame": 50}, report["improvements"][0]["suggested_window"])
+
+    def test_highlight_suggestion_cannot_extend_past_source_video_end(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_minimal_artifacts(output_dir)
+            _write_json(
+                output_dir / "event_candidates.json",
+                {
+                    "summary": {"candidate_count": 1, "total_source_frames": 51},
+                    "candidates": [
+                        {
+                            "id": "cleaned:shot_candidate:10-20",
+                            "type": "shot_candidate",
+                            "core_window": {"start_frame": 10, "end_frame": 20},
+                            "render_window": {"start_frame": 0, "end_frame": 50},
+                            "buffer_policy": {"min_tail_frames": 20},
+                        }
+                    ],
+                },
+            )
+            client = _FakeImprovementClient(
+                {
+                    "summary": {"status": "needs_rerun"},
+                    "improvements": [
+                        {
+                            "id": "imp_beyond_source",
+                            "priority": "P1",
+                            "area": "highlights",
+                            "failure_tags": ["post_roll_too_short"],
+                            "root_cause_module": "event_scoring",
+                            "diagnosis": "Suggests frames beyond the source video.",
+                            "recommended_action": "render_suggested_highlight",
+                            "candidate_id": "cleaned:shot_candidate:10-20",
+                            "suggested_window": {"start_frame": 0, "end_frame": 999},
+                            "clip_action": "extend_tail",
+                            "confidence": 0.8,
+                        }
+                    ],
+                    "highlight_adjustments": [],
+                }
+            )
+
+            report = build_ai_improvement_report(output_dir, client=client)
+
+        self.assertEqual("error", report["summary"]["status"])
+        self.assertIn("source video end", report["error"])
 
     def test_approving_highlight_action_fails_fast_when_event_candidates_missing_or_corrupt(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:

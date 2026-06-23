@@ -67,3 +67,14 @@ The workflow report records `approval_selection` with `approval_source`, request
 ## Model Guidance
 
 Use a stronger model for run-level improvement and hard recovery cases. Reserve smaller or cheaper models for low-risk tagging and dry-run smoke checks.
+
+## AI Suggestion Contract
+
+Run-level AI suggestions must be evidence-backed before they are eligible for approval:
+
+- Long missing-ball or lost-gap suggestions must cover the full lost gap, or explicitly describe uncovered subwindows.
+- ROI and localization suggestions must cite a `source_packet_id` or `visual_review_id`.
+- `not_visible` is only valid when packet or visual evidence supports that the ball is hidden, off-frame, or impossible to identify.
+- Noise suggestions must use bounded frame windows and an accepted false-positive class: `extra_ball`, `shoe_confusion`, `foot_confusion`, `player_head`, `advertising_board`, `sideline_confusion`, `wall_background_drift`, `unknown_false_positive`, or `unknown`.
+- Camera suggestions must distinguish tracking recovery from follow-cam tuning. Lost or Predicted ball-track context should produce `tracking_rerun_before_follow_cam`; stable Detected context can produce `adjust_follow_cam`.
+- Highlight suggestions must preserve the candidate `core_window` and required tail unless the source-video end clamps the tail.
