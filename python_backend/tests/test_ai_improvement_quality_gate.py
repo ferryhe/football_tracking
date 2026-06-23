@@ -1,0 +1,718 @@
+from __future__ import annotations
+
+import hashlib
+import json
+import tempfile
+import unittest
+from pathlib import Path
+from unittest.mock import patch
+
+from football_tracking.ai_improvement_quality_gate import (
+    build_ai_improvement_quality_gate,
+    write_ai_improvement_quality_gate,
+    write_track_hash_snapshot,
+)
+
+
+class AiImprovementQualityGateTests(unittest.TestCase):
+    def test_missing_inputs_are_unavailable_in_artifact_mode_without_crashing(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+
+            payload = write_ai_improvement_quality_gate(output_dir, mode="artifact-only")
+            written = json.loads((output_dir / "ai_improvement_quality_gate.json").read_text(encoding="utf-8"))
+
+        self.assertEqual("warn", payload["summary"]["status"])
+        self.assertEqual("unavailable", payload["checks"]["track_hash_unchanged"]["status"])
+        self.assertEqual("unavailable", payload["checks"]["long_lost_gap_improvement_coverage"]["status"])
+        self.assertEqual("unavailable", payload["checks"]["model_routing_recorded"]["status"])
+        self.assertEqual(payload, written)
+
+    def test_real_mode_fails_when_required_artifacts_are_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            payload = build_ai_improvement_quality_gate(Path(temp_name), mode="real")
+
+        self.assertEqual("fail", payload["summary"]["status"])
+        self.assertEqual("fail", payload["checks"]["track_hash_unchanged"]["status"])
+        self.assertEqual("fail", payload["checks"]["long_lost_gap_improvement_coverage"]["status"])
+        self.assertGreater(payload["summary"]["failed_check_count"], 0)
+
+    def test_real_mode_fails_when_review_packets_are_missing_even_without_lost_gaps(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_tracks(output_dir)
+            write_track_hash_snapshot(output_dir, "before_review")
+            write_track_hash_snapshot(output_dir, "after_ai_improvement")
+            _write_json(output_dir / "ball_audit.json", {"review_events": []})
+            _write_json(
+                output_dir / "ai_improvement_report.json",
+                {
+                    "summary": {"status": "ok"},
+                    "model": "gpt-improve",
+                    "model_selection_source": "explicit",
+                    "improvements": [],
+                },
+            )
+
+            payload = build_ai_improvement_quality_gate(output_dir, mode="real")
+
+        self.assertEqual("fail", payload["checks"]["long_lost_gap_improvement_coverage"]["status"])
+        self.assertIn("review_packets.json", payload["checks"]["long_lost_gap_improvement_coverage"]["reason"])
+
+    def test_hash_snapshots_pass_when_tracks_are_unchanged(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_tracks(output_dir, raw="Frame,X,Y,Status\n1,10,20,Detected\n")
+
+            before = write_track_hash_snapshot(output_dir, "before_review")
+            after = write_track_hash_snapshot(output_dir, "after_ai_improvement")
+            expected_hash = _sha256_file(output_dir / "ball_track.csv")
+            payload = build_ai_improvement_quality_gate(output_dir)
+
+        self.assertEqual(expected_hash, before["files"]["ball_track.csv"]["sha256"])
+        self.assertEqual(before["files"], after["files"])
+        self.assertEqual("pass", payload["checks"]["track_hash_unchanged"]["status"])
+
+    def test_hash_snapshots_fail_when_review_phase_mutates_track_csv(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_tracks(output_dir, raw="Frame,X,Y,Status\n1,10,20,Detected\n")
+            write_track_hash_snapshot(output_dir, "before_review")
+            _write_tracks(output_dir, raw="Frame,X,Y,Status\n1,99,20,Detected\n")
+            write_track_hash_snapshot(output_dir, "after_ai_improvement")
+
+            payload = build_ai_improvement_quality_gate(output_dir)
+
+        self.assertEqual("fail", payload["checks"]["track_hash_unchanged"]["status"])
+        self.assertIn("ball_track.csv", payload["checks"]["track_hash_unchanged"]["changed_files"])
+
+    def test_approved_actions_file_presence_is_not_execution(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_2079_gap(output_dir)
+            _write_packet(output_dir, packet_id="packet_2079", start=2049, end=2544)
+            _write_ai_report(output_dir, [_missing_ball_improvement(start=2049, end=2544)])
+            _write_approved_actions(output_dir, [_targeted_rerun_approval(start=2049, end=2544)])
+
+            payload = build_ai_improvement_quality_gate(output_dir)
+
+        self.assertEqual("fail", payload["checks"]["approved_actions_explicitly_consumed"]["status"])
+        self.assertEqual("fail", payload["checks"]["long_lost_gap_improvement_coverage"]["status"])
+
+    def test_long_lost_gap_2079_fails_without_packet_coverage(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_2079_gap(output_dir)
+            _write_ai_report(output_dir, [_missing_ball_improvement(start=2049, end=2544)])
+            approved_path = _write_approved_actions(output_dir, [_targeted_rerun_approval(start=2049, end=2544)])
+
+            payload = build_ai_improvement_quality_gate(output_dir, approved_actions_path=approved_path)
+
+        self.assertEqual("fail", payload["checks"]["long_lost_gap_improvement_coverage"]["status"])
+        self.assertIn("packet", payload["checks"]["long_lost_gap_improvement_coverage"]["reasons"][0])
+
+    def test_long_lost_gap_2079_fails_without_ai_or_approval_coverage(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_2079_gap(output_dir)
+            _write_packet(output_dir, packet_id="packet_2079", start=2049, end=2544)
+            _write_ai_report(output_dir, [])
+
+            payload = build_ai_improvement_quality_gate(output_dir)
+
+        self.assertEqual("fail", payload["checks"]["long_lost_gap_improvement_coverage"]["status"])
+        self.assertTrue(any("AI improvement" in reason for reason in payload["checks"]["long_lost_gap_improvement_coverage"]["reasons"]))
+
+    def test_long_lost_gap_2079_passes_with_explicit_targeted_rerun_approval(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_2079_gap(output_dir)
+            _write_packet(output_dir, packet_id="packet_2079", start=2049, end=2544)
+            _write_ai_report(output_dir, [_missing_ball_improvement(start=2049, end=2544)])
+            approved_path = _write_approved_actions(output_dir, [_targeted_rerun_approval(start=2049, end=2544)])
+
+            payload = build_ai_improvement_quality_gate(output_dir, approved_actions_path=approved_path)
+
+        self.assertEqual("pass", payload["checks"]["long_lost_gap_improvement_coverage"]["status"])
+        self.assertEqual("pass", payload["checks"]["missing_ball_roi_or_not_visible_present"]["status"])
+
+    def test_long_lost_gap_2079_fails_when_approval_lacks_provenance(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_2079_gap(output_dir)
+            _write_packet(output_dir, packet_id="packet_2079", start=2049, end=2544)
+            _write_ai_report(output_dir, [_missing_ball_improvement(start=2049, end=2544)])
+            approval = _targeted_rerun_approval(start=2049, end=2544)
+            approval.pop("provenance")
+            approved_path = _write_approved_actions(output_dir, [approval])
+
+            payload = build_ai_improvement_quality_gate(output_dir, approved_actions_path=approved_path)
+
+        self.assertEqual("fail", payload["checks"]["long_lost_gap_improvement_coverage"]["status"])
+        self.assertTrue(
+            any("provenance" in reason for reason in payload["checks"]["long_lost_gap_improvement_coverage"]["reasons"])
+        )
+
+    def test_long_lost_gap_2079_warns_for_evidence_backed_not_visible(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_2079_gap(output_dir)
+            _write_packet(output_dir, packet_id="packet_2079", start=2049, end=2544)
+            _write_ai_report(
+                output_dir,
+                [_not_visible_improvement(start=2049, end=2544, source_packet_id="packet_2079")],
+            )
+
+            payload = build_ai_improvement_quality_gate(output_dir)
+
+        self.assertEqual("warn", payload["checks"]["long_lost_gap_improvement_coverage"]["status"])
+        self.assertEqual("warn", payload["checks"]["missing_ball_roi_or_not_visible_present"]["status"])
+
+    def test_long_lost_gap_2079_real_mode_fails_for_unavailable_not_visible(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_2079_gap(output_dir)
+            _write_packet(output_dir, packet_id="packet_2079", start=2049, end=2544)
+            _write_ai_report(
+                output_dir,
+                [_not_visible_improvement(start=2049, end=2544, status="unavailable", source_packet_id="packet_2079")],
+            )
+            _write_tracks(output_dir)
+            write_track_hash_snapshot(output_dir, "before_review")
+            write_track_hash_snapshot(output_dir, "after_ai_improvement")
+
+            payload = build_ai_improvement_quality_gate(output_dir, mode="real")
+
+        self.assertEqual("fail", payload["checks"]["long_lost_gap_improvement_coverage"]["status"])
+
+    def test_long_lost_gap_2079_real_mode_warns_for_evidence_backed_not_visible(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_2079_gap(output_dir)
+            _write_packet(output_dir, packet_id="packet_2079", start=2049, end=2544)
+            _write_ai_report(
+                output_dir,
+                [_not_visible_improvement(start=2049, end=2544, source_packet_id="packet_2079")],
+            )
+            _write_tracks(output_dir)
+            write_track_hash_snapshot(output_dir, "before_review")
+            write_track_hash_snapshot(output_dir, "after_ai_improvement")
+
+            payload = build_ai_improvement_quality_gate(output_dir, mode="real")
+
+        self.assertEqual("warn", payload["checks"]["long_lost_gap_improvement_coverage"]["status"])
+        self.assertEqual("warn", payload["checks"]["missing_ball_roi_or_not_visible_present"]["status"])
+
+    def test_dense_noise_requires_failure_tag_and_window_overlap(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_json(
+                output_dir / "ai_review_triggers.json",
+                {"triggers": [{"id": "noise_1", "type": "dense_noise", "start_frame": 100, "end_frame": 150}]},
+            )
+            _write_ai_report(
+                output_dir,
+                [
+                    {
+                        "id": "imp_noise_bad",
+                        "area": "tracking",
+                        "failure_tags": ["ball_lost"],
+                        "recommended_action": "noise_filter_adjustment",
+                        "start_frame": 200,
+                        "end_frame": 210,
+                    }
+                ],
+            )
+
+            failing = build_ai_improvement_quality_gate(output_dir)
+            _write_ai_report(
+                output_dir,
+                [
+                    {
+                        "id": "imp_noise_good",
+                        "area": "tracking",
+                        "failure_tags": ["shoe_confusion"],
+                        "recommended_action": "noise_filter_adjustment",
+                        "start_frame": 120,
+                        "end_frame": 130,
+                    }
+                ],
+            )
+            passing = build_ai_improvement_quality_gate(output_dir)
+
+        self.assertEqual("fail", failing["checks"]["noise_failure_tags_present"]["status"])
+        self.assertEqual("pass", passing["checks"]["noise_failure_tags_present"]["status"])
+
+    def test_short_tracklet_noise_requires_false_positive_tag_coverage(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_json(
+                output_dir / "ball_audit.json",
+                {
+                    "review_events": [
+                        {
+                            "type": "short_tracklet",
+                            "start_frame": 300,
+                            "end_frame": 301,
+                            "frame_count": 2,
+                            "flags": ["short_tracklet"],
+                        }
+                    ]
+                },
+            )
+            _write_ai_report(output_dir, [])
+
+            failing = build_ai_improvement_quality_gate(output_dir)
+            _write_ai_report(
+                output_dir,
+                [
+                    {
+                        "id": "imp_noise_tracklet",
+                        "area": "tracking",
+                        "failure_tags": ["foot_confusion"],
+                        "recommended_action": "reject_noise",
+                        "start_frame": 300,
+                        "end_frame": 301,
+                        "false_positive_class": "foot_confusion",
+                    }
+                ],
+            )
+            passing = build_ai_improvement_quality_gate(output_dir)
+
+        self.assertEqual("fail", failing["checks"]["noise_failure_tags_present"]["status"])
+        self.assertEqual("pass", passing["checks"]["noise_failure_tags_present"]["status"])
+
+    def test_camera_regression_passes_within_five_percent(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            source_dir = Path(temp_name) / "source"
+            candidate_dir = Path(temp_name) / "candidate"
+            _write_camera_audit(source_dir, review_events=10, max_pan=100.0, p95_pan=80.0)
+            _write_camera_audit(candidate_dir, review_events=10, max_pan=105.0, p95_pan=84.0)
+
+            payload = build_ai_improvement_quality_gate(source_dir, candidate_output_dir=candidate_dir)
+
+        self.assertEqual("pass", payload["checks"]["camera_regression"]["status"])
+
+    def test_camera_regression_fails_beyond_five_percent(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            source_dir = Path(temp_name) / "source"
+            candidate_dir = Path(temp_name) / "candidate"
+            _write_camera_audit(source_dir, review_events=10, max_pan=100.0, p95_pan=80.0)
+            _write_camera_audit(candidate_dir, review_events=12, max_pan=106.0, p95_pan=90.0)
+
+            payload = build_ai_improvement_quality_gate(source_dir, candidate_output_dir=candidate_dir)
+
+        self.assertEqual("fail", payload["checks"]["camera_regression"]["status"])
+        self.assertIn("max_pan_step_px", payload["checks"]["camera_regression"]["regressions"])
+
+    def test_highlight_tail_fails_when_suggested_window_clips_tail(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_event_candidate(output_dir, candidate_id="clip_1", core_end=100, min_tail=40, source_frames=200)
+            _write_ai_report(
+                output_dir,
+                [
+                    {
+                        "id": "imp_highlight",
+                        "area": "highlights",
+                        "failure_tags": ["post_roll_too_short"],
+                        "recommended_action": "render_suggested_highlight",
+                        "candidate_id": "clip_1",
+                        "suggested_window": {"start_frame": 80, "end_frame": 120},
+                    }
+                ],
+            )
+
+            payload = build_ai_improvement_quality_gate(output_dir)
+
+        self.assertEqual("fail", payload["checks"]["highlight_tail_ok"]["status"])
+
+    def test_highlight_tail_passes_when_tail_reaches_source_boundary(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_event_candidate(output_dir, candidate_id="clip_1", core_end=100, min_tail=40, source_frames=121)
+            _write_ai_report(
+                output_dir,
+                [
+                    {
+                        "id": "imp_highlight",
+                        "area": "highlights",
+                        "failure_tags": ["post_roll_too_short"],
+                        "recommended_action": "render_suggested_highlight",
+                        "candidate_id": "clip_1",
+                        "suggested_window": {"start_frame": 80, "end_frame": 120},
+                    }
+                ],
+            )
+
+            payload = build_ai_improvement_quality_gate(output_dir)
+
+        self.assertEqual("pass", payload["checks"]["highlight_tail_ok"]["status"])
+
+    def test_highlight_tail_does_not_clamp_to_generic_frame_count(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_json(
+                output_dir / "event_candidates.json",
+                {
+                    "summary": {"frame_count": 121},
+                    "candidates": [
+                        {
+                            "id": "clip_1",
+                            "core_window": {"start_frame": 90, "end_frame": 100},
+                            "render_window": {"start_frame": 80, "end_frame": 120},
+                            "buffer_policy": {"min_tail_frames": 40},
+                        }
+                    ],
+                },
+            )
+            _write_ai_report(
+                output_dir,
+                [
+                    {
+                        "id": "imp_highlight",
+                        "area": "highlights",
+                        "failure_tags": ["post_roll_too_short"],
+                        "recommended_action": "render_suggested_highlight",
+                        "candidate_id": "clip_1",
+                        "suggested_window": {"start_frame": 80, "end_frame": 120},
+                    }
+                ],
+            )
+
+            payload = build_ai_improvement_quality_gate(output_dir)
+
+        self.assertEqual("fail", payload["checks"]["highlight_tail_ok"]["status"])
+        self.assertEqual(140, payload["checks"]["highlight_tail_ok"]["failures"][0]["required_end_frame"])
+
+    def test_real_mode_missing_event_candidates_is_unavailable_not_failure_without_highlight_request(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_tracks(output_dir)
+            write_track_hash_snapshot(output_dir, "before_review")
+            write_track_hash_snapshot(output_dir, "after_ai_improvement")
+            _write_json(output_dir / "ball_audit.json", {"review_events": []})
+            _write_json(output_dir / "review_packets.json", {"packets": []})
+            _write_json(
+                output_dir / "ai_improvement_report.json",
+                {
+                    "summary": {"status": "ok"},
+                    "model": "gpt-improve",
+                    "model_selection_source": "explicit",
+                    "improvements": [],
+                },
+            )
+
+            payload = build_ai_improvement_quality_gate(output_dir, mode="real")
+
+        self.assertEqual("unavailable", payload["checks"]["highlight_tail_ok"]["status"])
+        self.assertNotEqual("fail", payload["summary"]["status"])
+
+    def test_real_provider_mode_requires_selected_models(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_real_required_without_models(output_dir)
+
+            missing = build_ai_improvement_quality_gate(output_dir, mode="real")
+            _write_json(
+                output_dir / "ai_improvement_report.json",
+                {
+                    "summary": {"status": "ok"},
+                    "model": "gpt-improve",
+                    "model_selection_source": "explicit",
+                    "improvements": [],
+                },
+            )
+            _write_json(output_dir / "ai_visual_review.json", {"model": "gpt-vision", "reviews": []})
+            present = build_ai_improvement_quality_gate(output_dir, mode="real")
+
+        self.assertEqual("fail", missing["checks"]["model_routing_recorded"]["status"])
+        self.assertEqual("pass", present["checks"]["model_routing_recorded"]["status"])
+
+    def test_real_provider_mode_rejects_dry_run_model_provenance(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_real_required_without_models(output_dir)
+            _write_json(
+                output_dir / "ai_improvement_report.json",
+                {
+                    "summary": {"status": "ok"},
+                    "model": "gpt-improve",
+                    "model_selection_source": "explicit",
+                    "dry_run": True,
+                    "improvements": [],
+                },
+            )
+
+            payload = build_ai_improvement_quality_gate(output_dir, mode="real")
+
+        self.assertEqual("fail", payload["checks"]["model_routing_recorded"]["status"])
+        self.assertIn("dry-run", payload["checks"]["model_routing_recorded"]["reason"])
+
+    def test_dry_run_provider_unavailable_is_warning_not_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_json(output_dir / "ai_improvement_report.json", {"summary": {"status": "unavailable"}, "improvements": []})
+
+            payload = build_ai_improvement_quality_gate(output_dir, mode="dry-run")
+
+        self.assertEqual("warn", payload["checks"]["model_routing_recorded"]["status"])
+        self.assertEqual("dry-run", payload["checks"]["model_routing_recorded"]["mode"])
+        self.assertNotEqual("fail", payload["summary"]["status"])
+
+    def test_malformed_approved_actions_artifact_fails_explicit_consumption(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            approved_path = output_dir / "ai_improvement_approved_actions.json"
+            _write_json(approved_path, {"approved_actions": {"not": "a list"}})
+
+            payload = build_ai_improvement_quality_gate(output_dir, approved_actions_path=approved_path)
+
+        self.assertEqual("fail", payload["checks"]["approved_actions_explicitly_consumed"]["status"])
+        self.assertIn("approved_actions", payload["checks"]["approved_actions_explicitly_consumed"]["reason"])
+
+    def test_missing_explicit_approved_actions_path_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            approved_path = output_dir / "missing_approved_actions.json"
+
+            payload = build_ai_improvement_quality_gate(output_dir, approved_actions_path=approved_path)
+
+        self.assertEqual("fail", payload["checks"]["approved_actions_explicitly_consumed"]["status"])
+        self.assertIn("could not be loaded", payload["checks"]["approved_actions_explicitly_consumed"]["reason"])
+
+    def test_provenance_must_reference_existing_packet_or_visual_review(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_2079_gap(output_dir)
+            _write_packet(output_dir, packet_id="packet_2079", start=2049, end=2544)
+            _write_ai_report(output_dir, [_missing_ball_improvement(start=2049, end=2544)])
+            approval = _targeted_rerun_approval(start=2049, end=2544)
+            approval["provenance"] = {"source_packet_id": "packet_missing"}
+            approved_path = _write_approved_actions(output_dir, [approval])
+
+            payload = build_ai_improvement_quality_gate(output_dir, approved_actions_path=approved_path)
+
+        self.assertEqual("fail", payload["checks"]["long_lost_gap_improvement_coverage"]["status"])
+        self.assertTrue(
+            any("provenance" in reason for reason in payload["checks"]["long_lost_gap_improvement_coverage"]["reasons"])
+        )
+
+    def test_evidence_payload_packet_provenance_can_cover_not_visible(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_2079_gap(output_dir)
+            _write_packet(output_dir, packet_id="packet_2079", start=2049, end=2544)
+            improvement = _not_visible_improvement(start=2049, end=2544)
+            improvement["evidence_payload"] = {"source_packet_id": "packet_2079"}
+            _write_ai_report(output_dir, [improvement])
+
+            payload = build_ai_improvement_quality_gate(output_dir)
+
+        self.assertEqual("warn", payload["checks"]["long_lost_gap_improvement_coverage"]["status"])
+
+    def test_cli_returns_nonzero_when_quality_gate_fails(self) -> None:
+        from scripts.run_ai_improvement_quality_gate import main
+
+        with tempfile.TemporaryDirectory() as temp_name:
+            exit_code = main(["--output-dir", temp_name, "--mode", "real"])
+
+        self.assertEqual(1, exit_code)
+
+    def test_cli_rejects_missing_output_directory(self) -> None:
+        from scripts.run_ai_improvement_quality_gate import main
+
+        with tempfile.TemporaryDirectory() as temp_name:
+            missing_dir = Path(temp_name) / "missing"
+
+            with self.assertRaises(SystemExit) as raised:
+                main(["--output-dir", str(missing_dir)])
+
+        self.assertEqual(2, raised.exception.code)
+
+    def test_cli_accepts_inline_approved_actions_json(self) -> None:
+        from scripts.run_ai_improvement_quality_gate import main
+
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_2079_gap(output_dir)
+            _write_packet(output_dir, packet_id="packet_2079", start=2049, end=2544)
+            _write_ai_report(output_dir, [_missing_ball_improvement(start=2049, end=2544)])
+
+            with patch("builtins.print"):
+                exit_code = main(
+                    [
+                        "--output-dir",
+                        str(output_dir),
+                        "--approved-actions",
+                        json.dumps({"approved_actions": [_targeted_rerun_approval(start=2049, end=2544)]}),
+                    ]
+                )
+
+            payload = json.loads((output_dir / "ai_improvement_quality_gate.json").read_text(encoding="utf-8"))
+
+        self.assertEqual(0, exit_code)
+        self.assertEqual("pass", payload["checks"]["approved_actions_explicitly_consumed"]["status"])
+        self.assertEqual("pass", payload["checks"]["long_lost_gap_improvement_coverage"]["status"])
+
+
+def _write_real_required_without_models(output_dir: Path) -> None:
+    _write_tracks(output_dir)
+    write_track_hash_snapshot(output_dir, "before_review")
+    write_track_hash_snapshot(output_dir, "after_ai_improvement")
+    _write_json(output_dir / "ball_audit.json", {"review_events": []})
+    _write_json(output_dir / "review_packets.json", {"packets": []})
+    _write_json(output_dir / "ai_improvement_report.json", {"summary": {"status": "ok"}, "improvements": []})
+
+
+def _write_2079_gap(output_dir: Path) -> None:
+    _write_json(
+        output_dir / "ball_audit.json",
+        {
+            "summary": {"lost_gap_count": 1},
+            "review_events": [
+                {
+                    "id": "lost_2079",
+                    "type": "lost_gap",
+                    "start_frame": 2049,
+                    "end_frame": 2544,
+                    "frame_count": 496,
+                }
+            ],
+        },
+    )
+
+
+def _write_packet(output_dir: Path, *, packet_id: str, start: int, end: int, label: str = "needs_ai_review") -> None:
+    _write_json(
+        output_dir / "review_packets.json",
+        {
+            "packets": [
+                {
+                    "packet_id": packet_id,
+                    "window": {"start_frame": start, "end_frame": end},
+                    "decision": {"label": label},
+                }
+            ]
+        },
+    )
+
+
+def _write_ai_report(output_dir: Path, improvements: list[dict[str, object]]) -> None:
+    _write_json(
+        output_dir / "ai_improvement_report.json",
+        {
+            "schema_version": "1.0",
+            "summary": {"status": "needs_rerun" if improvements else "ok"},
+            "model": "gpt-improve",
+            "model_selection_source": "explicit",
+            "improvements": improvements,
+            "highlight_adjustments": [],
+        },
+    )
+
+
+def _missing_ball_improvement(*, start: int, end: int) -> dict[str, object]:
+    return {
+        "id": "imp_2079",
+        "area": "tracking",
+        "failure_tags": ["ball_lost"],
+        "recommended_action": "targeted_rerun",
+        "start_frame": start,
+        "end_frame": end,
+        "rerun_scope": {"start_frame": start, "end_frame": end},
+        "source_packet_id": "packet_2079",
+    }
+
+
+def _not_visible_improvement(
+    *,
+    start: int,
+    end: int,
+    status: str = "ok",
+    source_packet_id: str | None = None,
+) -> dict[str, object]:
+    result: dict[str, object] = {
+        "id": "imp_not_visible",
+        "area": "tracking",
+        "failure_tags": ["ball_not_visible"],
+        "recommended_action": "localize_ball_roi",
+        "start_frame": start,
+        "end_frame": end,
+        "likely_ball_region": {"description": "not_visible", "status": status},
+    }
+    if source_packet_id is not None:
+        result["source_packet_id"] = source_packet_id
+    return result
+
+
+def _targeted_rerun_approval(*, start: int, end: int) -> dict[str, object]:
+    return {
+        "approval_id": "approval_2079",
+        "improvement_id": "imp_2079",
+        "approved_action": "targeted_rerun",
+        "rerun_scope": {"start_frame": start, "end_frame": end},
+        "provenance": {"source_packet_id": "packet_2079"},
+    }
+
+
+def _write_approved_actions(output_dir: Path, actions: list[dict[str, object]]) -> Path:
+    path = output_dir / "ai_improvement_approved_actions.json"
+    _write_json(path, {"approved_actions": actions})
+    return path
+
+
+def _write_camera_audit(output_dir: Path, *, review_events: int, max_pan: float, p95_pan: float) -> None:
+    _write_json(
+        output_dir / "camera_motion_audit.json",
+        {
+            "summary": {
+                "review_event_count": review_events,
+                "max_pan_step_px": max_pan,
+                "p95_pan_step_px": p95_pan,
+            }
+        },
+    )
+
+
+def _write_event_candidate(
+    output_dir: Path,
+    *,
+    candidate_id: str,
+    core_end: int,
+    min_tail: int,
+    source_frames: int,
+) -> None:
+    _write_json(
+        output_dir / "event_candidates.json",
+        {
+            "summary": {"total_source_frames": source_frames},
+            "candidates": [
+                {
+                    "id": candidate_id,
+                    "core_window": {"start_frame": core_end - 10, "end_frame": core_end},
+                    "render_window": {"start_frame": core_end - 20, "end_frame": min(source_frames - 1, core_end + min_tail)},
+                    "buffer_policy": {"min_tail_frames": min_tail},
+                }
+            ],
+        },
+    )
+
+
+def _write_tracks(output_dir: Path, *, raw: str = "Frame,X,Y,Status\n1,10,20,Detected\n") -> None:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    (output_dir / "ball_track.csv").write_text(raw, encoding="utf-8")
+    (output_dir / "ball_track.cleaned.csv").write_text(raw, encoding="utf-8")
+
+
+def _sha256_file(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _write_json(path: Path, payload: object) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
+if __name__ == "__main__":
+    unittest.main()
