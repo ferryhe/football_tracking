@@ -6,12 +6,16 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from football_tracking.ai_candidate_comparison import CANDIDATE_STATUSES, comparison_payload_status
+
 SCHEMA_VERSION = "1.0"
 QUALITY_GATE_REPORT_NAME = "ai_improvement_quality_gate.json"
 HASH_SNAPSHOT_REPORT_NAME = "ai_improvement_hash_snapshots.json"
+FINAL_ARTIFACT_MANIFEST_NAME = "final_ai_improvement_artifact_manifest.json"
 TRACK_FILES = ("ball_track.csv", "ball_track.cleaned.csv")
 LONG_LOST_GAP_THRESHOLD_FRAMES = 120
 CAMERA_REGRESSION_TOLERANCE = 1.05
+CANDIDATE_COMPARISON_STATUSES = CANDIDATE_STATUSES
 
 CHECK_NAMES = (
     "track_hash_unchanged",
@@ -22,6 +26,7 @@ CHECK_NAMES = (
     "camera_regression",
     "highlight_tail_ok",
     "model_routing_recorded",
+    "candidate_comparisons_ok",
 )
 
 FAILURE_TAG_ALIASES = {
@@ -114,6 +119,7 @@ def build_ai_improvement_quality_gate(
         "camera_motion_audit": _load_artifact(output_dir / "camera_motion_audit.json"),
         "event_candidates": _load_artifact(output_dir / "event_candidates.json"),
         "ai_visual_review": _load_artifact(output_dir / "ai_visual_review.json"),
+        "final_artifact_manifest": _load_artifact(output_dir / FINAL_ARTIFACT_MANIFEST_NAME),
     }
     candidate_artifacts = {
         "camera_motion_audit": _load_artifact(candidate_dir / "camera_motion_audit.json") if candidate_dir else None
@@ -151,6 +157,10 @@ def build_ai_improvement_quality_gate(
             artifacts["ai_visual_review"],
             mode=mode,
         ),
+        "candidate_comparisons_ok": _check_candidate_comparisons(
+            output_dir,
+            artifacts["final_artifact_manifest"],
+        ),
     }
     long_gap_check, missing_ball_check = _check_long_lost_gap_coverage(
         artifacts["ball_audit"],
@@ -172,6 +182,7 @@ def build_ai_improvement_quality_gate(
     )
     checks = {name: checks[name] for name in CHECK_NAMES}
     summary = _summary(checks)
+    summary["candidate_comparisons"] = _candidate_comparisons_summary(checks["candidate_comparisons_ok"])
     return {
         "schema_version": SCHEMA_VERSION,
         "generated_at": _utc_now_iso(),
@@ -930,6 +941,147 @@ def _load_explicit_approved_actions(
     loaded = _load_artifact(Path(path))
     loaded["source"] = "path"
     return loaded
+
+
+def _check_candidate_comparisons(output_dir: Path, final_manifest: dict[str, Any]) -> dict[str, Any]:
+    reports = _candidate_comparison_reports(output_dir, final_manifest)
+    status_counts = {status: 0 for status in CANDIDATE_COMPARISON_STATUSES}
+    for report in reports:
+        status = report.get("status")
+        if status not in status_counts:
+            status = "unavailable"
+        status_counts[status] += 1
+    if status_counts["fail"]:
+        status = "fail"
+    elif status_counts["unavailable"]:
+        status = "unavailable"
+    elif status_counts["warn"]:
+        status = "warn"
+    elif not reports and _manifest_has_candidate_outputs(final_manifest):
+        status = "unavailable"
+    else:
+        status = "pass"
+    return _check(
+        status,
+        report_count=len(reports),
+        status_counts=status_counts,
+        reports=reports,
+        reason=None if reports else "No candidate comparison reports found",
+    )
+
+
+def _candidate_comparison_reports(output_dir: Path, final_manifest: dict[str, Any]) -> list[dict[str, Any]]:
+    reports: list[dict[str, Any]] = []
+    seen_paths: set[str] = set()
+    output_root = output_dir.resolve()
+    for path in sorted(output_dir.glob("*_comparison.json")):
+        loaded = _load_artifact(path)
+        reports.append(_comparison_report_summary(loaded, path=path))
+        seen_paths.add(str(path.resolve()))
+
+    if final_manifest["status"] != "loaded":
+        return reports
+    manifest_reports = final_manifest["payload"].get("comparison_reports")
+    if not isinstance(manifest_reports, list):
+        return reports
+    for item in manifest_reports:
+        if not isinstance(item, dict):
+            continue
+        path_value = item.get("path") or item.get("report_path")
+        if isinstance(path_value, str) and path_value.strip():
+            path = Path(path_value)
+            if not path.is_absolute():
+                path = output_dir / path
+            resolved_path = path.resolve()
+            if not _is_relative_to(resolved_path, output_root):
+                reports.append(
+                    {
+                        "path": str(path),
+                        "problem_type": item.get("problem_type"),
+                        "candidate_id": item.get("candidate_id"),
+                        "status": "unavailable",
+                        "failed_check_count": 0,
+                        "warning_count": 0,
+                        "unavailable_count": 1,
+                        "artifact_status": "path_outside_output_dir",
+                    }
+                )
+                continue
+            resolved = str(resolved_path)
+            if resolved in seen_paths:
+                continue
+            loaded = _load_artifact(path)
+            reports.append(_comparison_report_summary(loaded, path=path, manifest_entry=item))
+            seen_paths.add(resolved)
+        elif isinstance(item.get("summary"), dict):
+            reports.append(_comparison_payload_summary(item, path=None))
+    return reports
+
+
+def _comparison_report_summary(
+    artifact: dict[str, Any],
+    *,
+    path: Path,
+    manifest_entry: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    if artifact["status"] == "loaded":
+        return _comparison_payload_summary(artifact["payload"], path=path)
+    fallback_candidate_id = None
+    if isinstance(manifest_entry, dict):
+        fallback_candidate_id = manifest_entry.get("candidate_id")
+    return {
+        "path": str(path),
+        "problem_type": None,
+        "candidate_id": fallback_candidate_id,
+        "status": "unavailable",
+        "failed_check_count": 0,
+        "warning_count": 0,
+        "unavailable_count": 1,
+        "artifact_status": artifact["status"],
+    }
+
+
+def _comparison_payload_summary(payload: dict[str, Any], *, path: Path | None) -> dict[str, Any]:
+    status_payload = comparison_payload_status(payload)
+    candidate = payload.get("candidate") if isinstance(payload.get("candidate"), dict) else {}
+    candidate_id = payload.get("candidate_id") or candidate.get("id") or candidate.get("candidate_id")
+    return {
+        "path": str(path) if path is not None else payload.get("path"),
+        "problem_type": payload.get("problem_type"),
+        "candidate_id": candidate_id,
+        "status": status_payload["status"],
+        "failed_check_count": status_payload["failed_check_count"],
+        "warning_count": status_payload["warning_count"],
+        "unavailable_count": status_payload["unavailable_count"],
+        "artifact_status": status_payload["artifact_status"],
+    }
+
+
+def _candidate_comparisons_summary(check: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "status": check.get("status"),
+        "report_count": check.get("report_count", 0),
+        "status_counts": check.get("status_counts", {status: 0 for status in CANDIDATE_COMPARISON_STATUSES}),
+    }
+
+
+def _manifest_has_candidate_outputs(final_manifest: dict[str, Any]) -> bool:
+    if final_manifest["status"] != "loaded":
+        return False
+    payload = final_manifest["payload"]
+    for key in ("candidate_outputs", "final_selected_artifacts"):
+        value = payload.get(key)
+        if isinstance(value, list) and value:
+            return True
+    return False
+
+
+def _is_relative_to(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+    except ValueError:
+        return False
+    return True
 
 
 def _load_artifact(path: Path) -> dict[str, Any]:

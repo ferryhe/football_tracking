@@ -64,6 +64,27 @@ The workflow report records `approval_selection` with `approval_source`, request
 
 `--mode real` treats missing required artifacts as failures. The CLI returns nonzero only for a failing quality gate in non-dry-run real mode.
 
+## Candidate Comparison And Promotion
+
+AI improvement artifacts use three shared roles:
+
+- `baseline`: the existing output used as the comparison source.
+- `candidate`: an alternative output produced by a bounded improvement attempt.
+- `final`: the artifact selected for downstream use after comparison and promotion checks.
+
+Candidate comparison reports are pure JSON files, normally named `*_comparison.json`. They do not copy media and must not mutate `ball_track.csv` or `ball_track.cleaned.csv`. Each report records `problem_type`, `baseline`, `candidate`, optional `approval`, `checks`, and a `summary` status. Shared statuses are `pass`, `warn`, `fail`, and `unavailable`. The quality gate derives comparison status from `checks`; an empty check list or a summary/check mismatch is not accepted as a clean pass.
+
+Promotion uses the status derived from validated comparison checks as the contract:
+
+- `pass` candidates may be promoted into final artifacts.
+- `warn` candidates require both `requires_human_confirmation: true` on the final artifact and a consumed approval for the same `candidate_id` with `approval_type: human_confirmation`; otherwise they stay out of final output and are recorded as rejected or pending confirmation.
+- `fail` candidates are recorded in `rejected_candidates` and cannot be promoted.
+- `unavailable` candidates are not promoted until a usable comparison exists.
+
+The final promotion manifest is `final_ai_improvement_artifact_manifest.json`. It records baseline output, candidate outputs, final selected artifacts, consumed approvals, comparison reports, quality gate status, rejected candidates, warnings, videos, and clips by path/status only. It is a manifest, not a media copier.
+
+The quality gate reads direct `*_comparison.json` reports and comparison references in `final_ai_improvement_artifact_manifest.json`. Its `candidate_comparisons_ok` check and `summary.candidate_comparisons` field summarize pass, warn, fail, and unavailable comparison statuses for later missing-ball, noise, follow-cam, and highlight candidate workflows. Missing comparison reports remain backward compatible only when no candidate output or final selection exists; once a manifest contains candidates, missing or invalid comparisons become unavailable or failing evidence rather than a pass.
+
 ## Model Guidance
 
 Use a stronger model for run-level improvement and hard recovery cases. Reserve smaller or cheaper models for low-risk tagging and dry-run smoke checks.
