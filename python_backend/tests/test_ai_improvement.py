@@ -22,6 +22,7 @@ from football_tracking.ai_contracts import AI_RECOMMENDED_ACTIONS
 from football_tracking.api.ai_provider import OpenAIProviderSettings, OpenAIResponsesClient
 from football_tracking.high_recall_windows import build_high_recall_windows
 from football_tracking.metrics import build_metrics_report, stats_from_metrics_report
+from football_tracking.review_packets import build_review_packet_report
 
 
 class _FakeImprovementClient:
@@ -29,6 +30,7 @@ class _FakeImprovementClient:
         self.response = response
         self.enabled = enabled
         self.calls: list[dict[str, object]] = []
+        self.settings = SimpleNamespace(chat_model="gpt-chat-mini", improvement_model="gpt-improve-strong")
 
     def is_enabled(self) -> bool:
         return self.enabled
@@ -76,6 +78,59 @@ class AiImprovementTests(unittest.TestCase):
         self.assertEqual("review_only", report["candidate_intent"])
         self.assertTrue(report["provider_dry_run"])
         self.assertEqual("dry-run", report["provider_mode"])
+
+    def test_context_records_required_long_gap_coverage_from_real_review_packets(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_long_lost_gap_review_inputs(output_dir, start=100, end=800, total_frames=900)
+            review_packets = build_review_packet_report(output_dir, max_packets=1, include_media=False)
+            _write_json(output_dir / "review_packets.json", review_packets)
+
+            context = build_ai_improvement_context(output_dir)
+
+        coverage = context["validation_facts"]["required_window_coverage"][0]
+        self.assertEqual({"start_frame": 100, "end_frame": 800, "frame_count": 701}, coverage["required_window"])
+        self.assertEqual("partial", coverage["coverage_status"])
+        self.assertEqual(100, coverage["covered_start_frame"])
+        self.assertEqual(195, coverage["covered_end_frame"])
+        self.assertEqual([{"label": "start", "start_frame": 100, "end_frame": 195}], coverage["covered_ranges"])
+        self.assertEqual(
+            [{"label": "start", "start_frame": 100, "end_frame": 195}],
+            coverage["covered_required_window_ranges"],
+        )
+        self.assertEqual(
+            [
+                {"label": "middle", "start_frame": 418, "end_frame": 481},
+                {"label": "end", "start_frame": 705, "end_frame": 800},
+                {"label": "tail", "start_frame": 801, "end_frame": 830},
+            ],
+            coverage["uncovered_ranges"],
+        )
+        self.assertEqual(["start"], coverage["covered_labels"])
+
+    def test_context_records_required_long_gap_coverage_when_all_labels_are_present(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_long_lost_gap_review_inputs(output_dir, start=100, end=800, total_frames=900)
+            review_packets = build_review_packet_report(output_dir, max_packets=4, include_media=False)
+            _write_json(output_dir / "review_packets.json", review_packets)
+
+            context = build_ai_improvement_context(output_dir)
+
+        coverage = context["validation_facts"]["required_window_coverage"][0]
+        self.assertEqual("covered", coverage["coverage_status"])
+        self.assertEqual(100, coverage["covered_start_frame"])
+        self.assertEqual(800, coverage["covered_end_frame"])
+        self.assertEqual([], coverage["uncovered_ranges"])
+        self.assertEqual(["start", "middle", "end", "tail"], coverage["covered_labels"])
+        self.assertEqual(
+            [
+                {"label": "start", "start_frame": 100, "end_frame": 195},
+                {"label": "middle", "start_frame": 418, "end_frame": 481},
+                {"label": "end", "start_frame": 705, "end_frame": 800},
+            ],
+            coverage["covered_required_window_ranges"],
+        )
 
     def test_generic_review_note_is_non_executable_not_silent_candidate(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:
@@ -3376,6 +3431,34 @@ class AiImprovementTests(unittest.TestCase):
         self.assertEqual("unavailable", report["summary"]["status"])
         self.assertTrue(written_exists)
 
+    def test_real_improvement_without_strong_model_records_unavailable_without_chat_fallback(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_minimal_artifacts(output_dir)
+            client = _FakeImprovementClient(RuntimeError("chat fallback must not be called"), enabled=True)
+            client.settings = SimpleNamespace(chat_model="gpt-chat-mini", improvement_model=None)
+
+            report = write_ai_improvement_report(output_dir, client=client)
+
+        self.assertEqual([], client.calls)
+        self.assertIsNone(report["model"])
+        self.assertEqual("strong_model_unavailable", report["model_selection"]["source"])
+        self.assertEqual("unavailable", report["summary"]["status"])
+
+    def test_real_improvement_without_settings_requires_explicit_model(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_minimal_artifacts(output_dir)
+            client = _FakeImprovementClient(RuntimeError("model=None fallback must not be called"), enabled=True)
+            del client.settings
+
+            report = write_ai_improvement_report(output_dir, client=client)
+
+        self.assertEqual([], client.calls)
+        self.assertIsNone(report["model"])
+        self.assertEqual("strong_model_unavailable", report["model_selection"]["source"])
+        self.assertEqual("unavailable", report["summary"]["status"])
+
     def test_default_provider_without_api_key_returns_unavailable(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:
             output_dir = Path(temp_name)
@@ -3388,7 +3471,8 @@ class AiImprovementTests(unittest.TestCase):
                 report = write_ai_improvement_report(output_dir)
 
         self.assertEqual("unavailable", report["summary"]["status"])
-        self.assertEqual("gpt-test", report["model"])
+        self.assertIsNone(report["model"])
+        self.assertEqual("strong_model_unavailable", report["model_selection"]["source"])
 
     def test_cli_passes_max_items_writes_report_and_prints_summary(self) -> None:
         from scripts.run_ai_improvement import main
@@ -3536,6 +3620,52 @@ def _write_minimal_artifacts(output_dir: Path) -> None:
                         "min_post_event_frames": 20,
                         "min_tail_frames": 20,
                     },
+                }
+            ],
+        },
+    )
+
+
+def _write_long_lost_gap_review_inputs(output_dir: Path, *, start: int, end: int, total_frames: int) -> None:
+    rows = ["Frame,X,Y,Confidence,Status"]
+    for frame in range(total_frames):
+        if start <= frame <= end:
+            rows.append(f"{frame},,,0.00,Lost")
+        else:
+            rows.append(f"{frame},{100 + frame * 0.1:.1f},100,0.90,Detected")
+    (output_dir / "ball_track.cleaned.csv").write_text("\n".join(rows) + "\n", encoding="utf-8")
+    _write_json(
+        output_dir / "ball_audit.json",
+        {
+            "summary": {"review_event_count": 1, "lost_gap_count": 1},
+            "review_events": [
+                {
+                    "type": "lost_gap",
+                    "severity": "fail",
+                    "start_frame": start,
+                    "end_frame": end,
+                    "frame_count": end - start + 1,
+                    "reason": "Ball track is lost between tracklets.",
+                }
+            ],
+        },
+    )
+    _write_json(
+        output_dir / "ai_review_triggers.json",
+        {
+            "schema_version": "1.0",
+            "decision": {"needs_ai_review": True},
+            "triggers": [
+                {
+                    "id": f"event:1:lost_gap:{start}-{end}",
+                    "type": "lost_gap",
+                    "priority": "medium",
+                    "source": "cleaned",
+                    "start_frame": start,
+                    "end_frame": end,
+                    "frame_count": end - start + 1,
+                    "reason": f"Ball track is lost for {end - start + 1} frames between tracklets.",
+                    "evidence": {"lost_frame_count": end - start + 1},
                 }
             ],
         },

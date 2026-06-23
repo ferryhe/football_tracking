@@ -15,6 +15,13 @@ from football_tracking.ai_contracts import (
     AI_RECOMMENDED_ACTIONS,
     AI_ROOT_CAUSE_MODULES,
 )
+from football_tracking.review_packets import (
+    DEFAULT_POST_ROLL_FRAMES,
+    LONG_LOST_GAP_REQUIRED_LABELS,
+    MICRO_PACKET_MAX_FRAMES,
+    MICRO_PACKET_MIN_FRAMES,
+    MICRO_PACKET_TARGET_FRAMES,
+)
 
 SCHEMA_VERSION = "1.0"
 REPORT_FILE_NAME = "ai_improvement_report.json"
@@ -148,6 +155,9 @@ def build_ai_improvement_context(
         "traceable_provenance": _traceable_provenance_payload({"artifacts": provenance_artifacts}),
         "validation_facts": {
             "long_lost_gap_windows": _long_lost_gap_windows_from_artifacts(validation_artifacts),
+            "required_window_coverage": _required_window_coverage_from_artifacts(
+                {**validation_artifacts, **provenance_artifacts}
+            ),
         },
         "artifacts": artifacts,
         "warnings": warnings,
@@ -172,7 +182,7 @@ def build_ai_improvement_report(
         max_items=max_items,
         candidate_intent=resolved_candidate_intent,
     )
-    selected_model, model_selection_source = _select_model(client, model)
+    selected_model, model_selection_source = _select_model(client, model, allow_chat_fallback=dry_run)
 
     if context["available_artifact_count"] <= 0:
         return _report(
@@ -196,7 +206,7 @@ def build_ai_improvement_report(
     active_client = client
     if active_client is None:
         active_client = _build_default_client()
-        selected_model, model_selection_source = _select_model(active_client, model)
+        selected_model, model_selection_source = _select_model(active_client, model, allow_chat_fallback=False)
 
     if hasattr(active_client, "is_enabled") and not active_client.is_enabled():
         return _report(
@@ -207,6 +217,16 @@ def build_ai_improvement_report(
             dry_run=False,
             status="unavailable",
             warnings=[*context["warnings"], "OpenAI provider is not configured."],
+        )
+    if selected_model is None and model_selection_source == "strong_model_unavailable":
+        return _report(
+            output_dir=output_dir,
+            context=context,
+            model=selected_model,
+            model_selection_source=model_selection_source,
+            dry_run=False,
+            status="unavailable",
+            warnings=[*context["warnings"], "Strong AI improvement model is not configured."],
         )
 
     try:
@@ -1578,6 +1598,138 @@ def _long_lost_gap_windows_from_artifacts(artifacts: dict[str, Any]) -> list[dic
     return windows
 
 
+def _required_window_coverage_from_artifacts(artifacts: dict[str, Any]) -> list[dict[str, Any]]:
+    packet_report = artifacts.get("review_packets") if isinstance(artifacts.get("review_packets"), dict) else {}
+    raw_coverages = packet_report.get("long_lost_gap_coverage")
+    if not isinstance(raw_coverages, list):
+        return []
+
+    coverages: list[dict[str, Any]] = []
+    for raw in raw_coverages:
+        if not isinstance(raw, dict):
+            continue
+        gap = raw.get("gap") if isinstance(raw.get("gap"), dict) else raw
+        required_window = _optional_frame_window(gap)
+        if required_window is None:
+            continue
+        frame_count = _optional_int(gap.get("frame_count")) if isinstance(gap, dict) else None
+        if frame_count is None:
+            frame_count = required_window["end_frame"] - required_window["start_frame"] + 1
+        required_labels = [
+            str(label)
+            for label in raw.get("required_labels", [])
+            if isinstance(label, str) and label.strip()
+        ]
+        covered_labels = [
+            str(label)
+            for label in raw.get("covered_labels", [])
+            if isinstance(label, str) and label.strip()
+        ]
+        label_windows = _long_lost_gap_label_windows_for_context(
+            required_window["start_frame"],
+            required_window["end_frame"],
+        )
+        covered_ranges = [
+            {"label": label, **label_windows[label]}
+            for label in LONG_LOST_GAP_REQUIRED_LABELS
+            if label in covered_labels
+        ]
+        covered_required_window_ranges = [
+            clipped
+            for item in covered_ranges
+            if (clipped := _clip_coverage_range_to_required_window(item, required_window)) is not None
+        ]
+        covered_start = min(
+            (window["start_frame"] for window in covered_required_window_ranges),
+            default=None,
+        )
+        covered_end = max(
+            (window["end_frame"] for window in covered_required_window_ranges),
+            default=None,
+        )
+        uncovered_ranges = [
+            {"label": label, "start_frame": window["start_frame"], "end_frame": window["end_frame"]}
+            for item in raw.get("uncovered_ranges", [])
+            if isinstance(item, dict)
+            and isinstance(item.get("label"), str)
+            and (label := item["label"].strip()) in LONG_LOST_GAP_REQUIRED_LABELS
+            and (window := _optional_frame_window(item)) is not None
+        ]
+        coverages.append(
+            {
+                "required_window": {
+                    "start_frame": required_window["start_frame"],
+                    "end_frame": required_window["end_frame"],
+                    "frame_count": frame_count,
+                },
+                "coverage_status": (
+                    "covered"
+                    if not uncovered_ranges
+                    else ("partial" if covered_ranges or covered_labels else "uncovered")
+                ),
+                "covered_start_frame": covered_start,
+                "covered_end_frame": covered_end,
+                "covered_ranges": covered_ranges,
+                "covered_required_window_ranges": covered_required_window_ranges,
+                "uncovered_ranges": uncovered_ranges,
+                "required_labels": required_labels,
+                "covered_labels": covered_labels,
+            }
+        )
+    return coverages
+
+
+def _long_lost_gap_label_windows_for_context(start: int, end: int) -> dict[str, dict[str, int]]:
+    start_window = _bounded_context_window(start, start + MICRO_PACKET_MAX_FRAMES - 1, start, end)
+    middle_frame = start + (end - start) // 2
+    middle_window = _context_micro_window_for_frame(middle_frame, start, end)
+    end_window = _bounded_context_window(end - MICRO_PACKET_MAX_FRAMES + 1, end, start, end)
+    tail_start = end + 1
+    tail_end = end + DEFAULT_POST_ROLL_FRAMES
+    return {
+        "start": start_window,
+        "middle": middle_window,
+        "end": end_window,
+        "tail": {"start_frame": tail_start, "end_frame": tail_end},
+    }
+
+
+def _bounded_context_window(start_frame: int, end_frame: int, min_frame: int, max_frame: int) -> dict[str, int]:
+    start = max(min_frame, start_frame)
+    end = min(max_frame, end_frame)
+    if end < start:
+        end = start
+    return {"start_frame": start, "end_frame": end}
+
+
+def _context_micro_window_for_frame(frame: int, start_frame: int, end_frame: int) -> dict[str, int]:
+    parent_count = end_frame - start_frame + 1
+    target_count = min(MICRO_PACKET_TARGET_FRAMES, MICRO_PACKET_MAX_FRAMES, parent_count)
+    target_count = max(min(MICRO_PACKET_MIN_FRAMES, parent_count), target_count)
+    start = int(frame) - target_count // 2
+    end = start + target_count - 1
+    if start < start_frame:
+        end += start_frame - start
+        start = start_frame
+    if end > end_frame:
+        start -= end - end_frame
+        end = end_frame
+    start = max(start_frame, start)
+    end = min(end_frame, max(start, end))
+    return {"start_frame": int(start), "end_frame": int(end)}
+
+
+def _clip_coverage_range_to_required_window(
+    item: dict[str, Any],
+    required_window: dict[str, int],
+) -> dict[str, Any] | None:
+    start = max(required_window["start_frame"], int(item["start_frame"]))
+    end = min(required_window["end_frame"], int(item["end_frame"]))
+    if end < start:
+        return None
+    return {"label": item["label"], "start_frame": start, "end_frame": end}
+
+
 def _is_missing_ball_item(item: dict[str, Any]) -> bool:
     tags = {str(tag).casefold() for tag in item.get("failure_tags", []) if str(tag).strip()}
     if tags & _MISSING_BALL_TAGS:
@@ -2867,17 +3019,19 @@ _CONFIG_PATCH_VALIDATORS: dict[str, Callable[[Any], bool]] = {
 }
 
 
-def _select_model(client: Any, model: str | None) -> tuple[str | None, str]:
+def _select_model(client: Any, model: str | None, *, allow_chat_fallback: bool = False) -> tuple[str | None, str]:
     if model:
         return model, "explicit"
     settings = getattr(client, "settings", None)
+    if settings is None and client is not None:
+        return None, "client_supplied" if allow_chat_fallback else "strong_model_unavailable"
     improvement_model = getattr(settings, "improvement_model", None)
-    if isinstance(improvement_model, str) and improvement_model:
-        return improvement_model, "improvement_model"
+    if isinstance(improvement_model, str) and improvement_model.strip():
+        return improvement_model.strip(), "improvement_model"
     chat_model = getattr(settings, "chat_model", None)
-    if isinstance(chat_model, str) and chat_model:
-        return chat_model, "chat_model_fallback"
-    return None, "unknown"
+    if allow_chat_fallback and isinstance(chat_model, str) and chat_model.strip():
+        return chat_model.strip(), "chat_model_fallback"
+    return None, "strong_model_unavailable" if settings is not None else "unknown"
 
 
 def _build_default_client() -> Any:
