@@ -71,6 +71,7 @@ Review and highlight outputs:
 - **Camera motion audit** — follow-cam renders also write `camera_motion_audit.json`, a standalone review report for abrupt pan, acceleration, or zoom changes in the final camera path.
 - **Event candidates** — completed runs can expose `event_candidates.json` with shot and goal candidates. These are review candidates, not confirmed football events.
 - **Highlight clips** — the Deliverable page can render a short `highlight.mp4` from a selected event candidate; the child run writes `highlight_report.json` and appears in History as a highlight job.
+- **Stable AI improvement workflow** — use [`docs/operations/ai-improvement-workflow.md`](./docs/operations/ai-improvement-workflow.md) to rerun review/improvement checks against an existing output directory. The recipe favors temporal chunks for full-video speed, reserves SAHI/ROI for explicit bounded approvals, and never executes approval files just because they exist.
 
 ### Workflows (managed automatically on Replit)
 
