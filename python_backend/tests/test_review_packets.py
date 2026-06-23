@@ -16,6 +16,8 @@ from football_tracking.review_packets import (
     write_review_packet_report,
 )
 
+FIXTURE_DIR = Path(__file__).parent / "fixtures"
+
 
 class ReviewPacketTests(unittest.TestCase):
     def test_build_review_packet_report_selects_trigger_and_event_windows(self) -> None:
@@ -238,11 +240,186 @@ class ReviewPacketTests(unittest.TestCase):
             packet
             for packet in report["packets"]
             if packet["source"]["type"] == "lost_gap"
-            and packet["source"]["start_frame"] == 2049
-            and packet["source"]["end_frame"] == 2544
+            and packet["source"]["parent_window"]["start_frame"] == 2049
+            and packet["source"]["parent_window"]["end_frame"] == 2544
         ]
-        self.assertEqual(1, len(lost_gap_packets))
-        self.assertEqual("ball_not_visible", lost_gap_packets[0]["decision"]["label"])
+        self.assertEqual(4, len(lost_gap_packets))
+        self.assertEqual(
+            ["start", "middle", "end", "tail"],
+            [packet["source"]["evidence"]["long_lost_gap_coverage_label"] for packet in lost_gap_packets],
+        )
+        self.assertTrue(all(packet["decision"]["label"] == "ball_not_visible" for packet in lost_gap_packets[:3]))
+
+    def test_right_bottom_gap_fixture_gets_start_middle_end_tail_packet_coverage(self) -> None:
+        fixture = json.loads((FIXTURE_DIR / "right_bottom_gap_2049_2544.json").read_text(encoding="utf-8"))
+        gap = fixture["lost_gap"]
+        with tempfile.TemporaryDirectory() as temp:
+            output_dir = Path(temp)
+            rows = ["Frame,X,Y,Confidence,Status"]
+            for frame in range(2601):
+                if gap["start_frame"] <= frame <= gap["end_frame"]:
+                    rows.append(f"{frame},,,0.00,Lost")
+                else:
+                    rows.append(f"{frame},{100 + frame * 0.1:.1f},100,0.90,Detected")
+            (output_dir / "ball_track.cleaned.csv").write_text("\n".join(rows) + "\n", encoding="utf-8")
+            (output_dir / "ai_review_triggers.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": "1.0",
+                        "triggers": [
+                            {
+                                "id": "event:61:lost_gap:2049-2544",
+                                "type": "lost_gap",
+                                "priority": "medium",
+                                "source": "cleaned",
+                                "start_frame": gap["start_frame"],
+                                "end_frame": gap["end_frame"],
+                                "frame_count": gap["end_frame"] - gap["start_frame"] + 1,
+                                "reason": "Ball track is lost for 496 frames between tracklets.",
+                                "evidence": {
+                                    "lost_frame_count": 496,
+                                    "key_frame": fixture["key_frame"],
+                                    "source_size": fixture["source_size"],
+                                    "expected_region": fixture["expected_region"],
+                                },
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            report = build_review_packet_report(output_dir, max_packets=4, include_media=False)
+
+        coverage = report["long_lost_gap_coverage"][0]
+        self.assertEqual(fixture["expected_region"], coverage["expected_region"])
+        self.assertEqual(fixture["key_frame"], coverage["key_frame"])
+        self.assertEqual([], coverage["uncovered_ranges"])
+        self.assertEqual(fixture["required_packet_coverage_labels"], coverage["covered_labels"])
+        self.assertEqual(
+            fixture["required_packet_coverage_labels"],
+            [
+                packet["source"]["evidence"]["long_lost_gap_coverage_label"]
+                for packet in report["packets"]
+                if packet["source"]["type"] == "lost_gap"
+            ],
+        )
+
+    def test_long_lost_gap_reports_uncovered_tail_when_packet_budget_is_tight(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            output_dir = Path(temp)
+            rows = ["Frame,X,Y,Confidence,Status"]
+            for frame in range(900):
+                if 100 <= frame <= 800:
+                    rows.append(f"{frame},,,0.00,Lost")
+                else:
+                    rows.append(f"{frame},{100 + frame * 0.1:.1f},100,0.90,Detected")
+            (output_dir / "ball_track.cleaned.csv").write_text("\n".join(rows) + "\n", encoding="utf-8")
+            (output_dir / "ai_review_triggers.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": "1.0",
+                        "triggers": [
+                            {
+                                "id": "event:1:lost_gap:100-800",
+                                "type": "lost_gap",
+                                "priority": "medium",
+                                "source": "cleaned",
+                                "start_frame": 100,
+                                "end_frame": 800,
+                                "frame_count": 701,
+                                "reason": "Ball track is lost for 701 frames between tracklets.",
+                                "evidence": {"lost_frame_count": 701},
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            report = build_review_packet_report(output_dir, max_packets=3, include_media=False)
+
+        coverage = report["long_lost_gap_coverage"][0]
+        self.assertEqual(["start", "middle", "end"], coverage["covered_labels"])
+        self.assertEqual([{"label": "tail", "start_frame": 801, "end_frame": 830}], coverage["uncovered_ranges"])
+
+    def test_long_lost_gap_tail_at_source_end_is_uncovered(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            output_dir = Path(temp)
+            rows = ["Frame,X,Y,Confidence,Status"]
+            for frame in range(801):
+                if 100 <= frame <= 800:
+                    rows.append(f"{frame},,,0.00,Lost")
+                else:
+                    rows.append(f"{frame},{100 + frame * 0.1:.1f},100,0.90,Detected")
+            (output_dir / "ball_track.cleaned.csv").write_text("\n".join(rows) + "\n", encoding="utf-8")
+            (output_dir / "ai_review_triggers.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": "1.0",
+                        "triggers": [
+                            {
+                                "id": "event:1:lost_gap:100-800",
+                                "type": "lost_gap",
+                                "priority": "medium",
+                                "source": "cleaned",
+                                "start_frame": 100,
+                                "end_frame": 800,
+                                "frame_count": 701,
+                                "reason": "Ball track is lost through the source end.",
+                                "evidence": {"lost_frame_count": 701},
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            report = build_review_packet_report(output_dir, max_packets=4, include_media=False)
+
+        coverage = report["long_lost_gap_coverage"][0]
+        self.assertEqual(["start", "middle", "end"], coverage["covered_labels"])
+        self.assertEqual([{"label": "tail", "start_frame": 801, "end_frame": 830}], coverage["uncovered_ranges"])
+
+    def test_long_lost_gap_tail_with_failed_media_is_uncovered_even_when_track_rows_exist(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            output_dir = Path(temp)
+            fake_video = output_dir / "bad_input.mp4"
+            fake_video.write_text("not a video", encoding="utf-8")
+            rows = ["Frame,X,Y,Confidence,Status"]
+            for frame in range(831):
+                if 100 <= frame <= 800:
+                    rows.append(f"{frame},,,0.00,Lost")
+                else:
+                    rows.append(f"{frame},{100 + frame * 0.1:.1f},100,0.90,Detected")
+            (output_dir / "ball_track.cleaned.csv").write_text("\n".join(rows) + "\n", encoding="utf-8")
+            (output_dir / "ai_review_triggers.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": "1.0",
+                        "triggers": [
+                            {
+                                "id": "event:1:lost_gap:100-800",
+                                "type": "lost_gap",
+                                "priority": "medium",
+                                "source": "cleaned",
+                                "start_frame": 100,
+                                "end_frame": 800,
+                                "frame_count": 701,
+                                "reason": "Ball track is lost before a tail with invalid source media.",
+                                "evidence": {"lost_frame_count": 701},
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            report = build_review_packet_report(output_dir, input_video=fake_video, max_packets=4, include_media=True)
+
+        coverage = report["long_lost_gap_coverage"][0]
+        self.assertEqual(["start", "middle", "end"], coverage["covered_labels"])
+        self.assertEqual([{"label": "tail", "start_frame": 801, "end_frame": 830}], coverage["uncovered_ranges"])
 
     def test_build_review_packet_report_keeps_oversized_long_lost_gap_for_audit(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -279,10 +456,9 @@ class ReviewPacketTests(unittest.TestCase):
 
             report = build_review_packet_report(output_dir, max_packets=10, include_media=False)
 
-        self.assertEqual(1, report["summary"]["packet_count"])
-        packet = report["packets"][0]
-        self.assertEqual("lost_gap", packet["source"]["type"])
-        self.assertEqual({"start_frame": 70, "end_frame": 830, "frame_count": 761}, packet["window"])
+        self.assertEqual(4, report["summary"]["packet_count"])
+        self.assertEqual(["start", "middle", "end", "tail"], report["long_lost_gap_coverage"][0]["covered_labels"])
+        self.assertEqual([], report["long_lost_gap_coverage"][0]["uncovered_ranges"])
 
     def test_build_review_packet_report_includes_rejected_high_recall_windows(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -440,10 +616,14 @@ class ReviewPacketTests(unittest.TestCase):
             packet
             for packet in report["packets"]
             if packet["source"]["kind"] == "high_recall_rejection"
-            and packet["source"]["start_frame"] == 2049
-            and packet["source"]["end_frame"] == 2544
+            and packet["source"]["parent_window"]["start_frame"] == 2049
+            and packet["source"]["parent_window"]["end_frame"] == 2544
         ]
-        self.assertEqual(1, len(high_recall_lost_gap_packets))
+        self.assertEqual(4, len(high_recall_lost_gap_packets))
+        self.assertEqual(
+            ["start", "middle", "end", "tail"],
+            [packet["source"]["evidence"]["long_lost_gap_coverage_label"] for packet in high_recall_lost_gap_packets],
+        )
         packet = high_recall_lost_gap_packets[0]
         self.assertEqual("ball_audit: lost_gap", packet["source"]["evidence"]["window_reason"])
         self.assertEqual("needs_ai_review", packet["decision"]["label"])

@@ -19,6 +19,7 @@ from football_tracking.ai_improvement import (
     write_ai_improvement_report,
 )
 from football_tracking.api.ai_provider import OpenAIProviderSettings, OpenAIResponsesClient
+from football_tracking.high_recall_windows import build_high_recall_windows
 from football_tracking.metrics import build_metrics_report, stats_from_metrics_report
 
 
@@ -635,6 +636,7 @@ class AiImprovementTests(unittest.TestCase):
                             "root_cause_module": "reacquisition",
                             "diagnosis": "Ball is likely in the right corner packet crop.",
                             "recommended_action": "localize_ball_roi",
+                            "candidate_id": "candidate_001",
                             "local_search_roi": {
                                 "coordinate_space": "image",
                                 "frame": 2088,
@@ -662,6 +664,43 @@ class AiImprovementTests(unittest.TestCase):
         self.assertEqual("localize_ball_roi", report["improvements"][0]["recommended_action"])
         self.assertEqual(4300.0, report["improvements"][0]["local_search_roi"]["x"])
 
+    def test_localize_ball_roi_requires_candidate_id(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_minimal_artifacts(output_dir)
+            client = _FakeImprovementClient(
+                {
+                    "summary": {"status": "needs_rerun"},
+                    "improvements": [
+                        {
+                            "id": "imp_001",
+                            "priority": "P0",
+                            "area": "tracking",
+                            "failure_tags": ["ball_lost"],
+                            "root_cause_module": "reacquisition",
+                            "diagnosis": "Ball is likely in the right corner packet crop.",
+                            "recommended_action": "localize_ball_roi",
+                            "local_search_roi": {
+                                "coordinate_space": "image",
+                                "frame": 2088,
+                                "x": 4300,
+                                "y": 760,
+                                "width": 900,
+                                "height": 520,
+                                "confidence": 0.74,
+                            },
+                            "evidence": [{"source_packet_id": "packet_001"}],
+                            "confidence": 0.78,
+                        }
+                    ],
+                }
+            )
+
+            report = build_ai_improvement_report(output_dir, client=client)
+
+        self.assertEqual("error", report["summary"]["status"])
+        self.assertIn("localize_ball_roi requires candidate_id", report["error"])
+
     def test_localize_ball_roi_without_packet_or_visual_provenance_becomes_error_report(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:
             output_dir = Path(temp_name)
@@ -678,6 +717,7 @@ class AiImprovementTests(unittest.TestCase):
                             "root_cause_module": "reacquisition",
                             "diagnosis": "Ball is likely in the right corner, but no packet evidence is cited.",
                             "recommended_action": "localize_ball_roi",
+                            "candidate_id": "candidate_001",
                             "local_search_roi": {
                                 "coordinate_space": "image",
                                 "frame": 2088,
@@ -825,6 +865,7 @@ class AiImprovementTests(unittest.TestCase):
                             "root_cause_module": "reacquisition",
                             "diagnosis": "Model cites a packet id that is not in review_packets.json.",
                             "recommended_action": "localize_ball_roi",
+                            "candidate_id": "candidate_001",
                             "source_packet_id": "packet_does_not_exist",
                             "local_search_roi": {
                                 "coordinate_space": "image",
@@ -877,6 +918,7 @@ class AiImprovementTests(unittest.TestCase):
                             "root_cause_module": "reacquisition",
                             "diagnosis": "Packet id exists in review_packets.json but is outside the prompt context limit.",
                             "recommended_action": "localize_ball_roi",
+                            "candidate_id": "candidate_001",
                             "source_packet_id": "packet_005",
                             "local_search_roi": {
                                 "coordinate_space": "image",
@@ -1780,6 +1822,7 @@ class AiImprovementTests(unittest.TestCase):
                             "root_cause_module": "reacquisition",
                             "diagnosis": "Model thinks the ball can be localized.",
                             "recommended_action": "localize_ball_roi",
+                            "candidate_id": "candidate_001",
                             "local_search_roi": {
                                 "coordinate_space": "image",
                                 "frame": 15,
@@ -1824,6 +1867,7 @@ class AiImprovementTests(unittest.TestCase):
                             "root_cause_module": "reacquisition",
                             "diagnosis": "Recover localized ball.",
                             "recommended_action": "targeted_rerun",
+                            "candidate_id": "candidate_001",
                             "rerun_scope": {"start_frame": 10, "end_frame": 20},
                             "local_search_roi": {
                                 "coordinate_space": "image",
@@ -1857,6 +1901,7 @@ class AiImprovementTests(unittest.TestCase):
         self.assertEqual(artifact, written)
         self.assertEqual("approval_001", action["approval_id"])
         self.assertEqual("targeted_rerun", action["approved_action"])
+        self.assertEqual("candidate_001", action["candidate_id"])
         self.assertEqual("operator-a", action["approved_by"])
         self.assertEqual("packet_001", action["source_packet_id"])
         self.assertEqual("visual_review:packet_001", action["visual_review_id"])
@@ -1883,6 +1928,10 @@ class AiImprovementTests(unittest.TestCase):
                             "root_cause_module": "reacquisition",
                             "diagnosis": "Manually edited report removed source ids.",
                             "recommended_action": "localize_ball_roi",
+                            "candidate_id": "candidate_001",
+                            "match_ball_confirmed": True,
+                            "start_frame": 10,
+                            "end_frame": 20,
                             "local_search_roi": {
                                 "coordinate_space": "image",
                                 "frame": 15,
@@ -1927,6 +1976,10 @@ class AiImprovementTests(unittest.TestCase):
                             "root_cause_module": "reacquisition",
                             "diagnosis": "Evidence list carries the packet id.",
                             "recommended_action": "localize_ball_roi",
+                            "candidate_id": "candidate_001",
+                            "match_ball_confirmed": True,
+                            "start_frame": 10,
+                            "end_frame": 20,
                             "local_search_roi": {
                                 "coordinate_space": "image",
                                 "frame": 15,
@@ -1949,10 +2002,67 @@ class AiImprovementTests(unittest.TestCase):
                 improvement_ids=["imp_001"],
                 approved_by="operator-a",
             )
+            rerun_report = build_high_recall_windows(
+                output_dir,
+                approved_actions_path=output_dir / "ai_improvement_approved_actions.json",
+                approved_only=True,
+                total_frames=100,
+            )
 
         action = artifact["approved_actions"][0]
         self.assertEqual("localize_ball_roi", action["approved_action"])
+        self.assertEqual("packet_001", action["source_packet_id"])
+        self.assertEqual(10, action["start_frame"])
+        self.assertEqual(20, action["end_frame"])
+        self.assertIs(True, action["match_ball_confirmed"])
         self.assertEqual(120.0, action["local_search_roi"]["x"])
+        self.assertEqual(1, rerun_report["summary"]["selected_window_count"])
+        self.assertEqual("packet_001", rerun_report["windows"][0]["source_packet_id"])
+
+    def test_approval_rejects_localize_ball_roi_without_frame_bounds(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_minimal_artifacts(output_dir)
+            _write_json(
+                output_dir / "ai_improvement_report.json",
+                {
+                    "schema_version": "1.0",
+                    "generated_at": "2026-06-22T00:00:00+00:00",
+                    "model": "gpt-improve",
+                    "summary": {"status": "needs_rerun"},
+                    "improvements": [
+                        {
+                            "id": "imp_001",
+                            "priority": "P0",
+                            "area": "tracking",
+                            "failure_tags": ["ball_lost"],
+                            "root_cause_module": "reacquisition",
+                            "diagnosis": "ROI without a bounded frame window is not executable.",
+                            "recommended_action": "localize_ball_roi",
+                            "candidate_id": "candidate_001",
+                            "local_search_roi": {
+                                "coordinate_space": "image",
+                                "frame": 15,
+                                "x": 120,
+                                "y": 40,
+                                "width": 80,
+                                "height": 50,
+                                "confidence": 0.72,
+                            },
+                            "evidence": [{"source_packet_id": "packet_001"}],
+                            "confidence": 0.82,
+                        }
+                    ],
+                },
+            )
+
+            with self.assertRaisesRegex(ValueError, "localize_ball_roi requires frame bounds"):
+                approve_ai_improvement_actions(
+                    output_dir,
+                    run_id="run_123",
+                    improvement_ids=["imp_001"],
+                    approved_by="operator-a",
+                )
 
     def test_approval_config_patch_strips_invalid_paths_and_writes_derived_patch(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:

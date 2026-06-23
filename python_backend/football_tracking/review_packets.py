@@ -15,7 +15,8 @@ DEFAULT_PRE_ROLL_FRAMES = 30
 DEFAULT_POST_ROLL_FRAMES = 30
 MAX_TRIGGER_WINDOW_FRAMES = 600
 LONG_LOST_GAP_MIN_FRAMES = 120
-LONG_LOST_GAP_RESERVED_PACKETS = 1
+LONG_LOST_GAP_REQUIRED_LABELS = ("start", "middle", "end", "tail")
+LONG_LOST_GAP_RESERVED_PACKETS = len(LONG_LOST_GAP_REQUIRED_LABELS)
 MICRO_PACKET_MIN_FRAMES = 24
 MICRO_PACKET_TARGET_FRAMES = 64
 MICRO_PACKET_MAX_FRAMES = 96
@@ -93,6 +94,7 @@ def build_review_packet_report(
             "counts_by_label": dict(sorted(Counter(packet["decision"]["label"] for packet in packets).items())),
             "media_packet_count": sum(1 for packet in packets if packet["media"]),
         },
+        "long_lost_gap_coverage": _long_lost_gap_coverage(packets),
         "packets": packets,
     }
 
@@ -271,16 +273,26 @@ def _reserved_long_lost_gap_sources(sources: list[dict[str, Any]], *, max_packet
         source
         for source in sources
         if _source_represents_lost_gap(source)
-        and _frame_count(int(source["start_frame"]), int(source["end_frame"])) >= LONG_LOST_GAP_MIN_FRAMES
+        and _long_lost_gap_parent_frame_count(source) >= LONG_LOST_GAP_MIN_FRAMES
     ]
-    long_lost_gaps.sort(
+    grouped: dict[tuple[int, int], list[dict[str, Any]]] = {}
+    for source in long_lost_gaps:
+        grouped.setdefault(_long_lost_gap_parent_range(source), []).append(source)
+    ordered_groups = sorted(
+        grouped.items(),
         key=lambda item: (
-            -_frame_count(int(item["start_frame"]), int(item["end_frame"])),
-            -_priority_rank(str(item.get("priority") or "none")),
-            int(item["start_frame"]),
-        )
+            -_frame_count(item[0][0], item[0][1]),
+            item[0][0],
+        ),
     )
-    return long_lost_gaps[: min(max_packets, LONG_LOST_GAP_RESERVED_PACKETS)]
+    reserved: list[dict[str, Any]] = []
+    for _parent_range, group in ordered_groups:
+        group.sort(key=_long_lost_gap_label_order)
+        for source in group:
+            if len(reserved) >= min(max_packets, LONG_LOST_GAP_RESERVED_PACKETS):
+                return reserved
+            reserved.append(source)
+    return reserved
 
 
 def _event_candidate_sources(output_dir: Path) -> list[dict[str, Any]]:
@@ -353,7 +365,10 @@ def _trigger_sources(output_dir: Path, *, max_packets: int) -> list[dict[str, An
         if trigger_type == "dense_noise_cluster":
             sources.extend(_dense_noise_micro_sources(source, output_dir=output_dir, max_packets=max_packets))
             continue
-        if frame_count > MAX_TRIGGER_WINDOW_FRAMES and not _is_long_lost_gap_trigger(trigger_type, frame_count):
+        if _is_long_lost_gap_trigger(trigger_type, frame_count):
+            sources.extend(_long_lost_gap_diagnostic_sources(source, max_packets=max_packets))
+            continue
+        if frame_count > MAX_TRIGGER_WINDOW_FRAMES:
             continue
         sources.append(source)
     return sorted(
@@ -591,9 +606,7 @@ def _micro_sources_for_high_recall_rejection(
         child["render_window"] = {"start_frame": start, "end_frame": end}
         return [child]
     if _source_is_explicit_long_lost_gap(source) and parent_count >= LONG_LOST_GAP_MIN_FRAMES:
-        child = dict(source)
-        child["render_window"] = {"start_frame": start, "end_frame": end}
-        return [child]
+        return _long_lost_gap_diagnostic_sources(source, max_packets=max_packets)
 
     parent_window = {"start_frame": start, "end_frame": end, "frame_count": parent_count}
     anchors = _micro_packet_anchors(output_dir, start, end)
@@ -650,6 +663,152 @@ def _high_recall_micro_source(
         )
     child["evidence"] = evidence
     return child
+
+
+def _long_lost_gap_diagnostic_sources(source: dict[str, Any], *, max_packets: int) -> list[dict[str, Any]]:
+    start = _parse_int(source.get("start_frame"))
+    end = _parse_int(source.get("end_frame"))
+    if start is None or end is None:
+        return [source]
+    if end < start:
+        start, end = end, start
+    parent_window = {"start_frame": start, "end_frame": end, "frame_count": _frame_count(start, end)}
+    windows = _long_lost_gap_label_windows(start, end)
+    children: list[dict[str, Any]] = []
+    for index, label in enumerate(LONG_LOST_GAP_REQUIRED_LABELS[: max(0, max_packets)], start=1):
+        window = windows[label]
+        child = dict(source)
+        child["id"] = f"{source.get('id')}:diagnostic:{label}:{window['start_frame']}-{window['end_frame']}"
+        child["source_packet_id"] = str(source.get("id") or "")
+        child["parent_window"] = dict(parent_window)
+        child["start_frame"] = window["start_frame"]
+        child["end_frame"] = window["end_frame"]
+        child["render_window"] = {"start_frame": window["start_frame"], "end_frame": window["end_frame"]}
+        evidence = dict(source.get("evidence")) if isinstance(source.get("evidence"), dict) else {}
+        evidence["parent_window"] = dict(parent_window)
+        evidence["long_lost_gap_coverage_label"] = label
+        evidence["long_lost_gap_required_labels"] = list(LONG_LOST_GAP_REQUIRED_LABELS)
+        child["evidence"] = evidence
+        child["reason"] = f"{source.get('reason') or 'Long lost gap.'} Diagnostic {label} coverage."
+        children.append(child)
+    return children
+
+
+def _long_lost_gap_label_windows(start: int, end: int) -> dict[str, dict[str, int]]:
+    start_window = _bounded_window(start, start + MICRO_PACKET_MAX_FRAMES - 1, start, end)
+    middle_frame = start + (end - start) // 2
+    middle_window = _micro_window_for_frame(middle_frame, start, end)
+    end_window = _bounded_window(end - MICRO_PACKET_MAX_FRAMES + 1, end, start, end)
+    tail_start = end + 1
+    tail_end = end + DEFAULT_POST_ROLL_FRAMES
+    return {
+        "start": start_window,
+        "middle": middle_window,
+        "end": end_window,
+        "tail": {"start_frame": tail_start, "end_frame": tail_end},
+    }
+
+
+def _bounded_window(start_frame: int, end_frame: int, min_frame: int, max_frame: int) -> dict[str, int]:
+    start = max(min_frame, start_frame)
+    end = min(max_frame, end_frame)
+    if end < start:
+        end = start
+    return {"start_frame": start, "end_frame": end}
+
+
+def _long_lost_gap_coverage(packets: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    by_gap: dict[tuple[int, int], dict[str, Any]] = {}
+    for packet in packets:
+        if not isinstance(packet, dict):
+            continue
+        source = packet.get("source") if isinstance(packet.get("source"), dict) else {}
+        evidence = source.get("evidence") if isinstance(source.get("evidence"), dict) else {}
+        label = evidence.get("long_lost_gap_coverage_label")
+        parent = source.get("parent_window") if isinstance(source.get("parent_window"), dict) else evidence.get("parent_window")
+        if label not in LONG_LOST_GAP_REQUIRED_LABELS or not isinstance(parent, dict):
+            continue
+        parent_start = _parse_int(parent.get("start_frame"))
+        parent_end = _parse_int(parent.get("end_frame"))
+        if parent_start is None or parent_end is None:
+            continue
+        if label == "tail" and not _packet_has_reviewable_tail_evidence(packet):
+            continue
+        if parent_end < parent_start:
+            parent_start, parent_end = parent_end, parent_start
+        key = (parent_start, parent_end)
+        detail = by_gap.setdefault(
+            key,
+            {
+                "gap": {
+                    "start_frame": parent_start,
+                    "end_frame": parent_end,
+                    "frame_count": _frame_count(parent_start, parent_end),
+                },
+                "required_labels": list(LONG_LOST_GAP_REQUIRED_LABELS),
+                "covered_labels": [],
+                "uncovered_ranges": [],
+            },
+        )
+        if label not in detail["covered_labels"]:
+            detail["covered_labels"].append(label)
+        for key_name in ("key_frame", "expected_region", "source_size"):
+            if evidence.get(key_name) not in (None, "", {}):
+                detail[key_name] = evidence[key_name]
+
+    coverage: list[dict[str, Any]] = []
+    for (start, end), detail in sorted(by_gap.items()):
+        covered = set(detail["covered_labels"])
+        detail["covered_labels"] = [label for label in LONG_LOST_GAP_REQUIRED_LABELS if label in covered]
+        windows = _long_lost_gap_label_windows(start, end)
+        detail["uncovered_ranges"] = [
+            {
+                "label": label,
+                "start_frame": windows[label]["start_frame"],
+                "end_frame": windows[label]["end_frame"],
+            }
+            for label in LONG_LOST_GAP_REQUIRED_LABELS
+            if label not in covered
+        ]
+        coverage.append(detail)
+    return coverage
+
+
+def _packet_has_reviewable_tail_evidence(packet: dict[str, Any]) -> bool:
+    media = packet.get("media") if isinstance(packet.get("media"), dict) else {}
+    if media:
+        return True
+    media_warnings = packet.get("media_warnings") if isinstance(packet.get("media_warnings"), list) else []
+    if any(str(warning).endswith("_failed") for warning in media_warnings):
+        return False
+    track_summary = packet.get("track_summary") if isinstance(packet.get("track_summary"), dict) else {}
+    return _safe_summary_int(track_summary.get("frame_count")) > 0
+
+
+def _long_lost_gap_parent_range(source: dict[str, Any]) -> tuple[int, int]:
+    parent = source.get("parent_window") if isinstance(source.get("parent_window"), dict) else None
+    start = _parse_int(parent.get("start_frame")) if parent is not None else _parse_int(source.get("start_frame"))
+    end = _parse_int(parent.get("end_frame")) if parent is not None else _parse_int(source.get("end_frame"))
+    if start is None:
+        start = 0
+    if end is None:
+        end = start
+    return (start, end) if start <= end else (end, start)
+
+
+def _long_lost_gap_parent_frame_count(source: dict[str, Any]) -> int:
+    start, end = _long_lost_gap_parent_range(source)
+    return _frame_count(start, end)
+
+
+def _long_lost_gap_label_order(source: dict[str, Any]) -> tuple[int, int]:
+    evidence = source.get("evidence") if isinstance(source.get("evidence"), dict) else {}
+    label = str(evidence.get("long_lost_gap_coverage_label") or "")
+    try:
+        order = LONG_LOST_GAP_REQUIRED_LABELS.index(label)
+    except ValueError:
+        order = len(LONG_LOST_GAP_REQUIRED_LABELS)
+    return order, _parse_int(source.get("start_frame")) or 0
 
 
 def _micro_packet_anchors(output_dir: Path, start_frame: int, end_frame: int) -> list[dict[str, Any]]:

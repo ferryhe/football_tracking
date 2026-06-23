@@ -519,6 +519,8 @@ def _approved_action_entry(
         "false_positive_class",
         "camera_motion_event_id",
         "camera_motion_severity",
+        "match_ball_confirmed",
+        "match_ball_verdict",
     ):
         value = improvement.get(key, evidence_payload.get(key))
         if value not in (None, ""):
@@ -542,12 +544,27 @@ def _approved_action_entry(
         raise ValueError(f"Approval {approval_id} targeted_rerun requires rerun_scope.")
     if approved_action == "localize_ball_roi" and "local_search_roi" not in action:
         raise ValueError(f"Approval {approval_id} localize_ball_roi requires local_search_roi.")
-    if approved_action in {"localize_ball_roi", "targeted_rerun"} and "local_search_roi" in action:
+    if approved_action in {"localize_ball_roi", "targeted_rerun"}:
+        candidate_id = action.get("candidate_id") or improvement.get("candidate_id")
+        if not isinstance(candidate_id, str) or not candidate_id.strip():
+            raise ValueError(f"Approval {approval_id} {approved_action} requires candidate_id.")
+        action["candidate_id"] = candidate_id.strip()
+    if (
+        approved_action == "localize_ball_roi"
+        and "rerun_scope" not in action
+        and ("start_frame" not in action or "end_frame" not in action)
+    ):
+        raise ValueError(f"Approval {approval_id} localize_ball_roi requires frame bounds.")
+    if approved_action in {"localize_ball_roi", "targeted_rerun"}:
         provenance_item = dict(improvement)
         provenance_item.update(action)
+        if "source_packet_id" not in action and "visual_review_id" not in action:
+            traceable = _first_traceable_packet_or_visual_provenance(provenance_item, roi_provenance_context)
+            action.update(traceable)
+            provenance_item.update(traceable)
         if not _has_traceable_packet_or_visual_provenance(provenance_item, roi_provenance_context):
             raise ValueError(
-                f"Approval {approval_id} local_search_roi requires traceable packet or visual review provenance."
+                f"Approval {approval_id} {approved_action} requires traceable packet or visual review provenance."
             )
     if approved_action in {"noise_filter_adjustment", "tighten_noise_filter", "reject_noise"}:
         if "false_positive_class" not in action:
@@ -1329,6 +1346,8 @@ def _validate_action_specific_improvement(
     if action == "localize_ball_roi":
         if "local_search_roi" not in item:
             raise ValueError(f"Improvement {index} localize_ball_roi requires local_search_roi.")
+        if not isinstance(item.get("candidate_id"), str) or not str(item.get("candidate_id")).strip():
+            raise ValueError(f"Improvement {index} localize_ball_roi requires candidate_id.")
         if not _has_traceable_packet_or_visual_provenance(item, context):
             raise ValueError(
                 f"Improvement {index} localize_ball_roi requires source_packet_id or visual_review_id provenance "
@@ -1599,6 +1618,20 @@ def _has_traceable_packet_or_visual_provenance(item: dict[str, Any], context: di
         if visual_review_id in visual_review_ids:
             return True
     return False
+
+
+def _first_traceable_packet_or_visual_provenance(
+    item: dict[str, Any],
+    context: dict[str, Any] | None,
+) -> dict[str, str]:
+    packet_ids, visual_review_ids = _traceable_packet_and_visual_ids(context)
+    for packet_id in sorted(_packet_provenance_values(item)):
+        if packet_id in packet_ids:
+            return {"source_packet_id": packet_id}
+    for visual_review_id in sorted(_visual_review_provenance_values(item)):
+        if visual_review_id in visual_review_ids:
+            return {"visual_review_id": visual_review_id}
+    return {}
 
 
 def _packet_provenance_values(item: dict[str, Any]) -> set[str]:

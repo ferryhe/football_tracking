@@ -1006,7 +1006,7 @@ def _prepare_high_recall_window_for_execution(config: Any, window: dict[str, Any
         requested_mode = str(mode or "sahi").strip().lower()
     window["mode"] = requested_mode
 
-    if not _is_approved_targeted_rerun_window(window):
+    if not _is_approved_roi_action_window(window):
         return True
 
     base_roi = _coerce_roi(getattr(getattr(config, "filtering", None), "roi", None))
@@ -1055,13 +1055,16 @@ def _roi_policy_for_mode(mode: str, suffix: str) -> str:
     return f"{prefix}_{suffix}"
 
 
-def _is_approved_targeted_rerun_window(window: dict[str, Any]) -> bool:
-    if window.get("approved_action") == "targeted_rerun":
+def _is_approved_roi_action_window(window: dict[str, Any]) -> bool:
+    if window.get("approved_action") in {"targeted_rerun", "localize_ball_roi"}:
         return True
     provenance = window.get("approval_provenance")
     if not isinstance(provenance, list):
         return False
-    return any(isinstance(item, dict) and item.get("approved_action") == "targeted_rerun" for item in provenance)
+    return any(
+        isinstance(item, dict) and item.get("approved_action") in {"targeted_rerun", "localize_ball_roi"}
+        for item in provenance
+    )
 
 
 def _approved_roi_from_window(window: dict[str, Any]) -> tuple[int, int, int, int] | None:
