@@ -315,20 +315,42 @@ export interface AIApprovedActionsArtifact extends Record<string, unknown> {
   warnings?: string[];
 }
 
-export interface CreateRunRequest {
-  config_name?: string | null;
+interface CreateRunCommon {
   input_video?: string | null;
-  parent_run_id?: string | null;
   output_dir_name?: string | null;
   config_patch?: Record<string, unknown>;
   enable_postprocess?: boolean | null;
   enable_follow_cam?: boolean | null;
   start_frame?: number | null;
   max_frames?: number | null;
-  approved_action_ids?: string[];
-  approved_actions_artifact_name?: string | null;
   notes?: string | null;
 }
+
+type StandardCreateRunRequest = CreateRunCommon & {
+  config_name: string;
+  parent_run_id?: string | null;
+  approved_action_ids?: never;
+  approved_actions_artifact_name?: never;
+};
+
+type ApprovedChildRunByActionIdsRequest = CreateRunCommon & {
+  config_name?: string | null;
+  parent_run_id: string;
+  approved_action_ids: string[];
+  approved_actions_artifact_name?: string | null;
+};
+
+type ApprovedChildRunByArtifactRequest = CreateRunCommon & {
+  config_name?: string | null;
+  parent_run_id: string;
+  approved_action_ids?: string[];
+  approved_actions_artifact_name: string;
+};
+
+export type CreateRunRequest =
+  | StandardCreateRunRequest
+  | ApprovedChildRunByActionIdsRequest
+  | ApprovedChildRunByArtifactRequest;
 
 export interface FollowCamRenderRequest {
   output_dir_name?: string | null;
@@ -377,14 +399,36 @@ export interface EventCandidateReport {
   candidates: EventCandidate[];
 }
 
-export interface HighlightRenderRequest {
-  candidate_id?: string | null;
-  approved_action_id?: string | null;
-  start_frame?: number | null;
-  end_frame?: number | null;
+interface HighlightRenderBase {
   pre_roll_frames?: number;
   post_roll_frames?: number;
   output_dir_name?: string | null;
   output_video_name?: string | null;
   notes?: string | null;
 }
+
+type CandidateHighlightRenderRequest = HighlightRenderBase & {
+  candidate_id: string;
+  approved_action_id?: never;
+  start_frame?: never;
+  end_frame?: never;
+};
+
+type ApprovedHighlightRenderRequest = HighlightRenderBase & {
+  approved_action_id: string;
+  candidate_id?: never;
+  start_frame?: never;
+  end_frame?: never;
+};
+
+type FrameWindowHighlightRenderRequest = HighlightRenderBase & {
+  start_frame: number;
+  end_frame: number;
+  candidate_id?: never;
+  approved_action_id?: never;
+};
+
+export type HighlightRenderRequest =
+  | CandidateHighlightRenderRequest
+  | ApprovedHighlightRenderRequest
+  | FrameWindowHighlightRenderRequest;

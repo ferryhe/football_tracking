@@ -496,14 +496,14 @@ function ImprovementItemPanel({
       </div>
 
       <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-        <FieldRow label="area" value={item.area} />
-        <FieldRow label="recommended_action" value={item.recommended_action} />
+        <FieldRow label={labels.areaLabel} value={item.area} />
+        <FieldRow label={labels.recommendedActionLabel} value={item.recommended_action} />
         <FieldRow label={labels.frameWindow} value={frameWindowLabel(item)} />
         <FieldRow label={labels.confidence} value={item.confidence != null ? item.confidence.toFixed(2) : "n/a"} />
         <FieldRow label={labels.sourcePacket} value={sourcePacket} />
         <FieldRow label={labels.visualReview} value={visualReview} />
-        <FieldRow label="root_cause_module" value={item.root_cause_module} />
-        <FieldRow label="candidate_id" value={item.candidate_id} />
+        <FieldRow label={labels.rootCauseModuleLabel} value={item.root_cause_module} />
+        <FieldRow label={labels.candidateIdLabel} value={item.candidate_id} />
       </div>
 
       {!!item.failure_tags?.length && (
