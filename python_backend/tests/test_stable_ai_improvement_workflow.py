@@ -8,7 +8,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from scripts.run_stable_ai_improvement_workflow import main, run_workflow
+from football_tracking.ai_candidate_lifecycle import build_ai_candidate_lifecycle
+from scripts.run_stable_ai_improvement_workflow import _approved_child_rerun_stage, main, run_workflow
 
 
 class StableAiImprovementWorkflowTests(unittest.TestCase):
@@ -315,6 +316,318 @@ class StableAiImprovementWorkflowTests(unittest.TestCase):
         dispatcher = _stage(report, "selected_approval_dispatcher")
         self.assertEqual("skipped", dispatcher["noise_candidate_execution_path"]["status"])
         self.assertFalse(candidate_dir_exists)
+
+    def test_selected_missing_ball_recovery_executes_candidate(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            root = Path(temp_name)
+            output_dir = root / "outputs" / "baseline"
+            output_dir.mkdir(parents=True)
+            config_path = _write_recovery_config(root, output_dir)
+            _write_lost_tracks(output_dir, start=2049, end=2544)
+            _write_packet(output_dir, packet_id="packet_2079", start=2049, end=2544)
+            _write_json(
+                output_dir / "run_manifest.json",
+                {"config_path": str(config_path), "input_video": str(root / "data" / "input.mp4")},
+            )
+            approved_path = output_dir / "approved_actions.json"
+            approval = {**_approval("approval_2079", start=2049, end=2544), "candidate_id": "candidate_2079"}
+            approval["source_packet_id"] = "packet_2079"
+            _write_json(approved_path, {"approved_actions": [approval]})
+
+            def fake_high_recall(config, **_: object) -> dict[str, object]:
+                rows = ["Frame,X,Y,Confidence,Status"]
+                rows.extend(f"{frame},5700,1390,0.9000,Detected" for frame in range(2049, 2545))
+                (config.output_dir / "ball_track.csv").write_text("\n".join(rows) + "\n", encoding="utf-8")
+                (config.output_dir / "ball_track.cleaned.csv").write_text("\n".join(rows) + "\n", encoding="utf-8")
+                return {
+                    "windows": [{"approval_id": "approval_2079", "start_frame": 2049, "end_frame": 2544}],
+                    "execution": {"status": "succeeded"},
+                }
+
+            with patch("scripts.run_stable_ai_improvement_workflow.run_high_recall_windows", side_effect=fake_high_recall):
+                report = run_workflow(
+                    output_dir=output_dir,
+                    dry_run=False,
+                    approved_actions_path=approved_path,
+                    approval_ids=["approval_2079"],
+                )
+            candidate_dir = output_dir / "ai_candidates" / "missing_ball" / "candidate_2079"
+            dispatcher = _stage(report, "selected_approval_dispatcher")
+            child_stage = _stage(report, "approved_child_rerun")
+            manifest = json.loads((output_dir / "final_ai_improvement_artifact_manifest.json").read_text(encoding="utf-8"))
+            self.assertEqual("succeeded", dispatcher["missing_ball_execution_path"]["status"])
+            self.assertEqual("executed", dispatcher["missing_ball_execution_path"]["execution_status"])
+            self.assertEqual(["candidate_2079"], dispatcher["missing_ball_execution_path"]["candidate_ids"])
+            self.assertTrue((candidate_dir / "missing_ball_recovery_comparison.json").exists())
+            self.assertTrue((candidate_dir / "candidate_manifest.json").exists())
+            self.assertEqual("succeeded", child_stage["status"])
+            self.assertEqual("executed", child_stage["execution_status"])
+            self.assertEqual(1, manifest["summary"]["candidate_output_count"])
+            self.assertEqual("candidate_2079", manifest["candidate_outputs"][0]["candidate_id"])
+            self.assertEqual(0, manifest["summary"]["pending_candidate_count"])
+
+    def test_selected_missing_ball_recovery_executes_multiple_candidate_groups(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            root = Path(temp_name)
+            output_dir = root / "outputs" / "baseline"
+            output_dir.mkdir(parents=True)
+            config_path = _write_recovery_config(root, output_dir)
+            _write_lost_tracks(output_dir, start=2049, end=2650)
+            _write_json(
+                output_dir / "review_packets.json",
+                {
+                    "packets": [
+                        {
+                            "packet_id": "packet_2079",
+                            "window": {"start_frame": 2049, "end_frame": 2544},
+                            "decision": {"label": "needs_ai_review"},
+                        },
+                        {
+                            "packet_id": "packet_2600",
+                            "window": {"start_frame": 2600, "end_frame": 2650},
+                            "decision": {"label": "needs_ai_review"},
+                        },
+                        {
+                            "packet_id": "packet_2550",
+                            "window": {"start_frame": 2550, "end_frame": 2560},
+                            "decision": {"label": "needs_ai_review"},
+                        },
+                    ]
+                },
+            )
+            _write_json(
+                output_dir / "run_manifest.json",
+                {"config_path": str(config_path), "input_video": str(root / "data" / "input.mp4")},
+            )
+            approved_path = output_dir / "approved_actions.json"
+            approval_2079 = {**_approval("approval_2079", start=2049, end=2544), "candidate_id": "candidate_2079"}
+            approval_2079["source_packet_id"] = "packet_2079"
+            approval_2550 = {**_approval("approval_2550", start=2550, end=2560), "candidate_id": "candidate_2079"}
+            approval_2550["source_packet_id"] = "packet_2550"
+            approval_2600 = {**_approval("approval_2600", start=2600, end=2650), "candidate_id": "candidate_2600"}
+            approval_2600["source_packet_id"] = "packet_2600"
+            _write_json(approved_path, {"approved_actions": [approval_2079, approval_2550, approval_2600]})
+
+            def fake_high_recall(config, **_: object) -> dict[str, object]:
+                selected = json.loads((config.output_dir / "ai_improvement_approved_actions.json").read_text(encoding="utf-8"))
+                actions = selected["approved_actions"]
+                rows = ["Frame,X,Y,Confidence,Status"]
+                windows: list[dict[str, object]] = []
+                for action in actions:
+                    scope = action["rerun_scope"]
+                    start = int(scope["start_frame"])
+                    end = int(scope["end_frame"])
+                    rows.extend(f"{frame},5700,1390,0.9000,Detected" for frame in range(start, end + 1))
+                    windows.append({"approval_id": action["approval_id"], "start_frame": start, "end_frame": end})
+                (config.output_dir / "ball_track.csv").write_text("\n".join(rows) + "\n", encoding="utf-8")
+                (config.output_dir / "ball_track.cleaned.csv").write_text("\n".join(rows) + "\n", encoding="utf-8")
+                return {"windows": windows, "execution": {"status": "succeeded"}}
+
+            with patch("scripts.run_stable_ai_improvement_workflow.run_high_recall_windows", side_effect=fake_high_recall):
+                report = run_workflow(
+                    output_dir=output_dir,
+                    dry_run=False,
+                    approved_actions_path=approved_path,
+                    approval_ids=["approval_2079", "approval_2550", "approval_2600"],
+                )
+
+            dispatcher = _stage(report, "selected_approval_dispatcher")
+            missing_path = dispatcher["missing_ball_execution_path"]
+            manifest = json.loads((output_dir / "final_ai_improvement_artifact_manifest.json").read_text(encoding="utf-8"))
+            candidate_2079_exists = (output_dir / "ai_candidates" / "missing_ball" / "candidate_2079").exists()
+            candidate_2600_exists = (output_dir / "ai_candidates" / "missing_ball" / "candidate_2600").exists()
+            candidate_2079_selected = json.loads(
+                (
+                    output_dir
+                    / "ai_candidates"
+                    / "missing_ball"
+                    / "candidate_2079"
+                    / "ai_improvement_approved_actions.json"
+                ).read_text(encoding="utf-8")
+            )
+
+        self.assertEqual("succeeded", missing_path["status"])
+        self.assertEqual("executed", missing_path["execution_status"])
+        self.assertEqual(["candidate_2079", "candidate_2600"], missing_path["candidate_ids"])
+        self.assertEqual(
+            ["candidate_2079", "candidate_2600"],
+            [item["candidate_id"] for item in missing_path["candidate_outputs"]],
+        )
+        self.assertTrue(candidate_2079_exists)
+        self.assertTrue(candidate_2600_exists)
+        self.assertEqual(
+            ["approval_2079", "approval_2550"],
+            [item["approval_id"] for item in candidate_2079_selected["approved_actions"]],
+        )
+        self.assertEqual(2, manifest["summary"]["candidate_output_count"])
+        self.assertEqual(
+            ["candidate_2079", "candidate_2600"],
+            [item["candidate_id"] for item in manifest["candidate_outputs"]],
+        )
+
+    def test_failed_missing_ball_candidate_group_records_error_while_other_group_succeeds(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            root = Path(temp_name)
+            output_dir = root / "outputs" / "baseline"
+            output_dir.mkdir(parents=True)
+            config_path = _write_recovery_config(root, output_dir)
+            _write_lost_tracks(output_dir, start=2049, end=2650)
+            _write_json(
+                output_dir / "review_packets.json",
+                {
+                    "packets": [
+                        {
+                            "packet_id": "packet_2079",
+                            "window": {"start_frame": 2049, "end_frame": 2544},
+                            "decision": {"label": "needs_ai_review"},
+                        },
+                        {
+                            "packet_id": "packet_2600",
+                            "window": {"start_frame": 2600, "end_frame": 2650},
+                            "decision": {"label": "needs_ai_review"},
+                        },
+                    ]
+                },
+            )
+            _write_json(
+                output_dir / "run_manifest.json",
+                {"config_path": str(config_path), "input_video": str(root / "data" / "input.mp4")},
+            )
+            approved_path = output_dir / "approved_actions.json"
+            approval_2079 = {**_approval("approval_2079", start=2049, end=2544), "candidate_id": "candidate_2079"}
+            approval_2079["source_packet_id"] = "packet_2079"
+            approval_2600 = {**_approval("approval_2600", start=2600, end=2650), "candidate_id": "candidate_2600"}
+            approval_2600["source_packet_id"] = "packet_2600"
+            _write_json(approved_path, {"approved_actions": [approval_2079, approval_2600]})
+
+            def fake_high_recall(config, **_: object) -> dict[str, object]:
+                if config.output_dir.name == "candidate_2600":
+                    raise RuntimeError("synthetic recovery failure")
+                selected = json.loads((config.output_dir / "ai_improvement_approved_actions.json").read_text(encoding="utf-8"))
+                action = selected["approved_actions"][0]
+                scope = action["rerun_scope"]
+                start = int(scope["start_frame"])
+                end = int(scope["end_frame"])
+                rows = ["Frame,X,Y,Confidence,Status"]
+                rows.extend(f"{frame},5700,1390,0.9000,Detected" for frame in range(start, end + 1))
+                (config.output_dir / "ball_track.csv").write_text("\n".join(rows) + "\n", encoding="utf-8")
+                (config.output_dir / "ball_track.cleaned.csv").write_text("\n".join(rows) + "\n", encoding="utf-8")
+                return {
+                    "windows": [{"approval_id": action["approval_id"], "start_frame": start, "end_frame": end}],
+                    "execution": {"status": "succeeded"},
+                }
+
+            with patch("scripts.run_stable_ai_improvement_workflow.run_high_recall_windows", side_effect=fake_high_recall):
+                report = run_workflow(
+                    output_dir=output_dir,
+                    dry_run=False,
+                    approved_actions_path=approved_path,
+                    approval_ids=["approval_2079", "approval_2600"],
+                )
+            written_report = json.loads(
+                (output_dir / "stable_ai_improvement_workflow_report.json").read_text(encoding="utf-8")
+            )
+            manifest = json.loads((output_dir / "final_ai_improvement_artifact_manifest.json").read_text(encoding="utf-8"))
+            lifecycle = build_ai_candidate_lifecycle(output_dir)
+            failed_candidate_dir_exists = (output_dir / "ai_candidates" / "missing_ball" / "candidate_2600").exists()
+
+        dispatcher = _stage(report, "selected_approval_dispatcher")
+        missing_path = dispatcher["missing_ball_execution_path"]
+        child_stage = _stage(report, "approved_child_rerun")
+        written_missing_path = _stage(written_report, "selected_approval_dispatcher")["missing_ball_execution_path"]
+        self.assertEqual("partial_failure", missing_path["status"])
+        self.assertEqual("partial_failure", missing_path["execution_status"])
+        self.assertEqual(["candidate_2079"], [item["candidate_id"] for item in missing_path["candidate_outputs"]])
+        self.assertEqual(["candidate_2600"], missing_path["errors"][0]["candidate_ids"])
+        self.assertEqual(["approval_2600"], missing_path["errors"][0]["approval_ids"])
+        self.assertIn("synthetic recovery failure", missing_path["errors"][0]["error"])
+        self.assertEqual("partial_failure", child_stage["status"])
+        self.assertEqual("failed", report["quality_gate"]["summary"]["workflow_status"])
+        self.assertEqual(missing_path["errors"], written_missing_path["errors"])
+        self.assertEqual(1, manifest["summary"]["candidate_output_count"])
+        self.assertEqual("candidate_2079", manifest["candidate_outputs"][0]["candidate_id"])
+        self.assertEqual(1, manifest["summary"]["rejected_candidate_count"])
+        self.assertEqual("candidate_2600", manifest["rejected_candidates"][0]["candidate_id"])
+        self.assertEqual(["approval_2600"], manifest["rejected_candidates"][0]["approval_ids"])
+        self.assertEqual("comparison_unavailable", manifest["rejected_candidates"][0]["reason"])
+        self.assertEqual("unavailable", manifest["rejected_candidates"][0]["comparison_status"])
+        self.assertIn("synthetic recovery failure", manifest["rejected_candidates"][0]["error"])
+        failed_lifecycle = {
+            item["candidate_id"]: item
+            for item in lifecycle["candidates"]
+            if isinstance(item.get("candidate_id"), str)
+        }["candidate_2600"]
+        self.assertEqual("rejected", failed_lifecycle["promotion_status"])
+        self.assertIn("missing_evidence", failed_lifecycle["blocking_reasons"])
+        self.assertFalse(failed_candidate_dir_exists)
+
+    def test_approved_child_stage_prefers_dispatcher_failure_when_bounded_windows_empty(self) -> None:
+        stage = _approved_child_rerun_stage(
+            dry_run=False,
+            approval_intent={
+                "has_explicit_approval_intent": True,
+                "approved_actions_path_explicit": True,
+                "approval_ids_explicit": True,
+                "approved_action_id": None,
+            },
+            bounded_windows=[],
+            missing_ball_execution_path={
+                "status": "failed",
+                "execution_status": "failed",
+                "approval_ids": ["approval_bad"],
+                "candidate_ids": ["candidate_bad"],
+                "errors": [{"candidate_id": "candidate_bad", "error": "invalid selected recovery scope"}],
+                "strategy": "bounded_missing_ball_recovery_candidate",
+            },
+        )
+
+        self.assertEqual("failed", stage["status"])
+        self.assertEqual("failed", stage["execution_status"])
+        self.assertEqual(["approval_bad"], stage["approval_ids"])
+        self.assertEqual([{"candidate_id": "candidate_bad", "error": "invalid selected recovery scope"}], stage["errors"])
+
+    def test_missing_ball_recovery_resolves_run_manifest_paths_relative_to_output_dir_from_other_cwd(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            root = Path(temp_name)
+            output_dir = root / "outputs" / "baseline"
+            output_dir.mkdir(parents=True)
+            config_path = _write_recovery_config(output_dir, output_dir)
+            _write_lost_tracks(output_dir, start=2049, end=2544)
+            _write_packet(output_dir, packet_id="packet_2079", start=2049, end=2544)
+            _write_json(
+                output_dir / "run_manifest.json",
+                {"config_path": config_path.name, "input_video": "data/input.mp4"},
+            )
+            approved_path = output_dir / "approved_actions.json"
+            approval = {**_approval("approval_2079", start=2049, end=2544), "candidate_id": "candidate_2079"}
+            approval["source_packet_id"] = "packet_2079"
+            _write_json(approved_path, {"approved_actions": [approval]})
+            other_cwd = root / "different_cwd"
+            other_cwd.mkdir()
+
+            def fake_high_recall(config, **_: object) -> dict[str, object]:
+                self.assertEqual((output_dir / "data" / "input.mp4").resolve(), Path(config.input_video).resolve())
+                rows = ["Frame,X,Y,Confidence,Status"]
+                rows.extend(f"{frame},5700,1390,0.9000,Detected" for frame in range(2049, 2545))
+                (config.output_dir / "ball_track.csv").write_text("\n".join(rows) + "\n", encoding="utf-8")
+                (config.output_dir / "ball_track.cleaned.csv").write_text("\n".join(rows) + "\n", encoding="utf-8")
+                return {
+                    "windows": [{"approval_id": "approval_2079", "start_frame": 2049, "end_frame": 2544}],
+                    "execution": {"status": "succeeded"},
+                }
+
+            with (
+                contextlib.chdir(other_cwd),
+                patch("scripts.run_stable_ai_improvement_workflow.run_high_recall_windows", side_effect=fake_high_recall),
+            ):
+                report = run_workflow(
+                    output_dir=output_dir,
+                    dry_run=False,
+                    approved_actions_path=approved_path,
+                    approval_ids=["approval_2079"],
+                )
+
+        self.assertEqual("succeeded", _stage(report, "selected_approval_dispatcher")["missing_ball_execution_path"]["status"])
 
     def test_selected_noise_approval_missing_candidate_id_fails_without_candidate_artifacts(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:
@@ -933,22 +1246,15 @@ class StableAiImprovementWorkflowTests(unittest.TestCase):
 
         child_stage = _stage(report, "approved_child_rerun")
         dispatcher = _stage(report, "selected_approval_dispatcher")
-        self.assertEqual("pending_api_required", dispatcher["missing_ball_execution_path"]["status"])
-        self.assertTrue(dispatcher["missing_ball_execution_path"]["api_required"])
-        self.assertEqual("not_run", dispatcher["missing_ball_execution_path"]["execution_status"])
-        self.assertEqual("api_missing_ball_candidate_execution", dispatcher["missing_ball_execution_path"]["required_executor"])
-        self.assertEqual("pending_api_required", child_stage["status"])
-        self.assertTrue(child_stage["api_required"])
-        self.assertEqual("not_run", child_stage["execution_status"])
-        self.assertEqual("api_missing_ball_candidate_execution", child_stage["required_executor"])
-        self.assertIn("PR #46 API/service child execution path", child_stage["reason"])
+        self.assertEqual("failed", dispatcher["missing_ball_execution_path"]["status"])
+        self.assertEqual("failed", dispatcher["missing_ball_execution_path"]["execution_status"])
+        self.assertEqual("failed", child_stage["status"])
+        self.assertFalse(child_stage["api_required"])
         self.assertEqual("sahi_roi", child_stage["intended_rerun_mode"])
         self.assertEqual([{"approval_id": "approval_1", "start_frame": 10, "end_frame": 20}], child_stage["bounded_windows"])
         self.assertFalse(child_stage["runs_full_video_sahi"])
-        self.assertEqual(1, manifest["summary"]["pending_candidate_count"])
-        self.assertEqual("pending_api_required", manifest["pending_candidates"][0]["status"])
-        self.assertTrue(manifest["pending_candidates"][0]["api_required"])
-        self.assertEqual("not_run", manifest["pending_candidates"][0]["execution_status"])
+        self.assertEqual(0, manifest["summary"]["candidate_output_count"])
+        self.assertEqual(0, manifest["summary"]["pending_candidate_count"])
 
     def test_workflow_report_records_consumed_and_skipped_approval_ids(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:
@@ -1115,6 +1421,43 @@ def _write_tracks(output_dir: Path) -> None:
     text = "Frame,X,Y,Status\n1,10,20,Detected\n"
     (output_dir / "ball_track.csv").write_text(text, encoding="utf-8")
     (output_dir / "ball_track.cleaned.csv").write_text(text, encoding="utf-8")
+
+
+def _write_lost_tracks(output_dir: Path, *, start: int, end: int) -> None:
+    rows = ["Frame,X,Y,Confidence,Status"]
+    rows.extend(f"{frame},,,0.0000,Lost" for frame in range(start, end + 1))
+    text = "\n".join(rows) + "\n"
+    (output_dir / "ball_track.csv").write_text(text, encoding="utf-8")
+    (output_dir / "ball_track.cleaned.csv").write_text(text, encoding="utf-8")
+
+
+def _write_recovery_config(root: Path, output_dir: Path) -> Path:
+    (root / "data").mkdir(parents=True, exist_ok=True)
+    (root / "weights").mkdir(parents=True, exist_ok=True)
+    (root / "data" / "input.mp4").write_text("fake video", encoding="utf-8")
+    (root / "weights" / "football_ball_yolo.pt").write_text("fake weights", encoding="utf-8")
+    config_path = root / "config.yaml"
+    config_path.write_text(
+        "\n".join(
+            [
+                f"input_video: {str(root / 'data' / 'input.mp4')}",
+                f"output_dir: {str(output_dir)}",
+                "detector:",
+                f"  model_path: {str(root / 'weights' / 'football_ball_yolo.pt')}",
+                "postprocess:",
+                "  enabled: true",
+                "follow_cam:",
+                "  enabled: true",
+                "temporal_chunks:",
+                "  enabled: false",
+                "high_recall_windows:",
+                "  enabled: false",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    return config_path
 
 
 def _write_noise_tracks(output_dir: Path) -> None:
