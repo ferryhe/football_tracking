@@ -50,7 +50,7 @@ Use explicit arguments when you mean to consume approvals:
   --parallel-mode temporal
 ```
 
-Use `--approved-action-id` only to record one explicit highlight or camera follow-up action. If it is used together with `--approved-actions-path`, the workflow consumes only that matching action id; it does not imply approval of every action in the file. Targeted ball-recovery reruns must use `--approval-ids` from an explicit approval file. Highlight rendering should still be treated as an explicit operator action, not a side effect of an approval artifact.
+Use `--approved-action-id` only to record one explicit highlight or camera follow-up action from `--approved-actions-path`. `--approval-ids` can be supplied in the same command for separate bounded rerun approvals; each flag consumes only the ids it names, and neither implies approval of every action in the file. Targeted ball-recovery reruns must use `--approval-ids` from an explicit approval file. Highlight rendering should still be treated as an explicit operator action, not a side effect of an approval artifact.
 
 `--approval-ids` only filters actions from the explicitly supplied approval file. In non-dry-run runs, unknown ids, duplicate ids, missing approval files, or malformed approval payloads fail the workflow before provider-backed improvement work starts. In `--dry-run` or `--mode dry-run`, the workflow records the same problem in `warnings` so an operator can rehearse the command safely.
 

@@ -95,6 +95,45 @@ class StableAiImprovementWorkflowTests(unittest.TestCase):
                     approval_ids=["missing_approval"],
                 )
 
+    def test_programmatic_approval_ids_are_stripped_before_selection(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_tracks(output_dir)
+            approved_path = output_dir / "approved_actions.json"
+            _write_json(
+                approved_path,
+                {"approved_actions": [_approval("approval_1", start=10, end=20)]},
+            )
+
+            report = run_workflow(
+                output_dir=output_dir,
+                dry_run=False,
+                approved_actions_path=approved_path,
+                approval_ids=[" approval_1 ", ""],
+            )
+
+        selection = report["inputs"]["approval_selection"]
+        self.assertEqual(["approval_1"], selection["requested_ids"])
+        self.assertEqual(["approval_1"], selection["consumed_ids"])
+
+    def test_approved_action_id_without_path_fails_in_non_dry_run(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_tracks(output_dir)
+
+            with self.assertRaisesRegex(ValueError, "--approved-action-id requires --approved-actions-path"):
+                run_workflow(output_dir=output_dir, dry_run=False, approved_action_id="highlight_1")
+
+    def test_approved_action_id_without_path_warns_in_dry_run(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_tracks(output_dir)
+
+            report = run_workflow(output_dir=output_dir, dry_run=True, approved_action_id=" highlight_1 ")
+
+        self.assertTrue(any("--approved-action-id requires --approved-actions-path" in warning for warning in report["warnings"]))
+        self.assertEqual(["highlight_1"], report["inputs"]["approval_selection"]["single_action_ids"])
+
     def test_unknown_approval_ids_warn_in_dry_run(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:
             output_dir = Path(temp_name)
@@ -288,7 +327,7 @@ class StableAiImprovementWorkflowTests(unittest.TestCase):
             action.pop("approval_id")
             _write_json(approved_path, {"approved_actions": [action]})
 
-            with self.assertRaisesRegex(ValueError, "approval_id must be a non-empty string"):
+            with self.assertRaisesRegex(ValueError, "non-empty string approval_id"):
                 run_workflow(output_dir=output_dir, dry_run=False, approved_actions_path=approved_path)
 
     def test_tracking_rerun_before_follow_cam_is_follow_cam_plan_action(self) -> None:
@@ -399,15 +438,32 @@ class StableAiImprovementWorkflowTests(unittest.TestCase):
             _write_tracks(output_dir)
             _write_2079_gap(output_dir)
             _write_packet(output_dir, packet_id="packet_2079", start=2049, end=2544)
-            _write_ai_report(output_dir)
+            _write_json(
+                output_dir / "ai_improvement_report.json",
+                {
+                    "summary": {"status": "needs_rerun"},
+                    "model": "gpt-stable",
+                    "improvements": [
+                        {
+                            "id": "imp_2079",
+                            "area": "tracking",
+                            "failure_tags": ["ball_lost"],
+                            "recommended_action": "targeted_rerun",
+                            "start_frame": 2049,
+                            "end_frame": 2544,
+                            "rerun_scope": {"start_frame": 2049, "end_frame": 2544},
+                            "source_packet_id": "packet_2079",
+                        }
+                    ],
+                },
+            )
             approved_path = output_dir / "approved_actions.json"
             action = _approval("approval_2079", start=2049, end=2544)
             action.pop("approval_id")
             _write_json(approved_path, {"approved_actions": [action]})
 
             def fake_improvement(path: Path, **_: object) -> dict[str, object]:
-                _write_ai_report(path)
-                return {"summary": {"status": "ok"}, "improvements": []}
+                return json.loads((path / "ai_improvement_report.json").read_text(encoding="utf-8"))
 
             with patch(
                 "scripts.run_stable_ai_improvement_workflow.write_ai_improvement_report",
@@ -419,7 +475,7 @@ class StableAiImprovementWorkflowTests(unittest.TestCase):
                     approved_actions_path=approved_path,
                 )
 
-        self.assertTrue(any("approval_id must be a non-empty string" in warning for warning in report["warnings"]))
+        self.assertTrue(any("non-empty string approval_id" in warning for warning in report["warnings"]))
         self.assertEqual("fail", report["quality_gate"]["summary"]["status"])
 
     def test_missing_approved_actions_path_fails_before_provider_work(self) -> None:

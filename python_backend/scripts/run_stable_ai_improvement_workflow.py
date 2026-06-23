@@ -62,7 +62,8 @@ def run_workflow(
     if gate_mode not in {"dry-run", "artifact-only", "real"}:
         raise ValueError("quality_gate_mode must be dry-run, artifact-only, or real")
 
-    approval_ids = [item for item in (approval_ids or []) if item]
+    approval_ids = _normalize_approval_ids(approval_ids or [])
+    approved_action_id = _normalize_approval_id(approved_action_id)
     selection_is_dry_run = dry_run or gate_mode == "dry-run"
     warnings: list[str] = []
     stages: list[dict[str, Any]] = []
@@ -329,6 +330,7 @@ def _load_selected_approved_actions(
     fail_on_selection_error: bool,
     warnings: list[str],
 ) -> dict[str, Any]:
+    approval_ids = _normalize_approval_ids(approval_ids)
     duplicate_ids = _duplicate_items(approval_ids)
     if duplicate_ids:
         _handle_approval_selection_error(
@@ -337,6 +339,7 @@ def _load_selected_approved_actions(
             warnings=warnings,
         )
     requested_ids = _unique_items(approval_ids)
+    approved_action_id = _normalize_approval_id(approved_action_id)
     single_requested_ids = [approved_action_id] if approved_action_id else []
     all_requested_ids = _unique_items([*requested_ids, *single_requested_ids])
     if approved_actions_path is None:
@@ -346,6 +349,25 @@ def _load_selected_approved_actions(
                 fail=fail_on_selection_error,
                 warnings=warnings,
             )
+        if approved_action_id:
+            _handle_approval_selection_error(
+                "--approved-action-id requires --approved-actions-path in this CLI workflow.",
+                fail=fail_on_selection_error,
+                warnings=warnings,
+            )
+            return {
+                "approval_selection": {
+                    "approval_source": "none",
+                    "requested_ids": [],
+                    "single_action_ids": single_requested_ids,
+                    "consumed_ids": [],
+                    "skipped_ids": [],
+                    "skipped_reasons": {},
+                    "unknown_ids": [],
+                    "source": "none",
+                    "source_path": None,
+                }
+            }
         return {}
     try:
         loaded = json.loads(Path(approved_actions_path).read_text(encoding="utf-8"))
@@ -386,7 +408,7 @@ def _load_selected_approved_actions(
     ]
     if missing_id_indexes:
         _handle_approval_selection_error(
-            "approved_actions entries require approval_id must be a non-empty string.",
+            "approved_actions entries must include a non-empty string approval_id.",
             fail=fail_on_selection_error,
             warnings=warnings,
         )
@@ -679,8 +701,19 @@ def _parse_approval_ids(value: str | None) -> list[str]:
         loaded = json.loads(stripped)
         if not isinstance(loaded, list):
             raise ValueError("--approval-ids JSON form must be a list")
-        return [str(item).strip() for item in loaded if str(item).strip()]
-    return [item.strip() for item in stripped.split(",") if item.strip()]
+        return _normalize_approval_ids([str(item) for item in loaded])
+    return _normalize_approval_ids(stripped.split(","))
+
+
+def _normalize_approval_ids(items: list[str]) -> list[str]:
+    return [normalized for item in items if (normalized := _normalize_approval_id(item))]
+
+
+def _normalize_approval_id(value: str | None) -> str | None:
+    if value is None:
+        return None
+    stripped = str(value).strip()
+    return stripped or None
 
 
 def _optional_int(value: Any) -> int | None:
