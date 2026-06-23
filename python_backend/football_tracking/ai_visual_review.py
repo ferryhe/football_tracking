@@ -266,7 +266,7 @@ def build_ai_visual_review_report(
                 "packet_id": packet_id,
                 "error": _safe_error_message(exc),
                 "error_type": "strong_visual_model_unavailable"
-                if selected_model is None and not dry_run
+                if selected_model is None and model_selection_source == "strong_model_unavailable" and not dry_run
                 else exc.__class__.__name__,
             }
             review_item["error"] = error["error"]

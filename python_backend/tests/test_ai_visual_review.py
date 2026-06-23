@@ -193,6 +193,19 @@ class AiVisualReviewTests(unittest.TestCase):
         self.assertEqual("unavailable", report["summary"]["status"])
         self.assertEqual("strong_visual_model_unavailable", report["errors"][0]["error_type"])
 
+    def test_client_supplied_visual_review_error_is_not_labeled_as_missing_strong_model(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_review_packets(output_dir, [("packet_001", "needs_ai_review")])
+            client = _FakeVisualReviewClient([RuntimeError("provider timeout")])
+
+            report = build_ai_visual_review_report(output_dir, client=client)
+
+        self.assertIsNone(report["model"])
+        self.assertEqual("client_supplied", report["model_selection"]["source"])
+        self.assertEqual("error", report["summary"]["status"])
+        self.assertEqual("RuntimeError", report["errors"][0]["error_type"])
+
     def test_only_label_filter_is_applied_before_max_packets(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:
             output_dir = Path(temp_name)

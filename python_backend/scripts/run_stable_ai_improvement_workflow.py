@@ -682,7 +682,6 @@ def _selected_approval_dispatcher_stage(approved_payload: dict[str, Any]) -> dic
     for action in actions:
         if not isinstance(action, dict):
             continue
-        approval_id = str(action.get("approval_id") or "")
         approved_action = str(action.get("approved_action") or "")
         if approved_action in MISSING_BALL_APPROVAL_ACTIONS:
             missing_ball_actions.append(action)
@@ -832,7 +831,7 @@ def _final_artifact_manifest_stage(
             for approval_id in missing_ball_path.get("approval_ids", [])
             if isinstance(approval_id, str) and approval_id.strip()
         }
-        pending_candidates = [_pending_candidate_summary(action) for action in actions if action.get("approval_id") in missing_ids]
+        pending_candidates = [_pending_candidate_summary(action) for action in actions if _action_approval_id(action) in missing_ids]
     unsupported = dispatcher_stage.get("unsupported_actions")
     unsupported_candidates = unsupported if isinstance(unsupported, list) else []
     manifest = write_final_artifact_manifest(
