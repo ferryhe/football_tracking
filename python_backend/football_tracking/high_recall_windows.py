@@ -305,7 +305,7 @@ def _approved_action_windows(
         if not isinstance(action, dict):
             raise ValueError(f"approved actions artifact invalid: approved_actions[{index}] must be an object.")
         approved_action = action.get("approved_action")
-        if approved_action not in {"targeted_rerun", "localize_ball_roi"}:
+        if approved_action not in {"targeted_rerun", "rerun_ball_window", "localize_ball_roi"}:
             continue
         action_label = str(action.get("approval_id") or action.get("improvement_id") or index)
         approval_id = _required_string(action.get("approval_id"), f"approved {approved_action} action {action_label} approval_id")
@@ -318,7 +318,7 @@ def _approved_action_windows(
                 action.get("rerun_scope"),
                 f"approved targeted_rerun action {action_label} rerun_scope",
             )
-            if approved_action == "targeted_rerun"
+            if approved_action in {"targeted_rerun", "rerun_ball_window"}
             else _required_localize_frame_window(action, f"approved localize_ball_roi action {action_label}")
         )
         candidate_id = _required_string(
@@ -357,7 +357,7 @@ def _approved_action_windows(
         )
         if candidate_id:
             raw_payload["candidate_id"] = candidate_id
-        if approved_action == "targeted_rerun" or isinstance(action.get("rerun_scope"), dict):
+        if approved_action in {"targeted_rerun", "rerun_ball_window"} or isinstance(action.get("rerun_scope"), dict):
             raw_payload["rerun_scope"] = rerun_window
         windows.append(
             _raw_window(

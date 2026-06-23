@@ -1079,7 +1079,8 @@ class ApiService:
         requires_tracking_rerun = bool(action_counts.get("tracking_rerun_before_follow_cam"))
         if isinstance(follow_cam_plan, dict):
             requires_tracking_rerun = requires_tracking_rerun or bool(follow_cam_plan.get("requires_tracking_rerun"))
-        requires_high_recall_rerun = bool(action_counts.get("targeted_rerun"))
+        rerun_window_count = action_counts.get("targeted_rerun", 0) + action_counts.get("rerun_ball_window", 0)
+        requires_high_recall_rerun = bool(rerun_window_count)
         requires_highlight_render = bool(
             action_counts.get("adjust_highlight_window") or action_counts.get("render_suggested_highlight")
         )
@@ -1102,7 +1103,7 @@ class ApiService:
         return {
             "approved_action_count": len([action for action in actions if isinstance(action, dict)]),
             "approved_action_counts": action_counts,
-            "targeted_rerun_count": action_counts.get("targeted_rerun", 0),
+            "targeted_rerun_count": rerun_window_count,
             "config_patch_count": config_patch_count,
             "highlight_action_count": action_counts.get("adjust_highlight_window", 0)
             + action_counts.get("render_suggested_highlight", 0),
@@ -1942,7 +1943,7 @@ class ApiService:
         candidate_ids: set[str] = set()
         actions = artifact.get("approved_actions") if isinstance(artifact.get("approved_actions"), list) else []
         for action in actions:
-            if not isinstance(action, dict) or action.get("approved_action") not in {"localize_ball_roi", "targeted_rerun"}:
+            if not isinstance(action, dict) or action.get("approved_action") not in {"localize_ball_roi", "targeted_rerun", "rerun_ball_window"}:
                 continue
             candidate_id = action.get("candidate_id")
             if isinstance(candidate_id, str) and candidate_id.strip():
@@ -1953,7 +1954,7 @@ class ApiService:
         missing: list[str] = []
         actions = artifact.get("approved_actions") if isinstance(artifact.get("approved_actions"), list) else []
         for action in actions:
-            if not isinstance(action, dict) or action.get("approved_action") not in {"localize_ball_roi", "targeted_rerun"}:
+            if not isinstance(action, dict) or action.get("approved_action") not in {"localize_ball_roi", "targeted_rerun", "rerun_ball_window"}:
                 continue
             candidate_id = action.get("candidate_id")
             if not isinstance(candidate_id, str) or not candidate_id.strip():
@@ -2547,7 +2548,7 @@ class ApiService:
             for action in selected_artifact.get("approved_actions", [])
             if (
                 isinstance(action, dict)
-                and action.get("approved_action") in {"localize_ball_roi", "targeted_rerun"}
+                and action.get("approved_action") in {"localize_ball_roi", "targeted_rerun", "rerun_ball_window"}
                 and isinstance(action.get("candidate_id"), str)
                 and action.get("candidate_id", "").strip()
             )

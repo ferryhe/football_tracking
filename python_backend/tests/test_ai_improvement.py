@@ -54,10 +54,12 @@ class AiImprovementTests(unittest.TestCase):
         self.assertIn("bounded, traceable, and comparable", instructions)
         self.assertIn("cover the entire lost gap", instructions)
         self.assertIn("explain uncovered subwindows", instructions)
+        self.assertIn("explicit uncovered subranges", instructions)
         self.assertIn("source_packet_id or visual_review_id", instructions)
         self.assertIn("not_visible", instructions)
         self.assertIn("hidden, off-frame, or impossible to identify", instructions)
         self.assertIn("unknown_false_positive", instructions)
+        self.assertIn("evidence ids", instructions)
         self.assertIn("tracking_rerun_before_follow_cam", instructions)
         self.assertIn("adjust_follow_cam", instructions)
         self.assertIn("candidate.core_window", instructions)
@@ -65,6 +67,19 @@ class AiImprovementTests(unittest.TestCase):
         self.assertIn("do not trim result tail", instructions)
         self.assertIn("stronger model", instructions)
         self.assertIn("dry-run smoke", instructions)
+
+    def test_missing_ball_prompt_requires_uncovered_subranges(self) -> None:
+        instructions = _instructions(language="en")
+
+        self.assertIn("full-window coverage", instructions)
+        self.assertIn("explicit uncovered subranges", instructions)
+
+    def test_noise_prompt_requires_bounded_false_positive_class(self) -> None:
+        instructions = _instructions(language="en")
+
+        self.assertIn("false_positive_class", instructions)
+        self.assertIn("bounded start_frame/end_frame", instructions)
+        self.assertIn("evidence ids", instructions)
 
     def test_context_and_report_record_candidate_intent_and_provider_mode(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:
@@ -78,6 +93,7 @@ class AiImprovementTests(unittest.TestCase):
         self.assertEqual("review_only", report["candidate_intent"])
         self.assertTrue(report["provider_dry_run"])
         self.assertEqual("dry-run", report["provider_mode"])
+        self.assertFalse(report["can_lead_to_executable_candidates"])
 
     def test_context_records_required_long_gap_coverage_from_real_review_packets(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:
@@ -2239,7 +2255,7 @@ class AiImprovementTests(unittest.TestCase):
         self.assertEqual("error", report["summary"]["status"])
         self.assertIn("false_positive_class", report["error"])
 
-    def test_unknown_recommended_action_becomes_error_report(self) -> None:
+    def test_unknown_ai_action_becomes_review_only(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:
             output_dir = Path(temp_name)
             _write_minimal_artifacts(output_dir)
@@ -2264,8 +2280,126 @@ class AiImprovementTests(unittest.TestCase):
 
             report = build_ai_improvement_report(output_dir, client=client)
 
+        self.assertEqual("needs_rerun", report["summary"]["status"])
+        improvement = report["improvements"][0]
+        self.assertEqual("manual_review", improvement["recommended_action"])
+        self.assertEqual("targeted rerun", improvement["original_recommended_action"])
+        self.assertFalse(improvement["executable"])
+        self.assertEqual("review_only", improvement["candidate_intent"])
+        self.assertTrue(any("unsupported recommended_action" in warning for warning in report["warnings"]))
+
+    def test_unbounded_full_video_spatial_split_is_not_executable(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_minimal_artifacts(output_dir)
+            client = _FakeImprovementClient(
+                {
+                    "summary": {"status": "needs_rerun"},
+                    "improvements": [
+                        {
+                            "id": "imp_full_video_split",
+                            "priority": "P1",
+                            "area": "detection",
+                            "failure_tags": ["unknown"],
+                            "root_cause_module": "detection",
+                            "diagnosis": "Broad full-video spatial SAHI split request.",
+                            "recommended_action": "spatial_sahi_split_full_video",
+                            "evidence": ["broad model suggestion without bounded provenance"],
+                            "confidence": 0.55,
+                        }
+                    ],
+                }
+            )
+
+            report = build_ai_improvement_report(output_dir, client=client)
+
+        improvement = report["improvements"][0]
+        self.assertEqual("manual_review", improvement["recommended_action"])
+        self.assertEqual("spatial_sahi_split_full_video", improvement["original_recommended_action"])
+        self.assertFalse(improvement["executable"])
+        self.assertEqual("review_only", improvement["candidate_intent"])
+
+    def test_small_or_unavailable_model_mode_is_non_mutating(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_minimal_artifacts(output_dir)
+            client = _FakeImprovementClient({"summary": {"status": "ok"}, "improvements": []})
+            client.settings = SimpleNamespace(chat_model="gpt-chat-mini", improvement_model=None)
+
+            report = build_ai_improvement_report(output_dir, client=client)
+
+        self.assertEqual("unavailable", report["summary"]["status"])
+        self.assertEqual("strong_model_unavailable", report["model_selection"]["source"])
+        self.assertFalse(report["can_lead_to_executable_candidates"])
+        self.assertEqual([], client.calls)
+
+    def test_2079_local_evidence_cannot_close_2049_2544_without_full_coverage(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_minimal_artifacts(output_dir)
+            _write_json(
+                output_dir / "ball_audit.json",
+                {
+                    "summary": {"review_event_count": 1, "lost_gap_count": 1},
+                    "review_events": [
+                        {
+                            "type": "lost_gap",
+                            "severity": "fail",
+                            "start_frame": 2049,
+                            "end_frame": 2544,
+                            "frame_count": 496,
+                            "reason": "Ball track is lost through the long window.",
+                        }
+                    ],
+                },
+            )
+            _write_json(
+                output_dir / "review_packets.json",
+                {
+                    "summary": {"packet_count": 1},
+                    "packets": [
+                        {
+                            "packet_id": "packet_2079",
+                            "source": {"kind": "trigger", "type": "lost_gap"},
+                            "window": {"start_frame": 2049, "end_frame": 2544},
+                        }
+                    ],
+                },
+            )
+            client = _FakeImprovementClient(
+                {
+                    "summary": {"status": "needs_rerun"},
+                    "improvements": [
+                        {
+                            "id": "imp_2079",
+                            "priority": "P0",
+                            "area": "tracking",
+                            "failure_tags": ["ball_lost"],
+                            "root_cause_module": "reacquisition",
+                            "diagnosis": "Only frame 2079 has local evidence.",
+                            "recommended_action": "targeted_rerun",
+                            "candidate_id": "candidate_2079",
+                            "problem_type": "missing_ball",
+                            "source_packet_id": "packet_2079",
+                            "rerun_scope": {"start_frame": 2079, "end_frame": 2079},
+                            "likely_ball_region": {
+                                "frame": 2079,
+                                "description": "visible near midfield",
+                                "confidence": 0.8,
+                            },
+                            "expected_artifact": {"name": "ball_track.csv"},
+                            "comparison_criteria": {"report": "missing_ball_recovery_comparison.json"},
+                            "evidence": [{"source_packet_id": "packet_2079"}],
+                            "confidence": 0.72,
+                        }
+                    ],
+                }
+            )
+
+            report = build_ai_improvement_report(output_dir, client=client)
+
         self.assertEqual("error", report["summary"]["status"])
-        self.assertIn("recommended_action", report["error"])
+        self.assertIn("2049-2544", report["error"])
 
     def test_flat_dotted_config_patch_keys_are_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:
@@ -2573,7 +2707,7 @@ class AiImprovementTests(unittest.TestCase):
         self.assertEqual("not visible", improvement["likely_ball_region"]["description"])
         self.assertTrue(any("normalized from localize_ball_roi" in warning for warning in report["warnings"]))
 
-    def test_approving_targeted_rerun_writes_approved_actions(self) -> None:
+    def test_approving_targeted_rerun_writes_normalized_rerun_ball_window_action(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:
             output_dir = Path(temp_name)
             _write_minimal_artifacts(output_dir)
@@ -2608,6 +2742,7 @@ class AiImprovementTests(unittest.TestCase):
                                 "source_packet_id": "packet_001",
                                 "visual_review_id": "visual_review:packet_001",
                             },
+                            "evidence": [{"source_packet_id": "packet_001"}],
                             "confidence": 0.82,
                         }
                     ],
@@ -2626,13 +2761,60 @@ class AiImprovementTests(unittest.TestCase):
         self.assertEqual("run_123", artifact["run_id"])
         self.assertEqual(artifact, written)
         self.assertEqual("approval_001", action["approval_id"])
-        self.assertEqual("targeted_rerun", action["approved_action"])
+        self.assertEqual("rerun_ball_window", action["approved_action"])
+        self.assertEqual("targeted_rerun", action["legacy_approved_action"])
+        self.assertEqual("missing_ball", action["problem_type"])
+        self.assertEqual([{"source_packet_id": "packet_001"}], action["evidence"])
         self.assertEqual("candidate_001", action["candidate_id"])
         self.assertEqual("operator-a", action["approved_by"])
         self.assertEqual("packet_001", action["source_packet_id"])
         self.assertEqual("visual_review:packet_001", action["visual_review_id"])
         self.assertEqual({"start_frame": 10, "end_frame": 20}, action["rerun_scope"])
         self.assertEqual("gpt-improve", action["provenance"]["model"])
+
+    def test_approving_canonical_rerun_ball_window_action(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_minimal_artifacts(output_dir)
+            _write_json(
+                output_dir / "ai_improvement_report.json",
+                {
+                    "schema_version": "1.0",
+                    "generated_at": "2026-06-22T00:00:00+00:00",
+                    "model": "gpt-improve",
+                    "summary": {"status": "needs_rerun"},
+                    "improvements": [
+                        {
+                            "id": "imp_001",
+                            "priority": "P0",
+                            "area": "tracking",
+                            "failure_tags": ["ball_lost"],
+                            "root_cause_module": "reacquisition",
+                            "diagnosis": "Recover localized ball.",
+                            "recommended_action": "rerun_ball_window",
+                            "problem_type": "missing_ball",
+                            "candidate_id": "candidate_001",
+                            "rerun_scope": {"start_frame": 10, "end_frame": 20},
+                            "likely_ball_region": {"description": "not visible", "confidence": 0.0},
+                            "source_packet_id": "packet_001",
+                            "expected_artifact": {"name": "ball_track.csv"},
+                            "comparison_criteria": {"report": "missing_ball_recovery_comparison.json"},
+                            "evidence": [{"source_packet_id": "packet_001"}],
+                            "confidence": 0.82,
+                        }
+                    ],
+                },
+            )
+
+            artifact = approve_ai_improvement_actions(output_dir, run_id="run_123", improvement_ids=["imp_001"])
+
+        action = artifact["approved_actions"][0]
+        self.assertEqual("rerun_ball_window", action["approved_action"])
+        self.assertNotIn("legacy_approved_action", action)
+        self.assertEqual("missing_ball", action["problem_type"])
+        self.assertEqual("candidate_001", action["candidate_id"])
+        self.assertEqual({"name": "ball_track.csv"}, action["expected_artifact"])
+        self.assertEqual({"report": "missing_ball_recovery_comparison.json"}, action["comparison_criteria"])
 
     def test_approval_rejects_localize_ball_roi_without_traceable_provenance(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:
@@ -2886,6 +3068,7 @@ class AiImprovementTests(unittest.TestCase):
     def test_approval_config_patch_strips_invalid_paths_and_writes_derived_patch(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:
             output_dir = Path(temp_name)
+            _write_minimal_artifacts(output_dir)
             _write_json(
                 output_dir / "ai_improvement_report.json",
                 {
@@ -2904,7 +3087,10 @@ class AiImprovementTests(unittest.TestCase):
                             "end_frame": 52,
                             "diagnosis": "Noise filter can tighten.",
                             "recommended_action": "noise_filter_adjustment",
+                            "candidate_id": "noise_candidate_001",
+                            "source_packet_id": "packet_001",
                             "false_positive_class": "foot_confusion",
+                            "evidence": [{"source_packet_id": "packet_001"}],
                             "config_patch": {"selection": {"min_accept_score": 0.55}},
                             "confidence": 0.7,
                         }
@@ -2927,6 +3113,7 @@ class AiImprovementTests(unittest.TestCase):
             patch_artifact = json.loads((output_dir / "ai_improvement_approved_config_patch.json").read_text(encoding="utf-8"))
 
         self.assertEqual({"selection": {"min_accept_score": 0.6}}, artifact["approved_actions"][0]["config_patch"])
+        self.assertEqual("noise_candidate_001", artifact["approved_actions"][0]["candidate_id"])
         self.assertEqual("foot_confusion", artifact["approved_actions"][0]["false_positive_class"])
         self.assertEqual(40, artifact["approved_actions"][0]["start_frame"])
         self.assertEqual(52, artifact["approved_actions"][0]["end_frame"])
@@ -3081,6 +3268,7 @@ class AiImprovementTests(unittest.TestCase):
     def test_approval_without_config_patch_clears_stale_derived_patch_artifact(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:
             output_dir = Path(temp_name)
+            _write_minimal_artifacts(output_dir)
             _write_json(
                 output_dir / "ai_improvement_report.json",
                 {
@@ -3099,6 +3287,9 @@ class AiImprovementTests(unittest.TestCase):
                             "end_frame": 52,
                             "diagnosis": "Noise filter can tighten.",
                             "recommended_action": "noise_filter_adjustment",
+                            "candidate_id": "noise_candidate_001",
+                            "source_packet_id": "packet_001",
+                            "evidence": [{"source_packet_id": "packet_001"}],
                             "false_positive_class": "foot_confusion",
                             "config_patch": {"selection": {"min_accept_score": 0.55}},
                             "confidence": 0.7,
@@ -3108,6 +3299,10 @@ class AiImprovementTests(unittest.TestCase):
             )
             approve_ai_improvement_actions(output_dir, run_id="run_123", improvement_ids=["imp_noise"])
             self.assertTrue((output_dir / "ai_improvement_approved_config_patch.json").exists())
+            written = json.loads((output_dir / "ai_improvement_approved_actions.json").read_text(encoding="utf-8"))
+            action = written["approved_actions"][0]
+            self.assertEqual({"name": "ball_track.cleaned.csv", "role": "candidate"}, action["expected_artifact"])
+            self.assertEqual({"report": "noise_candidate_comparison.json"}, action["comparison_criteria"])
             _write_json(
                 output_dir / "ai_improvement_report.json",
                 {
@@ -3137,6 +3332,7 @@ class AiImprovementTests(unittest.TestCase):
     def test_approval_rejects_noise_action_without_bounded_scope(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:
             output_dir = Path(temp_name)
+            _write_minimal_artifacts(output_dir)
             stale_patch_path = output_dir / "ai_improvement_approved_config_patch.json"
             _write_json(
                 stale_patch_path,
@@ -3158,6 +3354,9 @@ class AiImprovementTests(unittest.TestCase):
                             "root_cause_module": "selection",
                             "diagnosis": "Malformed historical report.",
                             "recommended_action": "noise_filter_adjustment",
+                            "candidate_id": "noise_candidate_001",
+                            "source_packet_id": "packet_001",
+                            "evidence": [{"source_packet_id": "packet_001"}],
                             "false_positive_class": "foot_confusion",
                             "config_patch": {"selection": {"min_accept_score": 0.55}},
                             "confidence": 0.7,
@@ -3807,13 +4006,47 @@ def _valid_improvement_for_action(action: str, *, candidate_id: str = "candidate
             {
                 "failure_tags": ["unknown"],
                 "root_cause_module": "selection",
+                "candidate_id": candidate_id,
+                "source_packet_id": "packet_001",
                 "false_positive_class": "extra_ball",
                 "start_frame": 10,
                 "end_frame": 12,
+                "evidence": [{"source_packet_id": "packet_001"}],
             }
         )
         if action == "noise_filter_adjustment":
             base["config_patch"] = {"selection": {"min_accept_score": 0.62}}
+    elif action == "rerun_ball_window":
+        base.update(
+            {
+                "failure_tags": ["ball_lost"],
+                "root_cause_module": "reacquisition",
+                "problem_type": "missing_ball",
+                "candidate_id": candidate_id,
+                "rerun_scope": {"start_frame": 0, "end_frame": 35},
+                "source_packet_id": "packet_001",
+                "likely_ball_region": {"description": "not visible", "confidence": 0.0},
+                "expected_artifact": {"name": "ball_track.csv"},
+                "comparison_criteria": {"report": "missing_ball_recovery_comparison.json"},
+                "evidence": [{"source_packet_id": "packet_001"}],
+            }
+        )
+    elif action == "mark_ball_not_visible":
+        base.update(
+            {
+                "failure_tags": ["ball_lost"],
+                "root_cause_module": "reacquisition",
+                "problem_type": "missing_ball",
+                "candidate_id": candidate_id,
+                "start_frame": 10,
+                "end_frame": 20,
+                "source_packet_id": "packet_001",
+                "likely_ball_region": {"description": "not visible", "confidence": 0.0},
+                "expected_artifact": {"name": "missing_ball_resolution.json"},
+                "comparison_criteria": {"resolution": "not_visible"},
+                "evidence": [{"source_packet_id": "packet_001"}],
+            }
+        )
     elif action in {"adjust_highlight_window", "render_suggested_highlight"}:
         base.update(
             {

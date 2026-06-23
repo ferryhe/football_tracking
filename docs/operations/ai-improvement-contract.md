@@ -55,6 +55,26 @@ Executable candidates must carry these fields from suggestion through approval, 
 
 An executable candidate must also include evidence ids, a bounded frame window, `expected_artifact`, and `comparison_criteria`. Evidence ids may be packet ids, visual review ids, camera motion event ids, or event candidate ids as appropriate for the problem type.
 
+## Executable Actions
+
+The public executable `approved_action` set is closed:
+
+- `localize_ball_roi`
+- `rerun_ball_window`
+- `mark_ball_not_visible`
+- `noise_filter_adjustment`
+- `tighten_noise_filter`
+- `reject_noise`
+- `adjust_follow_cam`
+- `tracking_rerun_before_follow_cam`
+- `adjust_highlight_window`
+- `render_suggested_highlight`
+
+Legacy `targeted_rerun` inputs are normalized to `rerun_ball_window` for new approval artifacts. Executors may still adapt normalized approvals to older internal names at the execution boundary, but new public artifacts should emit the canonical action name.
+Schemas may continue to accept `targeted_rerun` as a legacy input value during the migration window. That compatibility value is not part of the closed executable output set; approved artifacts should expose `approved_action: "rerun_ball_window"` and may keep `legacy_approved_action: "targeted_rerun"` only as provenance metadata.
+
+Unknown, broad, unbounded, full-video spatial split/SAHI, or untraceable actions are review-only/manual-review. They must not become executable candidates and must not mutate final output.
+
 ## Model Policy
 
 Use the configured strong model for run-level improvement and hard recovery decisions, including missing-ball localization, long-gap reasoning, and any decision that could produce candidate artifacts.
@@ -62,6 +82,8 @@ Use the configured strong model for run-level improvement and hard recovery deci
 Smaller or cheaper models may be used only for low-risk tagging, operator labeling, or dry-run smoke checks. Dry-run output remains review-only unless a later real run produces the required approval, candidate, comparison, and gate evidence.
 
 Workflow reports must record provider mode, candidate intent, and model selection so an operator can tell whether the output came from a strong-model candidate path or a low-risk review path.
+
+If an improvement-capable model is unavailable in real mode, the workflow records non-mutating review-only/unavailable state. It must not manufacture executable approvals from a small-model fallback.
 
 ## Missing-Ball Closure
 
@@ -117,3 +139,5 @@ Final output requires all of the following:
 - A `final_ai_improvement_artifact_manifest.json` entry that records baseline output, candidate output, comparison report, consumed approvals, quality gate status, final selection or rejection, and warnings.
 
 `pass` candidates may be promoted. `warn` candidates require `requires_human_confirmation: true` on the final artifact plus a consumed approval for the same `candidate_id` with `approval_type: human_confirmation`. `fail` candidates are rejected. `unavailable` candidates stay out of final output until usable comparison evidence exists.
+
+Generated missing-ball and noise `pass` candidates remain pending in `final_ai_improvement_artifact_manifest.json` until an operator calls `finalize_ai_candidate` with `output_role="missing_ball_track"` or `output_role="noise_cleaned_track"`. `warn` candidates also require explicit confirmation. Review-only, missing-approval, unknown-candidate, `fail`, and `unavailable` cases cannot mutate final output.

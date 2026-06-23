@@ -88,8 +88,13 @@ function pickPlaybackArtifact(artifacts: ArtifactSummary[]): ArtifactSummary | n
 type AIAnalysisLabels = Translations["aiAnalysis"];
 type ImprovementGroupKey = "missingBall" | "noise" | "cameraMotion" | "highlightBoundary";
 
-const EXECUTABLE_RERUN_ACTIONS = new Set(["targeted_rerun"]);
-const MISSING_BALL_ACTIONS = new Set(["targeted_rerun", "localize_ball_roi"]);
+const EXECUTABLE_RERUN_ACTIONS = new Set(["targeted_rerun", "rerun_ball_window"]);
+const MISSING_BALL_ACTIONS = new Set([
+  "targeted_rerun",
+  "rerun_ball_window",
+  "localize_ball_roi",
+  "mark_ball_not_visible",
+]);
 const HIGHLIGHT_ACTIONS = new Set(["adjust_highlight_window", "render_suggested_highlight"]);
 const FOLLOW_CAM_ACTIONS = new Set([
   "adjust_follow_cam",
@@ -225,7 +230,8 @@ function normalizeApprovalArtifact(
   const followCamArtifact = artifactByName(run, "follow_cam_rerender_plan.json");
   const counts = actionCountMap(artifact.approved_actions ?? []);
   const requiresTrackingRerun = Boolean(counts.tracking_rerun_before_follow_cam);
-  const requiresHighRecallRerun = Boolean(counts.targeted_rerun);
+  const targetedRerunCount = (counts.targeted_rerun ?? 0) + (counts.rerun_ball_window ?? 0);
+  const requiresHighRecallRerun = targetedRerunCount > 0;
   const requiresHighlightRender = Boolean(counts.adjust_highlight_window || counts.render_suggested_highlight);
   const requiresFollowCamRerender = Boolean(followCamArtifact && counts.adjust_follow_cam && !requiresTrackingRerun);
   const configPatchCount = (artifact.approved_actions ?? []).filter((action) => isFilledRecord(action.config_patch)).length;
@@ -246,7 +252,7 @@ function normalizeApprovalArtifact(
     summary: {
       approved_action_count: artifact.approved_actions?.length ?? 0,
       approved_action_counts: counts,
-      targeted_rerun_count: counts.targeted_rerun ?? 0,
+      targeted_rerun_count: targetedRerunCount,
       config_patch_count: configPatchCount,
       highlight_action_count: (counts.adjust_highlight_window ?? 0) + (counts.render_suggested_highlight ?? 0),
       follow_cam_action_count: (counts.adjust_follow_cam ?? 0) + (counts.tracking_rerun_before_follow_cam ?? 0),

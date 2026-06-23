@@ -12,6 +12,7 @@ from football_tracking.ai_improvement_quality_gate import (
     write_ai_improvement_quality_gate,
     write_track_hash_snapshot,
 )
+from football_tracking.ai_candidate_lifecycle import build_ai_candidate_lifecycle
 from football_tracking.final_artifact_manifest import finalize_ai_candidate, write_final_artifact_manifest
 
 
@@ -962,7 +963,7 @@ class AiImprovementQualityGateTests(unittest.TestCase):
         self.assertEqual("candidate-missing", comparison_check["reports"][0]["candidate_id"])
         self.assertEqual("missing", comparison_check["reports"][0]["artifact_status"])
 
-    def test_finalized_missing_ball_and_noise_selections_remain_visible_to_quality_gate(self) -> None:
+    def test_missing_ball_and_noise_finalized_outputs_visible_to_lifecycle_quality_gate_and_final_manifest(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:
             output_dir = Path(temp_name)
             missing_dir = output_dir / "ai_candidates" / "missing_ball" / "candidate-missing"
@@ -1017,11 +1018,18 @@ class AiImprovementQualityGateTests(unittest.TestCase):
             finalize_ai_candidate(output_dir, problem_type="missing_ball", candidate_id="candidate-missing", approval_id="approval-missing", decision="promote", output_role="missing_ball_track")
             finalize_ai_candidate(output_dir, problem_type="noise", candidate_id="candidate-noise", approval_id="approval-noise", decision="promote", output_role="noise_cleaned_track")
             payload = build_ai_improvement_quality_gate(output_dir)
+            lifecycle = build_ai_candidate_lifecycle(output_dir)
+            final_manifest = json.loads((output_dir / "final_ai_improvement_artifact_manifest.json").read_text(encoding="utf-8"))
 
         comparison_check = payload["checks"]["candidate_comparisons_ok"]
         self.assertEqual("pass", comparison_check["status"])
         self.assertEqual(2, comparison_check["report_count"])
         self.assertEqual(["candidate-missing", "candidate-noise"], [item["candidate_id"] for item in comparison_check["reports"]])
+        self.assertEqual("promoted", lifecycle["summary"]["promotion_status"])
+        self.assertEqual(
+            ["candidate-missing", "candidate-noise"],
+            [item["candidate_id"] for item in final_manifest["final_selected_artifacts"]],
+        )
 
     def test_cli_returns_nonzero_when_quality_gate_fails(self) -> None:
         from scripts.run_ai_improvement_quality_gate import main

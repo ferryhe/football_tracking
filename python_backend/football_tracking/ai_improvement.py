@@ -36,8 +36,9 @@ LONG_LOST_GAP_THRESHOLD_FRAMES = 120
 _CANDIDATE_INTENTS = {"review_only", "suggest_candidates", "prepare_approved_candidates"}
 _CANDIDATE_PROBLEM_TYPES = {"missing_ball", "noise", "follow_cam", "highlight"}
 _EXECUTABLE_ACTIONS = {
-    "targeted_rerun",
     "localize_ball_roi",
+    "rerun_ball_window",
+    "mark_ball_not_visible",
     "noise_filter_adjustment",
     "tighten_noise_filter",
     "reject_noise",
@@ -46,6 +47,8 @@ _EXECUTABLE_ACTIONS = {
     "tracking_rerun_before_follow_cam",
     "render_suggested_highlight",
 }
+_LEGACY_EXECUTABLE_ACTION_ALIASES = {"targeted_rerun": "rerun_ball_window"}
+_REVIEW_ONLY_ACTIONS = {"manual_review", "split_packet", "loosen_ball_recovery", "human_review_camera_motion"}
 _VISUAL_MEDIA_KEYS = ("contact_sheet", "crop_sheet", "wide", "wide_evidence", "crop", "crop_evidence")
 _IMAGE_SIGNATURES = (
     b"\x89PNG\r\n\x1a\n",
@@ -552,9 +555,10 @@ def _approved_action_entry(
     roi_provenance_context: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any], list[str]]:
     improvement_id = str(improvement.get("id") or "")
-    approved_action = str(improvement.get("recommended_action") or "")
-    if approved_action not in AI_RECOMMENDED_ACTIONS:
-        raise ValueError(f"Improvement {improvement_id} recommended_action is unsupported: {approved_action}")
+    raw_approved_action = str(improvement.get("recommended_action") or "")
+    if raw_approved_action not in AI_RECOMMENDED_ACTIONS:
+        raise ValueError(f"Improvement {improvement_id} recommended_action is unsupported: {raw_approved_action}")
+    approved_action = _normalized_approved_action(raw_approved_action)
 
     warnings: list[str] = []
     patch_source = config_patch_override if config_patch_override is not None else improvement.get("config_patch")
@@ -576,9 +580,23 @@ def _approved_action_entry(
             "confidence": improvement.get("confidence"),
         },
     }
+    if approved_action != raw_approved_action:
+        action["legacy_approved_action"] = raw_approved_action
+    if "problem_type" not in improvement:
+        inferred_problem_type = _problem_type_for_approved_action(approved_action)
+        if inferred_problem_type is not None:
+            action["problem_type"] = inferred_problem_type
+    evidence = _evidence(improvement.get("evidence"))
+    if evidence:
+        action["evidence"] = evidence
+    for key in ("expected_artifact", "comparison_criteria"):
+        value = improvement.get(key)
+        if isinstance(value, dict):
+            action[key] = _json_copy(value)
     for key in (
         "source_packet_id",
         "visual_review_id",
+        "problem_type",
         "candidate_id",
         "frame_dimensions",
         "false_positive_class",
@@ -605,11 +623,11 @@ def _approved_action_entry(
     if config_patch:
         action["config_patch"] = config_patch
 
-    if approved_action == "targeted_rerun" and "rerun_scope" not in action:
-        raise ValueError(f"Approval {approval_id} targeted_rerun requires rerun_scope.")
+    if approved_action == "rerun_ball_window" and "rerun_scope" not in action:
+        raise ValueError(f"Approval {approval_id} rerun_ball_window requires rerun_scope.")
     if approved_action == "localize_ball_roi" and "local_search_roi" not in action:
         raise ValueError(f"Approval {approval_id} localize_ball_roi requires local_search_roi.")
-    if approved_action in {"localize_ball_roi", "targeted_rerun"}:
+    if approved_action in {"localize_ball_roi", "rerun_ball_window"}:
         candidate_id = action.get("candidate_id") or improvement.get("candidate_id")
         action["candidate_id"] = _safe_candidate_id(
             candidate_id,
@@ -621,7 +639,7 @@ def _approved_action_entry(
         and ("start_frame" not in action or "end_frame" not in action)
     ):
         raise ValueError(f"Approval {approval_id} localize_ball_roi requires frame bounds.")
-    if approved_action in {"localize_ball_roi", "targeted_rerun"}:
+    if approved_action in {"localize_ball_roi", "rerun_ball_window"}:
         provenance_item = dict(improvement)
         provenance_item.update(action)
         if "source_packet_id" not in action and "visual_review_id" not in action:
@@ -633,6 +651,15 @@ def _approved_action_entry(
                 f"Approval {approval_id} {approved_action} requires traceable packet or visual review provenance."
             )
     if approved_action in {"noise_filter_adjustment", "tighten_noise_filter", "reject_noise"}:
+        candidate_id = action.get("candidate_id") or improvement.get("candidate_id")
+        action["candidate_id"] = _safe_candidate_id(
+            candidate_id,
+            f"Approval {approval_id} {approved_action} candidate_id",
+        )
+        if not _has_traceable_packet_or_visual_provenance({**improvement, **action}, roi_provenance_context):
+            raise ValueError(
+                f"Approval {approval_id} {approved_action} requires traceable packet or visual review provenance."
+            )
         if "false_positive_class" not in action:
             raise ValueError(f"Approval {approval_id} {approved_action} requires false_positive_class.")
         if "start_frame" not in action or "end_frame" not in action:
@@ -641,6 +668,24 @@ def _approved_action_entry(
             raise ValueError(f"Approval {approval_id} end_frame must be greater than or equal to start_frame.")
         if approved_action == "noise_filter_adjustment" and "config_patch" not in action:
             raise ValueError(f"Approval {approval_id} noise_filter_adjustment requires config_patch.")
+
+    if approved_action == "mark_ball_not_visible":
+        candidate_id = action.get("candidate_id") or improvement.get("candidate_id")
+        action["candidate_id"] = _safe_candidate_id(
+            candidate_id,
+            f"Approval {approval_id} {approved_action} candidate_id",
+        )
+        likely_region = improvement.get("likely_ball_region")
+        if not isinstance(likely_region, dict) or not _likely_region_is_not_visible(likely_region):
+            raise ValueError(f"Approval {approval_id} mark_ball_not_visible requires not-visible likely_ball_region.")
+        action["likely_ball_region"] = dict(likely_region)
+        action["resolution"] = "not_visible"
+        if "start_frame" not in action or "end_frame" not in action:
+            raise ValueError(f"Approval {approval_id} mark_ball_not_visible requires start_frame and end_frame.")
+        if not _has_traceable_packet_or_visual_provenance({**improvement, **action}, roi_provenance_context):
+            raise ValueError(
+                f"Approval {approval_id} mark_ball_not_visible requires traceable packet or visual review provenance."
+            )
 
     if approved_action in {"adjust_highlight_window", "render_suggested_highlight"}:
         candidate_id = action.get("candidate_id") or improvement.get("candidate_id")
@@ -675,6 +720,7 @@ def _approved_action_entry(
         if "start_frame" not in action or "end_frame" not in action:
             raise ValueError(f"Approval {approval_id} human_review_camera_motion requires start_frame and end_frame.")
 
+    _fill_approved_action_contract_defaults(action)
     return action, warnings
 
 
@@ -1331,17 +1377,19 @@ def _validate_improvement(raw: Any, index: int, *, context: dict[str, Any] | Non
     if invalid_tags:
         raise ValueError(f"Improvement {index} failure_tags contain unsupported values: {', '.join(invalid_tags)}")
     confidence = _confidence(raw.get("confidence"), f"Improvement {index} confidence")
-    recommended_action = _required_string(raw, "recommended_action", index)
-    if recommended_action not in AI_RECOMMENDED_ACTIONS:
-        raise ValueError(f"Improvement {index} recommended_action is unsupported: {recommended_action}")
+    raw_recommended_action = _required_string(raw, "recommended_action", index)
+    recommended_action = raw_recommended_action
+    unsupported_recommended_action = recommended_action not in AI_RECOMMENDED_ACTIONS
+    if unsupported_recommended_action:
+        recommended_action = "manual_review"
     root_cause_module = _required_string(raw, "root_cause_module", index)
     if root_cause_module not in AI_ROOT_CAUSE_MODULES:
         raise ValueError(f"Improvement {index} root_cause_module is unsupported: {root_cause_module}")
 
     rerun_scope = raw.get("rerun_scope")
-    if recommended_action == "targeted_rerun":
+    if recommended_action in {"targeted_rerun", "rerun_ball_window"}:
         if not isinstance(rerun_scope, dict):
-            raise ValueError(f"Improvement {index} targeted_rerun requires rerun_scope.")
+            raise ValueError(f"Improvement {index} {recommended_action} requires rerun_scope.")
         rerun_scope = _frame_window(rerun_scope, f"Improvement {index} rerun_scope")
     elif isinstance(rerun_scope, dict):
         rerun_scope = _frame_window(rerun_scope, f"Improvement {index} rerun_scope")
@@ -1368,6 +1416,11 @@ def _validate_improvement(raw: Any, index: int, *, context: dict[str, Any] | Non
         "evidence": _evidence(raw.get("evidence")),
         "confidence": confidence,
     }
+    if unsupported_recommended_action:
+        item["original_recommended_action"] = raw_recommended_action
+        patch_warnings.append(
+            f"Improvement {index} unsupported recommended_action downgraded to manual_review: {raw_recommended_action}"
+        )
     for key in (
         "source_packet_id",
         "visual_review_id",
@@ -1435,6 +1488,8 @@ def _validate_action_specific_improvement(
     context: dict[str, Any] | None = None,
 ) -> None:
     action = item.get("recommended_action")
+    if action in _REVIEW_ONLY_ACTIONS:
+        return
     if _is_missing_ball_item(item):
         _validate_missing_ball_evidence_contract(item, index, context)
     if action == "localize_ball_roi":
@@ -1445,11 +1500,17 @@ def _validate_action_specific_improvement(
                 f"Improvement {index} localize_ball_roi requires source_packet_id or visual_review_id provenance "
                 "that matches review_packets.json or ai_visual_review.json."
             )
-    if action == "targeted_rerun" and "local_search_roi" in item:
+    if action in {"targeted_rerun", "rerun_ball_window"} and "local_search_roi" in item:
         if not _has_traceable_packet_or_visual_provenance(item, context):
             raise ValueError(
                 f"Improvement {index} local_search_roi requires traceable packet or visual review provenance."
             )
+    if action == "mark_ball_not_visible":
+        likely_region = item.get("likely_ball_region")
+        if not isinstance(likely_region, dict) or not _likely_region_is_not_visible(likely_region):
+            raise ValueError(f"Improvement {index} mark_ball_not_visible requires not-visible likely_ball_region.")
+        if "start_frame" not in item or "end_frame" not in item:
+            raise ValueError(f"Improvement {index} mark_ball_not_visible requires start_frame and end_frame.")
     if action in {"noise_filter_adjustment", "tighten_noise_filter", "reject_noise"}:
         if not item.get("false_positive_class"):
             raise ValueError(f"Improvement {index} {action} requires false_positive_class.")
@@ -2412,14 +2473,16 @@ def _with_candidate_contract(
     result = dict(item)
     requested_intent = _candidate_intent(candidate_intent)
     action = str(result.get("recommended_action") or "")
-    missing_fields = _candidate_contract_missing_fields(result) if action in _EXECUTABLE_ACTIONS else []
-    if action in _EXECUTABLE_ACTIONS:
+    contract_action = _normalized_approved_action(action)
+    missing_fields = _candidate_contract_missing_fields(result) if contract_action in _EXECUTABLE_ACTIONS else []
+    if contract_action in _EXECUTABLE_ACTIONS:
         result["candidate_contract"] = {
+            "approved_action": contract_action,
             "required_fields_present": not missing_fields,
             "missing_fields": missing_fields,
         }
     executable = (
-        action in _EXECUTABLE_ACTIONS
+        contract_action in _EXECUTABLE_ACTIONS
         and not provider_dry_run
         and requested_intent in {"suggest_candidates", "prepare_approved_candidates"}
         and not missing_fields
@@ -2442,6 +2505,8 @@ def _candidate_contract_missing_fields(item: dict[str, Any]) -> list[str]:
         missing.append("candidate_id")
     if not _has_candidate_evidence_id(item):
         missing.append("evidence_id")
+    if not isinstance(item.get("evidence"), list) or not item.get("evidence"):
+        missing.append("evidence")
     if not _has_candidate_bounded_window(item):
         missing.append("bounded_frame_window")
     if not item.get("expected_artifact"):
@@ -2485,6 +2550,78 @@ def _candidate_intent(value: str) -> str:
     if value not in _CANDIDATE_INTENTS:
         raise ValueError(f"candidate_intent must be one of: {', '.join(sorted(_CANDIDATE_INTENTS))}.")
     return value
+
+
+def _normalized_approved_action(action: str) -> str:
+    return _LEGACY_EXECUTABLE_ACTION_ALIASES.get(action, action)
+
+
+def _problem_type_for_approved_action(action: str) -> str | None:
+    if action in {"localize_ball_roi", "rerun_ball_window", "mark_ball_not_visible"}:
+        return "missing_ball"
+    if action in {"noise_filter_adjustment", "tighten_noise_filter", "reject_noise"}:
+        return "noise"
+    if action in {"adjust_follow_cam", "tracking_rerun_before_follow_cam"}:
+        return "follow_cam"
+    if action in {"adjust_highlight_window", "render_suggested_highlight"}:
+        return "highlight"
+    return None
+
+
+def _fill_approved_action_contract_defaults(action: dict[str, Any]) -> None:
+    approved_action = str(action.get("approved_action") or "")
+    if "problem_type" not in action:
+        problem_type = _problem_type_for_approved_action(approved_action)
+        if problem_type is not None:
+            action["problem_type"] = problem_type
+    if "expected_artifact" not in action:
+        expected = _default_expected_artifact(approved_action)
+        if expected is not None:
+            action["expected_artifact"] = expected
+    if "comparison_criteria" not in action:
+        criteria = _default_comparison_criteria(approved_action)
+        if criteria is not None:
+            action["comparison_criteria"] = criteria
+    if "evidence" not in action:
+        evidence: list[dict[str, str]] = []
+        for key in ("source_packet_id", "visual_review_id"):
+            value = action.get(key)
+            if isinstance(value, str) and value.strip():
+                evidence.append({key: value.strip()})
+        if evidence:
+            action["evidence"] = evidence
+
+
+def _default_expected_artifact(action: str) -> dict[str, str] | None:
+    if action in {"localize_ball_roi", "rerun_ball_window"}:
+        return {"name": "ball_track.csv", "role": "candidate"}
+    if action in {"noise_filter_adjustment", "tighten_noise_filter", "reject_noise"}:
+        return {"name": "ball_track.cleaned.csv", "role": "candidate"}
+    if action == "mark_ball_not_visible":
+        return {"name": "missing_ball_resolution.json", "role": "resolved_noop"}
+    if action in {"adjust_follow_cam", "tracking_rerun_before_follow_cam"}:
+        return {"name": "follow_cam.mp4", "role": "candidate"}
+    if action in {"adjust_highlight_window", "render_suggested_highlight"}:
+        return {"name": "highlight.mp4", "role": "candidate"}
+    return None
+
+
+def _default_comparison_criteria(action: str) -> dict[str, str] | None:
+    if action in {"localize_ball_roi", "rerun_ball_window"}:
+        return {"report": "missing_ball_recovery_comparison.json"}
+    if action in {"noise_filter_adjustment", "tighten_noise_filter", "reject_noise"}:
+        return {"report": "noise_candidate_comparison.json"}
+    if action == "mark_ball_not_visible":
+        return {"resolution": "not_visible"}
+    if action in {"adjust_follow_cam", "tracking_rerun_before_follow_cam"}:
+        return {"report": "follow_cam_candidate_comparison.json"}
+    if action in {"adjust_highlight_window", "render_suggested_highlight"}:
+        return {"report": "highlight_candidate_comparison.json"}
+    return None
+
+
+def _json_copy(value: dict[str, Any]) -> dict[str, Any]:
+    return json.loads(json.dumps(value, ensure_ascii=False))
 
 
 def _safe_candidate_id(value: Any, label: str) -> str:
@@ -2531,6 +2668,12 @@ def _report(
     report_candidate_intent = _candidate_intent(
         str(context.get("candidate_intent") or ("review_only" if provider_dry_run else "suggest_candidates"))
     )
+    can_lead_to_executable_candidates = (
+        not provider_dry_run
+        and status not in {"unavailable", "error"}
+        and model is not None
+        and report_candidate_intent in {"suggest_candidates", "prepare_approved_candidates"}
+    )
     improvements = [
         _with_candidate_contract(
             item,
@@ -2555,11 +2698,13 @@ def _report(
             "source": model_selection_source,
             "provider_mode": provider_mode,
             "provider_dry_run": provider_dry_run,
+            "can_lead_to_executable_candidates": can_lead_to_executable_candidates,
         },
         "candidate_intent": report_candidate_intent,
         "dry_run": bool(dry_run),
         "provider_dry_run": provider_dry_run,
         "provider_mode": provider_mode,
+        "can_lead_to_executable_candidates": can_lead_to_executable_candidates,
         "source_artifacts": context.get("source_artifacts") or {},
         "artifact_status": context.get("artifact_status") or {},
         "summary": summary,
@@ -2583,7 +2728,11 @@ def _summary(
         "status": status,
         "primary_issue": primary_issue,
         "improvement_count": len(improvements),
-        "targeted_rerun_count": sum(1 for item in improvements if item.get("recommended_action") == "targeted_rerun"),
+        "targeted_rerun_count": sum(
+            1
+            for item in improvements
+            if item.get("recommended_action") in {"targeted_rerun", "rerun_ball_window"}
+        ),
         "config_patch_count": sum(1 for item in improvements if bool(item.get("config_patch"))),
         "highlight_adjustment_count": len(highlight_adjustments),
         "executable_candidate_count": sum(1 for item in improvements if item.get("executable") is True),
@@ -2638,13 +2787,15 @@ def _instructions(language: str | None) -> str:
         "An executable candidate must be bounded, traceable, and comparable: include problem_type, "
         "candidate_id seed data, evidence ids, a bounded frame window, expected_artifact, and comparison_criteria. "
         "Each improvement must include priority, area, failure_tags, root_cause_module, recommended_action, confidence. "
-        "targeted_rerun improvements must include rerun_scope. "
-        "Missing-ball suggestions must use targeted_rerun, localize_ball_roi, or likely_ball_region.description='not visible'; "
-        "long missing-ball or lost-gap suggestions must cover the entire lost gap or explain uncovered subwindows. "
+        "Use rerun_ball_window for executable missing-ball reruns; legacy targeted_rerun may appear in older artifacts "
+        "but should be treated as rerun_ball_window. "
+        "Missing-ball suggestions must use rerun_ball_window, localize_ball_roi, mark_ball_not_visible, "
+        "or likely_ball_region.description='not visible'; cover the entire lost gap with full-window coverage or "
+        "explain uncovered subwindows with explicit uncovered subranges when coverage is partial. "
         "localize_ball_roi and any local_search_roi require a traceable source_packet_id or visual_review_id from the supplied packet evidence; "
         "executable localize_ball_roi also requires ai_visual_review or equivalent vision-reviewed wide/crop evidence. "
         "not_visible is acceptable only when packet or visual evidence shows the ball is hidden, off-frame, or impossible to identify. "
-        "Noise suggestions must include false_positive_class, bounded start_frame/end_frame, and use accepted classes "
+        "Noise suggestions must include false_positive_class, bounded start_frame/end_frame, evidence ids, and use accepted classes "
         "extra_ball, shoe_confusion, foot_confusion, player_head, advertising_board, sideline_confusion, "
         "wall_background_drift, unknown_false_positive, or unknown; do not put these false-positive classes in failure_tags. Use noise_filter_adjustment "
         "with a safe config_patch or reject_noise for confirmed false positives. "

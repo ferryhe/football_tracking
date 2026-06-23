@@ -48,7 +48,7 @@ FAILURE_TAG_ALIASES = {
     "wall_background_drift": "wall_background_drift",
 }
 ACCEPTED_FALSE_POSITIVE_TAGS = set(FAILURE_TAG_ALIASES.values())
-APPROVAL_ACTIONS_THAT_CAN_COVER_MISSING_BALL = {"targeted_rerun", "localize_ball_roi"}
+APPROVAL_ACTIONS_THAT_CAN_COVER_MISSING_BALL = {"targeted_rerun", "rerun_ball_window", "localize_ball_roi"}
 NOISE_APPROVAL_ACTIONS_THAT_REQUIRE_COMPARISON = {"noise_filter_adjustment", "tighten_noise_filter", "reject_noise"}
 
 
@@ -679,7 +679,7 @@ def _resolution_items(missing_ball_resolution: dict[str, Any]) -> list[dict[str,
 
 def _is_missing_ball_item(item: dict[str, Any]) -> bool:
     action = str(item.get("recommended_action") or item.get("approved_action") or "").casefold()
-    if action in {"targeted_rerun", "localize_ball_roi"}:
+    if action in {"targeted_rerun", "rerun_ball_window", "localize_ball_roi", "mark_ball_not_visible"}:
         return True
     tags = _tags(item)
     if tags & {"ball_lost", "missing_ball", "lost_gap", "ball_not_visible", "missed_ball"}:

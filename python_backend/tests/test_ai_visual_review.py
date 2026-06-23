@@ -158,6 +158,8 @@ class AiVisualReviewTests(unittest.TestCase):
                 },
                 report["model_selection"],
             )
+            self.assertEqual("real", report["provider_mode"])
+            self.assertTrue(report["can_lead_to_executable_candidates"])
             self.assertEqual("visual_localization", report["candidate_intent"])
 
     def test_default_visual_review_client_uses_nested_provider_settings_for_model_routing(self) -> None:

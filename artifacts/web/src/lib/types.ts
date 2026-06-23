@@ -299,6 +299,8 @@ export interface AIImproveReportArtifact extends Record<string, unknown> {
 
 export type AIRecommendedAction =
   | "targeted_rerun"
+  | "rerun_ball_window"
+  | "mark_ball_not_visible"
   | "tighten_noise_filter"
   | "loosen_ball_recovery"
   | "split_packet"

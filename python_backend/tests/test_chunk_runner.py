@@ -473,6 +473,31 @@ class ChunkRunnerConfigTests(unittest.TestCase):
         self.assertEqual("sahi_roi", window["sahi_policy"])
         self.assertIsNone(config.filtering.roi)
 
+    def test_high_recall_window_config_accepts_canonical_rerun_ball_window_roi(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            base_dir = Path(temp_name)
+            config = make_app_config(base_dir)
+            window = {
+                "start_frame": 10,
+                "end_frame": 20,
+                "approved_action": "rerun_ball_window",
+                "approved_roi": [120, 40, 200, 90],
+                "padded_roi": [88, 8, 232, 122],
+                "effective_roi": [88, 8, 232, 122],
+                "mode": "sahi",
+            }
+
+            config_path = write_high_recall_window_config(
+                config,
+                window,
+                0,
+                base_dir / "outputs" / "source" / "high_recall_windows",
+            )
+            payload = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+
+        self.assertEqual([88, 8, 232, 122], payload["filtering"]["roi"])
+        self.assertEqual("sahi_roi", window["sahi_policy"])
+
     def test_high_recall_roi_padding_clamps_to_known_mock_frame_bounds(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:
             base_dir = Path(temp_name)

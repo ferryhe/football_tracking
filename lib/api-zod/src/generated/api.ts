@@ -174,6 +174,8 @@ export const ImproveResponse = zod.object({
         .default(improveResponseImprovementsItemDiagnosisDefault),
       recommended_action: zod.enum([
         "targeted_rerun",
+        "rerun_ball_window",
+        "mark_ball_not_visible",
         "localize_ball_roi",
         "noise_filter_adjustment",
         "tighten_noise_filter",
@@ -511,6 +513,8 @@ export const ApproveImprovementsResponse = zod.object({
       improvement_id: zod.string(),
       approved_action: zod.enum([
         "targeted_rerun",
+        "rerun_ball_window",
+        "mark_ball_not_visible",
         "localize_ball_roi",
         "noise_filter_adjustment",
         "tighten_noise_filter",
