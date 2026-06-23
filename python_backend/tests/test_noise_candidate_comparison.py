@@ -89,6 +89,7 @@ class NoiseCandidateComparisonTests(unittest.TestCase):
         reduction = next(check for check in report["checks"] if check["name"] == "false_positive_island_reduction")
         self.assertEqual("fail", reduction["status"])
         self.assertEqual(1, reduction["absolute_decrease"])
+        self.assertIn("below the 5 percent warn threshold", reduction["reason"])
 
     def test_candidate_fails_when_sustained_valid_ball_coverage_drops(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:

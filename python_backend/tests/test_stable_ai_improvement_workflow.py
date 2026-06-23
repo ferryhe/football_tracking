@@ -338,6 +338,7 @@ class StableAiImprovementWorkflowTests(unittest.TestCase):
         dispatcher = _stage(report, "selected_approval_dispatcher")
         self.assertEqual("failed", dispatcher["status"])
         self.assertEqual("failed", dispatcher["noise_candidate_execution_path"]["status"])
+        self.assertIsNone(dispatcher["noise_candidate_execution_path"]["errors"][0]["candidate_id"])
         self.assertIn("candidate_id", dispatcher["noise_candidate_execution_path"]["errors"][0]["error"])
         self.assertFalse(candidate_parent_exists)
         self.assertEqual("failed", report["quality_gate"]["summary"]["workflow_status"])

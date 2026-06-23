@@ -737,10 +737,15 @@ def _noise_candidate_execution_path(*, output_dir: Path, actions: list[dict[str,
         }
     approval_ids = _approval_ids(actions)
     if dry_run:
+        candidate_ids = [
+            candidate_id
+            for action in actions
+            if (candidate_id := _noise_candidate_id(action)) is not None
+        ]
         return {
             "status": "planned",
             "approval_ids": approval_ids,
-            "candidate_ids": [_noise_candidate_id(action) for action in actions],
+            "candidate_ids": candidate_ids,
             "execution_status": "not_run",
             "reason": "Dry-run records selected noise cleanup approvals without writing candidate artifacts.",
         }
@@ -1010,8 +1015,7 @@ def _noise_candidate_id(action: dict[str, Any]) -> str | None:
     value = action.get("candidate_id")
     if isinstance(value, str) and value.strip():
         return value.strip()
-    approval_id = _action_approval_id(action)
-    return f"noise-{approval_id}" if approval_id else None
+    return None
 
 
 def _resolution_from_action(action: dict[str, Any]) -> dict[str, Any]:

@@ -340,7 +340,11 @@ def _false_positive_reduction_check(metrics: dict[str, Any]) -> dict[str, Any]:
         reason = "false-positive islands decreased by at least 5 percent, but below the PR3 pass threshold"
     else:
         status = "fail"
-        reason = "candidate does not reduce false-positive islands"
+        reason = (
+            "false-positive island decrease is below the 5 percent warn threshold"
+            if decrease > 0
+            else "candidate does not reduce false-positive islands"
+        )
     return {
         "name": "false_positive_island_reduction",
         "status": status,
