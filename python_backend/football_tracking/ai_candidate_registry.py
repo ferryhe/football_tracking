@@ -33,7 +33,7 @@ def normalize_candidate_record(record: dict[str, Any]) -> dict[str, Any]:
 
     comparison_report = _optional_string(record.get("comparison_report"))
     if comparison_report is not None:
-        comparison_report = safe_json_file_name(comparison_report)
+        comparison_report = _safe_relative_json_path(comparison_report, "comparison_report")
 
     approval_id = _optional_string(record.get("approval_id"))
     if approval_id is not None:
@@ -269,6 +269,26 @@ def _safe_relative_path(value: str, field_name: str) -> str:
     ):
         raise ValueError(f"{field_name} must contain safe relative paths")
     return stripped
+
+
+def _safe_relative_json_path(value: str, field_name: str) -> str:
+    try:
+        stripped = _safe_relative_path(value, field_name)
+    except ValueError as exc:
+        raise ValueError("report name must be a safe JSON file name or relative JSON path") from exc
+    path = Path(stripped)
+    if path.suffix.lower() != ".json":
+        raise ValueError("report name must be a safe JSON file name or relative JSON path")
+    safe_json_file_name(path.name)
+    for part in path.parts[:-1]:
+        if (
+            not part
+            or part in {".", ".."}
+            or any(separator in part for separator in ("/", "\\"))
+            or ":" in part
+        ):
+            raise ValueError("report name must be a safe JSON file name or relative JSON path")
+    return path.as_posix()
 
 
 def _validate_identifier(value: str, field_name: str) -> None:

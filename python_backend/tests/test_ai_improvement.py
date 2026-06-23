@@ -2735,6 +2735,99 @@ class AiImprovementTests(unittest.TestCase):
                     approved_by="operator-a",
                 )
 
+    def test_approval_rejects_unsafe_missing_ball_candidate_id_before_writing_artifact(self) -> None:
+        unsafe_ids = ["../escape", "candidate/path", "C:tmp", ".", "..", "CON", "candidate.", "candidate "]
+        for candidate_id in unsafe_ids:
+            with self.subTest(candidate_id=candidate_id):
+                with tempfile.TemporaryDirectory() as temp_name:
+                    output_dir = Path(temp_name)
+                    _write_minimal_artifacts(output_dir)
+                    approved_path = output_dir / "ai_improvement_approved_actions.json"
+                    _write_json(
+                        output_dir / "ai_improvement_report.json",
+                        {
+                            "schema_version": "1.0",
+                            "generated_at": "2026-06-22T00:00:00+00:00",
+                            "model": "gpt-improve",
+                            "summary": {"status": "needs_rerun"},
+                            "improvements": [
+                                {
+                                    "id": "imp_001",
+                                    "priority": "P0",
+                                    "area": "tracking",
+                                    "failure_tags": ["ball_lost"],
+                                    "root_cause_module": "reacquisition",
+                                    "diagnosis": "Unsafe candidate id should not be written.",
+                                    "recommended_action": "targeted_rerun",
+                                    "candidate_id": candidate_id,
+                                    "rerun_scope": {"start_frame": 10, "end_frame": 20},
+                                    "source_packet_id": "packet_001",
+                                    "confidence": 0.82,
+                                }
+                            ],
+                        },
+                    )
+
+                    with self.assertRaisesRegex(ValueError, "candidate_id"):
+                        approve_ai_improvement_actions(
+                            output_dir,
+                            run_id="run_123",
+                            improvement_ids=["imp_001"],
+                            approved_by="operator-a",
+                        )
+
+                    self.assertFalse(approved_path.exists())
+
+    def test_approval_rejects_unsafe_localize_candidate_id_before_writing_artifact(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_minimal_artifacts(output_dir)
+            approved_path = output_dir / "ai_improvement_approved_actions.json"
+            _write_json(
+                output_dir / "ai_improvement_report.json",
+                {
+                    "schema_version": "1.0",
+                    "generated_at": "2026-06-22T00:00:00+00:00",
+                    "model": "gpt-improve",
+                    "summary": {"status": "needs_rerun"},
+                    "improvements": [
+                        {
+                            "id": "imp_001",
+                            "priority": "P0",
+                            "area": "tracking",
+                            "failure_tags": ["ball_lost"],
+                            "root_cause_module": "reacquisition",
+                            "diagnosis": "Unsafe candidate id should not be written.",
+                            "recommended_action": "localize_ball_roi",
+                            "candidate_id": "candidate/path",
+                            "start_frame": 10,
+                            "end_frame": 20,
+                            "source_packet_id": "packet_001",
+                            "local_search_roi": {
+                                "coordinate_space": "image",
+                                "frame": 15,
+                                "x": 120,
+                                "y": 40,
+                                "width": 80,
+                                "height": 50,
+                                "confidence": 0.72,
+                            },
+                            "confidence": 0.82,
+                        }
+                    ],
+                },
+            )
+
+            with self.assertRaisesRegex(ValueError, "candidate_id"):
+                approve_ai_improvement_actions(
+                    output_dir,
+                    run_id="run_123",
+                    improvement_ids=["imp_001"],
+                    approved_by="operator-a",
+                )
+
+            self.assertFalse(approved_path.exists())
+
     def test_approval_config_patch_strips_invalid_paths_and_writes_derived_patch(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:
             output_dir = Path(temp_name)

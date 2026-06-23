@@ -189,6 +189,7 @@ def _comparison_checks(
         _packet_evidence_coverage_check(
             approval,
             review_packets,
+            target_window=target_window,
             require_packet_coverage=require_packet_coverage,
         )
     )
@@ -555,6 +556,7 @@ def _packet_evidence_coverage_check(
     approval: dict[str, Any] | None,
     review_packets: dict[str, Any] | None,
     *,
+    target_window: tuple[int, int],
     require_packet_coverage: bool,
 ) -> dict[str, Any]:
     if not require_packet_coverage:
@@ -564,6 +566,15 @@ def _packet_evidence_coverage_check(
     approvals = approval.get("related_approvals")
     approval_items = [item for item in approvals if isinstance(item, dict)] if isinstance(approvals, list) else [approval]
     packets_by_id = _packets_by_id(review_packets)
+    required_labels = _required_packet_coverage_labels(approval)
+    if required_labels:
+        return _packet_label_coverage_check(
+            approval,
+            approval_items,
+            packets_by_id,
+            required_labels=required_labels,
+            target_window=target_window,
+        )
     results: list[dict[str, Any]] = []
     for item in approval_items:
         packet_id = item.get("source_packet_id")
@@ -630,12 +641,148 @@ def _packet_evidence_coverage_check(
     }
 
 
+def _packet_label_coverage_check(
+    approval: dict[str, Any],
+    approval_items: list[dict[str, Any]],
+    packets_by_id: dict[str, dict[str, Any]],
+    *,
+    required_labels: list[str],
+    target_window: tuple[int, int],
+) -> dict[str, Any]:
+    required_window = target_window or _packet_required_window(approval)
+    results: list[dict[str, Any]] = []
+    packet_windows: list[dict[str, int]] = []
+    covered_labels: list[str] = []
+    for item in approval_items:
+        packet_id = item.get("source_packet_id")
+        if not isinstance(packet_id, str) or not packet_id.strip():
+            continue
+        packet = packets_by_id.get(packet_id.strip())
+        if packet is None:
+            results.append({"approval_id": item.get("approval_id"), "packet_id": packet_id, "status": "fail", "reason": "packet id not found"})
+            continue
+        packet_window = _approval_window(packet)
+        packet_label = _packet_coverage_label(packet)
+        contributes_required_label = packet_label in required_labels
+        result = {
+            "approval_id": item.get("approval_id"),
+            "packet_id": packet_id,
+            "coverage_label": packet_label,
+            "status": (
+                "unavailable"
+                if packet_window is None
+                else ("pass" if contributes_required_label else "ignored")
+            ),
+            "packet_window": (
+                {"start_frame": packet_window[0], "end_frame": packet_window[1]}
+                if packet_window is not None
+                else None
+            ),
+            "reason": (
+                "packet has no frame window"
+                if packet_window is None
+                else (
+                    "packet contributes required coverage label"
+                    if contributes_required_label
+                    else "packet coverage label is not required"
+                )
+            ),
+        }
+        results.append(result)
+        if packet_window is None:
+            continue
+        if contributes_required_label and packet_label not in covered_labels:
+            covered_labels.append(packet_label)
+            packet_windows.append({"start_frame": packet_window[0], "end_frame": packet_window[1]})
+    covered_labels = [label for label in required_labels if label in covered_labels]
+    missing_labels = [label for label in required_labels if label not in covered_labels]
+    uncovered_ranges = (
+        _uncovered_ranges(packet_windows, required_window[0], required_window[1])
+        if required_window is not None
+        else []
+    )
+    if not results:
+        status = "unavailable"
+        reason = "no source_packet_id approvals to check"
+    elif any(item["status"] == "fail" for item in results) or missing_labels:
+        status = "fail"
+        reason = "required packet coverage labels are missing"
+    elif uncovered_ranges:
+        status = "fail"
+        reason = "packet coverage labels leave uncovered recovery-window ranges"
+    elif any(item["status"] == "unavailable" for item in results) or required_window is None:
+        status = "unavailable"
+        reason = "packet coverage labels cannot prove recovery-window provenance"
+    else:
+        status = "pass"
+        reason = "packet evidence covers required recovery labels"
+    return {
+        "name": "packet_evidence_coverage",
+        "status": status,
+        "reason": reason,
+        "required_labels": required_labels,
+        "covered_labels": covered_labels,
+        "missing_labels": missing_labels,
+        "uncovered_ranges": uncovered_ranges,
+        "results": results,
+    }
+
+
 def _lost_gap_reduced_reason(lost_delta: int) -> str:
     if lost_delta >= SUSTAINED_RECOVERY_MIN_FRAMES:
         return "candidate reduces the sustained lost gap"
     if lost_delta > 0:
         return "candidate reduces lost frames, but not enough for sustained recovery"
     return "candidate does not reduce lost frames"
+
+
+def _required_packet_coverage_labels(approval: dict[str, Any]) -> list[str]:
+    labels: list[str] = []
+    related = approval.get("related_approvals")
+    approvals = [approval]
+    if isinstance(related, list):
+        approvals.extend(item for item in related if isinstance(item, dict))
+    for item in approvals:
+        raw_labels = item.get("required_packet_coverage_labels")
+        if not isinstance(raw_labels, list):
+            continue
+        for raw_label in raw_labels:
+            if not isinstance(raw_label, str) or not raw_label.strip():
+                continue
+            label = raw_label.strip()
+            if label not in labels:
+                labels.append(label)
+    return labels
+
+
+def _packet_coverage_label(packet: dict[str, Any]) -> str | None:
+    for key in ("coverage_label", "packet_coverage_label", "label"):
+        value = packet.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    decision = packet.get("decision") if isinstance(packet.get("decision"), dict) else {}
+    value = decision.get("coverage_label") or decision.get("label")
+    return value.strip() if isinstance(value, str) and value.strip() else None
+
+
+def _uncovered_ranges(windows: list[dict[str, int]], start: int, end: int) -> list[dict[str, int]]:
+    clipped = sorted(
+        (
+            {"start_frame": max(start, window["start_frame"]), "end_frame": min(end, window["end_frame"])}
+            for window in windows
+            if window["start_frame"] <= end and window["end_frame"] >= start
+        ),
+        key=lambda window: (window["start_frame"], window["end_frame"]),
+    )
+    uncovered: list[dict[str, int]] = []
+    cursor = start
+    for window in clipped:
+        if window["start_frame"] > cursor:
+            uncovered.append({"start_frame": cursor, "end_frame": window["start_frame"] - 1})
+        cursor = max(cursor, window["end_frame"] + 1)
+    if cursor <= end:
+        uncovered.append({"start_frame": cursor, "end_frame": end})
+    return uncovered
 
 
 def _packets_by_id(review_packets: dict[str, Any] | None) -> dict[str, dict[str, Any]]:

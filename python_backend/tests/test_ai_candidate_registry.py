@@ -74,6 +74,19 @@ class AiCandidateRegistryTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "report name"):
             normalize_candidate_record({**_record("candidate-001"), "comparison_report": "../escape.json"})
 
+    def test_nested_candidate_comparison_report_path_is_allowed(self) -> None:
+        record = normalize_candidate_record(
+            {
+                **_record("candidate-001"),
+                "comparison_report": "ai_candidates/missing_ball/candidate-001/missing_ball_recovery_comparison.json",
+            }
+        )
+
+        self.assertEqual(
+            "ai_candidates/missing_ball/candidate-001/missing_ball_recovery_comparison.json",
+            record["comparison_report"],
+        )
+
     def test_build_from_missing_ball_recovery_comparison_style_payload(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:
             output_dir = Path(temp_name)
@@ -161,7 +174,9 @@ class AiCandidateRegistryTests(unittest.TestCase):
     def test_quality_gate_reads_registry_as_candidate_comparison_source(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:
             output_dir = Path(temp_name)
-            _write_json(output_dir / "candidate_report.json", _comparison_payload("candidate-001", "warn"))
+            candidate_report = _comparison_payload("candidate-001", "warn")
+            candidate_report["comparison_report"] = "candidate_report.json"
+            _write_json(output_dir / "candidate_report.json", candidate_report)
             write_candidate_registry(
                 output_dir,
                 records=[
@@ -216,8 +231,12 @@ class AiCandidateRegistryTests(unittest.TestCase):
     def test_quality_gate_registry_report_is_not_hidden_by_same_candidate_id_glob_report(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:
             output_dir = Path(temp_name)
-            _write_json(output_dir / "glob_comparison.json", _comparison_payload("candidate-001", "pass"))
-            _write_json(output_dir / "registry_report.json", _comparison_payload("candidate-001", "fail"))
+            glob_report = _comparison_payload("candidate-001", "pass")
+            glob_report["comparison_report"] = "glob_comparison.json"
+            registry_report = _comparison_payload("candidate-001", "fail")
+            registry_report["comparison_report"] = "registry_report.json"
+            _write_json(output_dir / "glob_comparison.json", glob_report)
+            _write_json(output_dir / "registry_report.json", registry_report)
             write_candidate_registry(
                 output_dir,
                 records=[
@@ -235,6 +254,86 @@ class AiCandidateRegistryTests(unittest.TestCase):
         self.assertEqual(2, comparison_check["report_count"])
         self.assertEqual(1, comparison_check["status_counts"]["pass"])
         self.assertEqual(1, comparison_check["status_counts"]["fail"])
+
+    def test_quality_gate_registry_rejects_comparison_for_different_candidate(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            candidate_b_report = _comparison_payload("candidate-002", "pass")
+            candidate_b_report["comparison_report"] = "candidate_b_report.json"
+            _write_json(output_dir / "candidate_b_report.json", candidate_b_report)
+            write_candidate_registry(
+                output_dir,
+                records=[
+                    {
+                        **_record("candidate-001", status="pass"),
+                        "comparison_report": "candidate_b_report.json",
+                    }
+                ],
+            )
+
+            gate = build_ai_improvement_quality_gate(output_dir)
+
+        comparison_check = gate["checks"]["candidate_comparisons_ok"]
+        self.assertEqual("unavailable", comparison_check["status"])
+        self.assertEqual(1, comparison_check["report_count"])
+        self.assertEqual(1, comparison_check["status_counts"]["unavailable"])
+        self.assertEqual("registry_comparison_mismatch", comparison_check["reports"][0]["artifact_status"])
+        self.assertEqual(["candidate_dir", "candidate_id"], comparison_check["reports"][0]["mismatched_fields"])
+
+    def test_quality_gate_registry_mismatch_is_not_hidden_by_globbed_same_path(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            candidate_b_report = _comparison_payload("candidate-002", "pass")
+            candidate_b_report["comparison_report"] = "missing_ball_recovery_comparison.json"
+            _write_json(output_dir / "missing_ball_recovery_comparison.json", candidate_b_report)
+            write_candidate_registry(
+                output_dir,
+                records=[
+                    {
+                        **_record("candidate-001", status="pass"),
+                        "comparison_report": "missing_ball_recovery_comparison.json",
+                    }
+                ],
+            )
+
+            gate = build_ai_improvement_quality_gate(output_dir)
+
+        comparison_check = gate["checks"]["candidate_comparisons_ok"]
+        self.assertEqual("unavailable", comparison_check["status"])
+        self.assertEqual(2, comparison_check["report_count"])
+        self.assertEqual(1, comparison_check["status_counts"]["pass"])
+        self.assertEqual(1, comparison_check["status_counts"]["unavailable"])
+        mismatch_reports = [
+            report
+            for report in comparison_check["reports"]
+            if report["artifact_status"] == "registry_comparison_mismatch"
+        ]
+        self.assertEqual(1, len(mismatch_reports))
+        self.assertEqual(["candidate_dir", "candidate_id"], mismatch_reports[0]["mismatched_fields"])
+
+    def test_quality_gate_registry_rejects_payload_basename_for_nested_report(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            report = _comparison_payload("candidate-001", "pass")
+            report["comparison_report"] = "registry_report.json"
+            _write_json(output_dir / "reports" / "registry_report.json", report)
+            write_candidate_registry(
+                output_dir,
+                records=[
+                    {
+                        **_record("candidate-001", status="pass"),
+                        "comparison_report": "reports/registry_report.json",
+                    }
+                ],
+            )
+
+            gate = build_ai_improvement_quality_gate(output_dir)
+
+        comparison_check = gate["checks"]["candidate_comparisons_ok"]
+        self.assertEqual("unavailable", comparison_check["status"])
+        self.assertEqual(1, comparison_check["status_counts"]["unavailable"])
+        self.assertEqual("registry_comparison_mismatch", comparison_check["reports"][0]["artifact_status"])
+        self.assertEqual(["comparison_report"], comparison_check["reports"][0]["mismatched_fields"])
 
     def test_consumed_approval_ids_are_deduped(self) -> None:
         record = normalize_candidate_record(
@@ -341,7 +440,7 @@ def _record(
         "approval_id": approval_id,
         "problem_type": "missing_ball",
         "baseline_dir": "baseline",
-        "candidate_dir": "candidate",
+        "candidate_dir": f"candidate/{candidate_id}",
         "candidate_artifacts": ["candidate/ball_track.csv"],
         "comparison_report": "missing_ball_recovery_comparison.json",
         "comparison_status": status,
@@ -355,6 +454,8 @@ def _comparison_payload(candidate_id: str, status: str) -> dict[str, object]:
         "schema_version": "1.0",
         "problem_type": "missing_ball",
         "candidate_id": candidate_id,
+        "candidate_dir": f"candidate/{candidate_id}",
+        "comparison_report": "missing_ball_recovery_comparison.json",
         "candidate": {"id": candidate_id, "path": f"candidate/{candidate_id}/ball_track.csv"},
         "summary": {
             "status": status,

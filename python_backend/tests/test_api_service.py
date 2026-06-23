@@ -1500,11 +1500,13 @@ class ApiServiceSmokeTests(unittest.TestCase):
 
         child = self.service.get_run(created["run_id"])
         child_output_dir = Path(child["output_dir"])
+        expected_candidate_dir = parent_output_dir / "ai_candidates" / "missing_ball" / "candidate_keep"
         selected_artifact = json.loads((child_output_dir / "ai_improvement_approved_actions.json").read_text(encoding="utf-8"))
         child_config = yaml.safe_load((child_output_dir / "approved_recovery_config.yaml").read_text(encoding="utf-8"))
         runner_config = rerun.call_args.args[0]
 
         self.assertEqual("completed", child["status"])
+        self.assertEqual(expected_candidate_dir.resolve(), child_output_dir.resolve())
         self.assertEqual(["approval_keep"], [item["approval_id"] for item in selected_artifact["approved_actions"]])
         self.assertEqual("candidate_keep", selected_artifact["approved_actions"][0]["candidate_id"])
         self.assertEqual("localize_ball_roi", selected_artifact["approved_actions"][0]["approved_action"])
@@ -1517,6 +1519,42 @@ class ApiServiceSmokeTests(unittest.TestCase):
         self.assertEqual([5668, 1358, 5760, 1440], observed["window"]["effective_roi"])
         self.assertEqual("candidate_keep", observed["window"]["candidate_id"])
         self.assertTrue((child_output_dir / "missing_ball_recovery_comparison.json").exists())
+        registry = json.loads((parent_output_dir / "ai_candidate_registry.json").read_text(encoding="utf-8"))
+        self.assertEqual(1, registry["summary"]["candidate_count"])
+        self.assertEqual("candidate_keep", registry["candidates"][0]["candidate_id"])
+        self.assertEqual(
+            "ai_candidates/missing_ball/candidate_keep/missing_ball_recovery_comparison.json",
+            registry["candidates"][0]["comparison_report"],
+        )
+        self.assertEqual(
+            "ai_candidates/missing_ball/candidate_keep",
+            registry["candidates"][0]["candidate_dir"],
+        )
+        self.assertCountEqual(
+            [
+                "ai_candidates/missing_ball/candidate_keep/custom_track.csv",
+                "ai_candidates/missing_ball/candidate_keep/ball_track.csv",
+                "ai_candidates/missing_ball/candidate_keep/ball_track.cleaned.csv",
+                "ai_candidates/missing_ball/candidate_keep/missing_ball_recovery_comparison.json",
+                "ai_candidates/missing_ball/candidate_keep/candidate_manifest.json",
+                "ai_candidates/missing_ball/candidate_keep/ball_audit.json",
+                "ai_candidates/missing_ball/candidate_keep/metrics_report.json",
+                "ai_candidates/missing_ball/candidate_keep/run_manifest.json",
+                "ai_candidates/missing_ball/candidate_keep/ai_improvement_approved_actions.json",
+                "ai_candidates/missing_ball/candidate_keep/approved_recovery_config.yaml",
+            ],
+            registry["candidates"][0]["candidate_artifacts"],
+        )
+        candidate_manifest = json.loads((child_output_dir / "candidate_manifest.json").read_text(encoding="utf-8"))
+        self.assertEqual("candidate_keep", candidate_manifest["candidate_id"])
+        self.assertEqual("missing_ball", candidate_manifest["problem_type"])
+        self.assertEqual(["approval_keep"], candidate_manifest["source_approval_ids"])
+        self.assertEqual({"start_frame": 2049, "end_frame": 2544}, candidate_manifest["frame_window"])
+        self.assertEqual(["packet_2079"], candidate_manifest["evidence_ids"]["source_packet_ids"])
+        self.assertIn(
+            "ai_candidates/missing_ball/candidate_keep/candidate_manifest.json",
+            candidate_manifest["generated_artifacts"],
+        )
         comparison = json.loads((child_output_dir / "missing_ball_recovery_comparison.json").read_text(encoding="utf-8"))
         self.assertEqual("pass", comparison["summary"]["status"], comparison["checks"])
         roi_check = next(check for check in comparison["checks"] if check["name"] == "localize_roi_plausibility")
@@ -1836,6 +1874,86 @@ class ApiServiceSmokeTests(unittest.TestCase):
 
         self.assertFalse((self.repo_root / "outputs" / "runs" / "input" / "duplicate_approval_child").exists())
 
+    def test_approved_child_rejects_unsafe_candidate_id_before_output(self) -> None:
+        parent_output_dir = self.create_output_bundle("kept_baseline")
+        self.write_review_packets("kept_baseline", "packet_001")
+        self.write_json(
+            "outputs/kept_baseline/ai_improvement_approved_actions.json",
+            {
+                "schema_version": "1.0",
+                "approved_actions": [
+                    {
+                        "approval_id": "approval_001",
+                        "improvement_id": "imp_001",
+                        "candidate_id": "abc..def",
+                        "approved_action": "targeted_rerun",
+                        "source_packet_id": "packet_001",
+                        "rerun_scope": {"start_frame": 1, "end_frame": 2},
+                    }
+                ],
+            },
+        )
+        parent_run = self.service.list_runs()[0]
+
+        with self.assertRaisesRegex(ValueError, "candidate_id"):
+            self.service.create_run(
+                {
+                    "parent_run_id": parent_run["run_id"],
+                    "approved_action_ids": ["approval_001"],
+                    "output_dir_name": "unsafe_candidate_child",
+                }
+            )
+
+        self.assertFalse((parent_output_dir / "ai_candidates" / "missing_ball" / "abc..def").exists())
+        self.assertFalse((self.repo_root / "outputs" / "runs" / "input" / "unsafe_candidate_child").exists())
+
+    def test_missing_ball_candidate_output_rejects_symlink_escape(self) -> None:
+        parent_output_dir = self.create_output_bundle("kept_baseline")
+        outside_dir = self.repo_root / "outside_candidates"
+        outside_dir.mkdir()
+        link_parent = parent_output_dir / "ai_candidates"
+        link_parent.mkdir()
+        link_path = link_parent / "missing_ball"
+        try:
+            link_path.symlink_to(outside_dir, target_is_directory=True)
+        except (OSError, NotImplementedError) as exc:
+            self.skipTest(f"Directory symlink unavailable: {exc}")
+
+        with self.assertRaisesRegex(ValueError, "parent output directory"):
+            self.service._missing_ball_candidate_output_dir(parent_output_dir, "candidate_001")
+
+    def test_approved_child_rejects_windows_reserved_candidate_id_before_output(self) -> None:
+        parent_output_dir = self.create_output_bundle("kept_baseline")
+        self.write_review_packets("kept_baseline", "packet_001")
+        self.write_json(
+            "outputs/kept_baseline/ai_improvement_approved_actions.json",
+            {
+                "schema_version": "1.0",
+                "approved_actions": [
+                    {
+                        "approval_id": "approval_001",
+                        "improvement_id": "imp_001",
+                        "candidate_id": "CON",
+                        "approved_action": "targeted_rerun",
+                        "source_packet_id": "packet_001",
+                        "rerun_scope": {"start_frame": 1, "end_frame": 2},
+                    }
+                ],
+            },
+        )
+        parent_run = self.service.list_runs()[0]
+
+        with self.assertRaisesRegex(ValueError, "candidate_id"):
+            self.service.create_run(
+                {
+                    "parent_run_id": parent_run["run_id"],
+                    "approved_action_ids": ["approval_001"],
+                    "output_dir_name": "reserved_candidate_child",
+                }
+            )
+
+        self.assertFalse((parent_output_dir / "ai_candidates" / "missing_ball" / "CON").exists())
+
     def test_approved_child_rejects_unsafe_output_csv_name_before_output(self) -> None:
         self.create_output_bundle("kept_baseline")
         unsafe_config = build_sample_config("./outputs/kept_baseline")
@@ -2026,7 +2144,7 @@ class ApiServiceSmokeTests(unittest.TestCase):
             },
         )
         parent_run = self.service.list_runs()[0]
-        existing_dir = self.repo_root / "outputs" / "runs" / "input" / "existing_empty_child"
+        existing_dir = self.repo_root / "outputs" / "kept_baseline" / "ai_candidates" / "missing_ball" / "candidate_001"
         existing_dir.mkdir(parents=True)
 
         with self.assertRaises(FileExistsError):
@@ -2091,6 +2209,132 @@ class ApiServiceSmokeTests(unittest.TestCase):
         child = self.service.get_run(created["run_id"])
         self.assertEqual("failed", child["status"])
         self.assertIn("no executable windows", child["error"])
+
+    def test_approved_child_artifact_failure_does_not_register_parent_candidate(self) -> None:
+        parent_output_dir = self.create_output_bundle("kept_baseline")
+        self.write_review_packets("kept_baseline", "packet_001")
+        self.write_json(
+            "outputs/kept_baseline/ai_improvement_approved_actions.json",
+            {
+                "schema_version": "1.0",
+                "approved_actions": [
+                    {
+                        "approval_id": "approval_001",
+                        "improvement_id": "imp_001",
+                        "candidate_id": "candidate_001",
+                        "approved_action": "targeted_rerun",
+                        "source_packet_id": "packet_001",
+                        "rerun_scope": {"start_frame": 1, "end_frame": 2},
+                    }
+                ],
+            },
+        )
+        parent_run = self.service.list_runs()[0]
+
+        class ImmediateThread:
+            def __init__(self, *, target, args, name, daemon) -> None:
+                self._target = target
+                self._args = args
+
+            def start(self) -> None:
+                self._target(*self._args)
+
+            def is_alive(self) -> bool:
+                return False
+
+        with (
+            mock.patch("football_tracking.api.service.threading.Thread", ImmediateThread),
+            mock.patch(
+                "football_tracking.api.service.run_high_recall_windows",
+                return_value={"windows": [{"start_frame": 1, "end_frame": 2}], "execution": {"status": "succeeded"}},
+            ),
+            mock.patch.object(
+                self.service,
+                "_write_run_manifest_and_metrics_preserving_candidate_audit",
+                return_value="artifact failed",
+            ),
+        ):
+            created = self.service.create_run(
+                {
+                    "parent_run_id": parent_run["run_id"],
+                    "approved_action_ids": ["approval_001"],
+                    "output_dir_name": "artifact_failed_child",
+                }
+            )
+
+        child = self.service.get_run(created["run_id"])
+        child_output_dir = Path(child["output_dir"])
+        self.assertEqual("failed", child["status"])
+        self.assertEqual("artifact failed", child["error"])
+        self.assertTrue((child_output_dir / "missing_ball_recovery_comparison.json").exists())
+        self.assertFalse((parent_output_dir / "ai_candidate_registry.json").exists())
+
+    def test_approved_child_rejects_existing_run_id_even_with_different_candidate_id(self) -> None:
+        parent_output_dir = self.create_output_bundle("kept_baseline")
+        self.write_review_packets("kept_baseline", "packet_001", "packet_002")
+        self.write_json(
+            "outputs/kept_baseline/ai_improvement_approved_actions.json",
+            {
+                "schema_version": "1.0",
+                "approved_actions": [
+                    {
+                        "approval_id": "approval_001",
+                        "improvement_id": "imp_001",
+                        "candidate_id": "candidate_001",
+                        "approved_action": "targeted_rerun",
+                        "source_packet_id": "packet_001",
+                        "rerun_scope": {"start_frame": 1, "end_frame": 2},
+                    },
+                    {
+                        "approval_id": "approval_002",
+                        "improvement_id": "imp_002",
+                        "candidate_id": "candidate_002",
+                        "approved_action": "targeted_rerun",
+                        "source_packet_id": "packet_002",
+                        "rerun_scope": {"start_frame": 1, "end_frame": 2},
+                    },
+                ],
+            },
+        )
+        parent_run = self.service.list_runs()[0]
+
+        class ImmediateThread:
+            def __init__(self, *, target, args, name, daemon) -> None:
+                self._target = target
+                self._args = args
+
+            def start(self) -> None:
+                self._target(*self._args)
+
+            def is_alive(self) -> bool:
+                return False
+
+        with (
+            mock.patch("football_tracking.api.service.threading.Thread", ImmediateThread),
+            mock.patch(
+                "football_tracking.api.service.run_high_recall_windows",
+                return_value={"windows": [{"start_frame": 1, "end_frame": 2}], "execution": {"status": "succeeded"}},
+            ),
+        ):
+            self.service.create_run(
+                {
+                    "parent_run_id": parent_run["run_id"],
+                    "approved_action_ids": ["approval_001"],
+                    "output_dir_name": "same_child_run_id",
+                }
+            )
+
+        with self.assertRaisesRegex(ValueError, "Run already exists"):
+            self.service.create_run(
+                {
+                    "parent_run_id": parent_run["run_id"],
+                    "approved_action_ids": ["approval_002"],
+                    "output_dir_name": "same_child_run_id",
+                }
+            )
+
+        self.assertTrue((parent_output_dir / "ai_candidates" / "missing_ball" / "candidate_001").exists())
+        self.assertFalse((parent_output_dir / "ai_candidates" / "missing_ball" / "candidate_002").exists())
 
     def test_approved_child_failed_runner_still_reports_parent_mutation(self) -> None:
         parent_output = self.create_output_bundle("kept_baseline")
@@ -2243,6 +2487,44 @@ class ApiServiceSmokeTests(unittest.TestCase):
         self.assertEqual([], [run for run in self.service.list_runs() if run["run_id"] == "thread_start_failed_child"])
         self.assertNotIn("thread_start_failed_child", self.service._active_threads)
         self.assertNotIn("thread_start_failed_child", self.service._cancel_events)
+
+    def test_parent_candidate_registry_corrupt_is_not_overwritten_by_child_registration(self) -> None:
+        parent_output_dir = self.create_output_bundle("kept_baseline")
+        registry_path = parent_output_dir / "ai_candidate_registry.json"
+        registry_path.write_text("{corrupt json", encoding="utf-8")
+        before = registry_path.read_text(encoding="utf-8")
+        candidate_output_dir = parent_output_dir / "ai_candidates" / "missing_ball" / "candidate_001"
+        candidate_output_dir.mkdir(parents=True)
+        self.write_csv(
+            "outputs/kept_baseline/ai_candidates/missing_ball/candidate_001/ball_track.csv",
+            [{"Frame": 1, "X": 15, "Y": 25, "Confidence": "0.9000", "Status": "Detected"}],
+        )
+        comparison_path = candidate_output_dir / "missing_ball_recovery_comparison.json"
+        comparison_path.write_text(
+            json.dumps(
+                {
+                    "schema_version": "1.0",
+                    "candidate_id": "candidate_001",
+                    "problem_type": "missing_ball",
+                    "baseline": {"path": str(parent_output_dir / "ball_track.csv")},
+                    "candidate": {"path": str(candidate_output_dir / "ball_track.csv")},
+                    "approval": {"approval_id": "approval_001"},
+                    "summary": {"status": "pass"},
+                    "checks": [],
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "ai_candidate_registry.json"):
+            self.service._register_approved_child_missing_ball_candidate(
+                parent_output_dir=parent_output_dir,
+                candidate_output_dir=candidate_output_dir,
+                comparison_path=comparison_path,
+                candidate_id="candidate_001",
+            )
+
+        self.assertEqual(before, registry_path.read_text(encoding="utf-8"))
 
     def test_create_follow_cam_render_creates_standalone_deliverable_task(self) -> None:
         self.create_output_bundle("kept_baseline")
