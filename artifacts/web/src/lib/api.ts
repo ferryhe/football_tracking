@@ -1,5 +1,9 @@
 import type {
   AIExplainResponse,
+  AIImproveApprovalRequest,
+  AIImproveApprovalResponse,
+  AIImproveRequest,
+  AIImproveResponse,
   AISuggestion,
   AssetGroup,
   ConfigDetail,
@@ -46,6 +50,8 @@ export const api = {
   listInputs: () => request<InputCatalogResponse>("/inputs"),
   listRuns: () => request<RunRecord[]>("/runs"),
   getRun: (id: string) => request<RunRecord>(`/runs/${id}`),
+  getRunArtifactJson: <T>(runId: string, artifactName: string) =>
+    request<T>(`/runs/${encodeURIComponent(runId)}/artifacts/${encodePathSegmented(artifactName)}`),
   listAssetGroups: () => request<AssetGroup[]>("/runs/asset-groups"),
   createRun: (body: CreateRunRequest) =>
     request<RunRecord>("/runs", { method: "POST", body: JSON.stringify(body) }),
@@ -86,6 +92,16 @@ export const api = {
     }),
   aiRecommend: (body: { run_id: string; objective?: string; language?: string }) =>
     request<AISuggestion>("/ai/recommend", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  aiImprove: (body: AIImproveRequest) =>
+    request<AIImproveResponse>("/ai/improve", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  approveAIImprovements: (runId: string, body: AIImproveApprovalRequest) =>
+    request<AIImproveApprovalResponse>(`/ai/improve/${encodeURIComponent(runId)}/approve`, {
       method: "POST",
       body: JSON.stringify(body),
     }),

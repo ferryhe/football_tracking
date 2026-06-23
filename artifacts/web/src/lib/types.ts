@@ -150,10 +150,173 @@ export interface AIExplainResponse {
   evidence: string[];
 }
 
-export interface CreateRunRequest {
-  config_name: string;
+export interface AIFrameWindow {
+  start_frame: number;
+  end_frame: number;
+}
+
+export interface AILocalSearchRoi {
+  coordinate_space: "image";
+  frame: number;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  confidence: number;
+}
+
+export interface AIImproveRequest {
+  run_id: string;
+  objective?: string;
+  model?: string;
+  dry_run?: boolean;
+  max_items?: number;
+  language?: string;
+}
+
+export interface AIImprovementItem extends Record<string, unknown> {
+  id: string;
+  priority?: string;
+  area: string;
+  failure_tags?: string[];
+  root_cause_module?: string;
+  diagnosis?: string;
+  recommended_action: AIRecommendedAction;
+  config_patch?: Record<string, unknown>;
+  evidence?: unknown[];
+  confidence?: number;
+  start_frame?: number | null;
+  end_frame?: number | null;
+  rerun_scope?: AIFrameWindow | null;
+  likely_ball_region?: Record<string, unknown> | null;
+  local_search_roi?: AILocalSearchRoi | null;
+  false_positive_class?: string | null;
+  candidate_id?: string | null;
+  suggested_window?: AIFrameWindow | null;
+  clip_action?: AIClipAction | null;
+  camera_motion_event_id?: string | null;
+  camera_motion_severity?: string | null;
+  evidence_payload?: Record<string, unknown>;
+  follow_cam_rerender_plan?: Record<string, unknown> | null;
+  provenance?: Record<string, unknown>;
+}
+
+export interface AIHighlightAdjustment extends Record<string, unknown> {
+  candidate_id: string;
+  current_window: AIFrameWindow;
+  suggested_window: AIFrameWindow;
+  core_window?: AIFrameWindow | null;
+  render_window?: AIFrameWindow | null;
+  buffer_policy?: Record<string, unknown> | null;
+  boundary_warnings?: string[];
+  warnings?: string[];
+  reason: string;
+  confidence?: number;
+  clip_action?: AIClipAction | null;
+}
+
+export interface AIImproveResponse {
+  summary: Record<string, unknown>;
+  artifact_name: string;
+  artifact_path: string;
+  improvements: AIImprovementItem[];
+  highlight_adjustments: AIHighlightAdjustment[];
+}
+
+export interface AIImproveReportArtifact extends Record<string, unknown> {
+  summary: Record<string, unknown>;
+  improvements: AIImprovementItem[];
+  highlight_adjustments?: AIHighlightAdjustment[];
+}
+
+export type AIRecommendedAction =
+  | "targeted_rerun"
+  | "tighten_noise_filter"
+  | "loosen_ball_recovery"
+  | "split_packet"
+  | "manual_review"
+  | "reject_noise"
+  | "adjust_highlight_window"
+  | "adjust_follow_cam"
+  | "tracking_rerun_before_follow_cam"
+  | "render_suggested_highlight"
+  | "localize_ball_roi"
+  | "noise_filter_adjustment"
+  | "human_review_camera_motion";
+
+export type AIClipAction = "extend_tail" | "trim_head" | "trim_tail" | "split" | "keep";
+
+export interface AIImproveApprovalRequest {
+  improvement_ids: string[];
+  approved_by: string;
+  rerun_scope_overrides?: Record<string, AIFrameWindow>;
+  local_search_roi_overrides?: Record<string, AILocalSearchRoi>;
+  config_patch_overrides?: Record<string, Record<string, unknown>>;
+  suggested_window_overrides?: Record<string, AIFrameWindow>;
+  clip_action_overrides?: Record<string, AIClipAction>;
+  follow_cam_rerender_plan_overrides?: Record<string, Record<string, unknown>>;
+}
+
+export interface AIApprovedAction extends Record<string, unknown> {
+  approval_id: string;
+  improvement_id: string;
+  approved_action: AIRecommendedAction;
+  approval_source?: string;
+  approved_at?: string;
+  approved_by?: string;
+  provenance?: Record<string, unknown>;
+  rerun_scope?: AIFrameWindow | null;
+  local_search_roi?: AILocalSearchRoi | null;
+  config_patch?: Record<string, unknown>;
+  suggested_window?: AIFrameWindow | null;
+  clip_action?: AIClipAction | null;
+  follow_cam_rerender_plan?: Record<string, unknown> | null;
+  source_packet_id?: string | null;
+  visual_review_id?: string | null;
+  candidate_id?: string | null;
+  camera_motion_event_id?: string | null;
+  camera_motion_severity?: string | null;
+  start_frame?: number | null;
+  end_frame?: number | null;
+}
+
+export interface AIApprovalArtifactSummary {
+  name: string | null;
+  path: string | null;
+  exists: boolean;
+}
+
+export interface AIImproveApprovalResponse {
+  schema_version: string;
+  generated_at: string;
+  run_id: string;
+  source_report: string;
+  approved_by: string;
+  artifact_name: string;
+  artifact_path: string;
+  config_patch_artifact_name?: string | null;
+  config_patch_artifact_path?: string | null;
+  follow_cam_rerender_plan_artifact_name?: string | null;
+  follow_cam_rerender_plan_artifact_path?: string | null;
+  approved_actions: AIApprovedAction[];
+  summary: Record<string, unknown> & {
+    artifacts?: Record<string, AIApprovalArtifactSummary>;
+  };
+  warnings?: string[];
+}
+
+export interface AIApprovedActionsArtifact extends Record<string, unknown> {
+  schema_version: string;
+  generated_at: string;
+  run_id: string;
+  source_report: string;
+  approved_by: string;
+  approved_actions: AIApprovedAction[];
+  warnings?: string[];
+}
+
+interface CreateRunCommon {
   input_video?: string | null;
-  parent_run_id?: string | null;
   output_dir_name?: string | null;
   config_patch?: Record<string, unknown>;
   enable_postprocess?: boolean | null;
@@ -162,6 +325,32 @@ export interface CreateRunRequest {
   max_frames?: number | null;
   notes?: string | null;
 }
+
+type StandardCreateRunRequest = CreateRunCommon & {
+  config_name: string;
+  parent_run_id?: string | null;
+  approved_action_ids?: never;
+  approved_actions_artifact_name?: never;
+};
+
+type ApprovedChildRunByActionIdsRequest = CreateRunCommon & {
+  config_name?: string | null;
+  parent_run_id: string;
+  approved_action_ids: string[];
+  approved_actions_artifact_name?: string | null;
+};
+
+type ApprovedChildRunByArtifactRequest = CreateRunCommon & {
+  config_name?: string | null;
+  parent_run_id: string;
+  approved_action_ids?: string[];
+  approved_actions_artifact_name: string;
+};
+
+export type CreateRunRequest =
+  | StandardCreateRunRequest
+  | ApprovedChildRunByActionIdsRequest
+  | ApprovedChildRunByArtifactRequest;
 
 export interface FollowCamRenderRequest {
   output_dir_name?: string | null;
@@ -210,13 +399,36 @@ export interface EventCandidateReport {
   candidates: EventCandidate[];
 }
 
-export interface HighlightRenderRequest {
-  candidate_id?: string | null;
-  start_frame?: number | null;
-  end_frame?: number | null;
+interface HighlightRenderBase {
   pre_roll_frames?: number;
   post_roll_frames?: number;
   output_dir_name?: string | null;
   output_video_name?: string | null;
   notes?: string | null;
 }
+
+type CandidateHighlightRenderRequest = HighlightRenderBase & {
+  candidate_id: string;
+  approved_action_id?: never;
+  start_frame?: never;
+  end_frame?: never;
+};
+
+type ApprovedHighlightRenderRequest = HighlightRenderBase & {
+  approved_action_id: string;
+  candidate_id?: never;
+  start_frame?: never;
+  end_frame?: never;
+};
+
+type FrameWindowHighlightRenderRequest = HighlightRenderBase & {
+  start_frame: number;
+  end_frame: number;
+  candidate_id?: never;
+  approved_action_id?: never;
+};
+
+export type HighlightRenderRequest =
+  | CandidateHighlightRenderRequest
+  | ApprovedHighlightRenderRequest
+  | FrameWindowHighlightRenderRequest;
