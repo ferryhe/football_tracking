@@ -2,7 +2,18 @@ import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useLocation } from "wouter";
 import { api } from "@/lib/api";
-import type { CreateRunRequest, EventCandidate, RunRecord } from "@/lib/types";
+import {
+  buildLifecycleCandidateIndex,
+  getRunLifecycle,
+  lifecycleOperatorStateLabel,
+  presentLifecycleCandidate,
+  presentLifecycleSummary,
+  type LifecycleCandidatePresentation,
+  type LifecycleSummaryPresentation,
+  type LifecycleTone,
+} from "@/lib/aiLifecycle";
+import { cn } from "@/lib/utils";
+import type { AICandidateLifecycleCandidate, CreateRunRequest, EventCandidate, RunRecord } from "@/lib/types";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
@@ -29,6 +40,62 @@ function canRenderCandidateHighlights(run: RunRecord): boolean {
 
   const count = eventCandidateCount(run);
   return count === null || count > 0;
+}
+
+function lifecycleToneClass(tone: LifecycleTone): string {
+  switch (tone) {
+    case "success":
+      return "border-emerald-200 bg-emerald-50 text-emerald-700";
+    case "warning":
+      return "border-amber-200 bg-amber-50 text-amber-700";
+    case "danger":
+      return "border-red-200 bg-red-50 text-red-700";
+    case "pending":
+      return "border-sky-200 bg-sky-50 text-sky-700";
+    case "approved":
+      return "border-blue-200 bg-blue-50 text-blue-700";
+    case "info":
+      return "border-slate-200 bg-slate-50 text-slate-700";
+    case "muted":
+    default:
+      return "border-muted bg-muted/50 text-muted-foreground";
+  }
+}
+
+function lifecycleStateText(
+  labels: ReturnType<typeof useLanguage>["t"]["aiAnalysis"],
+  presentation: LifecycleCandidatePresentation | LifecycleSummaryPresentation,
+): string {
+  return lifecycleOperatorStateLabel(presentation.state, labels.lifecycleStates);
+}
+
+function LifecycleBadge({
+  labels,
+  presentation,
+}: {
+  labels: ReturnType<typeof useLanguage>["t"]["aiAnalysis"];
+  presentation: LifecycleCandidatePresentation | LifecycleSummaryPresentation;
+}) {
+  return (
+    <Badge variant="outline" className={cn("max-w-full truncate", lifecycleToneClass(presentation.tone))}>
+      {lifecycleStateText(labels, presentation)}
+    </Badge>
+  );
+}
+
+function draftHighlightLifecycleCandidate(candidate: EventCandidate): AICandidateLifecycleCandidate {
+  return {
+    candidate_id: candidate.id,
+    problem_type: "highlight",
+    improvement_ids: [],
+    approval_ids: [],
+    artifact_paths: [],
+    stage: "review_only",
+    comparison_status: "none",
+    promotion_status: "not_promoted",
+    resolution_status: "none",
+    blocking_reasons: [],
+  };
 }
 
 export default function DeliverablePage() {
@@ -73,6 +140,15 @@ export default function DeliverablePage() {
   const selectedVideo = inputCatalog?.videos.find((video) => video.path === selectedInput) ?? null;
   const selectedCfg = configs?.find((config) => config.name === selectedConfig) ?? null;
   const selectedHighlightRun = highlightSourceRuns.find((run) => run.run_id === selectedHighlightRunId) ?? null;
+  const selectedHighlightLifecycle = useMemo(() => getRunLifecycle(selectedHighlightRun), [selectedHighlightRun]);
+  const selectedHighlightLifecycleIndex = useMemo(
+    () => buildLifecycleCandidateIndex(selectedHighlightLifecycle),
+    [selectedHighlightLifecycle],
+  );
+  const selectedHighlightLifecycleSummary = useMemo(
+    () => presentLifecycleSummary(selectedHighlightLifecycle),
+    [selectedHighlightLifecycle],
+  );
   const canSubmit = !!selectedInput && !!selectedConfig;
 
   const eventCandidates = useQuery({
@@ -394,6 +470,18 @@ export default function DeliverablePage() {
               <div className="rounded-md bg-muted/50 p-3 space-y-1">
                 <p className="text-xs font-mono truncate">{selectedHighlightRun.run_id}</p>
                 <p className="text-xs text-muted-foreground truncate">{selectedHighlightRun.input_video ?? selectedHighlightRun.output_dir}</p>
+                <div className="flex flex-wrap gap-1.5 pt-1">
+                  <Badge variant="secondary">{t.deliverable.finalAiStatus}</Badge>
+                  <LifecycleBadge labels={t.aiAnalysis} presentation={selectedHighlightLifecycleSummary} />
+                  <Badge
+                    variant={selectedHighlightLifecycleSummary.isPublishable ? "default" : "outline"}
+                    className={selectedHighlightLifecycleSummary.isPublishable ? "" : "text-muted-foreground"}
+                  >
+                    {selectedHighlightLifecycleSummary.isPublishable
+                      ? t.deliverable.finalAiPublishable
+                      : t.deliverable.finalAiNotPublishable}
+                  </Badge>
+                </div>
               </div>
             )}
           </CardContent>
@@ -439,6 +527,9 @@ export default function DeliverablePage() {
               <div className="space-y-2">
                 {candidates.map((candidate) => {
                   const isRendering = renderHighlight.isPending && renderHighlight.variables?.candidate.id === candidate.id;
+                  const linkedLifecycleCandidate = selectedHighlightLifecycleIndex.byCandidateId.get(candidate.id);
+                  const lifecycleCandidate = linkedLifecycleCandidate ?? draftHighlightLifecycleCandidate(candidate);
+                  const lifecyclePresentation = presentLifecycleCandidate(lifecycleCandidate);
                   return (
                     <div
                       key={candidate.id}
@@ -456,6 +547,22 @@ export default function DeliverablePage() {
                           <span className="text-xs font-medium tabular-nums">
                             {t.deliverable.candidateScore} {candidate.score.toFixed(2)}
                           </span>
+                          <LifecycleBadge labels={t.aiAnalysis} presentation={lifecyclePresentation} />
+                          {!linkedLifecycleCandidate && (
+                            <Badge variant="outline" className="text-muted-foreground">
+                              {t.deliverable.draftCandidate}
+                            </Badge>
+                          )}
+                          {linkedLifecycleCandidate && !lifecyclePresentation.isPublishable && (
+                            <Badge variant="outline" className="text-muted-foreground">
+                              {t.deliverable.finalAiNotPublishable}
+                            </Badge>
+                          )}
+                          {lifecyclePresentation.isPublishable && (
+                            <Badge className="bg-emerald-600 text-white">
+                              {t.deliverable.finalAiPublishable}
+                            </Badge>
+                          )}
                         </div>
                         <p className="text-xs text-muted-foreground line-clamp-2">{candidate.reason}</p>
                       </div>
