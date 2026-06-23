@@ -4556,7 +4556,6 @@ class ApiService:
     def _collect_stats(self, output_dir: Path) -> dict[str, Any]:
         metrics_report = self._read_optional_json(output_dir / "metrics_report.json")
         stats = stats_from_metrics_report(metrics_report) if metrics_report is not None else {}
-        ai_candidate_lifecycle = self._collect_ai_candidate_lifecycle(output_dir)
         raw_summary = stats.get("raw") or self._summarize_track_csv(output_dir / "ball_track.csv")
         cleaned_summary = stats.get("cleaned") or self._summarize_track_csv(output_dir / "ball_track.cleaned.csv")
         cleanup_report = self._read_optional_json(output_dir / "cleanup_report.json")
@@ -4594,7 +4593,6 @@ class ApiService:
             ai_improvement_summary = compact_ai_improvement_summary(ai_improvement_report)
             if ai_improvement_summary is not None:
                 stats["ai_improvement"] = ai_improvement_summary
-        stats["ai_candidate_lifecycle"] = ai_candidate_lifecycle["summary"]
         return stats
 
     def _summarize_track_csv(self, csv_path: Path) -> dict[str, Any] | None:

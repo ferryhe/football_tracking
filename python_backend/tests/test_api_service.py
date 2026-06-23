@@ -908,6 +908,37 @@ class ApiServiceSmokeTests(unittest.TestCase):
         self.assertEqual("proposed", route_response.ai_candidate_lifecycle.summary.stage)
         self.assertEqual("candidate-lifecycle", route_response.ai_candidate_lifecycle.candidates[0].candidate_id)
 
+    def test_list_runs_collects_ai_candidate_lifecycle_once_per_run(self) -> None:
+        self.create_output_bundle("candidate_lifecycle_single_scan")
+        self.write_json(
+            "outputs/candidate_lifecycle_single_scan/ai_improvement_report.json",
+            {
+                "schema_version": "1.0",
+                "improvements": [
+                    {
+                        "id": "imp_lifecycle",
+                        "candidate_id": "candidate-lifecycle",
+                        "recommended_action": "targeted_rerun",
+                    }
+                ],
+            },
+        )
+        original = self.service._collect_ai_candidate_lifecycle
+        call_count = 0
+
+        def counting_collect(output_dir: Path) -> dict[str, Any]:
+            nonlocal call_count
+            call_count += 1
+            return original(output_dir)
+
+        self.service._collect_ai_candidate_lifecycle = counting_collect  # type: ignore[method-assign]
+
+        runs = self.service.list_runs()
+
+        self.assertEqual(1, len(runs))
+        self.assertEqual(1, call_count)
+        self.assertEqual("proposed", runs[0]["stats"]["ai_candidate_lifecycle"]["stage"])
+
     def test_list_runs_collects_metrics_artifacts_and_stats(self) -> None:
         output_dir = self.create_output_bundle("kept_baseline")
         write_run_artifacts(
