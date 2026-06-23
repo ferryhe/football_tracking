@@ -39,6 +39,8 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.dry_run:
         args.mode = "dry-run"
+    if not args.output_dir.exists() or not args.output_dir.is_dir():
+        parser.error("--output-dir must be an existing directory.")
     if args.approved_actions_path is not None and args.approved_actions is not None:
         parser.error("--approved-actions and --approved-actions-path are mutually exclusive.")
 

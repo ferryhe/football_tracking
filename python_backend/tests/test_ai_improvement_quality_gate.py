@@ -9,7 +9,6 @@ from unittest.mock import patch
 
 from football_tracking.ai_improvement_quality_gate import (
     build_ai_improvement_quality_gate,
-    build_track_hash_snapshot,
     write_ai_improvement_quality_gate,
     write_track_hash_snapshot,
 )
@@ -472,6 +471,16 @@ class AiImprovementQualityGateTests(unittest.TestCase):
         self.assertEqual("fail", payload["checks"]["approved_actions_explicitly_consumed"]["status"])
         self.assertIn("approved_actions", payload["checks"]["approved_actions_explicitly_consumed"]["reason"])
 
+    def test_missing_explicit_approved_actions_path_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            approved_path = output_dir / "missing_approved_actions.json"
+
+            payload = build_ai_improvement_quality_gate(output_dir, approved_actions_path=approved_path)
+
+        self.assertEqual("fail", payload["checks"]["approved_actions_explicitly_consumed"]["status"])
+        self.assertIn("could not be loaded", payload["checks"]["approved_actions_explicitly_consumed"]["reason"])
+
     def test_provenance_must_reference_existing_packet_or_visual_review(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:
             output_dir = Path(temp_name)
@@ -509,6 +518,17 @@ class AiImprovementQualityGateTests(unittest.TestCase):
             exit_code = main(["--output-dir", temp_name, "--mode", "real"])
 
         self.assertEqual(1, exit_code)
+
+    def test_cli_rejects_missing_output_directory(self) -> None:
+        from scripts.run_ai_improvement_quality_gate import main
+
+        with tempfile.TemporaryDirectory() as temp_name:
+            missing_dir = Path(temp_name) / "missing"
+
+            with self.assertRaises(SystemExit) as raised:
+                main(["--output-dir", str(missing_dir)])
+
+        self.assertEqual(2, raised.exception.code)
 
     def test_cli_accepts_inline_approved_actions_json(self) -> None:
         from scripts.run_ai_improvement_quality_gate import main

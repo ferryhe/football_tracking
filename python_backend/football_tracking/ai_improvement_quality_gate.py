@@ -257,6 +257,8 @@ def _check_approved_actions_explicitly_consumed(
 ) -> dict[str, Any]:
     implicit_path = output_dir / "ai_improvement_approved_actions.json"
     if approved_actions["status"] == "missing":
+        if approved_actions.get("source") == "path":
+            return _check("fail", reason="Explicit approved actions path could not be loaded")
         if implicit_path.exists():
             return _check(
                 "fail",
