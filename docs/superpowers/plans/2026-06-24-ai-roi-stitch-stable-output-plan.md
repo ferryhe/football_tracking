@@ -147,14 +147,14 @@ $env:PYTHONPATH='python_backend'
 
 **Implementation Steps:**
 
-- [ ] Implement `write_ai_visual_localization_report(output_dir, input_video, windows, model=None, client=None, dry_run=False)`.
-- [ ] Decode dimensions from OpenCV and store `dimension_source="opencv"`.
-- [ ] Reject out-of-bounds model ROI with a warning; do not silently accept coordinates beyond decoded width/height.
-- [ ] Normalize provider `"original"` coordinates to `"image"` only after bounds validation against decoded dimensions.
-- [ ] Record coverage over the requested full window, including uncovered subwindows.
-- [ ] Generate evidence media paths and hashes for contact/crop sheets when media is produced.
-- [ ] Add workflow stage `targeted_visual_localization`, gated by explicit CLI input such as `--targeted-localization-window 2049:2544:right_corner`.
-- [ ] Include `ai_visual_localization.json` as produced evidence in artifact lists, not as a final selected artifact.
+- [x] Implement `write_ai_visual_localization_report(output_dir, input_video, windows, model=None, client=None, dry_run=False)`.
+- [x] Decode dimensions from OpenCV and store `dimension_source="opencv"`.
+- [x] Reject out-of-bounds model ROI with a warning; do not silently accept coordinates beyond decoded width/height.
+- [x] Normalize provider `"original"` coordinates to `"image"` only after bounds validation against decoded dimensions.
+- [x] Record coverage over the requested full window, including uncovered subwindows.
+- [x] Generate evidence media paths and hashes for contact/crop sheets when media is produced.
+- [x] Add workflow stage `targeted_visual_localization`, gated by explicit CLI input such as `--targeted-localization-window 2049:2544:right_corner`.
+- [x] Include `ai_visual_localization.json` as produced evidence in artifact lists, not as a final selected artifact.
 
 **Commit Plan:**
 - `feat: add ai visual localization artifact`

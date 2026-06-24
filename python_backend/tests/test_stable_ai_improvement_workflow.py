@@ -35,8 +35,11 @@ class StableAiImprovementWorkflowTests(unittest.TestCase):
                 side_effect=fake_improvement,
             ):
                 report = run_workflow(output_dir=output_dir, dry_run=True, model="gpt-stable")
+            localization_exists = (output_dir / "ai_visual_localization.json").exists()
 
         stage_names = [stage["name"] for stage in report["stages"]]
+        self.assertNotIn("targeted_visual_localization", stage_names)
+        self.assertFalse(localization_exists)
         self.assertEqual(
             [
                 "metrics_artifacts_refresh",
@@ -163,6 +166,67 @@ class StableAiImprovementWorkflowTests(unittest.TestCase):
         self.assertEqual(["review_packets", "visual_review", "ai_improvement"], call_order)
         self.assertEqual("succeeded", _stage(report, "visual_review")["status"])
         self.assertEqual("gpt-strong", _stage(report, "visual_review")["model"])
+
+    def test_targeted_visual_localization_runs_before_ai_improvement_when_requested(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            input_video = output_dir / "source.mp4"
+            input_video.write_bytes(b"fake-video")
+            _write_tracks(output_dir)
+            call_order: list[str] = []
+
+            def fake_visual_localization(path: Path, video: Path | None, windows: list[str], **kwargs: object) -> dict[str, object]:
+                call_order.append("targeted_visual_localization")
+                self.assertEqual(input_video, video)
+                self.assertEqual(["10:20:right_corner"], windows)
+                payload = {
+                    "summary": {"status": "planned", "request_count": 1, "invalid_roi_count": 0},
+                    "model": kwargs.get("model"),
+                    "model_selection": {
+                        "model": kwargs.get("model"),
+                        "source": "explicit",
+                        "provider_dry_run": True,
+                        "provider_mode": "dry-run",
+                    },
+                    "requests": [],
+                }
+                _write_json(path / "ai_visual_localization.json", payload)
+                return payload
+
+            def fake_improvement(path: Path, **kwargs: object) -> dict[str, object]:
+                self.assertTrue((path / "ai_visual_localization.json").exists())
+                call_order.append("ai_improvement")
+                _write_ai_report(path)
+                return {
+                    "summary": {"status": "ok"},
+                    "candidate_intent": kwargs.get("candidate_intent"),
+                    "model": kwargs.get("model"),
+                    "improvements": [],
+                    "highlight_adjustments": [],
+                }
+
+            with (
+                patch(
+                    "scripts.run_stable_ai_improvement_workflow.write_ai_visual_localization_report",
+                    side_effect=fake_visual_localization,
+                ),
+                patch("scripts.run_stable_ai_improvement_workflow.write_ai_improvement_report", side_effect=fake_improvement),
+            ):
+                report = run_workflow(
+                    output_dir=output_dir,
+                    input_video=input_video,
+                    dry_run=True,
+                    model="gpt-stable",
+                    targeted_localization_windows=["10:20:right_corner"],
+                )
+
+        stage_names = [stage["name"] for stage in report["stages"]]
+        self.assertLess(stage_names.index("visual_review"), stage_names.index("targeted_visual_localization"))
+        self.assertLess(stage_names.index("targeted_visual_localization"), stage_names.index("ai_improvement"))
+        self.assertEqual(["targeted_visual_localization", "ai_improvement"], call_order)
+        self.assertEqual("succeeded", _stage(report, "targeted_visual_localization")["status"])
+        self.assertIn("ai_visual_localization.json", report["produced_artifacts"])
+        self.assertEqual(["10:20:right_corner"], report["inputs"]["targeted_localization_windows"])
 
     def test_workflow_candidate_intent_is_independent_from_quality_gate_mode(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:
