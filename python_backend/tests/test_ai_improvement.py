@@ -975,6 +975,7 @@ class AiImprovementTests(unittest.TestCase):
         self.assertTrue(improvement["executable"])
         self.assertEqual("rerun_ball_window", improvement["recommended_action"])
         self.assertEqual("targeted_rerun", improvement["legacy_recommended_action"])
+        self.assertEqual({"start_frame": 10, "end_frame": 20}, improvement["rerun_scope"])
         self.assertEqual("rerun_ball_window", improvement["candidate_contract"]["approved_action"])
         self.assertEqual("rerun_ball_window", artifact["approved_actions"][0]["approved_action"])
         self.assertEqual("targeted_rerun", artifact["approved_actions"][0]["legacy_approved_action"])
@@ -1607,32 +1608,144 @@ class AiImprovementTests(unittest.TestCase):
         self.assertNotIn("abcdef123456", report["error"])
         self.assertIn("<redacted", report["error"])
 
-    def test_invalid_targeted_rerun_response_becomes_error_report(self) -> None:
+    def test_rerun_ball_window_without_rerun_scope_is_downgraded_to_manual_review(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:
             output_dir = Path(temp_name)
             _write_minimal_artifacts(output_dir)
+            payload = _candidate_ready_targeted_rerun()
+            payload["id"] = "imp_missing_scope"
+            payload["recommended_action"] = "rerun_ball_window"
+            payload.pop("rerun_scope")
+            payload.pop("likely_ball_region")
             client = _FakeImprovementClient(
                 {
                     "summary": {"status": "needs_rerun"},
-                    "improvements": [
-                        {
-                            "id": "imp_001",
-                            "priority": "P1",
-                            "area": "tracking",
-                            "failure_tags": ["ball_lost"],
-                            "root_cause_module": "reacquisition",
-                            "recommended_action": "targeted_rerun",
-                            "confidence": 0.5,
-                            "evidence": ["missing rerun scope fixture"],
-                        }
-                    ],
+                    "improvements": [payload],
                 }
             )
 
-            report = build_ai_improvement_report(output_dir, client=client)
+            report = build_ai_improvement_report(
+                output_dir,
+                client=client,
+                candidate_intent="prepare_approved_candidates",
+            )
 
-        self.assertEqual("error", report["summary"]["status"])
-        self.assertIn("rerun_scope", report["error"])
+        improvement = report["improvements"][0]
+        warning_text = "\n".join(report["warnings"])
+        self.assertEqual("needs_rerun", report["summary"]["status"])
+        self.assertEqual("manual_review", improvement["recommended_action"])
+        self.assertEqual("rerun_ball_window", improvement["legacy_recommended_action"])
+        self.assertEqual("missing", improvement["rerun_scope_contract_gap"])
+        self.assertNotEqual("request_targeted_localization", improvement["recommended_action"])
+        self.assertNotIn("requested_action", improvement)
+        self.assertNotIn("rerun_scope", improvement)
+        self.assertNotIn("candidate_contract", improvement)
+        self.assertFalse(improvement["executable"])
+        self.assertEqual(0, report["summary"]["targeted_rerun_count"])
+        self.assertIn("missing rerun_scope", warning_text)
+
+    def test_legacy_targeted_rerun_without_rerun_scope_is_downgraded_to_manual_review(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_minimal_artifacts(output_dir)
+            payload = _candidate_ready_targeted_rerun()
+            payload["id"] = "imp_missing_legacy_scope"
+            payload.pop("rerun_scope")
+            client = _FakeImprovementClient(
+                {
+                    "summary": {"status": "needs_rerun"},
+                    "improvements": [payload],
+                }
+            )
+
+            report = build_ai_improvement_report(
+                output_dir,
+                client=client,
+                candidate_intent="prepare_approved_candidates",
+            )
+
+        improvement = report["improvements"][0]
+        warning_text = "\n".join(report["warnings"])
+        self.assertEqual("needs_rerun", report["summary"]["status"])
+        self.assertEqual("manual_review", improvement["recommended_action"])
+        self.assertEqual("targeted_rerun", improvement["legacy_recommended_action"])
+        self.assertEqual("missing", improvement["rerun_scope_contract_gap"])
+        self.assertNotIn("rerun_scope", improvement)
+        self.assertFalse(improvement["executable"])
+        self.assertIn("missing rerun_scope", warning_text)
+
+    def test_rerun_action_with_invalid_rerun_scope_is_downgraded_to_manual_review(self) -> None:
+        invalid_scopes = [
+            (["not", "an", "object"], "list"),
+            ({"start_frame": 30, "end_frame": 10}, "end_frame"),
+            ({"start_frame": "ten", "end_frame": 30}, "integer"),
+        ]
+        for invalid_scope, expected_warning_detail in invalid_scopes:
+            with self.subTest(invalid_scope=invalid_scope), tempfile.TemporaryDirectory() as temp_name:
+                output_dir = Path(temp_name)
+                _write_minimal_artifacts(output_dir)
+                payload = _candidate_ready_targeted_rerun()
+                payload["id"] = "imp_invalid_scope"
+                payload["recommended_action"] = "rerun_ball_window"
+                payload["rerun_scope"] = invalid_scope
+                client = _FakeImprovementClient(
+                    {
+                        "summary": {"status": "needs_rerun"},
+                        "improvements": [payload],
+                    }
+                )
+
+                report = build_ai_improvement_report(
+                    output_dir,
+                    client=client,
+                    candidate_intent="prepare_approved_candidates",
+                )
+
+            improvement = report["improvements"][0]
+            warning_text = "\n".join(report["warnings"])
+            self.assertEqual("needs_rerun", report["summary"]["status"])
+            self.assertEqual("manual_review", improvement["recommended_action"])
+            self.assertEqual("rerun_ball_window", improvement["legacy_recommended_action"])
+            self.assertIn(
+                improvement["rerun_scope_contract_gap"],
+                {"invalid_type", "invalid_window"},
+            )
+            self.assertNotIn("rerun_scope", improvement)
+            self.assertFalse(improvement["executable"])
+            self.assertIn("invalid rerun_scope", warning_text)
+            self.assertIn(expected_warning_detail, warning_text)
+
+    def test_rerun_scope_contract_gap_does_not_trigger_long_gap_coverage_error(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_minimal_artifacts(output_dir)
+            _write_long_lost_gap_review_inputs(output_dir, start=100, end=260, total_frames=320)
+            payload = _candidate_ready_targeted_rerun()
+            payload["id"] = "imp_partial_missing_scope"
+            payload["recommended_action"] = "rerun_ball_window"
+            payload.pop("rerun_scope")
+            payload["start_frame"] = 100
+            payload["end_frame"] = 150
+            payload["likely_ball_region"] = {"description": "right channel", "frame": 125, "confidence": 0.7}
+            client = _FakeImprovementClient(
+                {
+                    "summary": {"status": "needs_rerun"},
+                    "improvements": [payload],
+                }
+            )
+
+            report = build_ai_improvement_report(
+                output_dir,
+                client=client,
+                candidate_intent="prepare_approved_candidates",
+            )
+
+        self.assertEqual("needs_rerun", report["summary"]["status"], report.get("error"))
+        improvement = report["improvements"][0]
+        self.assertEqual("manual_review", improvement["recommended_action"])
+        self.assertEqual("missing", improvement["rerun_scope_contract_gap"])
+        self.assertFalse(improvement["executable"])
+        self.assertNotIn("candidate_contract", improvement)
 
     def test_status_ok_with_actions_is_normalized_to_needs_rerun(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:
@@ -1667,7 +1780,7 @@ class AiImprovementTests(unittest.TestCase):
         self.assertEqual("needs_rerun", report["summary"]["status"])
         self.assertTrue(any("normalized from ok" in warning for warning in report["warnings"]))
 
-    def test_negative_frame_windows_become_error_report(self) -> None:
+    def test_negative_rerun_scope_frame_window_is_downgraded_to_manual_review(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:
             output_dir = Path(temp_name)
             _write_minimal_artifacts(output_dir)
@@ -1693,10 +1806,18 @@ class AiImprovementTests(unittest.TestCase):
 
             report = build_ai_improvement_report(output_dir, client=client)
 
-        self.assertEqual("error", report["summary"]["status"])
-        self.assertIn("non-negative", report["error"])
+        improvement = report["improvements"][0]
+        warning_text = "\n".join(report["warnings"])
+        self.assertEqual("needs_rerun", report["summary"]["status"])
+        self.assertEqual("manual_review", improvement["recommended_action"])
+        self.assertEqual("targeted_rerun", improvement["legacy_recommended_action"])
+        self.assertEqual("invalid_window", improvement["rerun_scope_contract_gap"])
+        self.assertNotIn("rerun_scope", improvement)
+        self.assertFalse(improvement["executable"])
+        self.assertIn("invalid rerun_scope", warning_text)
+        self.assertIn("non-negative", warning_text)
 
-    def test_fractional_frame_window_becomes_error_report(self) -> None:
+    def test_fractional_rerun_scope_frame_window_is_downgraded_to_manual_review(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:
             output_dir = Path(temp_name)
             _write_minimal_artifacts(output_dir)
@@ -1722,8 +1843,16 @@ class AiImprovementTests(unittest.TestCase):
 
             report = build_ai_improvement_report(output_dir, client=client)
 
-        self.assertEqual("error", report["summary"]["status"])
-        self.assertIn("integer", report["error"])
+        improvement = report["improvements"][0]
+        warning_text = "\n".join(report["warnings"])
+        self.assertEqual("needs_rerun", report["summary"]["status"])
+        self.assertEqual("manual_review", improvement["recommended_action"])
+        self.assertEqual("targeted_rerun", improvement["legacy_recommended_action"])
+        self.assertEqual("invalid_window", improvement["rerun_scope_contract_gap"])
+        self.assertNotIn("rerun_scope", improvement)
+        self.assertFalse(improvement["executable"])
+        self.assertIn("invalid rerun_scope", warning_text)
+        self.assertIn("integer", warning_text)
 
     def test_invalid_local_search_roi_becomes_error_report(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:
@@ -3754,6 +3883,42 @@ class AiImprovementTests(unittest.TestCase):
         self.assertEqual("candidate_001", action["candidate_id"])
         self.assertEqual({"name": "ball_track.csv"}, action["expected_artifact"])
         self.assertEqual({"report": "missing_ball_recovery_comparison.json"}, action["comparison_criteria"])
+
+    def test_approval_rejects_rerun_ball_window_without_rerun_scope(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_minimal_artifacts(output_dir)
+            _write_json(
+                output_dir / "ai_improvement_report.json",
+                {
+                    "schema_version": "1.0",
+                    "generated_at": "2026-06-22T00:00:00+00:00",
+                    "model": "gpt-improve",
+                    "summary": {"status": "needs_rerun"},
+                    "improvements": [
+                        {
+                            "id": "imp_001",
+                            "priority": "P0",
+                            "area": "tracking",
+                            "failure_tags": ["ball_lost"],
+                            "root_cause_module": "reacquisition",
+                            "diagnosis": "Hand-edited report lost rerun scope.",
+                            "recommended_action": "rerun_ball_window",
+                            "problem_type": "missing_ball",
+                            "candidate_id": "candidate_001",
+                            "likely_ball_region": {"description": "not visible", "confidence": 0.0},
+                            "source_packet_id": "packet_001",
+                            "expected_artifact": {"name": "ball_track.csv"},
+                            "comparison_criteria": {"report": "missing_ball_recovery_comparison.json"},
+                            "evidence": [{"source_packet_id": "packet_001"}],
+                            "confidence": 0.82,
+                        }
+                    ],
+                },
+            )
+
+            with self.assertRaisesRegex(ValueError, "rerun_ball_window requires rerun_scope"):
+                approve_ai_improvement_actions(output_dir, run_id="run_123", improvement_ids=["imp_001"])
 
     def test_approval_rejects_localize_ball_roi_without_traceable_provenance(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:

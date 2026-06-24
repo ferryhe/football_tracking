@@ -1512,10 +1512,37 @@ def _validate_improvement(
     public_recommended_action = _normalized_public_recommended_action(recommended_action)
 
     rerun_scope = raw.get("rerun_scope")
+    rerun_scope_contract_gap: str | None = None
     if recommended_action in {"targeted_rerun", "rerun_ball_window"}:
-        if not isinstance(rerun_scope, dict):
-            raise ValueError(f"Improvement {index} {recommended_action} requires rerun_scope.")
-        rerun_scope = _frame_window(rerun_scope, f"Improvement {index} rerun_scope")
+        if "rerun_scope" not in raw:
+            public_recommended_action = "manual_review"
+            recommended_action_repaired = True
+            rerun_scope_contract_gap = "missing"
+            rerun_scope = None
+            repair_warnings.append(
+                f"Improvement {index} {recommended_action} missing rerun_scope downgraded to manual_review."
+            )
+        elif not isinstance(rerun_scope, dict):
+            public_recommended_action = "manual_review"
+            recommended_action_repaired = True
+            rerun_scope_contract_gap = "invalid_type"
+            rerun_scope = None
+            repair_warnings.append(
+                f"Improvement {index} {recommended_action} invalid rerun_scope "
+                f"({type(raw.get('rerun_scope')).__name__}) downgraded to manual_review."
+            )
+        else:
+            try:
+                rerun_scope = _frame_window(rerun_scope, f"Improvement {index} rerun_scope")
+            except ValueError as exc:
+                public_recommended_action = "manual_review"
+                recommended_action_repaired = True
+                rerun_scope_contract_gap = "invalid_window"
+                rerun_scope = None
+                repair_warnings.append(
+                    f"Improvement {index} {recommended_action} invalid rerun_scope "
+                    f"downgraded to manual_review: {exc}"
+                )
     elif isinstance(rerun_scope, dict):
         rerun_scope = _frame_window(rerun_scope, f"Improvement {index} rerun_scope")
     else:
@@ -1568,6 +1595,8 @@ def _validate_improvement(
         item["downgrade_reason"] = downgrade_reason
     if non_string_recommended_action_type is not None:
         item["original_recommended_action_type"] = non_string_recommended_action_type
+    if rerun_scope_contract_gap is not None:
+        item["rerun_scope_contract_gap"] = rerun_scope_contract_gap
     if unsupported_recommended_action:
         item["original_recommended_action"] = raw_recommended_action
         patch_warnings.append(
@@ -1818,6 +1847,8 @@ def _validate_long_lost_gap_suggestion_coverage(
         overlapping_items: list[dict[str, Any]] = []
         coverages: list[dict[str, int]] = []
         for item in improvements:
+            if item.get("rerun_scope_contract_gap"):
+                continue
             if not _is_missing_ball_item(item):
                 continue
             coverage = _improvement_coverage_window(item)
