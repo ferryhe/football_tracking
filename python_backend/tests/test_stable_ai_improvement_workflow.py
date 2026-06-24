@@ -8,7 +8,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from football_tracking.ai_candidate_lifecycle import build_ai_candidate_lifecycle
+from football_tracking.ai_candidate_lifecycle import AI_CANDIDATE_LIFECYCLE_REPORT_NAME, build_ai_candidate_lifecycle
 from scripts.run_stable_ai_improvement_workflow import (
     _approved_child_rerun_stage,
     _final_artifact_manifest_stage,
@@ -56,6 +56,7 @@ class StableAiImprovementWorkflowTests(unittest.TestCase):
                 "pre_manifest_quality_gate",
                 "final_artifact_manifest",
                 "quality_gate",
+                "ai_candidate_lifecycle",
             ],
             stage_names,
         )
@@ -83,6 +84,7 @@ class StableAiImprovementWorkflowTests(unittest.TestCase):
         stage_names = [stage["name"] for stage in report["stages"]]
         self.assertLess(stage_names.index("pre_manifest_quality_gate"), stage_names.index("final_artifact_manifest"))
         self.assertLess(stage_names.index("final_artifact_manifest"), stage_names.index("quality_gate"))
+        self.assertLess(stage_names.index("quality_gate"), stage_names.index("ai_candidate_lifecycle"))
         for stage, timing_row in zip(report["stages"], report["stage_timing"]["stages"], strict=True):
             self.assertIsInstance(stage["started_at"], str)
             self.assertIsInstance(stage["finished_at"], str)
@@ -1860,11 +1862,18 @@ class StableAiImprovementWorkflowTests(unittest.TestCase):
 
             report = run_workflow(output_dir=output_dir, dry_run=True)
             written = json.loads((output_dir / "stable_ai_improvement_workflow_report.json").read_text(encoding="utf-8"))
+            lifecycle = build_ai_candidate_lifecycle(output_dir)
+            lifecycle_written = json.loads((output_dir / AI_CANDIDATE_LIFECYCLE_REPORT_NAME).read_text(encoding="utf-8"))
 
         self.assertIn("quality_gate", report)
         self.assertIn("ai_improvement_quality_gate.json", report["produced_artifacts"])
+        self.assertIn(AI_CANDIDATE_LIFECYCLE_REPORT_NAME, report["produced_artifacts"])
         self.assertIn("ai_improvement_hash_snapshots.json", report["produced_artifacts"])
         self.assertEqual(report["quality_gate"]["summary"], written["quality_gate"]["summary"])
+        self.assertEqual(AI_CANDIDATE_LIFECYCLE_REPORT_NAME, report["ai_candidate_lifecycle"]["artifact"])
+        self.assertEqual(lifecycle["summary"], report["ai_candidate_lifecycle"]["summary"])
+        self.assertEqual(lifecycle_written["summary"], report["ai_candidate_lifecycle"]["summary"])
+        self.assertEqual(report["ai_candidate_lifecycle"], written["ai_candidate_lifecycle"])
 
     def test_workflow_report_summarizes_all_lane_candidates_and_finalization_requirements(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:
