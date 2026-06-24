@@ -4,6 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException
 
 from football_tracking.api.dependencies import get_service
 from football_tracking.api.schemas import (
+    AIImprovementStatusResponse,
     ApiErrorResponse,
     AssetGroup,
     CreateRunRequest,
@@ -119,3 +120,18 @@ def create_highlight_render(
         raise HTTPException(status_code=409, detail=f"Output dir already exists: {exc}") from exc
     except RuntimeError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@router.get(
+    "/runs/{run_id}/ai-improvement-status",
+    response_model=AIImprovementStatusResponse,
+    responses={404: {"model": ApiErrorResponse, "description": "Run not found"}},
+)
+def get_ai_improvement_status(
+    run_id: str,
+    service: ApiService = Depends(get_service),
+) -> AIImprovementStatusResponse:
+    try:
+        return AIImprovementStatusResponse(**service.get_ai_improvement_status(run_id))
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=f"Run not found: {run_id}") from exc

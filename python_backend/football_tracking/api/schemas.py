@@ -4,7 +4,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from football_tracking.ai_contracts import AIFailureTag, AIClipAction, AIRecommendedAction, AIRootCauseModule
+from football_tracking.ai_contracts import AIClipAction, AIFailureTag, AIRecommendedAction, AIRootCauseModule
 
 RunStatus = Literal["queued", "running", "completed", "failed", "cancelled"]
 AIResponseLanguage = Literal["en", "zh"]
@@ -23,6 +23,7 @@ CandidateLifecycleStage = Literal[
 CandidateComparisonStatus = Literal["pass", "warn", "fail", "unavailable", "none"]
 CandidatePromotionStatus = Literal["not_promoted", "pending_confirmation", "promoted", "rejected", "blocked"]
 CandidateResolutionStatus = Literal["none", "resolved_not_visible", "candidate_output"]
+AIArtifactAvailabilityStatus = Literal["available", "unavailable", "error"]
 CandidateBlockingReason = Literal[
     "missing_evidence",
     "unsafe_window",
@@ -432,6 +433,62 @@ class AICandidateLifecycleReport(BaseModel):
     summary: AICandidateLifecycleSummary = Field(default_factory=AICandidateLifecycleSummary)
     candidates: list[AICandidateLifecycleCandidate] = Field(default_factory=list)
     artifacts: dict[str, str] = Field(default_factory=dict)
+
+
+class AIImprovementArtifactStatus(BaseModel):
+    name: str
+    category: str
+    status: AIArtifactAvailabilityStatus
+    summary: str
+    path: str | None = None
+    exists: bool = False
+    size_bytes: int | None = None
+    content_type: str | None = None
+    problem_type: str | None = None
+    candidate_id: str | None = None
+
+
+class AIImprovementArtifactReference(BaseModel):
+    name: str
+    status: AIArtifactAvailabilityStatus
+    path: str | None = None
+    category: str | None = None
+
+
+class AIImprovementManifestStatus(BaseModel):
+    status: str
+    artifact_status: AIArtifactAvailabilityStatus = "unavailable"
+    summary: str | None = None
+    path: str | None = None
+
+
+class AIImprovementStatusItem(BaseModel):
+    id: str | None = None
+    improvement_id: str | None = None
+    candidate_id: str | None = None
+    approval_ids: list[str] = Field(default_factory=list)
+    frame_window: AIFrameWindow | None = None
+    evidence_ids: list[str] = Field(default_factory=list)
+    confidence: float | None = None
+    false_positive_class: str | None = None
+    recommended_action: str | None = None
+    approved_action: str | None = None
+    approval_status: str = "none"
+    consumed_approval_ids: list[str] = Field(default_factory=list)
+    comparison_status: CandidateComparisonStatus = "none"
+    promotion_status: CandidatePromotionStatus = "not_promoted"
+    artifact_references: list[AIImprovementArtifactReference] = Field(default_factory=list)
+
+
+class AIImprovementStatusResponse(BaseModel):
+    schema_version: str = "1.0"
+    run_id: str
+    output_dir: str
+    artifacts: list[AIImprovementArtifactStatus]
+    items_by_problem_type: dict[str, list[AIImprovementStatusItem]]
+    final_manifest_status: AIImprovementManifestStatus
+    final_selected_artifacts: list[dict[str, Any]]
+    final_selected_artifact_candidate_ids: list[str]
 
 
 class RunProgress(BaseModel):

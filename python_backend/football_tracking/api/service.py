@@ -973,6 +973,624 @@ class ApiService:
             ),
         }
 
+    def get_ai_improvement_status(self, run_id: str) -> dict[str, Any]:
+        run = self.get_run(run_id)
+        output_dir = Path(run["output_dir"]).resolve()
+
+        artifacts, payloads = self._collect_ai_improvement_status_artifacts(output_dir)
+        ai_report = payloads.get("ai_improvement_report.json") if isinstance(payloads.get("ai_improvement_report.json"), dict) else {}
+        approved_actions_report = (
+            payloads.get(APPROVED_ACTIONS_FILE_NAME) if isinstance(payloads.get(APPROVED_ACTIONS_FILE_NAME), dict) else {}
+        )
+        final_manifest = (
+            payloads.get("final_ai_improvement_artifact_manifest.json")
+            if isinstance(payloads.get("final_ai_improvement_artifact_manifest.json"), dict)
+            else {}
+        )
+        registry = payloads.get("ai_candidate_registry.json") if isinstance(payloads.get("ai_candidate_registry.json"), dict) else {}
+
+        approval_index = self._ai_status_approval_index(approved_actions_report)
+        comparison_index = self._ai_status_comparison_index(registry, final_manifest, payloads)
+        selected_artifacts = (
+            final_manifest.get("final_selected_artifacts") if isinstance(final_manifest.get("final_selected_artifacts"), list) else []
+        )
+        selected_candidate_ids = [
+            str(item.get("candidate_id"))
+            for item in selected_artifacts
+            if isinstance(item, dict) and item.get("candidate_id")
+        ]
+        selected_candidate_id_set = set(selected_candidate_ids)
+
+        groups: dict[str, list[dict[str, Any]]] = {
+            "missing_ball": [],
+            "noise": [],
+            "camera_motion": [],
+            "highlights": [],
+        }
+        seen_keys: set[tuple[str | None, str | None]] = set()
+        seen_candidate_ids: set[str] = set()
+        seen_improvement_ids: set[str] = set()
+        seen_approval_ids: set[str] = set()
+
+        improvements = ai_report.get("improvements") if isinstance(ai_report.get("improvements"), list) else []
+        for improvement in improvements:
+            if not isinstance(improvement, dict):
+                continue
+            item = self._build_ai_status_item(
+                source=improvement,
+                approval_index=approval_index,
+                comparison_index=comparison_index,
+                selected_candidate_ids=selected_candidate_id_set,
+                output_dir=output_dir,
+            )
+            groups[self._ai_status_problem_group(improvement, item)].append(item)
+            seen_keys.add((item.get("improvement_id"), item.get("candidate_id")))
+            self._mark_ai_status_item_seen(
+                item,
+                seen_candidate_ids=seen_candidate_ids,
+                seen_improvement_ids=seen_improvement_ids,
+                seen_approval_ids=seen_approval_ids,
+            )
+
+        for action in approval_index["actions"]:
+            key = (action.get("improvement_id"), action.get("candidate_id"))
+            candidate_id = str(action.get("candidate_id") or "").strip()
+            improvement_id = str(action.get("improvement_id") or "").strip()
+            approval_id = str(action.get("approval_id") or "").strip()
+            if (
+                key in seen_keys
+                or (candidate_id and candidate_id in seen_candidate_ids)
+                or (improvement_id and improvement_id in seen_improvement_ids)
+                or (approval_id and approval_id in seen_approval_ids)
+            ):
+                continue
+            item = self._build_ai_status_item(
+                source=action,
+                approval_index=approval_index,
+                comparison_index=comparison_index,
+                selected_candidate_ids=selected_candidate_id_set,
+                output_dir=output_dir,
+            )
+            groups[self._ai_status_problem_group(action, item)].append(item)
+            seen_keys.add(key)
+            self._mark_ai_status_item_seen(
+                item,
+                seen_candidate_ids=seen_candidate_ids,
+                seen_improvement_ids=seen_improvement_ids,
+                seen_approval_ids=seen_approval_ids,
+            )
+
+        for manifest_candidate in [
+            *self._ai_status_manifest_candidate_sources(final_manifest),
+            *self._ai_status_registry_candidate_sources(registry),
+        ]:
+            candidate_id = str(manifest_candidate.get("candidate_id") or "").strip()
+            approval_ids = self._ai_status_source_approval_ids(manifest_candidate)
+            if (candidate_id and candidate_id in seen_candidate_ids) or any(
+                approval_id in seen_approval_ids for approval_id in approval_ids
+            ):
+                continue
+            item = self._build_ai_status_item(
+                source=manifest_candidate,
+                approval_index=approval_index,
+                comparison_index=comparison_index,
+                selected_candidate_ids=selected_candidate_id_set,
+                output_dir=output_dir,
+            )
+            groups[self._ai_status_problem_group(manifest_candidate, item)].append(item)
+            self._mark_ai_status_item_seen(
+                item,
+                seen_candidate_ids=seen_candidate_ids,
+                seen_improvement_ids=seen_improvement_ids,
+                seen_approval_ids=seen_approval_ids,
+            )
+
+        final_manifest_artifact = next(
+            (artifact for artifact in artifacts if artifact["name"] == "final_ai_improvement_artifact_manifest.json"),
+            None,
+        )
+        final_manifest_status = self._ai_status_final_manifest_status(final_manifest, final_manifest_artifact)
+
+        return {
+            "schema_version": "1.0",
+            "run_id": run_id,
+            "output_dir": str(output_dir),
+            "artifacts": artifacts,
+            "items_by_problem_type": groups,
+            "final_manifest_status": final_manifest_status,
+            "final_selected_artifacts": selected_artifacts,
+            "final_selected_artifact_candidate_ids": selected_candidate_ids,
+        }
+
+    def _collect_ai_improvement_status_artifacts(self, output_dir: Path) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        expected = [
+            ("workflow", "stable_ai_improvement_workflow_report.json"),
+            ("workflow", "ai_improvement_report.json"),
+            ("approval", APPROVED_ACTIONS_FILE_NAME),
+            ("recovery", APPROVED_CONFIG_PATCH_FILE_NAME),
+            ("quality_gate", "ai_improvement_quality_gate.json"),
+            ("final_manifest", "final_ai_improvement_artifact_manifest.json"),
+            ("camera", "camera_motion_audit.json"),
+            ("follow_cam", FOLLOW_CAM_RERENDER_PLAN_FILE_NAME),
+            ("registry", "ai_candidate_registry.json"),
+        ]
+        artifacts: list[dict[str, Any]] = []
+        payloads: dict[str, Any] = {}
+        seen_names: set[str] = set()
+
+        for category, name in expected:
+            artifact, payload = self._ai_status_artifact(output_dir, name, category=category)
+            artifacts.append(artifact)
+            payloads[name] = payload
+            seen_names.add(name)
+
+        for path in sorted(output_dir.rglob("*")):
+            if not path.is_file():
+                continue
+            relative_name = path.relative_to(output_dir).as_posix()
+            if relative_name in seen_names:
+                continue
+            if not self._is_ai_status_candidate_artifact(path):
+                continue
+            category = self._ai_status_candidate_artifact_category(path)
+            artifact, payload = self._ai_status_artifact(output_dir, relative_name, category=category)
+            problem_type, candidate_id = self._ai_status_candidate_path_parts(path, output_dir)
+            artifact["problem_type"] = problem_type
+            artifact["candidate_id"] = candidate_id
+            artifacts.append(artifact)
+            payloads[relative_name] = payload
+            seen_names.add(relative_name)
+
+        return artifacts, payloads
+
+    def _ai_status_artifact(self, output_dir: Path, relative_name: str, *, category: str) -> tuple[dict[str, Any], Any]:
+        path = (output_dir / relative_name).resolve()
+        base = {
+            "name": relative_name,
+            "category": category,
+            "path": str(path) if path.exists() else None,
+            "exists": path.exists(),
+            "size_bytes": path.stat().st_size if path.exists() else None,
+            "content_type": mimetypes.guess_type(str(path))[0] if path.exists() else None,
+        }
+        if not path.exists():
+            return {**base, "status": "unavailable", "summary": f"{relative_name} is not available."}, None
+        if path.suffix.lower() != ".json":
+            return {**base, "status": "available", "summary": "available"}, None
+        try:
+            loaded = json.loads(path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, UnicodeDecodeError, OSError) as exc:
+            return {**base, "status": "error", "summary": f"Corrupt JSON: {exc}"}, None
+        if not isinstance(loaded, dict):
+            return {**base, "status": "error", "summary": "Invalid JSON: expected an object."}, None
+        return {**base, "status": "available", "summary": self._ai_status_payload_summary(loaded)}, loaded
+
+    def _is_ai_status_candidate_artifact(self, path: Path) -> bool:
+        name = path.name
+        if name in {
+            "missing_ball_recovery_comparison.json",
+            "noise_candidate_comparison.json",
+            "follow_cam_candidate_comparison.json",
+            "highlight_candidate_comparison.json",
+            "highlight_report.json",
+        }:
+            return True
+        if path.suffix.lower() == ".mp4" and "highlight" in path.parts:
+            return True
+        return False
+
+    def _ai_status_candidate_artifact_category(self, path: Path) -> str:
+        name = path.name
+        if name.endswith("_comparison.json") or name == "missing_ball_recovery_comparison.json":
+            return "comparison"
+        if name == "highlight_report.json" or (path.suffix.lower() == ".mp4" and "highlight" in path.parts):
+            return "highlight"
+        return "candidate"
+
+    def _ai_status_candidate_path_parts(self, path: Path, output_dir: Path) -> tuple[str | None, str | None]:
+        try:
+            relative = path.relative_to(output_dir)
+        except ValueError:
+            return None, None
+        parts = relative.parts
+        if len(parts) >= 4 and parts[0] == "ai_candidates":
+            return parts[1], parts[2]
+        return None, None
+
+    def _ai_status_payload_summary(self, payload: dict[str, Any]) -> str:
+        summary = payload.get("summary")
+        if isinstance(summary, dict):
+            status = summary.get("status") or summary.get("workflow_status")
+            if status:
+                return str(status)
+        status = payload.get("status") or payload.get("comparison_status")
+        if status:
+            return str(status)
+        return "available"
+
+    def _ai_status_approval_index(self, approved_actions_report: dict[str, Any]) -> dict[str, Any]:
+        actions = approved_actions_report.get("approved_actions") if isinstance(approved_actions_report.get("approved_actions"), list) else []
+        by_improvement: dict[str, list[dict[str, Any]]] = {}
+        by_candidate: dict[str, list[dict[str, Any]]] = {}
+        by_approval: dict[str, list[dict[str, Any]]] = {}
+        valid_actions: list[dict[str, Any]] = []
+        for action in actions:
+            if not isinstance(action, dict):
+                continue
+            valid_actions.append(action)
+            improvement_id = str(action.get("improvement_id") or "").strip()
+            candidate_id = str(action.get("candidate_id") or "").strip()
+            approval_id = str(action.get("approval_id") or "").strip()
+            if improvement_id:
+                by_improvement.setdefault(improvement_id, []).append(action)
+            if candidate_id:
+                by_candidate.setdefault(candidate_id, []).append(action)
+            if approval_id:
+                by_approval.setdefault(approval_id, []).append(action)
+        return {
+            "actions": valid_actions,
+            "by_improvement": by_improvement,
+            "by_candidate": by_candidate,
+            "by_approval": by_approval,
+        }
+
+    def _ai_status_comparison_index(
+        self,
+        registry: dict[str, Any],
+        final_manifest: dict[str, Any],
+        payloads: dict[str, Any],
+    ) -> dict[str, dict[str, dict[str, Any]]]:
+        by_candidate: dict[str, dict[str, Any]] = {}
+        by_approval: dict[str, dict[str, Any]] = {}
+        for source in (registry.get("candidates"), final_manifest.get("comparison_reports")):
+            if not isinstance(source, list):
+                continue
+            for item in source:
+                if isinstance(item, dict):
+                    self._ai_status_index_candidate_payload(by_candidate, by_approval, item)
+        for payload in payloads.values():
+            if isinstance(payload, dict) and self._ai_status_is_comparison_payload(payload):
+                self._ai_status_index_candidate_payload(by_candidate, by_approval, payload)
+        return {"by_candidate": by_candidate, "by_approval": by_approval}
+
+    def _ai_status_manifest_candidate_sources(self, final_manifest: dict[str, Any]) -> list[dict[str, Any]]:
+        candidates_by_id: dict[str, dict[str, Any]] = {}
+        for key, promotion_status in (
+            ("candidate_outputs", None),
+            ("pending_candidates", "pending_confirmation"),
+            ("rejected_candidates", "rejected"),
+            ("unsupported_candidates", "blocked"),
+            ("resolved_noop_candidates", "not_promoted"),
+            ("final_selected_artifacts", "promoted"),
+        ):
+            items = final_manifest.get(key)
+            if not isinstance(items, list):
+                continue
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                candidate_id = str(item.get("candidate_id") or item.get("id") or "").strip()
+                identity = candidate_id or str(item.get("approval_id") or "").strip()
+                if not identity:
+                    continue
+                merged = candidates_by_id.setdefault(identity, {})
+                merged.update({field: value for field, value in item.items() if value not in (None, "", [])})
+                if candidate_id:
+                    merged["candidate_id"] = candidate_id
+                if promotion_status is not None:
+                    merged["promotion_status"] = promotion_status
+        return list(candidates_by_id.values())
+
+    def _ai_status_registry_candidate_sources(self, registry: dict[str, Any]) -> list[dict[str, Any]]:
+        items = registry.get("candidates")
+        if not isinstance(items, list):
+            return []
+        return [item for item in items if isinstance(item, dict)]
+
+    def _ai_status_is_comparison_payload(self, payload: dict[str, Any]) -> bool:
+        return bool(payload.get("candidate_id")) and (
+            "comparison_status" in payload
+            or "comparison_report" in payload
+            or isinstance(payload.get("summary"), dict)
+        )
+
+    def _ai_status_index_candidate_payload(
+        self,
+        by_candidate: dict[str, dict[str, Any]],
+        by_approval: dict[str, dict[str, Any]],
+        payload: dict[str, Any],
+    ) -> None:
+        candidate_id = str(payload.get("candidate_id") or payload.get("id") or "").strip()
+        if candidate_id:
+            current = by_candidate.setdefault(candidate_id, {})
+            current.update({key: value for key, value in payload.items() if value not in (None, "", [])})
+        for approval_id in self._ai_status_source_approval_ids(payload):
+            current = by_approval.setdefault(approval_id, {})
+            current.update({key: value for key, value in payload.items() if value not in (None, "", [])})
+
+    def _build_ai_status_item(
+        self,
+        *,
+        source: dict[str, Any],
+        approval_index: dict[str, Any],
+        comparison_index: dict[str, dict[str, dict[str, Any]]],
+        selected_candidate_ids: set[str],
+        output_dir: Path,
+    ) -> dict[str, Any]:
+        improvement_id = str(source.get("id") or source.get("improvement_id") or "").strip() or None
+        candidate_id = str(source.get("candidate_id") or "").strip() or None
+        approvals = list(approval_index["by_improvement"].get(improvement_id or "", []))
+        if candidate_id:
+            for action in approval_index["by_candidate"].get(candidate_id, []):
+                if action not in approvals:
+                    approvals.append(action)
+        if approvals and candidate_id is None:
+            candidate_id = str(approvals[0].get("candidate_id") or "").strip() or None
+        source_approval_ids = self._ai_status_source_approval_ids(source)
+        for approval_id in source_approval_ids:
+            for action in approval_index["by_approval"].get(approval_id, []):
+                if action not in approvals:
+                    approvals.append(action)
+        approval_ids = self._ai_status_unique_strings(
+            [
+                *source_approval_ids,
+                *[
+                    str(action.get("approval_id"))
+                    for action in approvals
+                    if isinstance(action, dict) and action.get("approval_id")
+                ],
+            ]
+        )
+        comparison = self._ai_status_comparison_for_item(
+            comparison_index,
+            candidate_id=candidate_id,
+            approval_ids=approval_ids,
+        )
+        if candidate_id is None:
+            candidate_id = str(comparison.get("candidate_id") or "").strip() or None
+        consumed_approval_ids = self._ai_status_string_list(comparison.get("consumed_approval_ids"))
+        if not consumed_approval_ids and comparison.get("approval_id"):
+            consumed_approval_ids = [str(comparison["approval_id"])]
+        approval_ids = self._ai_status_unique_strings([*approval_ids, *consumed_approval_ids])
+        comparison_status = self._ai_status_comparison_status(comparison)
+        promotion_status = str(source.get("promotion_status") or comparison.get("promotion_status") or "not_promoted")
+        if candidate_id in selected_candidate_ids:
+            promotion_status = "promoted"
+        frame_window = self._ai_status_frame_window(source, approvals)
+
+        return {
+            "id": improvement_id or candidate_id,
+            "improvement_id": improvement_id,
+            "candidate_id": candidate_id,
+            "approval_ids": approval_ids,
+            "frame_window": frame_window,
+            "evidence_ids": self._ai_status_evidence_ids(source, approvals),
+            "confidence": source.get("confidence"),
+            "false_positive_class": source.get("false_positive_class")
+            or next((action.get("false_positive_class") for action in approvals if action.get("false_positive_class")), None),
+            "recommended_action": source.get("recommended_action") or source.get("approved_action"),
+            "approved_action": next((action.get("approved_action") for action in approvals if action.get("approved_action")), None),
+            "approval_status": "approved" if approvals else "none",
+            "consumed_approval_ids": consumed_approval_ids,
+            "comparison_status": comparison_status,
+            "promotion_status": promotion_status,
+            "artifact_references": self._ai_status_artifact_references(output_dir, comparison),
+        }
+
+    def _ai_status_comparison_for_item(
+        self,
+        comparison_index: dict[str, dict[str, dict[str, Any]]],
+        *,
+        candidate_id: str | None,
+        approval_ids: list[str],
+    ) -> dict[str, Any]:
+        if candidate_id:
+            comparison = comparison_index["by_candidate"].get(candidate_id)
+            if comparison is not None:
+                return comparison
+        for approval_id in approval_ids:
+            comparison = comparison_index["by_approval"].get(approval_id)
+            if comparison is not None:
+                return comparison
+        return {}
+
+    def _ai_status_comparison_status(self, comparison: dict[str, Any]) -> str:
+        status = comparison.get("comparison_status")
+        if isinstance(status, str) and status:
+            return status
+        summary = comparison.get("summary")
+        if isinstance(summary, dict) and isinstance(summary.get("status"), str):
+            return summary["status"]
+        return "none"
+
+    def _ai_status_problem_group(self, source: dict[str, Any], item: dict[str, Any]) -> str:
+        raw_problem = str(source.get("problem_type") or "").strip()
+        if raw_problem in {"missing_ball", "noise"}:
+            return raw_problem
+        if raw_problem in {"follow_cam", "camera_motion"}:
+            return "camera_motion"
+        if raw_problem in {"highlight", "highlights"}:
+            return "highlights"
+        action = str(item.get("recommended_action") or item.get("approved_action") or "").strip()
+        if action in {"adjust_highlight_window", "render_suggested_highlight"}:
+            return "highlights"
+        if action in {"adjust_follow_cam", "tracking_rerun_before_follow_cam", "human_review_camera_motion"}:
+            return "camera_motion"
+        if action in {"noise_filter_adjustment", "tighten_noise_filter", "reject_noise"} or item.get("false_positive_class"):
+            return "noise"
+        return "missing_ball"
+
+    def _ai_status_frame_window(
+        self,
+        source: dict[str, Any],
+        approvals: list[dict[str, Any]],
+    ) -> dict[str, int] | None:
+        for container in [source, *approvals]:
+            for key in ("rerun_scope", "suggested_window", "frame_window"):
+                window = container.get(key)
+                if isinstance(window, dict):
+                    normalized = self._ai_status_normalize_window(window)
+                    if normalized is not None:
+                        return normalized
+            normalized = self._ai_status_normalize_window(container)
+            if normalized is not None:
+                return normalized
+        return None
+
+    def _ai_status_normalize_window(self, value: dict[str, Any]) -> dict[str, int] | None:
+        if value.get("start_frame") is None or value.get("end_frame") is None:
+            return None
+        try:
+            start_frame = int(value["start_frame"])
+            end_frame = int(value["end_frame"])
+        except (TypeError, ValueError):
+            return None
+        if start_frame < 0 or end_frame < start_frame:
+            return None
+        return {"start_frame": start_frame, "end_frame": end_frame}
+
+    def _ai_status_evidence_ids(self, source: dict[str, Any], approvals: list[dict[str, Any]]) -> list[str]:
+        ids: list[str] = []
+        for container in [source, *approvals]:
+            evidence = container.get("evidence")
+            if isinstance(evidence, list):
+                for item in evidence:
+                    if isinstance(item, str):
+                        self._append_unique_string(ids, item)
+                    elif isinstance(item, dict):
+                        for key in ("id", "packet_id", "source_packet_id", "visual_review_id", "event_candidate_id"):
+                            self._append_unique_string(ids, item.get(key))
+            evidence_payload = container.get("evidence_payload")
+            if isinstance(evidence_payload, dict):
+                for key in ("id", "packet_id", "source_packet_id", "visual_review_id", "event_candidate_id"):
+                    self._append_unique_string(ids, evidence_payload.get(key))
+            for key in ("source_packet_id", "visual_review_id", "camera_motion_event_id", "event_candidate_id"):
+                self._append_unique_string(ids, container.get(key))
+        return ids
+
+    def _append_unique_string(self, target: list[str], value: Any) -> None:
+        if isinstance(value, str) and value.strip() and value.strip() not in target:
+            target.append(value.strip())
+
+    def _mark_ai_status_item_seen(
+        self,
+        item: dict[str, Any],
+        *,
+        seen_candidate_ids: set[str],
+        seen_improvement_ids: set[str],
+        seen_approval_ids: set[str],
+    ) -> None:
+        if item.get("candidate_id"):
+            seen_candidate_ids.add(str(item["candidate_id"]))
+        if item.get("improvement_id"):
+            seen_improvement_ids.add(str(item["improvement_id"]))
+        seen_approval_ids.update(self._ai_status_source_approval_ids(item))
+
+    def _ai_status_source_approval_ids(self, source: dict[str, Any]) -> list[str]:
+        return self._ai_status_unique_strings(
+            [
+                source.get("approval_id"),
+                *self._ai_status_string_list(source.get("approval_ids")),
+                *self._ai_status_string_list(source.get("consumed_approval_ids")),
+            ]
+        )
+
+    def _ai_status_unique_strings(self, values: list[Any]) -> list[str]:
+        unique: list[str] = []
+        for value in values:
+            if isinstance(value, str) and value.strip() and value.strip() not in unique:
+                unique.append(value.strip())
+        return unique
+
+    def _ai_status_string_list(self, value: Any) -> list[str]:
+        if not isinstance(value, list):
+            return []
+        return [str(item) for item in value if str(item).strip()]
+
+    def _ai_status_artifact_references(self, output_dir: Path, comparison: dict[str, Any]) -> list[dict[str, Any]]:
+        references: list[dict[str, Any]] = []
+        for key in ("comparison_report", "path"):
+            value = comparison.get(key)
+            if isinstance(value, str) and value.strip():
+                self._append_ai_status_artifact_reference(references, output_dir, value.strip(), category="comparison")
+        for value in comparison.get("candidate_artifacts") or []:
+            if isinstance(value, str) and value.strip():
+                self._append_ai_status_artifact_reference(references, output_dir, value.strip(), category="candidate")
+        return references
+
+    def _append_ai_status_artifact_reference(
+        self,
+        references: list[dict[str, Any]],
+        output_dir: Path,
+        relative_name: str,
+        *,
+        category: str,
+    ) -> None:
+        if any(reference["name"] == relative_name for reference in references):
+            return
+        relative_path = Path(relative_name)
+        if relative_path.is_absolute():
+            references.append(
+                {
+                    "name": relative_path.name,
+                    "path": None,
+                    "status": "error",
+                    "category": category,
+                }
+            )
+            return
+        path = (output_dir / relative_path).resolve()
+        if not self._path_is_relative_to(path, output_dir.resolve()):
+            references.append(
+                {
+                    "name": relative_name,
+                    "path": None,
+                    "status": "error",
+                    "category": category,
+                }
+            )
+            return
+        references.append(
+            {
+                "name": relative_name,
+                "path": str(path) if path.exists() else None,
+                "status": "available" if path.exists() else "unavailable",
+                "category": category,
+            }
+        )
+
+    def _path_is_relative_to(self, path: Path, root: Path) -> bool:
+        try:
+            path.relative_to(root)
+        except ValueError:
+            return False
+        return True
+
+    def _ai_status_final_manifest_status(
+        self,
+        final_manifest: dict[str, Any],
+        artifact: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        if not artifact or artifact.get("status") != "available":
+            return {
+                "status": "unavailable",
+                "artifact_status": artifact.get("status", "unavailable") if artifact else "unavailable",
+                "summary": artifact.get("summary") if artifact else "final manifest is not available.",
+                "path": artifact.get("path") if artifact else None,
+            }
+        summary = final_manifest.get("summary")
+        status = None
+        if isinstance(summary, dict):
+            status = summary.get("status")
+        if not status:
+            status = final_manifest.get("status") or "available"
+        return {
+            "status": str(status),
+            "artifact_status": "available",
+            "summary": artifact.get("summary"),
+            "path": artifact.get("path"),
+        }
+
     def ai_improvement_approve(
         self,
         run_id: str,

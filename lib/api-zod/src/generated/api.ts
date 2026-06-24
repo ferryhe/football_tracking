@@ -1935,6 +1935,125 @@ export const GetRunResponse = zod.object({
 });
 
 /**
+ * @summary Get Ai Improvement Status
+ */
+export const GetAiImprovementStatusParams = zod.object({
+  run_id: zod.coerce.string(),
+});
+
+export const getAiImprovementStatusResponseSchemaVersionDefault = `1.0`;
+export const getAiImprovementStatusResponseArtifactsItemExistsDefault = false;
+export const getAiImprovementStatusResponseItemsByProblemTypeItemFrameWindowOneStartFrameMin = 0;
+
+export const getAiImprovementStatusResponseItemsByProblemTypeItemFrameWindowOneEndFrameMin = 0;
+
+export const getAiImprovementStatusResponseItemsByProblemTypeItemApprovalStatusDefault = `none`;
+export const getAiImprovementStatusResponseItemsByProblemTypeItemComparisonStatusDefault = `none`;
+export const getAiImprovementStatusResponseItemsByProblemTypeItemPromotionStatusDefault = `not_promoted`;
+export const getAiImprovementStatusResponseFinalManifestStatusArtifactStatusDefault = `unavailable`;
+
+export const GetAiImprovementStatusResponse = zod.object({
+  schema_version: zod
+    .string()
+    .default(getAiImprovementStatusResponseSchemaVersionDefault),
+  run_id: zod.string(),
+  output_dir: zod.string(),
+  artifacts: zod.array(
+    zod.object({
+      name: zod.string(),
+      category: zod.string(),
+      status: zod.enum(["available", "unavailable", "error"]),
+      summary: zod.string(),
+      path: zod.union([zod.string(), zod.null()]).optional(),
+      exists: zod
+        .boolean()
+        .default(getAiImprovementStatusResponseArtifactsItemExistsDefault),
+      size_bytes: zod.union([zod.number(), zod.null()]).optional(),
+      content_type: zod.union([zod.string(), zod.null()]).optional(),
+      problem_type: zod.union([zod.string(), zod.null()]).optional(),
+      candidate_id: zod.union([zod.string(), zod.null()]).optional(),
+    }),
+  ),
+  items_by_problem_type: zod.record(
+    zod.string(),
+    zod.array(
+      zod.object({
+        id: zod.union([zod.string(), zod.null()]).optional(),
+        improvement_id: zod.union([zod.string(), zod.null()]).optional(),
+        candidate_id: zod.union([zod.string(), zod.null()]).optional(),
+        approval_ids: zod.array(zod.string()).optional(),
+        frame_window: zod
+          .union([
+            zod.object({
+              start_frame: zod
+                .number()
+                .min(
+                  getAiImprovementStatusResponseItemsByProblemTypeItemFrameWindowOneStartFrameMin,
+                ),
+              end_frame: zod
+                .number()
+                .min(
+                  getAiImprovementStatusResponseItemsByProblemTypeItemFrameWindowOneEndFrameMin,
+                ),
+            }),
+            zod.null(),
+          ])
+          .optional(),
+        evidence_ids: zod.array(zod.string()).optional(),
+        confidence: zod.union([zod.number(), zod.null()]).optional(),
+        false_positive_class: zod.union([zod.string(), zod.null()]).optional(),
+        recommended_action: zod.union([zod.string(), zod.null()]).optional(),
+        approved_action: zod.union([zod.string(), zod.null()]).optional(),
+        approval_status: zod
+          .string()
+          .default(
+            getAiImprovementStatusResponseItemsByProblemTypeItemApprovalStatusDefault,
+          ),
+        consumed_approval_ids: zod.array(zod.string()).optional(),
+        comparison_status: zod
+          .enum(["pass", "warn", "fail", "unavailable", "none"])
+          .default(
+            getAiImprovementStatusResponseItemsByProblemTypeItemComparisonStatusDefault,
+          ),
+        promotion_status: zod
+          .enum([
+            "not_promoted",
+            "pending_confirmation",
+            "promoted",
+            "rejected",
+            "blocked",
+          ])
+          .default(
+            getAiImprovementStatusResponseItemsByProblemTypeItemPromotionStatusDefault,
+          ),
+        artifact_references: zod
+          .array(
+            zod.object({
+              name: zod.string(),
+              status: zod.enum(["available", "unavailable", "error"]),
+              path: zod.union([zod.string(), zod.null()]).optional(),
+              category: zod.union([zod.string(), zod.null()]).optional(),
+            }),
+          )
+          .optional(),
+      }),
+    ),
+  ),
+  final_manifest_status: zod.object({
+    status: zod.string(),
+    artifact_status: zod
+      .enum(["available", "unavailable", "error"])
+      .default(
+        getAiImprovementStatusResponseFinalManifestStatusArtifactStatusDefault,
+      ),
+    summary: zod.union([zod.string(), zod.null()]).optional(),
+    path: zod.union([zod.string(), zod.null()]).optional(),
+  }),
+  final_selected_artifacts: zod.array(zod.record(zod.string(), zod.unknown())),
+  final_selected_artifact_candidate_ids: zod.array(zod.string()),
+});
+
+/**
  * @summary Get Ai Review Triggers Report
  */
 export const GetAiReviewTriggersReportParams = zod.object({

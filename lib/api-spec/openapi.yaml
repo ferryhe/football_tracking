@@ -503,6 +503,38 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/HTTPValidationError'
+  /runs/{run_id}/ai-improvement-status:
+    get:
+      tags:
+      - runs
+      summary: Get Ai Improvement Status
+      operationId: get_ai_improvement_status
+      parameters:
+      - name: run_id
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Run Id
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AIImprovementStatusResponse'
+        '404':
+          description: Run not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiErrorResponse'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
   /runs/{run_id}/ai-review-triggers:
     get:
       tags:
@@ -1662,6 +1694,87 @@ components:
       required:
       - status
       title: AIImproveSummary
+    AIImprovementArtifactReference:
+      properties:
+        name:
+          type: string
+          title: Name
+        status:
+          type: string
+          enum:
+          - available
+          - unavailable
+          - error
+          title: Status
+        path:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Path
+        category:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Category
+      type: object
+      required:
+      - name
+      - status
+      title: AIImprovementArtifactReference
+    AIImprovementArtifactStatus:
+      properties:
+        name:
+          type: string
+          title: Name
+        category:
+          type: string
+          title: Category
+        status:
+          type: string
+          enum:
+          - available
+          - unavailable
+          - error
+          title: Status
+        summary:
+          type: string
+          title: Summary
+        path:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Path
+        exists:
+          type: boolean
+          title: Exists
+          default: false
+        size_bytes:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          title: Size Bytes
+        content_type:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Content Type
+        problem_type:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Problem Type
+        candidate_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Candidate Id
+      type: object
+      required:
+      - name
+      - category
+      - status
+      - summary
+      title: AIImprovementArtifactStatus
     AIImprovementItem:
       properties:
         id:
@@ -1819,6 +1932,167 @@ components:
       - recommended_action
       - confidence
       title: AIImprovementItem
+    AIImprovementManifestStatus:
+      properties:
+        status:
+          type: string
+          title: Status
+        artifact_status:
+          type: string
+          enum:
+          - available
+          - unavailable
+          - error
+          title: Artifact Status
+          default: unavailable
+        summary:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Summary
+        path:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Path
+      type: object
+      required:
+      - status
+      title: AIImprovementManifestStatus
+    AIImprovementStatusItem:
+      properties:
+        id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Id
+        improvement_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Improvement Id
+        candidate_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Candidate Id
+        approval_ids:
+          items:
+            type: string
+          type: array
+          title: Approval Ids
+        frame_window:
+          anyOf:
+          - $ref: '#/components/schemas/AIFrameWindow'
+          - type: 'null'
+        evidence_ids:
+          items:
+            type: string
+          type: array
+          title: Evidence Ids
+        confidence:
+          anyOf:
+          - type: number
+          - type: 'null'
+          title: Confidence
+        false_positive_class:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: False Positive Class
+        recommended_action:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Recommended Action
+        approved_action:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Approved Action
+        approval_status:
+          type: string
+          title: Approval Status
+          default: none
+        consumed_approval_ids:
+          items:
+            type: string
+          type: array
+          title: Consumed Approval Ids
+        comparison_status:
+          type: string
+          enum:
+          - pass
+          - warn
+          - fail
+          - unavailable
+          - none
+          title: Comparison Status
+          default: none
+        promotion_status:
+          type: string
+          enum:
+          - not_promoted
+          - pending_confirmation
+          - promoted
+          - rejected
+          - blocked
+          title: Promotion Status
+          default: not_promoted
+        artifact_references:
+          items:
+            $ref: '#/components/schemas/AIImprovementArtifactReference'
+          type: array
+          title: Artifact References
+      type: object
+      title: AIImprovementStatusItem
+    AIImprovementStatusResponse:
+      properties:
+        schema_version:
+          type: string
+          title: Schema Version
+          default: '1.0'
+        run_id:
+          type: string
+          title: Run Id
+        output_dir:
+          type: string
+          title: Output Dir
+        artifacts:
+          items:
+            $ref: '#/components/schemas/AIImprovementArtifactStatus'
+          type: array
+          title: Artifacts
+        items_by_problem_type:
+          additionalProperties:
+            items:
+              $ref: '#/components/schemas/AIImprovementStatusItem'
+            type: array
+          type: object
+          title: Items By Problem Type
+        final_manifest_status:
+          $ref: '#/components/schemas/AIImprovementManifestStatus'
+        final_selected_artifacts:
+          items:
+            additionalProperties: true
+            type: object
+          type: array
+          title: Final Selected Artifacts
+        final_selected_artifact_candidate_ids:
+          items:
+            type: string
+          type: array
+          title: Final Selected Artifact Candidate Ids
+      type: object
+      required:
+      - run_id
+      - output_dir
+      - artifacts
+      - items_by_problem_type
+      - final_manifest_status
+      - final_selected_artifacts
+      - final_selected_artifact_candidate_ids
+      title: AIImprovementStatusResponse
     AILikelyBallRegion:
       properties:
         description:

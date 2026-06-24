@@ -24,6 +24,7 @@ import type {
   AIImproveApprovalResponse,
   AIImproveRequest,
   AIImproveResponse,
+  AIImprovementStatusResponse,
   AIRecommendRequest,
   AIReviewTriggerReport,
   AISuggestion,
@@ -1822,6 +1823,100 @@ export function useGetRun<
   },
 ): UseQueryResult<TData, TError> & { queryKey: QueryKey } {
   const queryOptions = getGetRunQueryOptions(runId, options);
+
+  const query = useQuery(queryOptions) as UseQueryResult<TData, TError> & {
+    queryKey: QueryKey;
+  };
+
+  return { ...query, queryKey: queryOptions.queryKey };
+}
+
+/**
+ * @summary Get Ai Improvement Status
+ */
+export const getGetAiImprovementStatusUrl = (runId: string) => {
+  return `/api/runs/${encodePathSegmented(runId)}/ai-improvement-status`;
+};
+
+export const getAiImprovementStatus = async (
+  runId: string,
+  options?: RequestInit,
+): Promise<AIImprovementStatusResponse> => {
+  return customFetch<AIImprovementStatusResponse>(
+    getGetAiImprovementStatusUrl(runId),
+    {
+      ...options,
+      method: "GET",
+    },
+  );
+};
+
+export const getGetAiImprovementStatusQueryKey = (runId: string) => {
+  return [`/api/runs/${encodePathSegmented(runId)}/ai-improvement-status`] as const;
+};
+
+export const getGetAiImprovementStatusQueryOptions = <
+  TData = Awaited<ReturnType<typeof getAiImprovementStatus>>,
+  TError = ErrorType<ApiErrorResponse | HTTPValidationError>,
+>(
+  runId: string,
+  options?: {
+    query?: UseQueryOptions<
+      Awaited<ReturnType<typeof getAiImprovementStatus>>,
+      TError,
+      TData
+    >;
+    request?: SecondParameter<typeof customFetch>;
+  },
+) => {
+  const { query: queryOptions, request: requestOptions } = options ?? {};
+
+  const queryKey =
+    queryOptions?.queryKey ?? getGetAiImprovementStatusQueryKey(runId);
+
+  const queryFn: QueryFunction<
+    Awaited<ReturnType<typeof getAiImprovementStatus>>
+  > = ({ signal }) =>
+    getAiImprovementStatus(runId, { signal, ...requestOptions });
+
+  return {
+    queryKey,
+    queryFn,
+    enabled: !!runId,
+    ...queryOptions,
+  } as UseQueryOptions<
+    Awaited<ReturnType<typeof getAiImprovementStatus>>,
+    TError,
+    TData
+  > & { queryKey: QueryKey };
+};
+
+export type GetAiImprovementStatusQueryResult = NonNullable<
+  Awaited<ReturnType<typeof getAiImprovementStatus>>
+>;
+export type GetAiImprovementStatusQueryError = ErrorType<
+  ApiErrorResponse | HTTPValidationError
+>;
+
+/**
+ * @summary Get Ai Improvement Status
+ */
+
+export function useGetAiImprovementStatus<
+  TData = Awaited<ReturnType<typeof getAiImprovementStatus>>,
+  TError = ErrorType<ApiErrorResponse | HTTPValidationError>,
+>(
+  runId: string,
+  options?: {
+    query?: UseQueryOptions<
+      Awaited<ReturnType<typeof getAiImprovementStatus>>,
+      TError,
+      TData
+    >;
+    request?: SecondParameter<typeof customFetch>;
+  },
+): UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+  const queryOptions = getGetAiImprovementStatusQueryOptions(runId, options);
 
   const query = useQuery(queryOptions) as UseQueryResult<TData, TError> & {
     queryKey: QueryKey;
