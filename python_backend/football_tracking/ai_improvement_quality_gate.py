@@ -1127,11 +1127,11 @@ def _check_candidate_comparisons(
     if status_counts["fail"]:
         status = "fail"
     elif status_counts["unavailable"]:
-        status = "unavailable"
+        status = "fail" if mode == "real" else "unavailable"
     elif status_counts["warn"]:
         status = "warn"
     elif not reports and _manifest_has_candidate_outputs(final_manifest):
-        status = "unavailable"
+        status = "fail" if mode == "real" else "unavailable"
     else:
         status = "pass"
     return _check(

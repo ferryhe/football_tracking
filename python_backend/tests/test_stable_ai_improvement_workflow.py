@@ -962,6 +962,60 @@ class StableAiImprovementWorkflowTests(unittest.TestCase):
         self.assertEqual(["candidate-final"], [item["candidate_id"] for item in manifest["final_selected_artifacts"]])
         self.assertEqual(1, manifest["summary"]["final_artifact_count"])
 
+    def test_workflow_rerun_preserves_existing_pending_finalization(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_tracks(output_dir)
+            existing_comparison = _comparison_payload("candidate-pending", "pass")
+            existing_comparison["problem_type"] = "missing_ball"
+            existing_comparison["approval_id"] = "approval-pending"
+            existing_comparison["consumed_approval_ids"] = ["approval-pending"]
+            _write_json(
+                output_dir / "final_ai_improvement_artifact_manifest.json",
+                {
+                    "schema_version": "1.0",
+                    "candidate_outputs": [
+                        {
+                            "id": "candidate-pending",
+                            "candidate_id": "candidate-pending",
+                            "problem_type": "missing_ball",
+                            "path": "ai_candidates/missing_ball/candidate-pending/ball_track.csv",
+                            "candidate_artifacts": [
+                                "ai_candidates/missing_ball/candidate-pending/ball_track.csv",
+                            ],
+                        }
+                    ],
+                    "final_selected_artifacts": [],
+                    "consumed_approvals": [{"approval_id": "approval-pending", "candidate_id": "candidate-pending"}],
+                    "comparison_reports": [existing_comparison],
+                    "pending_candidates": [
+                        {
+                            "candidate_id": "candidate-pending",
+                            "approval_id": "approval-pending",
+                            "approval_ids": ["approval-pending"],
+                            "problem_type": "missing_ball",
+                            "status": "pending_finalization",
+                            "comparison_status": "pass",
+                            "requires_finalize_ai_candidate": True,
+                        }
+                    ],
+                },
+            )
+
+            report = run_workflow(output_dir=output_dir, dry_run=False, quality_gate_mode="artifact-only")
+            manifest = json.loads((output_dir / "final_ai_improvement_artifact_manifest.json").read_text(encoding="utf-8"))
+
+        self.assertEqual(["candidate-pending"], [item["candidate_id"] for item in manifest["candidate_outputs"]])
+        self.assertEqual(["candidate-pending"], [item["candidate_id"] for item in manifest["comparison_reports"]])
+        self.assertEqual(["candidate-pending"], [item["candidate_id"] for item in manifest["pending_candidates"]])
+        requirements = report["workflow_summary"]["finalization_requirements"]
+        self.assertTrue(requirements["requires_explicit_finalization"])
+        self.assertEqual(1, requirements["pending_finalization_count"])
+        self.assertEqual(
+            ["candidate-pending"],
+            [item["candidate_id"] for item in requirements["pending_finalization"]],
+        )
+
     def test_unknown_approval_ids_fail_in_non_dry_run(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:
             output_dir = Path(temp_name)
@@ -1721,6 +1775,119 @@ class StableAiImprovementWorkflowTests(unittest.TestCase):
         self.assertIn("ai_improvement_hash_snapshots.json", report["produced_artifacts"])
         self.assertEqual(report["quality_gate"]["summary"], written["quality_gate"]["summary"])
 
+    def test_workflow_report_summarizes_all_lane_candidates_and_finalization_requirements(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            root = Path(temp_name)
+            output_dir = root / "outputs" / "baseline"
+            _write_tracks(output_dir)
+            input_video = root / "data" / "input.mp4"
+            config_path = _write_recovery_config(root, output_dir)
+            _write_json(
+                output_dir / "run_manifest.json",
+                {"config_path": str(config_path), "input_video": str(input_video)},
+            )
+            approved_path = output_dir / "approved_actions.json"
+            _write_json(
+                approved_path,
+                {
+                    "approved_actions": [
+                        _approval("missing_1", start=10, end=20),
+                        _noise_approval("noise_1", start=30, end=40),
+                        _adjust_follow_cam_approval("camera_1"),
+                        _highlight_approval("highlight_1", start=90, end=120),
+                    ]
+                },
+            )
+
+            with (
+                patch(
+                    "scripts.run_stable_ai_improvement_workflow.execute_missing_ball_candidate",
+                    return_value=_lane_comparison_report("missing_ball", "missing-candidate-1", "missing_1"),
+                ),
+                patch(
+                    "scripts.run_stable_ai_improvement_workflow.execute_noise_cleanup_candidate",
+                    return_value=_lane_comparison_report("noise", "noise-candidate-1", "noise_1"),
+                ),
+                patch(
+                    "scripts.run_stable_ai_improvement_workflow.execute_follow_cam_candidate",
+                    return_value=_lane_comparison_report("follow_cam", "follow-cam-1", "camera_1"),
+                ),
+                patch(
+                    "scripts.run_stable_ai_improvement_workflow.execute_highlight_candidate",
+                    return_value=_highlight_comparison_report(),
+                ),
+            ):
+                report = run_workflow(
+                    output_dir=output_dir,
+                    input_video=input_video,
+                    dry_run=False,
+                    approved_actions_path=approved_path,
+                    approval_ids=["missing_1", "noise_1", "camera_1", "highlight_1"],
+                )
+            written = json.loads((output_dir / "stable_ai_improvement_workflow_report.json").read_text(encoding="utf-8"))
+
+        self.assertEqual(report["workflow_summary"], written["workflow_summary"])
+        summary = report["workflow_summary"]
+        self.assertEqual(["missing_1", "noise_1", "camera_1", "highlight_1"], summary["selected_approval_ids"])
+        self.assertEqual(["missing_1", "noise_1", "camera_1", "highlight_1"], summary["consumed_approval_ids"])
+        self.assertEqual(
+            ["missing_ball", "noise", "follow_cam", "highlight"],
+            [item["problem_type"] for item in summary["candidate_outputs"]],
+        )
+        self.assertEqual(
+            ["missing_ball", "noise", "follow_cam", "highlight"],
+            [item["problem_type"] for item in summary["comparison_reports"]],
+        )
+        self.assertEqual(report["quality_gate"]["summary"], summary["quality_gate_status"])
+        requirements = summary["finalization_requirements"]
+        self.assertEqual(
+            {
+                "missing_ball": "missing_ball_track",
+                "noise": "noise_cleaned_track",
+                "follow_cam": "follow_cam_video",
+                "highlight": "highlight_clip",
+            },
+            requirements["output_roles_by_problem_type"],
+        )
+        self.assertEqual(4, requirements["pending_finalization_count"])
+        self.assertEqual(
+            ["missing_ball", "noise", "follow_cam", "highlight"],
+            [item["problem_type"] for item in requirements["pending_finalization"]],
+        )
+        self.assertEqual(
+            {
+                "missing_ball": {
+                    "selected_approval_count": 1,
+                    "consumed_approval_count": 1,
+                    "candidate_output_count": 1,
+                    "comparison_report_count": 1,
+                    "pending_finalization_count": 1,
+                },
+                "noise": {
+                    "selected_approval_count": 1,
+                    "consumed_approval_count": 1,
+                    "candidate_output_count": 1,
+                    "comparison_report_count": 1,
+                    "pending_finalization_count": 1,
+                },
+                "follow_cam": {
+                    "selected_approval_count": 1,
+                    "consumed_approval_count": 1,
+                    "candidate_output_count": 1,
+                    "comparison_report_count": 1,
+                    "pending_finalization_count": 1,
+                },
+                "highlight": {
+                    "selected_approval_count": 1,
+                    "consumed_approval_count": 1,
+                    "candidate_output_count": 1,
+                    "comparison_report_count": 1,
+                    "pending_finalization_count": 1,
+                },
+            },
+            requirements["by_problem_type"],
+        )
+
     def test_workflow_fails_quality_gate_when_real_mode_missing_required_artifacts(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:
             stdout = io.StringIO()
@@ -1970,6 +2137,50 @@ def _comparison_payload(candidate_id: str, status: str) -> dict[str, object]:
         "summary": {"status": status},
         "checks": [{"name": "fixture", "status": status}],
         "candidate": {"id": candidate_id, "path": f"ai_candidates/missing_ball/{candidate_id}"},
+    }
+
+
+def _lane_comparison_report(problem_type: str, candidate_id: str, approval_id: str, status: str = "pass") -> dict[str, object]:
+    comparison_names = {
+        "missing_ball": "missing_ball_recovery_comparison.json",
+        "noise": "noise_candidate_comparison.json",
+        "follow_cam": "follow_cam_candidate_comparison.json",
+        "highlight": "highlight_candidate_comparison.json",
+    }
+    artifact_names = {
+        "missing_ball": "ball_track.csv",
+        "noise": "ball_track.cleaned.csv",
+        "follow_cam": "follow_cam.mp4",
+        "highlight": "highlight.mp4",
+    }
+    candidate_dir = f"ai_candidates/{problem_type}/{candidate_id}"
+    comparison_report = f"{candidate_dir}/{comparison_names[problem_type]}"
+    return {
+        "schema_version": "1.0",
+        "candidate_id": candidate_id,
+        "approval_id": approval_id,
+        "consumed_approval_ids": [approval_id],
+        "problem_type": problem_type,
+        "candidate_dir": candidate_dir,
+        "comparison_report": comparison_report,
+        "comparison_status": status,
+        "candidate_artifacts": [
+            f"{candidate_dir}/{artifact_names[problem_type]}",
+            comparison_report,
+            f"{candidate_dir}/candidate_manifest.json",
+        ],
+        "candidate": {"id": candidate_id, "path": f"{candidate_dir}/{artifact_names[problem_type]}"},
+        "summary": {
+            "status": status,
+            "check_count": 1,
+            "passed_check_count": 1 if status == "pass" else 0,
+            "failed_check_count": 1 if status == "fail" else 0,
+            "warning_count": 1 if status == "warn" else 0,
+            "unavailable_count": 1 if status == "unavailable" else 0,
+            "requires_human_confirmation": False,
+            "promotion_eligible": status == "pass",
+        },
+        "checks": [{"name": "fixture", "status": status}],
     }
 
 
