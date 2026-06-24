@@ -296,6 +296,10 @@ class FollowCamGenerator:
         smoothed_velocity = (0.0, 0.0)
         lost_streak = 0
         pan_mode = "glide"
+        last_action_center: tuple[float, float] | None = None
+        last_action_center_frame_index: int | None = None
+        last_action_center_player_count = 0
+        last_camera_target: tuple[float, float] | None = None
         path_entries: list[CameraPathEntry] = []
         total_frames = len(frames)
         last_progress_at = 0.0
@@ -330,9 +334,23 @@ class FollowCamGenerator:
             if not ok:
                 break
 
+            camera_frame_info = frame_info
             has_track_point = frame_info.x is not None and frame_info.y is not None
             if frame_info.status == OutputStatus.LOST:
                 has_track_point = False
+            elif has_track_point and self._is_unreliable_predicted_edge_point(
+                frame_info=frame_info,
+                source_width=source_width,
+                source_height=source_height,
+            ):
+                has_track_point = False
+                camera_frame_info = FollowCamFrame(
+                    frame_index=frame_info.frame_index,
+                    x=None,
+                    y=None,
+                    confidence=0.0,
+                    status=OutputStatus.LOST,
+                )
 
             if has_track_point:
                 lost_streak = 0
@@ -355,7 +373,7 @@ class FollowCamGenerator:
 
             speed = math.hypot(smoothed_velocity[0], smoothed_velocity[1])
             desired_crop_height, zoom_out_ratio = self._desired_crop_height(
-                frame_info=frame_info,
+                frame_info=camera_frame_info,
                 speed=speed,
                 source_height=source_height,
             )
@@ -407,6 +425,25 @@ class FollowCamGenerator:
                     anchor_x - (cfg.ball_screen_x_ratio - 0.5) * current_crop_width,
                     anchor_y - (cfg.ball_screen_y_ratio - 0.5) * current_crop_height,
                 )
+                if self._can_seed_lost_action_hold(
+                    frame_info=frame_info,
+                    action_center=(float(camera_target[0]), float(camera_target[1])),
+                    source_width=source_width,
+                    source_height=source_height,
+                ):
+                    last_action_center = (float(camera_target[0]), float(camera_target[1]))
+                    last_action_center_frame_index = frame_info.frame_index
+                    last_action_center_player_count = action_center.player_count
+                    last_camera_target = desired_center
+                elif self._should_clear_lost_action_hold_seed(
+                    frame_info=frame_info,
+                    action_center=(float(camera_target[0]), float(camera_target[1])),
+                    source_width=source_width,
+                ):
+                    last_action_center = None
+                    last_action_center_frame_index = None
+                    last_action_center_player_count = 0
+                    last_camera_target = None
                 current_center, pan_mode = self._move_camera_towards(
                     current_center=current_center,
                     desired_center=desired_center,
@@ -416,9 +453,30 @@ class FollowCamGenerator:
                     current_pan_mode=pan_mode,
                 )
             else:
-                pan_mode = "hold"
-                if lost_streak > cfg.lost_recenter_frames:
+                if (
+                    last_camera_target is not None
+                    and last_action_center is not None
+                    and self._should_hold_lost_action(
+                        frame_index=frame_info.frame_index,
+                        last_action_center=last_action_center,
+                        last_action_center_frame_index=last_action_center_frame_index,
+                        source_width=source_width,
+                        source_height=source_height,
+                    )
+                ):
+                    current_center = self._move_towards_action_hold(current_center, last_camera_target)
+                    pan_mode = "action_hold"
+                    action_center = ActionCenterPoint(
+                        last_action_center[0],
+                        last_action_center[1],
+                        "lost_action_hold",
+                        last_action_center_player_count,
+                    )
+                elif lost_streak > cfg.lost_recenter_frames:
+                    pan_mode = "hold"
                     current_center = self._move_towards_home(current_center, home_center, cfg.recenter_smoothing)
+                else:
+                    pan_mode = "hold"
 
             current_center = self._clamp_center(
                 center=current_center,
@@ -438,7 +496,7 @@ class FollowCamGenerator:
             resized = cv2.resize(crop, (cfg.target_width, cfg.target_height), interpolation=cv2.INTER_LINEAR)
             self._draw_overlay(
                 image=resized,
-                frame_info=frame_info,
+                frame_info=camera_frame_info,
                 crop_box=crop_box,
             )
             writer.write(resized)
@@ -691,6 +749,112 @@ class FollowCamGenerator:
             self._lerp(current_center[0], home_center[0], smoothing),
             self._lerp(current_center[1], home_center[1], smoothing),
         )
+
+    def _move_towards_action_hold(
+        self,
+        current_center: tuple[float, float],
+        desired_center: tuple[float, float],
+    ) -> tuple[float, float]:
+        cfg = self.config
+        return (
+            current_center[0]
+            + self._axis_move(
+                current=current_center[0],
+                desired=desired_center[0],
+                dead_zone=0.0,
+                smoothing=cfg.lost_action_hold_smoothing,
+                max_step=cfg.glide_max_pan_per_frame_x,
+            ),
+            current_center[1]
+            + self._axis_move(
+                current=current_center[1],
+                desired=desired_center[1],
+                dead_zone=0.0,
+                smoothing=cfg.lost_action_hold_smoothing,
+                max_step=cfg.glide_max_pan_per_frame_y,
+            ),
+        )
+
+    def _should_hold_lost_action(
+        self,
+        frame_index: int,
+        last_action_center: tuple[float, float],
+        last_action_center_frame_index: int | None,
+        source_width: int,
+        source_height: int,
+    ) -> bool:
+        cfg = self.config
+        if not cfg.lost_action_hold_enabled or last_action_center_frame_index is None:
+            return False
+        frame_delta = frame_index - last_action_center_frame_index
+        if frame_delta < 0 or frame_delta > cfg.lost_action_hold_frames:
+            return False
+        return self._is_edge_action_center(last_action_center, source_width, source_height)
+
+    def _can_seed_lost_action_hold(
+        self,
+        frame_info: FollowCamFrame,
+        action_center: tuple[float, float],
+        source_width: int,
+        source_height: int,
+    ) -> bool:
+        if frame_info.status != OutputStatus.DETECTED:
+            return False
+        if frame_info.confidence < self.config.lost_action_hold_min_confidence:
+            return False
+        return self._is_edge_action_center(action_center, source_width, source_height)
+
+    def _is_unreliable_predicted_edge_point(
+        self,
+        frame_info: FollowCamFrame,
+        source_width: int,
+        source_height: int,
+    ) -> bool:
+        if not self.config.lost_action_hold_enabled or frame_info.status != OutputStatus.PREDICTED:
+            return False
+        if frame_info.confidence >= self.config.lost_action_hold_min_confidence:
+            return False
+        if frame_info.x is None or frame_info.y is None:
+            return False
+        return self._is_edge_action_center((float(frame_info.x), float(frame_info.y)), source_width, source_height)
+
+    def _should_clear_lost_action_hold_seed(
+        self,
+        frame_info: FollowCamFrame,
+        action_center: tuple[float, float],
+        source_width: int,
+    ) -> bool:
+        if frame_info.status != OutputStatus.DETECTED:
+            return False
+        if frame_info.confidence < self.config.lost_action_hold_min_confidence:
+            return False
+        return self._is_central_action_center(action_center, source_width)
+
+    def _is_central_action_center(
+        self,
+        point: tuple[float, float],
+        source_width: int,
+    ) -> bool:
+        if source_width <= 0:
+            return False
+        x, _ = point
+        if not math.isfinite(x):
+            return False
+        return source_width * 0.35 <= x <= source_width * 0.65
+
+    def _is_edge_action_center(
+        self,
+        point: tuple[float, float],
+        source_width: int,
+        source_height: int,
+    ) -> bool:
+        if source_width <= 0 or source_height <= 0:
+            return False
+        x, y = point
+        if not (math.isfinite(x) and math.isfinite(y)):
+            return False
+        margin_x = source_width * self.config.lost_action_hold_edge_margin_ratio
+        return x <= margin_x or x >= source_width - margin_x
 
     def _crop_size_for_height(
         self,
