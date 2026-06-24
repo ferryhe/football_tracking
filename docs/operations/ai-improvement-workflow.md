@@ -21,6 +21,7 @@ $env:PYTHONPATH='python_backend'
 .\.venv\Scripts\python.exe python_backend\scripts\run_stable_ai_improvement_workflow.py `
   --output-dir python_backend\outputs\full_workflow_latest_review_20260622_060600 `
   --input-video python_backend\data\raw5760x144020fps.mp4 `
+  --targeted-localization-window 2049:2544:right_corner `
   --dry-run `
   --parallel-mode temporal
 ```
@@ -44,17 +45,35 @@ Stable rules summary:
 2. `before_review` track hash snapshot.
 3. Review packets.
 4. Optional visual review.
-5. Run-level AI improvement.
-6. `after_ai_improvement` track hash snapshot.
-7. Explicit approved child rerun plan.
-8. Optional follow-cam rerender plan.
-9. Optional highlight render plan.
-10. Missing-ball noop resolution.
-11. Pre-manifest AI improvement quality gate.
-12. Final artifact manifest.
-13. Final AI improvement quality-gate refresh and final-manifest status sync.
+5. Optional targeted visual localization.
+6. Run-level AI improvement.
+7. `after_ai_improvement` track hash snapshot.
+8. Explicit approved child rerun plan.
+9. Optional follow-cam rerender plan.
+10. Optional highlight render plan.
+11. Missing-ball noop resolution.
+12. Pre-manifest AI improvement quality gate.
+13. Final artifact manifest.
+14. Final AI improvement quality-gate refresh and final-manifest status sync.
 
 In `--dry-run`, provider calls and expensive video work are not required. Hash snapshots and lightweight JSON reports may still be written so the quality gate has stable inputs.
+
+## Targeted Visual Localization
+
+Use `--targeted-localization-window start:end:label` when a known missing-ball window needs a stronger visual look before a bounded `localize_ball_roi` approval can be trusted. The stage writes `ai_visual_localization.json` after decoding the source video dimensions with OpenCV, generating contact/crop sheets, and validating any model ROI against the decoded image width and height.
+
+Example:
+
+```powershell
+.\.venv\Scripts\python.exe python_backend\scripts\run_stable_ai_improvement_workflow.py `
+  --output-dir python_backend\outputs\my_run `
+  --input-video python_backend\data\raw5760x144020fps.mp4 `
+  --targeted-localization-window 2049:2544:right_corner `
+  --mode real `
+  --model gpt-5.4
+```
+
+`ai_visual_localization.json` is evidence only. It can provide a traceable `visual_localization_id` and a bounded `local_search_roi` suggestion for later approval, but it is not a final selected artifact and does not mutate `ball_track.csv`, `ball_track.cleaned.csv`, follow-cam videos, or highlight clips by itself. If a model proposes an ROI outside the decoded source frame, the workflow records it as rejected rather than silently clamping the coordinates.
 
 ## Speed Strategy
 
@@ -124,7 +143,7 @@ Hard cases include long missing-ball gaps, camera-audit failures, follow-cam reg
 Run-level AI suggestions must be evidence-backed before they are eligible for approval. See the contract document for the final gating rules; the stable workflow enforces these operator-facing constraints:
 
 - Long missing-ball or lost-gap suggestions must cover the full lost gap, or explicitly describe uncovered subwindows.
-- ROI and localization suggestions must cite a `source_packet_id` or `visual_review_id`.
+- ROI and localization suggestions must cite a `source_packet_id`, `visual_review_id`, or a `visual_localization_id` from `ai_visual_localization.json`.
 - `not_visible` is only valid when packet or visual evidence supports that the ball is hidden, off-frame, or impossible to identify.
 - Noise suggestions must use bounded frame windows, evidence ids, and an accepted false-positive class: `extra_ball`, `shoe_confusion`, `foot_confusion`, `player_head`, `advertising_board`, `sideline_confusion`, `wall_background_drift`, `unknown_false_positive`, or `unknown`.
 - Camera suggestions must distinguish tracking recovery from follow-cam tuning. Lost or Predicted ball-track context should produce `tracking_rerun_before_follow_cam`; stable Detected context can produce `adjust_follow_cam`.

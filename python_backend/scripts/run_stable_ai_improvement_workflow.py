@@ -21,6 +21,8 @@ from football_tracking.ai_improvement_quality_gate import (
     write_track_hash_snapshot,
 )
 from football_tracking.ai_visual_review import write_ai_visual_review_report
+from football_tracking.ai_visual_localization import REPORT_NAME as AI_VISUAL_LOCALIZATION_REPORT_NAME
+from football_tracking.ai_visual_localization import write_ai_visual_localization_report
 from football_tracking.chunk_runner import run_high_recall_windows
 from football_tracking.config import load_config
 from football_tracking.final_artifact_manifest import FINALIZATION_OUTPUT_ROLES, write_final_artifact_manifest
@@ -69,6 +71,7 @@ def run_workflow(
     approval_ids: list[str] | None = None,
     approved_action_id: str | None = None,
     candidate_intent: str | None = None,
+    targeted_localization_windows: list[str] | None = None,
     quality_gate_mode: str | None = None,
     report_name: str = DEFAULT_REPORT_NAME,
 ) -> dict[str, Any]:
@@ -85,6 +88,7 @@ def run_workflow(
         raise ValueError("candidate_intent must be review_only, suggest_candidates, or prepare_approved_candidates")
 
     approval_ids = _normalize_approval_ids(approval_ids or [])
+    targeted_localization_windows = list(targeted_localization_windows or [])
     approved_action_id = _normalize_approval_id(approved_action_id)
     selection_is_dry_run = dry_run or gate_mode == "dry-run"
     warnings: list[str] = []
@@ -139,6 +143,20 @@ def run_workflow(
             )
         )
     )
+    if targeted_localization_windows:
+        stages.append(
+            _timed_stage(
+                lambda: _targeted_visual_localization_stage(
+                    output_dir=output_dir,
+                    input_video=input_video,
+                    windows=targeted_localization_windows,
+                    dry_run=dry_run,
+                    gate_mode=gate_mode,
+                    model=model,
+                    warnings=warnings,
+                )
+            )
+        )
     if approved_actions_path is not None and not approval_ids and approved_action_id is None:
         warnings.append("approved actions path supplied without approval ids; no approval action will execute by path alone.")
     stages.append(
@@ -271,6 +289,7 @@ def run_workflow(
             "approval_ids": approval_ids,
             "approved_action_id": approved_action_id,
             "candidate_intent": candidate_intent,
+            "targeted_localization_windows": targeted_localization_windows,
             "approval_intent": approval_intent,
             "approval_selection": approval_selection,
         },
@@ -307,6 +326,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--approval-ids", default=None, help="Comma-separated or JSON-list approval ids.")
     parser.add_argument("--approved-action-id", default=None, help="Explicit approved highlight or camera follow-up action id.")
     parser.add_argument(
+        "--targeted-localization-window",
+        action="append",
+        default=[],
+        help="Request AI visual localization evidence for a bounded window, formatted start:end:label.",
+    )
+    parser.add_argument(
         "--candidate-intent",
         choices=("review_only", "suggest_candidates", "prepare_approved_candidates"),
         default=None,
@@ -335,6 +360,7 @@ def main(argv: list[str] | None = None) -> int:
             approval_ids=approval_ids,
             approved_action_id=args.approved_action_id,
             candidate_intent=args.candidate_intent,
+            targeted_localization_windows=args.targeted_localization_window,
             quality_gate_mode=args.mode,
             report_name=args.report_name,
         )
@@ -531,6 +557,62 @@ def _visual_review_stage(
         "status": stage_status,
         "enabled": True,
         "artifact": "ai_visual_review.json",
+        "model": report.get("model") or model,
+        "model_selection": report.get("model_selection") if isinstance(report.get("model_selection"), dict) else {},
+        "summary": summary,
+    }
+
+
+def _targeted_visual_localization_stage(
+    *,
+    output_dir: Path,
+    input_video: Path | None,
+    windows: list[str],
+    dry_run: bool,
+    gate_mode: str,
+    model: str | None,
+    warnings: list[str],
+) -> dict[str, Any]:
+    if not windows:
+        return {
+            "name": "targeted_visual_localization",
+            "status": "skipped",
+            "enabled": False,
+            "artifact": AI_VISUAL_LOCALIZATION_REPORT_NAME,
+            "reason": "No targeted localization windows were requested.",
+        }
+    if input_video is None or not input_video.exists():
+        warnings.append("input video missing or not supplied; targeted visual localization is unavailable.")
+    provider_dry_run = dry_run or gate_mode != "real"
+    try:
+        report = write_ai_visual_localization_report(
+            output_dir,
+            input_video,
+            windows,
+            model=model,
+            dry_run=provider_dry_run,
+        )
+    except Exception as exc:  # pragma: no cover - defensive CLI reporting
+        warnings.append(f"targeted visual localization unavailable: {exc}")
+        return {
+            "name": "targeted_visual_localization",
+            "status": "unavailable",
+            "enabled": True,
+            "artifact": AI_VISUAL_LOCALIZATION_REPORT_NAME,
+            "error": str(exc),
+            "requested_windows": windows,
+        }
+    summary = report.get("summary") if isinstance(report.get("summary"), dict) else {}
+    summary_status = summary.get("status") if isinstance(summary.get("status"), str) else "ok"
+    stage_status = "succeeded" if summary_status in {"ok", "warn", "planned"} else summary_status
+    return {
+        "name": "targeted_visual_localization",
+        "status": stage_status,
+        "enabled": True,
+        "artifact": AI_VISUAL_LOCALIZATION_REPORT_NAME,
+        "requested_windows": windows,
+        "provider_dry_run": provider_dry_run,
+        "provider_mode": "dry-run" if provider_dry_run else "real",
         "model": report.get("model") or model,
         "model_selection": report.get("model_selection") if isinstance(report.get("model_selection"), dict) else {},
         "summary": summary,
@@ -2271,6 +2353,7 @@ def _produced_artifacts(output_dir: Path, *, extra_names: list[str]) -> list[str
         "metrics_report.json",
         "review_packets.json",
         "ai_visual_review.json",
+        AI_VISUAL_LOCALIZATION_REPORT_NAME,
         AI_IMPROVEMENT_REPORT_NAME,
         HASH_SNAPSHOT_REPORT_NAME,
         "follow_cam_rerender_plan.json",

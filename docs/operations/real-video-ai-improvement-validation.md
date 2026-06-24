@@ -177,3 +177,19 @@ Residual risks:
 Next action:
 
 - Run provider-backed AI improvement with a configured strong model, approve only bounded recovery/noise/camera/highlight actions by explicit id, execute candidates, and rerun this validation. The next successful run should produce candidate registry entries, domain comparison reports, and a non-empty final manifest only for candidates that actually improve the baseline.
+
+## Future Targeted Localization Check
+
+For PR1 and later validation runs that target a known missing-ball gap, add a bounded localization request to the command:
+
+```powershell
+.\.venv\Scripts\python.exe python_backend\scripts\run_stable_ai_improvement_workflow.py `
+  --output-dir python_backend\outputs\my_run `
+  --input-video python_backend\data\raw5760x144020fps.mp4 `
+  --targeted-localization-window 2049:2544:right_corner `
+  --parallel-mode temporal `
+  --mode real `
+  --model gpt-5.4
+```
+
+Record a `targeted_visual_localization` timing row, `ai_visual_localization.json`, generated contact/crop sheets, decoded OpenCV dimensions, accepted/rejected ROI counts, and uncovered subwindows such as `2049-2078` or `2301-2544` when only part of the requested window is localized. This artifact is evidence only and should not be recorded as a promoted final track.
