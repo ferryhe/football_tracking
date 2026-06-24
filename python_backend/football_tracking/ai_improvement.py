@@ -1479,6 +1479,7 @@ def _validate_improvement(
         raise ValueError(f"Improvement {index} failure_tags contain unsupported values: {', '.join(invalid_tags)}")
     confidence = _confidence(raw.get("confidence"), f"Improvement {index} confidence")
     raw_action_value = raw.get("recommended_action")
+    non_string_recommended_action_type: str | None = None
     if raw_action_value is None or (isinstance(raw_action_value, str) and not raw_action_value.strip()):
         raw = dict(raw)
         raw["recommended_action"] = "manual_review"
@@ -1486,6 +1487,16 @@ def _validate_improvement(
         recommended_action_repaired = True
         repair_warnings.append(
             f"Improvement {index} blank recommended_action downgraded to manual_review."
+        )
+    elif not isinstance(raw_action_value, str):
+        raw = dict(raw)
+        raw["recommended_action"] = "manual_review"
+        raw_recommended_action = "manual_review"
+        recommended_action_repaired = True
+        non_string_recommended_action_type = type(raw_action_value).__name__
+        repair_warnings.append(
+            f"Improvement {index} non-string recommended_action "
+            f"({non_string_recommended_action_type}) downgraded to manual_review."
         )
     else:
         raw_recommended_action = _required_string(raw, "recommended_action", index)
@@ -1555,6 +1566,8 @@ def _validate_improvement(
         item["requested_action"] = "localize_ball_roi"
     if downgrade_reason is not None:
         item["downgrade_reason"] = downgrade_reason
+    if non_string_recommended_action_type is not None:
+        item["original_recommended_action_type"] = non_string_recommended_action_type
     if unsupported_recommended_action:
         item["original_recommended_action"] = raw_recommended_action
         patch_warnings.append(
