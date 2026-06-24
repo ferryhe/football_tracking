@@ -15,27 +15,13 @@ TILE_GRID = 8
 def inspect_image(path: Path) -> dict[str, Any]:
     """Return lightweight integrity signals for AI review images."""
     path = Path(path)
-    result: dict[str, Any] = {
-        "path": str(path),
-        "status": "unavailable",
-        "width": 0,
-        "height": 0,
-        "mean_luma": 0.0,
-        "std_luma": 0.0,
-        "texture_tile_ratio": 0.0,
-        "dominant_color_ratio": 0.0,
-        "gray": False,
-        "low_information": False,
-        "likely_corrupt": False,
-        "reasons": [],
-    }
+    result = _empty_inspection_result(path=str(path))
     if not path.exists() or path.stat().st_size <= 0:
         result["likely_corrupt"] = True
         result["reasons"] = ["missing_or_empty"]
         return result
 
     import cv2
-    import numpy as np
 
     image = cv2.imread(str(path), cv2.IMREAD_COLOR)
     if image is None or getattr(image, "size", 0) == 0:
@@ -43,13 +29,29 @@ def inspect_image(path: Path) -> dict[str, Any]:
         result["reasons"] = ["unreadable"]
         return result
 
-    height, width = image.shape[:2]
-    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    result.update(inspect_frame(image))
+    result["path"] = str(path)
+    return result
+
+
+def inspect_frame(frame: Any) -> dict[str, Any]:
+    """Return the same low-information signals for an already decoded BGR frame."""
+    result = _empty_inspection_result(path=None)
+    if frame is None or getattr(frame, "size", 0) == 0:
+        result["likely_corrupt"] = True
+        result["reasons"] = ["unreadable"]
+        return result
+
+    import cv2
+    import numpy as np
+
+    height, width = frame.shape[:2]
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
     mean_luma = float(np.mean(gray))
     std_luma = float(np.std(gray))
     texture_ratio = _texture_tile_ratio(gray)
-    channel_delta = _mean_channel_delta(image)
-    dominant_color_ratio = _dominant_color_ratio(image)
+    channel_delta = _mean_channel_delta(frame)
+    dominant_color_ratio = _dominant_color_ratio(frame)
     reasons: list[str] = []
     if std_luma < LOW_VARIANCE_STD:
         reasons.append("low_variance")
@@ -86,6 +88,23 @@ def inspect_image(path: Path) -> dict[str, Any]:
         }
     )
     return result
+
+
+def _empty_inspection_result(*, path: str | None) -> dict[str, Any]:
+    return {
+        "path": path,
+        "status": "unavailable",
+        "width": 0,
+        "height": 0,
+        "mean_luma": 0.0,
+        "std_luma": 0.0,
+        "texture_tile_ratio": 0.0,
+        "dominant_color_ratio": 0.0,
+        "gray": False,
+        "low_information": False,
+        "likely_corrupt": False,
+        "reasons": [],
+    }
 
 
 def inspect_named_images(images: dict[str, Path]) -> tuple[dict[str, Any], list[str]]:
