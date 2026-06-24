@@ -42,7 +42,7 @@ ACTION_SCHEMA_HINTS: Mapping[str, tuple[str, ...]] = MappingProxyType(
             "approval_id or approval-ready source id",
             "problem_type=missing_ball",
             "recommended_action=localize_ball_roi",
-            "source_packet_id or visual_review_id",
+            "source_packet_id, visual_review_id, or visual_localization_id",
             "start_frame",
             "end_frame",
             "local_search_roi",
@@ -172,12 +172,16 @@ LANE_PROMPT_CONTRACTS: Mapping[str, str] = MappingProxyType(
     {
         "missing_ball": (
             "missing_ball lane: use rerun_ball_window, localize_ball_roi, or mark_ball_not_visible. "
+            "If the ball likely needs a visual locator but you cannot provide local_search_roi yet, use "
+            "review-only request_targeted_localization with traceable source_packet_id or visual_review_id; "
+            "do not emit executable localize_ball_roi without local_search_roi. "
             "Missing-ball suggestions must cover the entire lost gap with full-window coverage, or cover the full "
             "window end to end, or explain uncovered subwindows and list uncovered subwindows with explicit "
             "uncovered subranges when coverage is partial. The long right-bottom gap 2049-2544 cannot be closed by only checking around 2079; that is "
             "partial evidence, not full closure. localize_ball_roi is bounded-window-only and must not expand into "
             "broad full-video SAHI. localize_ball_roi and any local_search_roi require a traceable source_packet_id "
-            "or visual_review_id from supplied packet evidence; executable localize_ball_roi also requires "
+            "or visual_review_id from supplied packet evidence, or a visual_localization_id from "
+            "ai_visual_localization.json; executable localize_ball_roi also requires "
             "ai_visual_review or equivalent vision-reviewed wide/crop evidence. not_visible is acceptable only when "
             "packet or visual evidence shows the ball is hidden, off-frame, or impossible to identify."
         ),
@@ -221,8 +225,11 @@ def build_prompt_contract_text() -> str:
         "Each improvement must include priority, area, failure_tags, root_cause_module, recommended_action, "
         "confidence. Every executable candidate must be bounded, traceable, and comparable: include candidate_id, "
         "approval_id or approval-ready source id, problem_type, recommended_action, source_packet_id or "
-        "visual_review_id when packet or visual evidence is used, a bounded start_frame and end_frame or equivalent "
+        "visual_review_id when packet or visual evidence is used, visual_localization_id when targeted localization "
+        "evidence is used, a bounded start_frame and end_frame or equivalent "
         "rerun_scope/suggested_window, evidence, expected_artifact, and comparison_criteria. "
+        "Review-only request_targeted_localization is allowed when missing-ball evidence is traceable but "
+        "local_search_roi is still missing; it must not be treated as an executable approved_action. "
         "Use rerun_ball_window for executable missing-ball reruns; legacy targeted_rerun may appear in older "
         "artifacts but should be treated as rerun_ball_window and is not part of the public executable set. "
         f"{schema_hints} {lanes} {MODEL_POLICY_TEXT} "

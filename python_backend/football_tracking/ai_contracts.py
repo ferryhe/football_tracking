@@ -47,6 +47,7 @@ AIRecommendedAction: TypeAlias = Literal[
     "tracking_rerun_before_follow_cam",
     "human_review_camera_motion",
     "render_suggested_highlight",
+    "request_targeted_localization",
 ]
 
 AIClipAction: TypeAlias = Literal[

@@ -646,6 +646,108 @@ class HighRecallWindowTests(unittest.TestCase):
         self.assertEqual("sahi_roi", window["sahi_policy"])
         self.assertEqual("packet_001", window["source_packet_id"])
 
+    def test_approved_localize_ball_roi_accepts_visual_localization_provenance(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_json(
+                output_dir / "ai_visual_localization.json",
+                {
+                    "requests": [
+                        {
+                            "visual_localization_id": "visual_localization:2049_2544_right_corner",
+                            "source_packet_id": "packet_001",
+                        }
+                    ]
+                },
+            )
+            approved_path = output_dir / "ai_improvement_approved_actions.json"
+            _write_json(
+                approved_path,
+                {
+                    "schema_version": "1.0",
+                    "approved_actions": [
+                        {
+                            "approval_id": "approval_001",
+                            "improvement_id": "imp_001",
+                            "candidate_id": "candidate_001",
+                            "approved_action": "localize_ball_roi",
+                            "start_frame": 2049,
+                            "end_frame": 2544,
+                            "visual_localization_id": "visual_localization:2049_2544_right_corner",
+                            "local_search_roi": {
+                                "coordinate_space": "image",
+                                "frame": 2121,
+                                "x": 5000,
+                                "y": 960,
+                                "width": 120,
+                                "height": 200,
+                                "confidence": 0.9,
+                            },
+                        }
+                    ],
+                },
+            )
+
+            report = build_high_recall_windows(
+                output_dir,
+                margin_frames=0,
+                merge_gap_frames=0,
+                max_total_frames=600,
+                total_frames=3000,
+                approved_actions_path=approved_path,
+                approved_only=True,
+            )
+
+        window = report["windows"][0]
+        self.assertEqual("visual_localization:2049_2544_right_corner", window["visual_localization_id"])
+        self.assertEqual(
+            "visual_localization:2049_2544_right_corner",
+            window["approval_provenance"][0]["visual_localization_id"],
+        )
+
+    def test_approved_localize_ball_roi_rejects_unknown_visual_localization_provenance(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_json(
+                output_dir / "ai_visual_localization.json",
+                {"requests": [{"visual_localization_id": "visual_localization:known"}]},
+            )
+            approved_path = output_dir / "ai_improvement_approved_actions.json"
+            _write_json(
+                approved_path,
+                {
+                    "schema_version": "1.0",
+                    "approved_actions": [
+                        {
+                            "approval_id": "approval_001",
+                            "improvement_id": "imp_001",
+                            "candidate_id": "candidate_001",
+                            "approved_action": "localize_ball_roi",
+                            "start_frame": 2049,
+                            "end_frame": 2544,
+                            "visual_localization_id": "visual_localization:missing",
+                            "local_search_roi": {
+                                "coordinate_space": "image",
+                                "frame": 2121,
+                                "x": 5000,
+                                "y": 960,
+                                "width": 120,
+                                "height": 200,
+                                "confidence": 0.9,
+                            },
+                        }
+                    ],
+                },
+            )
+
+            with self.assertRaisesRegex(ValueError, "visual_localization_id does not match"):
+                build_high_recall_windows(
+                    output_dir,
+                    total_frames=3000,
+                    approved_actions_path=approved_path,
+                    approved_only=True,
+                )
+
     def test_approved_localize_ball_roi_requires_bounded_frames(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:
             output_dir = Path(temp_name)

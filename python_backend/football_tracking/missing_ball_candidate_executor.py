@@ -121,12 +121,15 @@ def execute_missing_ball_candidate(
     recovery_actions = _selected_recovery_actions(selected_artifact)
     if not recovery_actions:
         raise ValueError("Approved child recovery requires at least one executable approved recovery action.")
-    known_packet_ids, known_visual_ids = traceable_approval_provenance_ids(parent_output_dir)
+    known_packet_ids, known_visual_ids, known_visual_localization_ids = traceable_approval_provenance_ids(
+        parent_output_dir
+    )
     executable_windows = approved_action_windows_from_report(
         selected_artifact,
         mode="sahi",
         known_source_packet_ids=known_packet_ids,
         known_visual_review_ids=known_visual_ids,
+        known_visual_localization_ids=known_visual_localization_ids,
     )
     if not executable_windows:
         raise ValueError("Approved child recovery requires at least one executable approved recovery action.")
@@ -221,7 +224,7 @@ def copy_candidate_inputs(
         source_path = parent_output_dir / name
         if source_path.is_file():
             shutil.copy2(source_path, candidate_output_dir / name)
-    for name in ("review_packets.json", "ai_visual_review.json"):
+    for name in ("review_packets.json", "ai_visual_review.json", "ai_visual_localization.json"):
         source_path = parent_output_dir / name
         if source_path.is_file():
             shutil.copy2(source_path, candidate_output_dir / name)
@@ -406,10 +409,12 @@ def write_missing_ball_candidate_manifest(
     approval_items = [item for item in related if isinstance(item, dict)] or ([approval] if approval else [])
     source_packet_ids: list[str] = []
     visual_review_ids: list[str] = []
+    visual_localization_ids: list[str] = []
     effective_rois: list[dict[str, Any]] = []
     for item in approval_items:
         _append_unique_string(source_packet_ids, item.get("source_packet_id"))
         _append_unique_string(visual_review_ids, item.get("visual_review_id"))
+        _append_unique_string(visual_localization_ids, item.get("visual_localization_id"))
         effective_roi = item.get("effective_roi")
         if isinstance(effective_roi, list) and len(effective_roi) == 4:
             effective_rois.append({"approval_id": item.get("approval_id"), "effective_roi": list(effective_roi)})
@@ -431,6 +436,7 @@ def write_missing_ball_candidate_manifest(
         "evidence_ids": {
             "source_packet_ids": source_packet_ids,
             "visual_review_ids": visual_review_ids,
+            "visual_localization_ids": visual_localization_ids,
         },
         "effective_rois": effective_rois,
         "comparison_report": comparison_path.relative_to(parent_output_dir).as_posix(),
@@ -442,9 +448,10 @@ def write_missing_ball_candidate_manifest(
     manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
-def traceable_approval_provenance_ids(output_dir: Path) -> tuple[set[str] | None, set[str] | None]:
+def traceable_approval_provenance_ids(output_dir: Path) -> tuple[set[str] | None, set[str] | None, set[str] | None]:
     packet_ids: set[str] = set()
     visual_review_ids: set[str] = set()
+    visual_localization_ids: set[str] = set()
     review_packets = _read_json(output_dir / "review_packets.json")
     if isinstance(review_packets, dict):
         for packet in _list_dicts(review_packets.get("packets")):
@@ -466,7 +473,12 @@ def traceable_approval_provenance_ids(output_dir: Path) -> tuple[set[str] | None
             provenance = review.get("provenance") if isinstance(review.get("provenance"), dict) else {}
             _add_string_value(visual_review_ids, provenance.get("visual_review_id"))
             _add_string_value(packet_ids, provenance.get("source_packet_id"))
-    return packet_ids, visual_review_ids
+    visual_localization = _read_json(output_dir / "ai_visual_localization.json")
+    if isinstance(visual_localization, dict):
+        for item in _visual_localization_items(visual_localization):
+            for source in _visual_localization_sources(item):
+                _add_string_value(visual_localization_ids, source.get("visual_localization_id"))
+    return packet_ids, visual_review_ids, visual_localization_ids
 
 
 def capture_parent_fingerprints(parent_output_dir: Path, *, watched_paths: list[Path] | None = None) -> dict[str, tuple[int, str] | None]:
@@ -740,6 +752,25 @@ def _read_json(path: Path) -> dict[str, Any] | None:
 
 def _list_dicts(value: Any) -> list[dict[str, Any]]:
     return [item for item in value if isinstance(item, dict)] if isinstance(value, list) else []
+
+
+def _visual_localization_items(report: dict[str, Any]) -> list[dict[str, Any]]:
+    items: list[dict[str, Any]] = []
+    for key in ("requests", "localizations", "reviews"):
+        items.extend(_list_dicts(report.get(key)))
+    return items
+
+
+def _visual_localization_sources(item: dict[str, Any]) -> list[dict[str, Any]]:
+    sources = [item]
+    for key in ("localization", "review", "provenance"):
+        value = item.get(key)
+        if isinstance(value, dict):
+            sources.append(value)
+    frames = item.get("frames")
+    if isinstance(frames, list):
+        sources.extend(frame for frame in frames if isinstance(frame, dict))
+    return sources
 
 
 def _add_string_value(target: set[str], value: Any) -> None:

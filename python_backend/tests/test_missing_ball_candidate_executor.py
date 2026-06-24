@@ -151,6 +151,62 @@ class MissingBallCandidateExecutorTests(unittest.TestCase):
 
             self.assertFalse((output_dir / "ai_candidates" / "missing_ball" / "candidate_full").exists())
 
+    def test_execute_accepts_and_carries_visual_localization_provenance(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            root = Path(temp_name)
+            config_path = _write_config(root)
+            output_dir = root / "outputs" / "baseline"
+            output_dir.mkdir(parents=True)
+            _write_lost_tracks(output_dir, start=2049, end=2544)
+            _write_packet(output_dir, packet_id="packet_2079", start=2049, end=2544)
+            _write_json(
+                output_dir / "ai_visual_localization.json",
+                {
+                    "requests": [
+                        {
+                            "visual_localization_id": "visual_localization:2049_2544_right_corner",
+                            "source_packet_id": "packet_2079",
+                        }
+                    ]
+                },
+            )
+            approval = _approval(
+                "approval_2079",
+                candidate_id="candidate_2079",
+                start=2049,
+                end=2544,
+                approved_action="localize_ball_roi",
+            )
+            approval.pop("source_packet_id", None)
+            approval["visual_localization_id"] = "visual_localization:2049_2544_right_corner"
+
+            def fake_runner(config, **_: object) -> dict[str, object]:
+                rows = ["Frame,X,Y,Confidence,Status"]
+                rows.extend(f"{frame},4700,1020,0.9000,Detected" for frame in range(2049, 2545))
+                (config.output_dir / "ball_track.csv").write_text("\n".join(rows) + "\n", encoding="utf-8")
+                (config.output_dir / "ball_track.cleaned.csv").write_text("\n".join(rows) + "\n", encoding="utf-8")
+                return {
+                    "windows": [{"approval_id": "approval_2079", "start_frame": 2049, "end_frame": 2544}],
+                    "execution": {"status": "succeeded"},
+                }
+
+            execute_missing_ball_candidate(
+                output_dir,
+                {"approved_actions": [approval]},
+                config_path=config_path,
+                input_video=root / "data" / "input.mp4",
+                source_total_frames=3000,
+                runner=fake_runner,
+            )
+
+            candidate_dir = output_dir / "ai_candidates" / "missing_ball" / "candidate_2079"
+            self.assertTrue((candidate_dir / "ai_visual_localization.json").exists())
+            manifest = json.loads((candidate_dir / "candidate_manifest.json").read_text(encoding="utf-8"))
+            self.assertEqual(
+                ["visual_localization:2049_2544_right_corner"],
+                manifest["evidence_ids"]["visual_localization_ids"],
+            )
+
 
 def _write_config(root: Path) -> Path:
     (root / "data").mkdir(parents=True, exist_ok=True)
@@ -236,6 +292,10 @@ def _write_packet(output_dir: Path, *, packet_id: str, start: int, end: int) -> 
         ]
     }
     (output_dir / "review_packets.json").write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+
+
+def _write_json(path: Path, payload: object) -> None:
+    path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
 
 
 def _sha256(path: Path) -> str:

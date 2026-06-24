@@ -2297,12 +2297,15 @@ class ApiService:
             request.get("approved_action_ids") or [],
         )
         selected_artifact["source_approved_actions_path"] = str(artifact_path)
-        known_packet_ids, known_visual_ids = self._traceable_approval_provenance_ids(parent_output_dir)
+        known_packet_ids, known_visual_ids, known_visual_localization_ids = self._traceable_approval_provenance_ids(
+            parent_output_dir
+        )
         executable_windows = approved_action_windows_from_report(
             selected_artifact,
             mode="sahi",
             known_source_packet_ids=known_packet_ids,
             known_visual_review_ids=known_visual_ids,
+            known_visual_localization_ids=known_visual_localization_ids,
         )
         if not executable_windows:
             raise ValueError("Approved child recovery requires at least one executable approved recovery action.")
@@ -2558,7 +2561,10 @@ class ApiService:
         except OSError:
             return None
 
-    def _traceable_approval_provenance_ids(self, output_dir: Path) -> tuple[set[str] | None, set[str] | None]:
+    def _traceable_approval_provenance_ids(
+        self,
+        output_dir: Path,
+    ) -> tuple[set[str] | None, set[str] | None, set[str] | None]:
         return traceable_approval_provenance_ids(output_dir)
 
     def _recovery_candidate_ids(self, artifact: dict[str, Any]) -> set[str]:
