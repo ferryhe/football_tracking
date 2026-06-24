@@ -296,7 +296,6 @@ class StableAiImprovementWorkflowTests(unittest.TestCase):
                     "approved_actions": [
                         _noise_approval("noise_1", start=0, end=79),
                         _tracking_rerun_before_follow_cam_approval("camera_1", start=30, end=40),
-                        _highlight_approval("highlight_1", start=50, end=70),
                     ]
                 },
             )
@@ -305,7 +304,7 @@ class StableAiImprovementWorkflowTests(unittest.TestCase):
                 output_dir=output_dir,
                 dry_run=False,
                 approved_actions_path=approved_path,
-                approval_ids=["noise_1", "camera_1", "highlight_1"],
+                approval_ids=["noise_1", "camera_1"],
             )
             candidate_cleaned_exists = (
                 output_dir / "ai_candidates" / "noise" / "noise-candidate-1" / "ball_track.cleaned.csv"
@@ -328,13 +327,7 @@ class StableAiImprovementWorkflowTests(unittest.TestCase):
             "linked_tracking_candidate_evidence_required",
             dispatcher["follow_cam_candidate_execution_path"]["reason"],
         )
-        self.assertEqual(
-            ["highlight_1"],
-            [item["approval_id"] for item in dispatcher["unsupported_actions"]],
-        )
-        self.assertTrue(
-            all(item["reason"] == "unsupported_candidate_type" for item in dispatcher["unsupported_actions"])
-        )
+        self.assertEqual([], dispatcher["unsupported_actions"])
         self.assertTrue(candidate_cleaned_exists)
         self.assertEqual(1, registry["summary"]["counts_by_problem_type"]["noise"])
         self.assertEqual(1, manifest["summary"]["candidate_output_count"])
@@ -1119,18 +1112,29 @@ class StableAiImprovementWorkflowTests(unittest.TestCase):
                 },
             )
 
-            report = run_workflow(
-                output_dir=output_dir,
-                dry_run=False,
-                approved_actions_path=approved_path,
-                approved_action_id="highlight_1",
-            )
+            highlight_report = _highlight_comparison_report()
+            with patch(
+                "scripts.run_stable_ai_improvement_workflow.execute_highlight_candidate",
+                return_value=highlight_report,
+            ) as execute_highlight:
+                report = run_workflow(
+                    output_dir=output_dir,
+                    dry_run=False,
+                    approved_actions_path=approved_path,
+                    approved_action_id="highlight_1",
+                )
+            manifest = json.loads((output_dir / "final_ai_improvement_artifact_manifest.json").read_text(encoding="utf-8"))
 
         self.assertEqual("skipped", _stage(report, "approved_child_rerun")["status"])
-        self.assertEqual("skipped", _stage(report, "highlight_render")["status"])
-        self.assertEqual("unsupported_candidate_type", _stage(report, "highlight_render")["reason"])
+        self.assertEqual("succeeded", _stage(report, "highlight_render")["status"])
         dispatcher = _stage(report, "selected_approval_dispatcher")
-        self.assertEqual(["highlight_1"], [item["approval_id"] for item in dispatcher["unsupported_actions"]])
+        self.assertEqual([], dispatcher["unsupported_actions"])
+        self.assertEqual("succeeded", dispatcher["highlight_candidate_execution_path"]["status"])
+        self.assertEqual(["highlight_1"], dispatcher["highlight_candidate_execution_path"]["approval_ids"])
+        self.assertEqual(["highlight-candidate-1"], dispatcher["highlight_candidate_execution_path"]["candidate_ids"])
+        execute_highlight.assert_called_once()
+        self.assertEqual("highlight-candidate-1", manifest["candidate_outputs"][0]["candidate_id"])
+        self.assertEqual(["highlight-candidate-1"], [item["candidate_id"] for item in manifest["pending_candidates"]])
         selection = report["inputs"]["approval_selection"]
         self.assertEqual(["highlight_1"], selection["consumed_ids"])
         self.assertEqual(["rerun_1"], selection["skipped_ids"])
@@ -1224,6 +1228,40 @@ class StableAiImprovementWorkflowTests(unittest.TestCase):
 
             with self.assertRaisesRegex(ValueError, "non-empty string approval_id"):
                 run_workflow(output_dir=output_dir, dry_run=False, approved_actions_path=approved_path)
+
+    def test_selected_unknown_approval_action_is_reported_as_unsupported(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_tracks(output_dir)
+            approved_path = output_dir / "approved_actions.json"
+            _write_json(
+                approved_path,
+                {
+                    "approved_actions": [
+                        {
+                            "approval_id": "mystery_1",
+                            "candidate_id": "mystery-candidate-1",
+                            "approved_action": "mystery_action",
+                            "problem_type": "highlight",
+                        }
+                    ]
+                },
+            )
+
+            report = run_workflow(
+                output_dir=output_dir,
+                dry_run=False,
+                approved_actions_path=approved_path,
+                approval_ids=["mystery_1"],
+            )
+            manifest = json.loads((output_dir / "final_ai_improvement_artifact_manifest.json").read_text(encoding="utf-8"))
+
+        dispatcher = _stage(report, "selected_approval_dispatcher")
+        self.assertEqual("failed", dispatcher["status"])
+        self.assertEqual(["mystery_1"], [item["approval_id"] for item in dispatcher["unsupported_actions"]])
+        self.assertEqual("unsupported_candidate_type", dispatcher["unsupported_actions"][0]["reason"])
+        self.assertEqual(["mystery_1"], [item["approval_id"] for item in manifest["unsupported_candidates"]])
+        self.assertEqual("failed", report["quality_gate"]["summary"]["workflow_status"])
 
     def test_tracking_rerun_before_follow_cam_blocks_without_linked_tracking_evidence(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:
@@ -1413,7 +1451,7 @@ class StableAiImprovementWorkflowTests(unittest.TestCase):
 
         self.assertEqual("skipped", _stage(report, "highlight_render")["status"])
 
-    def test_mixed_follow_cam_action_id_and_highlight_approval_ids_do_not_plan_highlight(self) -> None:
+    def test_mixed_follow_cam_action_id_and_highlight_approval_ids_execute_selected_highlight(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:
             output_dir = Path(temp_name)
             _write_tracks(output_dir)
@@ -1428,15 +1466,25 @@ class StableAiImprovementWorkflowTests(unittest.TestCase):
                 },
             )
 
-            report = run_workflow(
-                output_dir=output_dir,
-                dry_run=False,
-                approved_actions_path=approved_path,
-                approval_ids=["highlight_1"],
-                approved_action_id="camera_1",
-            )
+            with patch(
+                "scripts.run_stable_ai_improvement_workflow.execute_highlight_candidate",
+                return_value=_highlight_comparison_report(),
+            ) as execute_highlight:
+                report = run_workflow(
+                    output_dir=output_dir,
+                    dry_run=False,
+                    approved_actions_path=approved_path,
+                    approval_ids=["highlight_1"],
+                    approved_action_id="camera_1",
+                )
+            manifest = json.loads((output_dir / "final_ai_improvement_artifact_manifest.json").read_text(encoding="utf-8"))
 
-        self.assertEqual("skipped", _stage(report, "highlight_render")["status"])
+        self.assertEqual("succeeded", _stage(report, "highlight_render")["status"])
+        execute_highlight.assert_called_once()
+        self.assertEqual(
+            ["highlight-candidate-1", "follow-cam-1"],
+            [item["candidate_id"] for item in manifest["pending_candidates"]],
+        )
 
     def test_targeted_rerun_approved_action_id_fails_in_non_dry_run(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:
@@ -1729,6 +1777,9 @@ def _highlight_approval(approval_id: str, *, start: int, end: int) -> dict[str, 
     return {
         "approval_id": approval_id,
         "improvement_id": "highlight_imp_1",
+        "candidate_id": "highlight-candidate-1",
+        "event_candidate_id": "event-1",
+        "problem_type": "highlight",
         "approved_action": "render_suggested_highlight",
         "suggested_window": {"start_frame": start, "end_frame": end},
         "source_packet_id": "packet_highlight",
@@ -1919,6 +1970,42 @@ def _comparison_payload(candidate_id: str, status: str) -> dict[str, object]:
         "summary": {"status": status},
         "checks": [{"name": "fixture", "status": status}],
         "candidate": {"id": candidate_id, "path": f"ai_candidates/missing_ball/{candidate_id}"},
+    }
+
+
+def _highlight_comparison_report(status: str = "pass") -> dict[str, object]:
+    return {
+        "schema_version": "1.0",
+        "candidate_id": "highlight-candidate-1",
+        "approval_id": "highlight_1",
+        "consumed_approval_ids": ["highlight_1"],
+        "problem_type": "highlight",
+        "event_candidate_id": "event-1",
+        "candidate_dir": "ai_candidates/highlight/highlight-candidate-1",
+        "comparison_report": "ai_candidates/highlight/highlight-candidate-1/highlight_candidate_comparison.json",
+        "comparison_status": status,
+        "candidate_artifacts": [
+            "ai_candidates/highlight/highlight-candidate-1/highlight.mp4",
+            "ai_candidates/highlight/highlight-candidate-1/highlight_report.json",
+            "ai_candidates/highlight/highlight-candidate-1/highlight_window_validation.json",
+            "ai_candidates/highlight/highlight-candidate-1/highlight_candidate_comparison.json",
+            "ai_candidates/highlight/highlight-candidate-1/candidate_manifest.json",
+        ],
+        "candidate": {
+            "id": "highlight-candidate-1",
+            "path": "ai_candidates/highlight/highlight-candidate-1/highlight.mp4",
+        },
+        "summary": {
+            "status": status,
+            "check_count": 1,
+            "passed_check_count": 1 if status == "pass" else 0,
+            "failed_check_count": 1 if status == "fail" else 0,
+            "warning_count": 0,
+            "unavailable_count": 0,
+            "requires_human_confirmation": False,
+            "promotion_eligible": status == "pass",
+        },
+        "checks": [{"name": "fixture", "status": status}],
     }
 
 

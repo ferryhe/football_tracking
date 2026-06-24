@@ -366,6 +366,67 @@ class AiImprovementQualityGateTests(unittest.TestCase):
             )
         )
 
+    def test_real_mode_selected_highlight_approval_requires_highlight_comparison_report(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_tracks(output_dir)
+            write_track_hash_snapshot(output_dir, "before_review")
+            write_track_hash_snapshot(output_dir, "after_ai_improvement")
+            approved_path = _write_approved_actions(
+                output_dir,
+                [
+                    {
+                        "approval_id": "approval_highlight",
+                        "candidate_id": "highlight-candidate",
+                        "event_candidate_id": "event-1",
+                        "approved_action": "render_suggested_highlight",
+                        "problem_type": "highlight",
+                        "suggested_window": {"start_frame": 20, "end_frame": 70},
+                    }
+                ],
+            )
+
+            payload = build_ai_improvement_quality_gate(output_dir, mode="real", approved_actions_path=approved_path)
+
+        self.assertEqual("fail", payload["checks"]["candidate_comparisons_ok"]["status"])
+        self.assertTrue(
+            any(
+                report.get("artifact_status") == "selected_highlight_approval_missing_comparison"
+                and report.get("status") == "fail"
+                for report in payload["checks"]["candidate_comparisons_ok"]["reports"]
+            )
+        )
+
+    def test_real_mode_selected_highlight_approval_requires_candidate_id(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_tracks(output_dir)
+            write_track_hash_snapshot(output_dir, "before_review")
+            write_track_hash_snapshot(output_dir, "after_ai_improvement")
+            approved_path = _write_approved_actions(
+                output_dir,
+                [
+                    {
+                        "approval_id": "approval_highlight",
+                        "event_candidate_id": "event-1",
+                        "approved_action": "render_suggested_highlight",
+                        "problem_type": "highlight",
+                        "suggested_window": {"start_frame": 20, "end_frame": 70},
+                    }
+                ],
+            )
+
+            payload = build_ai_improvement_quality_gate(output_dir, mode="real", approved_actions_path=approved_path)
+
+        self.assertEqual("fail", payload["checks"]["candidate_comparisons_ok"]["status"])
+        self.assertTrue(
+            any(
+                report.get("artifact_status") == "selected_highlight_approval_missing_candidate_id"
+                and report.get("status") == "fail"
+                for report in payload["checks"]["candidate_comparisons_ok"]["reports"]
+            )
+        )
+
     def test_real_mode_selected_follow_cam_approval_accepts_matching_comparison_report(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:
             output_dir = Path(temp_name)
@@ -984,6 +1045,26 @@ class AiImprovementQualityGateTests(unittest.TestCase):
         self.assertEqual("fail", comparison_check["status"])
         self.assertEqual("fail", comparison_check["reports"][0]["status"])
         self.assertEqual("invalid_summary", comparison_check["reports"][0]["artifact_status"])
+
+    def test_candidate_comparison_missing_candidate_artifact_is_fail(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            payload = _comparison_payload("candidate-missing-artifact", "pass")
+            payload["candidate_artifacts"] = ["ai_candidates/highlight/candidate-missing-artifact/highlight.mp4"]
+            _write_json(
+                output_dir / "ai_candidates" / "highlight" / "candidate-missing-artifact" / "highlight_candidate_comparison.json",
+                payload,
+            )
+
+            gate = build_ai_improvement_quality_gate(output_dir)
+
+        comparison_check = gate["checks"]["candidate_comparisons_ok"]
+        self.assertEqual("fail", comparison_check["status"])
+        self.assertEqual("candidate_artifacts_missing", comparison_check["reports"][0]["artifact_status"])
+        self.assertEqual(
+            ["ai_candidates/highlight/candidate-missing-artifact/highlight.mp4"],
+            comparison_check["reports"][0]["missing_candidate_artifacts"],
+        )
 
     def test_candidate_comparison_empty_checks_are_unavailable(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:

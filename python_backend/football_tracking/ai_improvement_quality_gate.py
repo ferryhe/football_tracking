@@ -51,6 +51,7 @@ ACCEPTED_FALSE_POSITIVE_TAGS = set(FAILURE_TAG_ALIASES.values())
 APPROVAL_ACTIONS_THAT_CAN_COVER_MISSING_BALL = {"targeted_rerun", "rerun_ball_window", "localize_ball_roi"}
 NOISE_APPROVAL_ACTIONS_THAT_REQUIRE_COMPARISON = {"noise_filter_adjustment", "tighten_noise_filter", "reject_noise"}
 FOLLOW_CAM_APPROVAL_ACTIONS_THAT_REQUIRE_COMPARISON = {"adjust_follow_cam", "tracking_rerun_before_follow_cam"}
+HIGHLIGHT_APPROVAL_ACTIONS_THAT_REQUIRE_COMPARISON = {"adjust_highlight_window", "render_suggested_highlight"}
 
 
 def build_track_hash_snapshot(output_dir: Path, stage_name: str) -> dict[str, Any]:
@@ -1110,6 +1111,13 @@ def _check_candidate_comparisons(
             mode=mode,
         )
     )
+    reports.extend(
+        _selected_highlight_approval_missing_comparison_reports(
+            reports,
+            approved_actions=approved_actions,
+            mode=mode,
+        )
+    )
     status_counts = {status: 0 for status in CANDIDATE_COMPARISON_STATUSES}
     for report in reports:
         status = report.get("status")
@@ -1139,7 +1147,7 @@ def _candidate_comparison_reports(output_dir: Path, final_manifest: dict[str, An
     reports: list[dict[str, Any]] = []
     seen_paths: set[str] = set()
     output_root = output_dir.resolve()
-    for path in sorted(output_dir.glob("*_comparison.json")):
+    for path in sorted(output_dir.rglob("*_comparison.json")):
         loaded = _load_artifact(path)
         reports.append(_comparison_report_summary(loaded, path=path, output_root=output_root))
         seen_paths.add(str(path.resolve()))
@@ -1191,7 +1199,7 @@ def _candidate_comparison_reports(output_dir: Path, final_manifest: dict[str, An
                     ))
                     seen_paths.add(resolved)
                 elif isinstance(item.get("summary"), dict):
-                    reports.append(_comparison_payload_summary(item, path=None))
+                    reports.append(_comparison_payload_summary(item, path=None, output_root=output_root))
     reports.extend(_registry_candidate_summaries(output_dir, seen_paths))
     return reports
 
@@ -1399,6 +1407,79 @@ def _report_covers_selected_follow_cam_approval(
     }
 
 
+def _selected_highlight_approval_missing_comparison_reports(
+    reports: list[dict[str, Any]],
+    *,
+    approved_actions: dict[str, Any] | None,
+    mode: str,
+) -> list[dict[str, Any]]:
+    if mode != "real" or not isinstance(approved_actions, dict) or approved_actions.get("status") != "loaded":
+        return []
+    missing_reports: list[dict[str, Any]] = []
+    for action in _approval_items(approved_actions.get("payload")):
+        if str(action.get("approved_action") or "") not in HIGHLIGHT_APPROVAL_ACTIONS_THAT_REQUIRE_COMPARISON:
+            continue
+        candidate_id = str(action.get("candidate_id") or "").strip()
+        approval_id = str(action.get("approval_id") or "").strip() or None
+        if not candidate_id:
+            missing_reports.append(
+                {
+                    "path": None,
+                    "problem_type": "highlight",
+                    "candidate_id": None,
+                    "approval_id": approval_id,
+                    "status": "fail",
+                    "failed_check_count": 1,
+                    "warning_count": 0,
+                    "unavailable_count": 0,
+                    "artifact_status": "selected_highlight_approval_missing_candidate_id",
+                    "reason": "selected highlight approval must include explicit candidate_id",
+                }
+            )
+            continue
+        if any(
+            _report_covers_selected_highlight_approval(report, candidate_id=candidate_id, approval_id=approval_id)
+            for report in reports
+        ):
+            continue
+        missing_reports.append(
+            {
+                "path": None,
+                "problem_type": "highlight",
+                "candidate_id": candidate_id,
+                "approval_id": approval_id,
+                "status": "fail",
+                "failed_check_count": 1,
+                "warning_count": 0,
+                "unavailable_count": 0,
+                "artifact_status": "selected_highlight_approval_missing_comparison",
+                "reason": "selected highlight approval has no highlight_candidate_comparison.json",
+            }
+        )
+    return missing_reports
+
+
+def _report_covers_selected_highlight_approval(
+    report: dict[str, Any],
+    *,
+    candidate_id: str,
+    approval_id: str | None,
+) -> bool:
+    if report.get("problem_type") != "highlight":
+        return False
+    if str(report.get("candidate_id") or "").strip() != candidate_id:
+        return False
+    path = report.get("path")
+    if not isinstance(path, str) or Path(path).name != "highlight_candidate_comparison.json":
+        return False
+    consumed = report.get("consumed_approval_ids")
+    if approval_id is None:
+        return True
+    return isinstance(consumed, list) and approval_id in {
+        str(item).strip() for item in consumed if isinstance(item, str) and item.strip()
+    }
+
+
 def _comparison_report_summary(
     artifact: dict[str, Any],
     *,
@@ -1407,7 +1488,7 @@ def _comparison_report_summary(
     output_root: Path | None = None,
 ) -> dict[str, Any]:
     if artifact["status"] == "loaded":
-        summary = _comparison_payload_summary(artifact["payload"], path=path)
+        summary = _comparison_payload_summary(artifact["payload"], path=path, output_root=output_root)
         if isinstance(manifest_entry, dict):
             summary = _comparison_summary_with_expected_entry(
                 summary,
@@ -1434,22 +1515,57 @@ def _comparison_report_summary(
     }
 
 
-def _comparison_payload_summary(payload: dict[str, Any], *, path: Path | None) -> dict[str, Any]:
+def _comparison_payload_summary(
+    payload: dict[str, Any],
+    *,
+    path: Path | None,
+    output_root: Path | None = None,
+) -> dict[str, Any]:
     status_payload = comparison_payload_status(payload)
     candidate = payload.get("candidate") if isinstance(payload.get("candidate"), dict) else {}
     candidate_id = payload.get("candidate_id") or candidate.get("id") or candidate.get("candidate_id")
-    return {
+    status = status_payload["status"]
+    failed_check_count = status_payload["failed_check_count"]
+    artifact_status = status_payload["artifact_status"]
+    missing_candidate_artifacts = _missing_candidate_artifacts(payload, output_root=output_root)
+    if missing_candidate_artifacts:
+        status = "fail"
+        failed_check_count += 1
+        artifact_status = "candidate_artifacts_missing"
+    summary = {
         "path": str(path) if path is not None else payload.get("path"),
         "problem_type": payload.get("problem_type"),
         "candidate_id": candidate_id,
         "approval_id": payload.get("approval_id"),
         "consumed_approval_ids": payload.get("consumed_approval_ids") if isinstance(payload.get("consumed_approval_ids"), list) else [],
-        "status": status_payload["status"],
-        "failed_check_count": status_payload["failed_check_count"],
+        "status": status,
+        "failed_check_count": failed_check_count,
         "warning_count": status_payload["warning_count"],
         "unavailable_count": status_payload["unavailable_count"],
-        "artifact_status": status_payload["artifact_status"],
+        "artifact_status": artifact_status,
     }
+    if missing_candidate_artifacts:
+        summary["missing_candidate_artifacts"] = missing_candidate_artifacts
+    return summary
+
+
+def _missing_candidate_artifacts(payload: dict[str, Any], *, output_root: Path | None) -> list[str]:
+    if output_root is None:
+        return []
+    artifacts = payload.get("candidate_artifacts")
+    if not isinstance(artifacts, list):
+        return []
+    missing: list[str] = []
+    for item in artifacts:
+        if not isinstance(item, str) or not item.strip():
+            missing.append(str(item))
+            continue
+        path = Path(item.strip())
+        display = str(path) if path.is_absolute() else path.as_posix()
+        resolved = path.resolve() if path.is_absolute() else (output_root / path).resolve()
+        if not _is_relative_to(resolved, output_root) or not resolved.exists():
+            missing.append(display)
+    return missing
 
 
 def _registry_candidate_summaries(output_dir: Path, seen_paths: set[str]) -> list[dict[str, Any]]:
