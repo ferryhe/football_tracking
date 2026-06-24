@@ -1498,16 +1498,20 @@ def _validate_improvement(
 
     likely_ball_region = _likely_ball_region(raw.get("likely_ball_region"), index)
     local_search_roi = _local_search_roi(raw.get("local_search_roi"), index)
+    downgrade_reason: str | None = None
     if _is_missing_ball_improvement(normalized_tags, raw) and likely_ball_region is None and local_search_roi is None:
-        traceable_incomplete_localize = (
-            public_recommended_action in {"localize_ball_roi", "request_targeted_localization"}
-            and _has_traceable_packet_or_visual_provenance(raw, context)
-        )
-        if traceable_incomplete_localize:
+        downgrade_reason = "missing likely_ball_region/local_search_roi for missing-ball suggestion"
+        if _has_traceable_packet_or_visual_provenance(raw, context):
             public_recommended_action = "request_targeted_localization"
+            repair_warnings.append(
+                f"Improvement {index} missing-ball suggestion missing likely_ball_region/local_search_roi; "
+                "downgraded to request_targeted_localization for traceable localization review."
+            )
         else:
-            raise ValueError(
-                f"Improvement {index} missing-ball suggestions require likely_ball_region or local_search_roi."
+            public_recommended_action = "manual_review"
+            repair_warnings.append(
+                f"Improvement {index} missing-ball suggestion missing likely_ball_region/local_search_roi; "
+                "downgraded to manual_review because no traceable packet or visual provenance was cited."
             )
 
     config_patch_raw = raw.get("config_patch") if isinstance(raw.get("config_patch"), dict) else {}
@@ -1530,10 +1534,13 @@ def _validate_improvement(
         item["legacy_recommended_action"] = recommended_action
     if public_recommended_action == "request_targeted_localization":
         item["requested_action"] = "localize_ball_roi"
+    if downgrade_reason is not None:
+        item["downgrade_reason"] = downgrade_reason
     if unsupported_recommended_action:
         item["original_recommended_action"] = raw_recommended_action
         patch_warnings.append(
-            f"Improvement {index} unsupported recommended_action downgraded to manual_review: {raw_recommended_action}"
+            f"Improvement {index} unsupported recommended_action downgraded to "
+            f"{public_recommended_action}: {raw_recommended_action}"
         )
     for key in (
         "source_packet_id",
