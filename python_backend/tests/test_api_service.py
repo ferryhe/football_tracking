@@ -941,6 +941,528 @@ class ApiServiceSmokeTests(unittest.TestCase):
         self.assertEqual(1, call_count)
         self.assertEqual("proposed", runs[0]["stats"]["ai_candidate_lifecycle"]["stage"])
 
+    def test_ai_improvement_status_groups_items_and_artifact_contract(self) -> None:
+        self.create_output_bundle("ai_status_baseline")
+
+        missing_comparison = {
+            "schema_version": "1.0",
+            "problem_type": "missing_ball",
+            "candidate_id": "missing-candidate-1",
+            "approval_id": "approval_missing",
+            "consumed_approval_ids": ["approval_missing"],
+            "comparison_report": "ai_candidates/missing_ball/missing-candidate-1/missing_ball_recovery_comparison.json",
+            "comparison_status": "pass",
+            "promotion_status": "promoted",
+            "candidate_artifacts": ["ai_candidates/missing_ball/missing-candidate-1/ball_track.csv"],
+            "summary": {"status": "pass"},
+        }
+        noise_comparison = {
+            "schema_version": "1.0",
+            "problem_type": "noise",
+            "candidate_id": "noise-candidate-1",
+            "approval_id": "approval_noise",
+            "consumed_approval_ids": ["approval_noise"],
+            "comparison_report": "ai_candidates/noise/noise-candidate-1/noise_candidate_comparison.json",
+            "comparison_status": "warn",
+            "promotion_status": "pending_confirmation",
+            "candidate_artifacts": ["ai_candidates/noise/noise-candidate-1/ball_track.cleaned.csv"],
+            "summary": {"status": "warn"},
+        }
+        follow_cam_comparison = {
+            "schema_version": "1.0",
+            "problem_type": "follow_cam",
+            "candidate_id": "follow-cam-1",
+            "approval_id": "approval_camera",
+            "consumed_approval_ids": ["approval_camera"],
+            "comparison_report": "ai_candidates/follow_cam/follow-cam-1/follow_cam_candidate_comparison.json",
+            "comparison_status": "pass",
+            "promotion_status": "promoted",
+            "candidate_artifacts": ["ai_candidates/follow_cam/follow-cam-1/follow_cam.mp4"],
+            "summary": {"status": "pass"},
+        }
+        highlight_comparison = {
+            "schema_version": "1.0",
+            "problem_type": "highlight",
+            "candidate_id": "highlight-candidate-1",
+            "approval_id": "approval_highlight",
+            "consumed_approval_ids": ["approval_highlight"],
+            "comparison_report": "ai_candidates/highlight/highlight-candidate-1/highlight_candidate_comparison.json",
+            "comparison_status": "pass",
+            "promotion_status": "promoted",
+            "candidate_artifacts": [
+                "ai_candidates/highlight/highlight-candidate-1/highlight_report.json",
+                "ai_candidates/highlight/highlight-candidate-1/highlight.mp4",
+            ],
+            "summary": {"status": "pass"},
+        }
+        self.write_json(
+            "outputs/ai_status_baseline/ai_improvement_report.json",
+            {
+                "schema_version": "1.0",
+                "summary": {"status": "needs_rerun"},
+                "improvements": [
+                    {
+                        "id": "imp_missing",
+                        "problem_type": "missing_ball",
+                        "candidate_id": "missing-candidate-1",
+                        "recommended_action": "localize_ball_roi",
+                        "rerun_scope": {"start_frame": 2049, "end_frame": 2544},
+                        "evidence": ["packet_2079"],
+                        "confidence": 0.82,
+                    },
+                    {
+                        "id": "imp_noise",
+                        "problem_type": "noise",
+                        "candidate_id": "noise-candidate-1",
+                        "recommended_action": "tighten_noise_filter",
+                        "start_frame": 40,
+                        "end_frame": 52,
+                        "evidence": [{"id": "trigger_noise"}],
+                        "confidence": 0.74,
+                        "false_positive_class": "foot_confusion",
+                    },
+                    {
+                        "id": "imp_camera",
+                        "problem_type": "follow_cam",
+                        "candidate_id": "follow-cam-1",
+                        "recommended_action": "adjust_follow_cam",
+                        "camera_motion_event_id": "camera_event_1",
+                        "start_frame": 50,
+                        "end_frame": 80,
+                        "evidence": [{"id": "camera_event_1"}],
+                        "confidence": 0.8,
+                    },
+                    {
+                        "id": "imp_highlight",
+                        "problem_type": "highlight",
+                        "candidate_id": "highlight-candidate-1",
+                        "recommended_action": "render_suggested_highlight",
+                        "suggested_window": {"start_frame": 0, "end_frame": 9},
+                        "evidence": ["cleaned:shot_candidate:0-1"],
+                        "confidence": 0.9,
+                    },
+                ],
+                "highlight_adjustments": [
+                    {
+                        "candidate_id": "highlight-candidate-1",
+                        "current_window": {"start_frame": 0, "end_frame": 7},
+                        "suggested_window": {"start_frame": 0, "end_frame": 9},
+                        "reason": "Preserve the result tail.",
+                        "confidence": 0.9,
+                    }
+                ],
+            },
+        )
+        self.write_json(
+            "outputs/ai_status_baseline/ai_improvement_approved_actions.json",
+            {
+                "approved_actions": [
+                    {"approval_id": "approval_missing", "improvement_id": "imp_missing", "approved_action": "localize_ball_roi"},
+                    {
+                        "approval_id": "approval_noise",
+                        "improvement_id": "imp_noise",
+                        "approved_action": "tighten_noise_filter",
+                        "false_positive_class": "foot_confusion",
+                    },
+                    {"approval_id": "approval_camera", "improvement_id": "imp_camera", "approved_action": "adjust_follow_cam"},
+                    {
+                        "approval_id": "approval_highlight",
+                        "improvement_id": "imp_highlight",
+                        "approved_action": "render_suggested_highlight",
+                        "candidate_id": "highlight-candidate-1",
+                    },
+                ]
+            },
+        )
+        self.write_json("outputs/ai_status_baseline/stable_ai_improvement_workflow_report.json", {"summary": {"status": "completed"}})
+        self.write_json("outputs/ai_status_baseline/ai_improvement_quality_gate.json", {"summary": {"status": "warn"}})
+        self.write_json("outputs/ai_status_baseline/camera_motion_audit.json", {"summary": {"status": "warn"}})
+        self.write_json("outputs/ai_status_baseline/follow_cam_rerender_plan.json", {"requires_tracking_rerun": False})
+        self.write_json(
+            "outputs/ai_status_baseline/ai_candidate_registry.json",
+            {
+                "candidates": [
+                    missing_comparison,
+                    noise_comparison,
+                    follow_cam_comparison,
+                    highlight_comparison,
+                ]
+            },
+        )
+        self.write_json(
+            "outputs/ai_status_baseline/final_ai_improvement_artifact_manifest.json",
+            {
+                "summary": {"status": "pass"},
+                "quality_gate_status": {"status": "warn"},
+                "final_selected_artifacts": [
+                    {"candidate_id": "missing-candidate-1", "path": "final/ball_track.csv", "role": "missing_ball_track"},
+                    {"candidate_id": "highlight-candidate-1", "path": "final/highlight.mp4", "role": "highlight_clip"},
+                ],
+                "comparison_reports": [missing_comparison, noise_comparison, follow_cam_comparison, highlight_comparison],
+            },
+        )
+        self.write_json(
+            "outputs/ai_status_baseline/ai_candidates/missing_ball/missing-candidate-1/missing_ball_recovery_comparison.json",
+            missing_comparison,
+        )
+        self.write_text("outputs/ai_status_baseline/ai_candidates/missing_ball/missing-candidate-1/ball_track.csv", "Frame,X,Y\n")
+        self.write_json(
+            "outputs/ai_status_baseline/ai_candidates/noise/noise-candidate-1/noise_candidate_comparison.json",
+            noise_comparison,
+        )
+        self.write_json(
+            "outputs/ai_status_baseline/ai_candidates/follow_cam/follow-cam-1/follow_cam_candidate_comparison.json",
+            follow_cam_comparison,
+        )
+        self.write_json(
+            "outputs/ai_status_baseline/ai_candidates/highlight/highlight-candidate-1/highlight_candidate_comparison.json",
+            highlight_comparison,
+        )
+        self.write_json(
+            "outputs/ai_status_baseline/ai_candidates/highlight/highlight-candidate-1/highlight_report.json",
+            {"candidate_id": "highlight-candidate-1"},
+        )
+        self.write_text("outputs/ai_status_baseline/ai_candidates/highlight/highlight-candidate-1/highlight.mp4", "clip")
+
+        status = self.service.get_ai_improvement_status("scan_ai_status_baseline")
+        route_response = run_routes.get_ai_improvement_status("scan_ai_status_baseline", service=self.service)
+
+        self.assertEqual("scan_ai_status_baseline", status["run_id"])
+        self.assertEqual("pass", status["final_manifest_status"]["status"])
+        self.assertEqual(["missing-candidate-1", "highlight-candidate-1"], status["final_selected_artifact_candidate_ids"])
+        self.assertEqual(2, len(status["final_selected_artifacts"]))
+
+        groups = status["items_by_problem_type"]
+        self.assertEqual({"missing_ball", "noise", "camera_motion", "highlights"}, set(groups))
+        missing_item = groups["missing_ball"][0]
+        self.assertEqual("imp_missing", missing_item["improvement_id"])
+        self.assertEqual("missing-candidate-1", missing_item["candidate_id"])
+        self.assertEqual(["approval_missing"], missing_item["approval_ids"])
+        self.assertEqual({"start_frame": 2049, "end_frame": 2544}, missing_item["frame_window"])
+        self.assertEqual(["packet_2079"], missing_item["evidence_ids"])
+        self.assertEqual("localize_ball_roi", missing_item["recommended_action"])
+        self.assertEqual("approved", missing_item["approval_status"])
+        self.assertEqual(["approval_missing"], missing_item["consumed_approval_ids"])
+        self.assertEqual("pass", missing_item["comparison_status"])
+        self.assertEqual("promoted", missing_item["promotion_status"])
+        self.assertTrue(missing_item["artifact_references"])
+
+        self.assertEqual("foot_confusion", groups["noise"][0]["false_positive_class"])
+        self.assertEqual("warn", groups["noise"][0]["comparison_status"])
+        self.assertEqual("follow-cam-1", groups["camera_motion"][0]["candidate_id"])
+        self.assertEqual("highlight-candidate-1", groups["highlights"][0]["candidate_id"])
+
+        artifacts_by_name = {artifact["name"]: artifact for artifact in status["artifacts"]}
+        for name in (
+            "stable_ai_improvement_workflow_report.json",
+            "ai_improvement_report.json",
+            "ai_improvement_quality_gate.json",
+            "final_ai_improvement_artifact_manifest.json",
+            "camera_motion_audit.json",
+            "follow_cam_rerender_plan.json",
+            "ai_candidates/missing_ball/missing-candidate-1/missing_ball_recovery_comparison.json",
+            "ai_candidates/noise/noise-candidate-1/noise_candidate_comparison.json",
+            "ai_candidates/follow_cam/follow-cam-1/follow_cam_candidate_comparison.json",
+            "ai_candidates/highlight/highlight-candidate-1/highlight_candidate_comparison.json",
+            "ai_candidates/highlight/highlight-candidate-1/highlight_report.json",
+            "ai_candidates/highlight/highlight-candidate-1/highlight.mp4",
+        ):
+            self.assertEqual("available", artifacts_by_name[name]["status"], name)
+
+        self.assertEqual("pass", route_response.final_manifest_status.status)
+        self.assertEqual("imp_missing", route_response.items_by_problem_type["missing_ball"][0].improvement_id)
+
+    def test_ai_improvement_status_reports_missing_and_corrupt_artifacts_without_crashing(self) -> None:
+        self.create_output_bundle("ai_status_missing")
+        self.write_text("outputs/ai_status_missing/ai_improvement_report.json", "{")
+
+        status = self.service.get_ai_improvement_status("scan_ai_status_missing")
+
+        self.assertEqual([], status["items_by_problem_type"]["missing_ball"])
+        artifacts_by_name = {artifact["name"]: artifact for artifact in status["artifacts"]}
+        self.assertEqual("error", artifacts_by_name["ai_improvement_report.json"]["status"])
+        self.assertIn("corrupt", artifacts_by_name["ai_improvement_report.json"]["summary"].lower())
+        self.assertEqual("unavailable", artifacts_by_name["ai_improvement_quality_gate.json"]["status"])
+        self.assertEqual("unavailable", artifacts_by_name["final_ai_improvement_artifact_manifest.json"]["status"])
+        self.assertEqual("unavailable", status["final_manifest_status"]["status"])
+
+    def test_ai_improvement_status_does_not_make_approval_file_executable(self) -> None:
+        self.create_output_bundle("ai_status_approval_only")
+        self.write_json(
+            "outputs/ai_status_approval_only/ai_improvement_approved_actions.json",
+            {
+                "approved_actions": [
+                    {
+                        "approval_id": "approval_present",
+                        "improvement_id": "imp_present",
+                        "approved_action": "localize_ball_roi",
+                        "candidate_id": "candidate_present",
+                        "rerun_scope": {"start_frame": 10, "end_frame": 20},
+                    }
+                ]
+            },
+        )
+
+        status = self.service.get_ai_improvement_status("scan_ai_status_approval_only")
+
+        self.assertEqual("approved", status["items_by_problem_type"]["missing_ball"][0]["approval_status"])
+        self.assertEqual("none", status["items_by_problem_type"]["missing_ball"][0]["comparison_status"])
+        self.assertEqual("not_promoted", status["items_by_problem_type"]["missing_ball"][0]["promotion_status"])
+        with self.assertRaisesRegex(ValueError, "Approved action IDs not found: missing_approval"):
+            self.service.create_run(
+                {
+                    "parent_run_id": "scan_ai_status_approval_only",
+                    "approved_action_ids": ["missing_approval"],
+                    "output_dir_name": "should_not_execute",
+                }
+            )
+
+    def test_ai_improvement_status_includes_manifest_only_candidate_outputs(self) -> None:
+        self.create_output_bundle("ai_status_manifest_only")
+        comparison = {
+            "schema_version": "1.0",
+            "problem_type": "follow_cam",
+            "candidate_id": "follow-cam-manifest-only",
+            "approval_id": "approval_camera_manifest",
+            "consumed_approval_ids": ["approval_camera_manifest"],
+            "comparison_report": "ai_candidates/follow_cam/follow-cam-manifest-only/follow_cam_candidate_comparison.json",
+            "comparison_status": "pass",
+            "candidate_artifacts": ["ai_candidates/follow_cam/follow-cam-manifest-only/follow_cam.mp4"],
+            "summary": {"status": "pass"},
+        }
+        self.write_json(
+            "outputs/ai_status_manifest_only/final_ai_improvement_artifact_manifest.json",
+            {
+                "schema_version": "1.0",
+                "candidate_outputs": [
+                    {
+                        "candidate_id": "follow-cam-manifest-only",
+                        "problem_type": "follow_cam",
+                        "path": "ai_candidates/follow_cam/follow-cam-manifest-only/follow_cam.mp4",
+                        "candidate_artifacts": ["ai_candidates/follow_cam/follow-cam-manifest-only/follow_cam.mp4"],
+                    }
+                ],
+                "final_selected_artifacts": [
+                    {
+                        "candidate_id": "follow-cam-manifest-only",
+                        "approval_id": "approval_camera_manifest",
+                        "problem_type": "follow_cam",
+                        "output_role": "follow_cam_video",
+                        "path": "ai_candidates/follow_cam/follow-cam-manifest-only/follow_cam.mp4",
+                    }
+                ],
+                "consumed_approvals": [
+                    {"approval_id": "approval_camera_manifest", "candidate_id": "follow-cam-manifest-only"}
+                ],
+                "comparison_reports": [comparison],
+                "summary": {"candidate_output_count": 1, "final_artifact_count": 1},
+            },
+        )
+        self.write_json(
+            "outputs/ai_status_manifest_only/ai_candidates/follow_cam/follow-cam-manifest-only/follow_cam_candidate_comparison.json",
+            comparison,
+        )
+
+        status = self.service.get_ai_improvement_status("scan_ai_status_manifest_only")
+
+        self.assertEqual(["follow-cam-manifest-only"], status["final_selected_artifact_candidate_ids"])
+        camera_items = status["items_by_problem_type"]["camera_motion"]
+        self.assertEqual(1, len(camera_items))
+        self.assertEqual("follow-cam-manifest-only", camera_items[0]["candidate_id"])
+        self.assertEqual("approval_camera_manifest", camera_items[0]["consumed_approval_ids"][0])
+        self.assertEqual("pass", camera_items[0]["comparison_status"])
+        self.assertEqual("promoted", camera_items[0]["promotion_status"])
+
+    def test_ai_improvement_status_does_not_leak_outside_artifact_paths(self) -> None:
+        self.create_output_bundle("ai_status_outside_artifact")
+        outside_file = (self.repo_root / "outside-secret.txt").resolve()
+        comparison = {
+            "schema_version": "1.0",
+            "problem_type": "missing_ball",
+            "candidate_id": "unsafe-candidate",
+            "comparison_report": str(outside_file),
+            "comparison_status": "pass",
+            "candidate_artifacts": ["../outside-secret.txt"],
+            "summary": {"status": "pass"},
+        }
+        self.write_json(
+            "outputs/ai_status_outside_artifact/final_ai_improvement_artifact_manifest.json",
+            {
+                "schema_version": "1.0",
+                "candidate_outputs": [{"candidate_id": "unsafe-candidate", "problem_type": "missing_ball"}],
+                "comparison_reports": [comparison],
+            },
+        )
+
+        status = self.service.get_ai_improvement_status("scan_ai_status_outside_artifact")
+
+        references = status["items_by_problem_type"]["missing_ball"][0]["artifact_references"]
+        self.assertTrue(references)
+        self.assertTrue(all(reference["path"] is None for reference in references))
+        self.assertTrue(all(reference["status"] == "error" for reference in references))
+        self.assertNotIn(str(outside_file), {reference.get("path") for reference in references})
+
+    def test_ai_improvement_status_joins_approval_id_only_actions_to_manifest_candidates(self) -> None:
+        self.create_output_bundle("ai_status_approval_id_only")
+        comparison = {
+            "schema_version": "1.0",
+            "problem_type": "missing_ball",
+            "candidate_id": "candidate-from-comparison",
+            "approval_id": "approval_only",
+            "consumed_approval_ids": ["approval_only"],
+            "comparison_status": "pass",
+            "summary": {"status": "pass"},
+        }
+        self.write_json(
+            "outputs/ai_status_approval_id_only/ai_improvement_report.json",
+            {
+                "improvements": [
+                    {
+                        "id": "imp_approval_only",
+                        "problem_type": "missing_ball",
+                        "recommended_action": "localize_ball_roi",
+                        "confidence": 0.7,
+                    }
+                ]
+            },
+        )
+        self.write_json(
+            "outputs/ai_status_approval_id_only/ai_improvement_approved_actions.json",
+            {
+                "approved_actions": [
+                    {
+                        "approval_id": "approval_only",
+                        "improvement_id": "imp_approval_only",
+                        "approved_action": "localize_ball_roi",
+                        "rerun_scope": {"start_frame": 10, "end_frame": 20},
+                    }
+                ]
+            },
+        )
+        self.write_json(
+            "outputs/ai_status_approval_id_only/final_ai_improvement_artifact_manifest.json",
+            {
+                "schema_version": "1.0",
+                "candidate_outputs": [{"candidate_id": "candidate-from-comparison", "problem_type": "missing_ball"}],
+                "comparison_reports": [comparison],
+            },
+        )
+
+        status = self.service.get_ai_improvement_status("scan_ai_status_approval_id_only")
+
+        missing_items = status["items_by_problem_type"]["missing_ball"]
+        self.assertEqual(1, len(missing_items))
+        self.assertEqual("candidate-from-comparison", missing_items[0]["candidate_id"])
+        self.assertEqual(["approval_only"], missing_items[0]["approval_ids"])
+        self.assertEqual(["approval_only"], missing_items[0]["consumed_approval_ids"])
+        self.assertEqual("pass", missing_items[0]["comparison_status"])
+
+    def test_ai_improvement_status_includes_manifest_pending_rejected_and_resolved_items(self) -> None:
+        self.create_output_bundle("ai_status_manifest_states")
+        self.write_json(
+            "outputs/ai_status_manifest_states/final_ai_improvement_artifact_manifest.json",
+            {
+                "schema_version": "1.0",
+                "pending_candidates": [
+                    {
+                        "candidate_id": "noise-pending",
+                        "problem_type": "noise",
+                        "approval_id": "approval_noise_pending",
+                        "status": "pending_finalization",
+                    }
+                ],
+                "rejected_candidates": [
+                    {
+                        "candidate_id": "highlight-rejected",
+                        "problem_type": "highlight",
+                        "approval_ids": ["approval_highlight_rejected"],
+                        "status": "rejected",
+                    }
+                ],
+                "unsupported_candidates": [
+                    {
+                        "approval_id": "approval_camera_unsupported",
+                        "problem_type": "follow_cam",
+                        "approved_action": "unsupported_camera_action",
+                        "reason": "unsupported_candidate_type",
+                    }
+                ],
+                "resolved_noop_candidates": [
+                    {
+                        "candidate_id": "missing-not-visible",
+                        "approval_id": "approval_not_visible",
+                        "problem_type": "missing_ball",
+                        "status": "resolved_not_visible",
+                    }
+                ],
+            },
+        )
+
+        status = self.service.get_ai_improvement_status("scan_ai_status_manifest_states")
+
+        self.assertEqual("pending_confirmation", status["items_by_problem_type"]["noise"][0]["promotion_status"])
+        self.assertEqual("rejected", status["items_by_problem_type"]["highlights"][0]["promotion_status"])
+        self.assertEqual("blocked", status["items_by_problem_type"]["camera_motion"][0]["promotion_status"])
+        self.assertEqual("missing-not-visible", status["items_by_problem_type"]["missing_ball"][0]["candidate_id"])
+
+    def test_ai_improvement_status_does_not_report_approval_id_as_candidate_id(self) -> None:
+        self.create_output_bundle("ai_status_manifest_approval_identity")
+        self.write_json(
+            "outputs/ai_status_manifest_approval_identity/final_ai_improvement_artifact_manifest.json",
+            {
+                "schema_version": "1.0",
+                "pending_candidates": [
+                    {
+                        "approval_id": "approval_pending_without_candidate",
+                        "problem_type": "noise",
+                        "status": "pending_finalization",
+                    }
+                ],
+                "comparison_reports": [
+                    {
+                        "approval_id": "approval_pending_without_candidate",
+                        "consumed_approval_ids": ["approval_pending_without_candidate"],
+                        "candidate_id": "real-noise-candidate",
+                        "problem_type": "noise",
+                        "comparison_status": "warn",
+                    }
+                ],
+            },
+        )
+
+        status = self.service.get_ai_improvement_status("scan_ai_status_manifest_approval_identity")
+
+        item = status["items_by_problem_type"]["noise"][0]
+        self.assertEqual("real-noise-candidate", item["candidate_id"])
+        self.assertEqual(["approval_pending_without_candidate"], item["approval_ids"])
+
+    def test_ai_improvement_status_includes_registry_only_candidates(self) -> None:
+        self.create_output_bundle("ai_status_registry_only")
+        self.write_json(
+            "outputs/ai_status_registry_only/ai_candidate_registry.json",
+            {
+                "candidates": [
+                    {
+                        "candidate_id": "registry-noise-candidate",
+                        "problem_type": "noise",
+                        "approval_id": "approval_registry_noise",
+                        "consumed_approval_ids": ["approval_registry_noise"],
+                        "comparison_status": "warn",
+                        "candidate_artifacts": ["ai_candidates/noise/registry-noise-candidate/ball_track.cleaned.csv"],
+                        "summary": {"status": "warn"},
+                    }
+                ]
+            },
+        )
+
+        status = self.service.get_ai_improvement_status("scan_ai_status_registry_only")
+
+        self.assertEqual(1, len(status["items_by_problem_type"]["noise"]))
+        item = status["items_by_problem_type"]["noise"][0]
+        self.assertEqual("registry-noise-candidate", item["candidate_id"])
+        self.assertEqual(["approval_registry_noise"], item["consumed_approval_ids"])
+        self.assertEqual("warn", item["comparison_status"])
+
     def test_ai_candidate_finalize_promotes_and_refreshes_run_lifecycle(self) -> None:
         output_dir = self.create_output_bundle("candidate_finalize_baseline")
         candidate_dir = output_dir / "ai_candidates" / "missing_ball" / "candidate_api"
@@ -4092,6 +4614,7 @@ class ApiServiceSmokeTests(unittest.TestCase):
             "/api/v1/runs/{run_id}",
             "/api/v1/runs/{run_id}/follow-cam-render",
             "/api/v1/runs/{run_id}/highlight-render",
+            "/api/v1/runs/{run_id}/ai-improvement-status",
             "/api/v1/runs/{run_id}/artifacts",
             "/api/v1/runs/{run_id}/artifacts/{artifact_name:path}",
             "/api/v1/runs/{run_id}/cleanup-report",
@@ -4208,6 +4731,22 @@ class ApiServiceSmokeTests(unittest.TestCase):
             "#/components/schemas/ApiErrorResponse",
             operation["responses"]["409"]["content"]["application/json"]["schema"]["$ref"],
         )
+
+    def test_create_app_documents_ai_improvement_status_response_schema(self) -> None:
+        app = create_app(self.repo_root)
+        operation = app.openapi()["paths"]["/api/v1/runs/{run_id}/ai-improvement-status"]["get"]
+
+        self.assertEqual(
+            "#/components/schemas/AIImprovementStatusResponse",
+            operation["responses"]["200"]["content"]["application/json"]["schema"]["$ref"],
+        )
+        self.assertEqual(
+            "#/components/schemas/ApiErrorResponse",
+            operation["responses"]["404"]["content"]["application/json"]["schema"]["$ref"],
+        )
+        response_schema = app.openapi()["components"]["schemas"]["AIImprovementStatusResponse"]
+        self.assertIn("items_by_problem_type", response_schema["required"])
+        self.assertIn("final_selected_artifacts", response_schema["required"])
 
     def test_create_app_documents_ai_improve_schema(self) -> None:
         app = create_app(self.repo_root)

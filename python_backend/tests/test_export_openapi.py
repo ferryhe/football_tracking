@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from pathlib import Path
 import unittest
+from pathlib import Path
 
 from scripts.export_openapi import _frontend_paths, build_openapi_document
 
@@ -15,6 +15,7 @@ class ExportOpenApiTests(unittest.TestCase):
             "/healthz",
             "/health",
             "/runs",
+            "/runs/{run_id}/ai-improvement-status",
             "/configs",
             "/inputs",
             "/ai/recommend",
@@ -155,6 +156,64 @@ class ExportOpenApiTests(unittest.TestCase):
         for field in ("stage", "comparison_status", "promotion_status", "resolution_status", "blocking_reasons"):
             self.assertIn(field, zod_summary)
             self.assertIn(field, zod_candidate)
+
+    def test_openapi_exposes_ai_improvement_status_contract(self) -> None:
+        document = build_openapi_document()
+
+        operation = document["paths"]["/runs/{run_id}/ai-improvement-status"]["get"]
+        self.assertEqual(
+            "#/components/schemas/AIImprovementStatusResponse",
+            operation["responses"]["200"]["content"]["application/json"]["schema"]["$ref"],
+        )
+        response = document["components"]["schemas"]["AIImprovementStatusResponse"]
+        for field in (
+            "artifacts",
+            "items_by_problem_type",
+            "final_manifest_status",
+            "final_selected_artifacts",
+            "final_selected_artifact_candidate_ids",
+        ):
+            self.assertIn(field, response["properties"])
+        item = document["components"]["schemas"]["AIImprovementStatusItem"]
+        for field in (
+            "improvement_id",
+            "candidate_id",
+            "approval_ids",
+            "frame_window",
+            "evidence_ids",
+            "recommended_action",
+            "approval_status",
+            "consumed_approval_ids",
+            "comparison_status",
+            "promotion_status",
+            "artifact_references",
+        ):
+            self.assertIn(field, item["properties"])
+
+    def test_generated_clients_expose_ai_improvement_status_contract(self) -> None:
+        react_api = Path("lib/api-client-react/src/generated/api.ts").read_text(encoding="utf-8")
+        react_schemas = Path("lib/api-client-react/src/generated/api.schemas.ts").read_text(encoding="utf-8")
+        zod_api = Path("lib/api-zod/src/generated/api.ts").read_text(encoding="utf-8")
+        zod_response = Path("lib/api-zod/src/generated/types/aIImprovementStatusResponse.ts").read_text(
+            encoding="utf-8"
+        )
+        zod_item = Path("lib/api-zod/src/generated/types/aIImprovementStatusItem.ts").read_text(encoding="utf-8")
+
+        self.assertIn("getAiImprovementStatus", react_api)
+        self.assertIn("/ai-improvement-status", react_api)
+        for field in (
+            "AIImprovementStatusResponse",
+            "AIImprovementStatusItem",
+            "items_by_problem_type",
+            "final_selected_artifacts",
+            "final_selected_artifact_candidate_ids",
+        ):
+            self.assertIn(field, react_schemas)
+        self.assertIn("getAiImprovementStatusResponse", zod_api)
+        for field in ("items_by_problem_type", "final_manifest_status", "final_selected_artifacts"):
+            self.assertIn(field, zod_response)
+        for field in ("approval_status", "comparison_status", "promotion_status", "artifact_references"):
+            self.assertIn(field, zod_item)
 
 
 if __name__ == "__main__":

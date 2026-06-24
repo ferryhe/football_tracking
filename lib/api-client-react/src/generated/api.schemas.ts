@@ -542,6 +542,119 @@ export interface AIImproveResponse {
   highlight_adjustments: AIHighlightAdjustment[];
 }
 
+export type AIImprovementArtifactReferenceStatus =
+  (typeof AIImprovementArtifactReferenceStatus)[keyof typeof AIImprovementArtifactReferenceStatus];
+
+export const AIImprovementArtifactReferenceStatus = {
+  available: "available",
+  unavailable: "unavailable",
+  error: "error",
+} as const;
+
+export interface AIImprovementArtifactReference {
+  name: string;
+  status: AIImprovementArtifactReferenceStatus;
+  path?: string | null;
+  category?: string | null;
+}
+
+export type AIImprovementArtifactStatusStatus =
+  (typeof AIImprovementArtifactStatusStatus)[keyof typeof AIImprovementArtifactStatusStatus];
+
+export const AIImprovementArtifactStatusStatus = {
+  available: "available",
+  unavailable: "unavailable",
+  error: "error",
+} as const;
+
+export interface AIImprovementArtifactStatus {
+  name: string;
+  category: string;
+  status: AIImprovementArtifactStatusStatus;
+  summary: string;
+  path?: string | null;
+  exists?: boolean;
+  size_bytes?: number | null;
+  content_type?: string | null;
+  problem_type?: string | null;
+  candidate_id?: string | null;
+}
+
+export type AIImprovementManifestStatusArtifactStatus =
+  (typeof AIImprovementManifestStatusArtifactStatus)[keyof typeof AIImprovementManifestStatusArtifactStatus];
+
+export const AIImprovementManifestStatusArtifactStatus = {
+  available: "available",
+  unavailable: "unavailable",
+  error: "error",
+} as const;
+
+export interface AIImprovementManifestStatus {
+  status: string;
+  artifact_status?: AIImprovementManifestStatusArtifactStatus;
+  summary?: string | null;
+  path?: string | null;
+}
+
+export type AIImprovementStatusItemComparisonStatus =
+  (typeof AIImprovementStatusItemComparisonStatus)[keyof typeof AIImprovementStatusItemComparisonStatus];
+
+export const AIImprovementStatusItemComparisonStatus = {
+  pass: "pass",
+  warn: "warn",
+  fail: "fail",
+  unavailable: "unavailable",
+  none: "none",
+} as const;
+
+export type AIImprovementStatusItemPromotionStatus =
+  (typeof AIImprovementStatusItemPromotionStatus)[keyof typeof AIImprovementStatusItemPromotionStatus];
+
+export const AIImprovementStatusItemPromotionStatus = {
+  not_promoted: "not_promoted",
+  pending_confirmation: "pending_confirmation",
+  promoted: "promoted",
+  rejected: "rejected",
+  blocked: "blocked",
+} as const;
+
+export interface AIImprovementStatusItem {
+  id?: string | null;
+  improvement_id?: string | null;
+  candidate_id?: string | null;
+  approval_ids?: string[];
+  frame_window?: AIFrameWindow | null;
+  evidence_ids?: string[];
+  confidence?: number | null;
+  false_positive_class?: string | null;
+  recommended_action?: string | null;
+  approved_action?: string | null;
+  approval_status?: string;
+  consumed_approval_ids?: string[];
+  comparison_status?: AIImprovementStatusItemComparisonStatus;
+  promotion_status?: AIImprovementStatusItemPromotionStatus;
+  artifact_references?: AIImprovementArtifactReference[];
+}
+
+export type AIImprovementStatusResponseItemsByProblemType = {
+  [key: string]: AIImprovementStatusItem[];
+};
+
+export type AIImprovementStatusResponseFinalSelectedArtifactsItem = {
+  [key: string]: unknown;
+};
+
+export interface AIImprovementStatusResponse {
+  schema_version?: string;
+  run_id: string;
+  output_dir: string;
+  artifacts: AIImprovementArtifactStatus[];
+  items_by_problem_type: AIImprovementStatusResponseItemsByProblemType;
+  final_manifest_status: AIImprovementManifestStatus;
+  final_selected_artifacts: AIImprovementStatusResponseFinalSelectedArtifactsItem[];
+  final_selected_artifact_candidate_ids: string[];
+}
+
 export type AIRecommendRequestLanguage =
   (typeof AIRecommendRequestLanguage)[keyof typeof AIRecommendRequestLanguage];
 
