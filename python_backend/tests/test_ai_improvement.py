@@ -242,9 +242,179 @@ class AiImprovementTests(unittest.TestCase):
                 self.assertFalse(improvement["executable"])
                 self.assertTrue(any("blank recommended_action" in warning for warning in report["warnings"]))
 
-    def test_non_string_recommended_action_values_are_downgraded_to_manual_review(self) -> None:
+    def test_structured_dict_targeted_rerun_action_is_repaired_before_validation(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_minimal_artifacts(output_dir)
+            improvement_payload = _candidate_ready_targeted_rerun()
+            improvement_payload["recommended_action"] = {"action": "targeted_rerun"}
+            client = _FakeImprovementClient(
+                {
+                    "summary": {"status": "needs_rerun", "primary_issue": "tracking"},
+                    "improvements": [improvement_payload],
+                }
+            )
+
+            report = build_ai_improvement_report(
+                output_dir,
+                client=client,
+                candidate_intent="prepare_approved_candidates",
+            )
+
+        improvement = report["improvements"][0]
+        self.assertEqual("needs_rerun", report["summary"]["status"])
+        self.assertEqual("rerun_ball_window", improvement["recommended_action"])
+        self.assertEqual("targeted_rerun", improvement["legacy_recommended_action"])
+        self.assertTrue(improvement["executable"])
+        self.assertEqual(1, report["summary"]["executable_candidate_count"])
+        self.assertEqual("dict", improvement["original_recommended_action_type"])
+        self.assertEqual("structured_dict", improvement["recommended_action_repair"])
+        self.assertEqual("action", improvement["recommended_action_repair_key"])
+        self.assertTrue(
+            any("structured dict recommended_action repaired" in warning for warning in report["warnings"])
+        )
+
+    def test_structured_dict_localize_without_roi_follows_string_review_path(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_minimal_artifacts(output_dir)
+            client = _FakeImprovementClient(
+                {
+                    "summary": {"status": "needs_rerun", "primary_issue": "tracking"},
+                    "improvements": [
+                        {
+                            "id": "imp_structured_locator",
+                            "priority": "P0",
+                            "area": "tracking",
+                            "failure_tags": ["ball_lost"],
+                            "root_cause_module": "reacquisition",
+                            "diagnosis": "The packet has missing-ball evidence but needs a locator.",
+                            "recommended_action": {"recommended_action": "localize_ball_roi"},
+                            "source_packet_id": "packet_001",
+                            "evidence": [{"source_packet_id": "packet_001"}],
+                            "confidence": 0.72,
+                        }
+                    ],
+                }
+            )
+
+            report = build_ai_improvement_report(output_dir, client=client)
+
+        improvement = report["improvements"][0]
+        self.assertEqual("needs_rerun", report["summary"]["status"])
+        self.assertEqual("request_targeted_localization", improvement["recommended_action"])
+        self.assertEqual("localize_ball_roi", improvement["legacy_recommended_action"])
+        self.assertEqual("localize_ball_roi", improvement["requested_action"])
+        self.assertEqual("missing likely_ball_region/local_search_roi for missing-ball suggestion", improvement["downgrade_reason"])
+        self.assertFalse(improvement["executable"])
+        self.assertEqual(0, report["summary"]["executable_candidate_count"])
+        self.assertEqual("dict", improvement["original_recommended_action_type"])
+        self.assertEqual("structured_dict", improvement["recommended_action_repair"])
+        self.assertEqual("recommended_action", improvement["recommended_action_repair_key"])
+        self.assertTrue(
+            any("structured dict recommended_action repaired" in warning for warning in report["warnings"])
+        )
+
+    def test_invalid_structured_dict_action_stays_manual_review(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_minimal_artifacts(output_dir)
+            client = _FakeImprovementClient(
+                {
+                    "summary": {"status": "needs_rerun", "primary_issue": "tracking"},
+                    "improvements": [
+                        {
+                            "id": "imp_invalid_structured_action",
+                            "priority": "P2",
+                            "area": "tracking",
+                            "failure_tags": ["unknown"],
+                            "root_cause_module": "unknown",
+                            "diagnosis": "The model used an unsupported structured action.",
+                            "recommended_action": {"action": "unsupported_action"},
+                            "evidence": ["unsupported structured action fixture"],
+                            "confidence": 0.48,
+                        }
+                    ],
+                }
+            )
+
+            report = build_ai_improvement_report(output_dir, client=client)
+
+        improvement = report["improvements"][0]
+        self.assertEqual("needs_rerun", report["summary"]["status"])
+        self.assertEqual("manual_review", improvement["recommended_action"])
+        self.assertFalse(improvement["executable"])
+        self.assertEqual(0, report["summary"]["executable_candidate_count"])
+        self.assertEqual("dict", improvement["original_recommended_action_type"])
+        self.assertNotIn("recommended_action_repair", improvement)
+        self.assertNotIn("recommended_action_repair_key", improvement)
+
+    def test_conflicting_structured_dict_action_stays_manual_review(self) -> None:
+        for action_value in (
+            {"recommended_action": "unsupported_action", "action": "targeted_rerun"},
+            {"action": "targeted_rerun", "value": "manual_review"},
+        ):
+            with self.subTest(action_value=action_value), tempfile.TemporaryDirectory() as temp_name:
+                output_dir = Path(temp_name)
+                _write_minimal_artifacts(output_dir)
+                improvement_payload = _candidate_ready_targeted_rerun()
+                improvement_payload["recommended_action"] = action_value
+                client = _FakeImprovementClient(
+                    {
+                        "summary": {"status": "needs_rerun", "primary_issue": "tracking"},
+                        "improvements": [improvement_payload],
+                    }
+                )
+
+                report = build_ai_improvement_report(
+                    output_dir,
+                    client=client,
+                    candidate_intent="prepare_approved_candidates",
+                )
+
+            improvement = report["improvements"][0]
+            self.assertEqual("manual_review", improvement["recommended_action"])
+            self.assertFalse(improvement["executable"])
+            self.assertEqual(0, report["summary"]["executable_candidate_count"])
+            self.assertEqual("dict", improvement["original_recommended_action_type"])
+            self.assertNotIn("recommended_action_repair", improvement)
+            self.assertNotIn("recommended_action_repair_key", improvement)
+            self.assertTrue(any("non-string recommended_action" in warning for warning in report["warnings"]))
+
+    def test_unrecognized_structured_dict_action_stays_manual_review(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_minimal_artifacts(output_dir)
+            client = _FakeImprovementClient(
+                {
+                    "summary": {"status": "needs_rerun", "primary_issue": "tracking"},
+                    "improvements": [
+                        {
+                            "id": "imp_unrecognized_structured_action",
+                            "priority": "P2",
+                            "area": "tracking",
+                            "failure_tags": ["unknown"],
+                            "root_cause_module": "unknown",
+                            "diagnosis": "The model used a structured object without a contract action key.",
+                            "recommended_action": {"label": "targeted_rerun"},
+                            "evidence": ["unrecognized structured action fixture"],
+                            "confidence": 0.48,
+                        }
+                    ],
+                }
+            )
+
+            report = build_ai_improvement_report(output_dir, client=client)
+
+        improvement = report["improvements"][0]
+        self.assertEqual("needs_rerun", report["summary"]["status"])
+        self.assertEqual("manual_review", improvement["recommended_action"])
+        self.assertFalse(improvement["executable"])
+        self.assertEqual("dict", improvement["original_recommended_action_type"])
+        self.assertNotIn("recommended_action_repair", improvement)
+
+    def test_non_dict_non_string_recommended_action_values_are_downgraded_to_manual_review(self) -> None:
         invalid_actions: tuple[tuple[object, str], ...] = (
-            ({"action": "targeted_rerun"}, "dict"),
             (["targeted_rerun"], "list"),
             (7, "int"),
             (3.5, "float"),
@@ -287,7 +457,7 @@ class AiImprovementTests(unittest.TestCase):
                 self.assertIn("non-string recommended_action", warning_text)
                 self.assertIn(expected_type, warning_text)
 
-    def test_non_string_missing_ball_action_with_traceable_packet_stays_manual_review(self) -> None:
+    def test_structured_missing_ball_action_with_traceable_packet_requests_localization(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:
             output_dir = Path(temp_name)
             _write_minimal_artifacts(output_dir)
@@ -315,17 +485,21 @@ class AiImprovementTests(unittest.TestCase):
 
         improvement = report["improvements"][0]
         self.assertEqual("needs_rerun", report["summary"]["status"])
-        self.assertEqual("manual_review", improvement["recommended_action"])
-        self.assertNotEqual("request_targeted_localization", improvement["recommended_action"])
-        self.assertNotIn("requested_action", improvement)
+        self.assertEqual("request_targeted_localization", improvement["recommended_action"])
+        self.assertEqual("localize_ball_roi", improvement["legacy_recommended_action"])
+        self.assertEqual("localize_ball_roi", improvement["requested_action"])
         self.assertNotIn("local_search_roi", improvement)
         self.assertNotIn("likely_ball_region", improvement)
         self.assertNotIn("original_recommended_action", improvement)
         self.assertEqual("dict", improvement["original_recommended_action_type"])
+        self.assertEqual("structured_dict", improvement["recommended_action_repair"])
+        self.assertEqual("action", improvement["recommended_action_repair_key"])
         self.assertFalse(improvement["executable"])
         self.assertEqual(0, report["summary"]["executable_candidate_count"])
-        self.assertTrue(any("non-string recommended_action" in warning for warning in report["warnings"]))
-        self.assertFalse(any("request_targeted_localization" in warning for warning in report["warnings"]))
+        self.assertTrue(
+            any("structured dict recommended_action repaired" in warning for warning in report["warnings"])
+        )
+        self.assertTrue(any("request_targeted_localization" in warning for warning in report["warnings"]))
 
     def test_unsupported_string_recommended_action_preserves_original_action(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:
