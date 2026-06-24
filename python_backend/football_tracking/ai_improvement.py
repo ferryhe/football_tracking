@@ -1449,10 +1449,12 @@ def _validate_improvement(
         raise ValueError(f"Improvement {index} must be a JSON object.")
     missing = [field for field in _REQUIRED_IMPROVEMENT_FIELDS if field not in raw]
     repair_warnings: list[str] = []
+    recommended_action_repaired = False
     if missing:
         if missing == ["recommended_action"]:
             raw = dict(raw)
             raw["recommended_action"] = "manual_review"
+            recommended_action_repaired = True
             repair_warnings.append(
                 f"Improvement {index} missing recommended_action downgraded to manual_review."
             )
@@ -1476,9 +1478,21 @@ def _validate_improvement(
     if invalid_tags:
         raise ValueError(f"Improvement {index} failure_tags contain unsupported values: {', '.join(invalid_tags)}")
     confidence = _confidence(raw.get("confidence"), f"Improvement {index} confidence")
-    raw_recommended_action = _required_string(raw, "recommended_action", index)
+    raw_action_value = raw.get("recommended_action")
+    if raw_action_value is None or (isinstance(raw_action_value, str) and not raw_action_value.strip()):
+        raw = dict(raw)
+        raw["recommended_action"] = "manual_review"
+        raw_recommended_action = "manual_review"
+        recommended_action_repaired = True
+        repair_warnings.append(
+            f"Improvement {index} blank recommended_action downgraded to manual_review."
+        )
+    else:
+        raw_recommended_action = _required_string(raw, "recommended_action", index)
     recommended_action = raw_recommended_action
-    unsupported_recommended_action = recommended_action not in AI_RECOMMENDED_ACTIONS
+    unsupported_recommended_action = (
+        not recommended_action_repaired and recommended_action not in AI_RECOMMENDED_ACTIONS
+    )
     if unsupported_recommended_action:
         recommended_action = "manual_review"
     root_cause_module = _required_string(raw, "root_cause_module", index)
@@ -1499,7 +1513,12 @@ def _validate_improvement(
     likely_ball_region = _likely_ball_region(raw.get("likely_ball_region"), index)
     local_search_roi = _local_search_roi(raw.get("local_search_roi"), index)
     downgrade_reason: str | None = None
-    if _is_missing_ball_improvement(normalized_tags, raw) and likely_ball_region is None and local_search_roi is None:
+    if (
+        not recommended_action_repaired
+        and _is_missing_ball_improvement(normalized_tags, raw)
+        and likely_ball_region is None
+        and local_search_roi is None
+    ):
         downgrade_reason = "missing likely_ball_region/local_search_roi for missing-ball suggestion"
         if _has_traceable_packet_or_visual_provenance(raw, context):
             public_recommended_action = "request_targeted_localization"
