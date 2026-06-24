@@ -4,7 +4,13 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from football_tracking.ai_contracts import AIClipAction, AIFailureTag, AIRecommendedAction, AIRootCauseModule
+from football_tracking.ai_contracts import (
+    AIApprovedActionName,
+    AIClipAction,
+    AIFailureTag,
+    AIRecommendedAction,
+    AIRootCauseModule,
+)
 
 RunStatus = Literal["queued", "running", "completed", "failed", "cancelled"]
 AIResponseLanguage = Literal["en", "zh"]
@@ -813,7 +819,7 @@ class AIApprovedAction(BaseModel):
 
     approval_id: str
     improvement_id: str
-    approved_action: AIRecommendedAction
+    approved_action: AIApprovedActionName
     approval_source: str
     approved_at: str
     approved_by: str
