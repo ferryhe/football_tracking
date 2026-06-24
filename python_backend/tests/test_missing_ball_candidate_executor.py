@@ -165,10 +165,11 @@ class MissingBallCandidateExecutorTests(unittest.TestCase):
                 output_dir / "ai_visual_localization.json",
                 {
                     "requests": [
-                        {
-                            "visual_localization_id": "visual_localization:2049_2544_right_corner",
-                            "source_packet_id": "packet_2079",
-                        }
+                        _clean_visual_localization_request(
+                            "visual_localization:2049_2544_right_corner",
+                            source_packet_id="packet_2079",
+                            frame=2049,
+                        )
                     ]
                 },
             )
@@ -488,6 +489,50 @@ def _write_packet(output_dir: Path, *, packet_id: str, start: int, end: int) -> 
 
 def _write_json(path: Path, payload: object) -> None:
     path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+
+
+def _clean_visual_localization_request(
+    visual_localization_id: str,
+    *,
+    source_packet_id: str,
+    frame: int,
+) -> dict[str, object]:
+    local_roi = {
+        "coordinate_space": "image",
+        "frame": frame,
+        "x": 10,
+        "y": 10,
+        "width": 20,
+        "height": 20,
+        "confidence": 0.8,
+    }
+    return {
+        "visual_localization_id": visual_localization_id,
+        "source_packet_id": source_packet_id,
+        "status": "localized",
+        "media_warnings": [],
+        "media_integrity": {
+            "status": "ok",
+            "image_count": 2,
+            "low_information_image_count": 0,
+            "likely_corrupt_image_count": 0,
+        },
+        "local_search_roi": local_roi,
+        "roi_status": "accepted",
+        "frames": [
+            {
+                "frame": frame,
+                "status": "localized",
+                "ball_visible": True,
+                "confidence": 0.8,
+                "local_search_roi": local_roi,
+            }
+        ],
+        "coverage": {
+            "covered_subwindows": [{"start_frame": frame, "end_frame": frame, "status": "localized"}],
+            "uncovered_subwindows": [],
+        },
+    }
 
 
 def _sha256(path: Path) -> str:
