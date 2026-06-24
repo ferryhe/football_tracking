@@ -116,6 +116,29 @@ class AiVisualLocalizationTests(unittest.TestCase):
         self.assertLessEqual(request["zoom_crop"]["x"] + request["zoom_crop"]["width"], 64)
         self.assertLessEqual(request["zoom_crop"]["y"] + request["zoom_crop"]["height"], 36)
 
+    def test_low_information_visual_localization_sheets_warn_and_record_provenance(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            video_path = output_dir / "source.mp4"
+            _write_constant_video(video_path, width=64, height=36, frame_count=20)
+
+            report = write_ai_visual_localization_report(
+                output_dir,
+                video_path,
+                ["5:15:right_corner"],
+                dry_run=True,
+            )
+
+        request = report["requests"][0]
+        self.assertIn("contact_sheet_low_information", request["media_warnings"])
+        self.assertIn("crop_sheet_low_information", request["media_warnings"])
+        self.assertIn("zoom_sheet_low_information", request["media_warnings"])
+        self.assertEqual(str(video_path.resolve()), report["review_source"]["input_video"])
+        self.assertFalse(report["review_source"]["used_review_friendly_source"])
+        self.assertIn("media_integrity", report["summary"])
+        self.assertEqual(3, report["summary"]["media_integrity"]["low_information_image_count"])
+        self.assertEqual(report["media_integrity"], report["summary"]["media_integrity"])
+
     def test_video_must_decode_first_frame_before_dimensions_are_available(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:
             output_dir = Path(temp_name)
@@ -180,6 +203,8 @@ class AiVisualLocalizationTests(unittest.TestCase):
 
         self.assertEqual(1, len(client.calls))
         self.assertEqual(80, client.calls[0]["metadata"]["source_video"]["width"])
+        self.assertEqual([], client.calls[0]["metadata"]["media_warnings"])
+        self.assertIn("media_integrity", client.calls[0]["metadata"])
         self.assertIn("zoom_crop", client.calls[0]["metadata"])
         self.assertIn("zoom_sheet", client.calls[0]["metadata"]["media"])
         self.assertRegex(client.calls[0]["metadata"]["media"]["zoom_sheet_sha256"], r"^[0-9a-f]{64}$")
@@ -274,6 +299,34 @@ class AiVisualLocalizationTests(unittest.TestCase):
         self.assertNotIn("source_packet_id", request["requested_action"])
         self.assertEqual("warn", report["summary"]["status"])
 
+    def test_low_information_media_is_not_sent_to_real_localization_client(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            video_path = output_dir / "source.mp4"
+            _write_constant_video(video_path, width=64, height=36, frame_count=20)
+            client = _FakeLocalizationClient(
+                {
+                    "reason": "should not be called",
+                    "frames": [],
+                    "coverage": {"covered_subwindows": []},
+                }
+            )
+
+            report = write_ai_visual_localization_report(
+                output_dir,
+                video_path,
+                ["5:15:right_corner"],
+                client=client,
+                model="vision-test",
+            )
+
+        request = report["requests"][0]
+        self.assertEqual([], client.calls)
+        self.assertEqual("error", request["status"])
+        self.assertIn("failed integrity", request["error"])
+        self.assertIn("contact_sheet_low_information", request["media_warnings"])
+        self.assertFalse(report["can_lead_to_executable_candidates"])
+
     def test_openai_visual_localization_client_sends_schema_and_images(self) -> None:
         response_client = _CapturingResponsesClient(
             {
@@ -310,6 +363,19 @@ def _write_tiny_video(path: Path, *, width: int, height: int, frame_count: int) 
     for index in range(frame_count):
         frame = np.zeros((height, width, 3), dtype=np.uint8)
         frame[:, :] = (index * 5 % 255, 30, 80)
+        writer.write(frame)
+    writer.release()
+
+
+def _write_constant_video(path: Path, *, width: int, height: int, frame_count: int) -> None:
+    import cv2
+    import numpy as np
+
+    writer = cv2.VideoWriter(str(path), cv2.VideoWriter.fourcc(*"mp4v"), 10.0, (width, height))
+    if not writer.isOpened():
+        raise RuntimeError("OpenCV VideoWriter could not create a tiny test video.")
+    frame = np.full((height, width, 3), 128, dtype=np.uint8)
+    for _ in range(frame_count):
         writer.write(frame)
     writer.release()
 

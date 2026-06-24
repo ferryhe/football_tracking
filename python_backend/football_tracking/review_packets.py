@@ -9,6 +9,11 @@ from pathlib import Path
 from typing import Any
 
 from football_tracking.ai_contracts import AI_FAILURE_TAGS, AI_ROOT_CAUSE_MODULES
+from football_tracking.media_integrity import (
+    inspect_named_images,
+    review_source_provenance,
+    summarize_media_integrity,
+)
 
 SCHEMA_VERSION = "1.0"
 DEFAULT_PRE_ROLL_FRAMES = 30
@@ -45,6 +50,7 @@ def build_review_packet_report(
     track_rows = _read_track_rows(_preferred_track_path(output_dir))
     frame_bounds = _frame_bounds(track_rows)
     sources = _packet_sources(output_dir, max_packets=max_packets)
+    review_source_input = input_video
     input_video = _resolve_input_video(output_dir, input_video)
     follow_cam_video = _resolve_follow_cam_video(output_dir, follow_cam_video)
 
@@ -56,7 +62,7 @@ def build_review_packet_report(
         decision = _decision_for_source(source, track_summary)
         packet_id = _packet_id(index, source)
         packet_dir = packet_root / packet_id
-        media, media_warnings, media_frame_dimensions = (
+        media, media_warnings, media_frame_dimensions, media_integrity = (
             _write_packet_media(
                 packet_dir=packet_dir,
                 packet_id=packet_id,
@@ -67,7 +73,7 @@ def build_review_packet_report(
                 end_frame=window["end_frame"],
             )
             if include_media
-            else ({}, [], None)
+            else ({}, [], None, {})
         )
         packet = {
             "packet_id": packet_id,
@@ -78,6 +84,7 @@ def build_review_packet_report(
             **_packet_diagnosis(source, track_summary),
             "media": media,
             "media_warnings": media_warnings,
+            "media_integrity": media_integrity,
         }
         frame_dimensions = _source_frame_dimensions(source) or media_frame_dimensions
         if frame_dimensions is not None:
@@ -85,14 +92,18 @@ def build_review_packet_report(
         packet.update(_packet_lineage(source))
         packets.append(packet)
 
+    media_integrity_summary = summarize_media_integrity(packets)
     return {
         "schema_version": SCHEMA_VERSION,
         "generated_at": _utc_now_iso(),
         "output_dir": str(output_dir),
+        "review_source": review_source_provenance(review_source_input or input_video),
+        "media_integrity": media_integrity_summary,
         "summary": {
             "packet_count": len(packets),
             "counts_by_label": dict(sorted(Counter(packet["decision"]["label"] for packet in packets).items())),
             "media_packet_count": sum(1 for packet in packets if packet["media"]),
+            "media_integrity": media_integrity_summary,
         },
         "long_lost_gap_coverage": _long_lost_gap_coverage(packets),
         "packets": packets,
@@ -732,8 +743,6 @@ def _long_lost_gap_coverage(packets: list[dict[str, Any]]) -> list[dict[str, Any
         parent_end = _parse_int(parent.get("end_frame"))
         if parent_start is None or parent_end is None:
             continue
-        if label == "tail" and not _packet_has_reviewable_tail_evidence(packet):
-            continue
         if parent_end < parent_start:
             parent_start, parent_end = parent_end, parent_start
         key = (parent_start, parent_end)
@@ -750,11 +759,13 @@ def _long_lost_gap_coverage(packets: list[dict[str, Any]]) -> list[dict[str, Any
                 "uncovered_ranges": [],
             },
         )
-        if label not in detail["covered_labels"]:
-            detail["covered_labels"].append(label)
         for key_name in ("key_frame", "expected_region", "source_size"):
             if evidence.get(key_name) not in (None, "", {}):
                 detail[key_name] = evidence[key_name]
+        if not _packet_has_reviewable_gap_evidence(packet):
+            continue
+        if label not in detail["covered_labels"]:
+            detail["covered_labels"].append(label)
 
     coverage: list[dict[str, Any]] = []
     for (start, end), detail in sorted(by_gap.items()):
@@ -774,15 +785,24 @@ def _long_lost_gap_coverage(packets: list[dict[str, Any]]) -> list[dict[str, Any
     return coverage
 
 
-def _packet_has_reviewable_tail_evidence(packet: dict[str, Any]) -> bool:
+def _packet_has_reviewable_gap_evidence(packet: dict[str, Any]) -> bool:
+    media_warnings = packet.get("media_warnings") if isinstance(packet.get("media_warnings"), list) else []
+    if _has_unreviewable_media_warnings(media_warnings):
+        return False
     media = packet.get("media") if isinstance(packet.get("media"), dict) else {}
     if media:
         return True
-    media_warnings = packet.get("media_warnings") if isinstance(packet.get("media_warnings"), list) else []
-    if any(str(warning).endswith("_failed") for warning in media_warnings):
-        return False
     track_summary = packet.get("track_summary") if isinstance(packet.get("track_summary"), dict) else {}
     return _safe_summary_int(track_summary.get("frame_count")) > 0
+
+def _has_unreviewable_media_warnings(media_warnings: list[Any]) -> bool:
+    unreviewable_literals = {"input_video_missing", "media_empty", "no_sample_frames"}
+    unreviewable_suffixes = ("_failed", "_unreadable", "_low_information")
+    for warning in media_warnings:
+        text = str(warning)
+        if text in unreviewable_literals or text.endswith(unreviewable_suffixes):
+            return True
+    return False
 
 
 def _long_lost_gap_parent_range(source: dict[str, Any]) -> tuple[int, int]:
@@ -1235,10 +1255,11 @@ def _write_packet_media(
     track_rows: list[dict[str, Any]],
     start_frame: int,
     end_frame: int,
-) -> tuple[dict[str, str], list[str], dict[str, int] | None]:
+) -> tuple[dict[str, str], list[str], dict[str, int] | None, dict[str, Any]]:
     packet_dir.mkdir(parents=True, exist_ok=True)
     media: dict[str, str] = {}
     warnings: list[str] = []
+    media_integrity: dict[str, Any] = {}
     if input_video is not None and input_video.exists():
         contact_path = packet_dir / "contact_sheet.jpg"
         crop_path = packet_dir / "crop_sheet.jpg"
@@ -1253,9 +1274,14 @@ def _write_packet_media(
         if contact_ok:
             media["contact_sheet"] = str(contact_path)
             media["crop_sheet"] = str(crop_path)
+            media_integrity, integrity_warnings = inspect_named_images(
+                {"contact_sheet": contact_path, "crop_sheet": crop_path}
+            )
+            warnings.extend(integrity_warnings)
         else:
             warnings.append("contact_sheet_failed")
     else:
+        warnings.append("input_video_missing")
         frame_dimensions = None
     clip_source = follow_cam_video if follow_cam_video is not None and follow_cam_video.exists() else input_video
     if clip_source is not None and clip_source.exists():
@@ -1264,7 +1290,7 @@ def _write_packet_media(
             media["clip"] = str(clip_path)
         else:
             warnings.append("clip_failed")
-    return media, warnings, frame_dimensions
+    return media, warnings, frame_dimensions, media_integrity
 
 
 def _write_contact_sheets(

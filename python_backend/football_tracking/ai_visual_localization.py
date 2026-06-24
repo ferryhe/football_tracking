@@ -13,6 +13,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from football_tracking.media_integrity import (
+    inspect_named_images,
+    review_source_provenance,
+    summarize_media_integrity,
+)
+
 SCHEMA_VERSION = "1.0"
 REPORT_NAME = "ai_visual_localization.json"
 DEFAULT_SAMPLE_COUNT = 5
@@ -239,7 +245,7 @@ def build_ai_visual_localization_report(
     for window in parsed_windows:
         request = _base_request(window)
         try:
-            media, media_warnings, seed_crop, zoom_crop = _write_window_media(
+            media, media_warnings, seed_crop, zoom_crop, media_integrity = _write_window_media(
                 output_dir=output_path,
                 input_video=source_path,
                 window=window,
@@ -249,6 +255,7 @@ def build_ai_visual_localization_report(
             request["zoom_crop"] = zoom_crop
             request["media"] = media
             request["media_warnings"] = media_warnings
+            request["media_integrity"] = media_integrity
             if dry_run:
                 request.update(_dry_run_request_payload(window))
             else:
@@ -258,12 +265,16 @@ def build_ai_visual_localization_report(
                     raise RuntimeError("Visual localization client is unavailable.")
                 if not media.get("contact_sheet") or not media.get("crop_sheet") or not media.get("zoom_sheet"):
                     raise RuntimeError("Targeted localization media could not be generated.")
+                if _has_unreviewable_media_warnings(media_warnings):
+                    raise RuntimeError("Targeted localization media failed integrity checks; create a review source and retry.")
                 response = _call_localization_client(
                     active_client,
                     metadata=_window_metadata(
                         window,
                         video_info=video_info,
                         media=media,
+                        media_warnings=media_warnings,
+                        media_integrity=media_integrity,
                         seed_crop=seed_crop,
                         zoom_crop=zoom_crop,
                     ),
@@ -317,13 +328,18 @@ def _base_report(
     errors: list[dict[str, Any]],
 ) -> dict[str, Any]:
     summary = _summary(requests, errors)
+    media_integrity_summary = summarize_media_integrity(requests)
     width = _safe_int(source_video.get("width"))
     height = _safe_int(source_video.get("height"))
+    review_source_path = Path(str(source_video["path"])) if source_video.get("path") else None
+    summary["media_integrity"] = media_integrity_summary
     return {
         "schema_version": SCHEMA_VERSION,
         "generated_at": _utc_now_iso(),
         "output_dir": str(output_dir.resolve()),
         "source_video": source_video,
+        "review_source": review_source_provenance(review_source_path),
+        "media_integrity": media_integrity_summary,
         "video_width": width,
         "video_height": height,
         "model": model,
@@ -617,7 +633,7 @@ def _write_window_media(
     input_video: Path,
     window: LocalizationWindow,
     video_info: dict[str, Any],
-) -> tuple[dict[str, Any], list[str], dict[str, Any], dict[str, Any]]:
+) -> tuple[dict[str, Any], list[str], dict[str, Any], dict[str, Any], dict[str, Any]]:
     import cv2
 
     media_dir = output_dir / "ai_visual_localization" / _safe_token(window.visual_localization_id)
@@ -629,7 +645,7 @@ def _write_window_media(
     zoom_crop = _zoom_crop_for_label(seed_crop, window.label, width=int(video_info["width"]), height=int(video_info["height"]))
     frames = _read_sampled_frames(input_video, _sample_frames(window.start_frame, window.end_frame, DEFAULT_SAMPLE_COUNT))
     if not frames:
-        return {}, ["no_sample_frames"], seed_crop, zoom_crop
+        return {}, ["no_sample_frames"], seed_crop, zoom_crop, {}
 
     contact_thumbs: list[Any] = []
     crop_thumbs: list[Any] = []
@@ -646,7 +662,7 @@ def _write_window_media(
         _draw_label(zoom_thumb, f"frame {frame_index} zoom", scale=0.8, y=40)
         zoom_thumbs.append(zoom_thumb)
     if not cv2.imwrite(str(contact_path), cv2.vconcat(contact_thumbs)):
-        return {}, ["contact_sheet_failed"], seed_crop, zoom_crop
+        return {}, ["contact_sheet_failed"], seed_crop, zoom_crop, {}
     crop_rows: list[Any] = []
     for index in range(0, len(crop_thumbs), 2):
         row = crop_thumbs[index : index + 2]
@@ -655,7 +671,7 @@ def _write_window_media(
         crop_rows.append(cv2.hconcat(row))
     if not cv2.imwrite(str(crop_path), cv2.vconcat(crop_rows)):
         contact_path.unlink(missing_ok=True)
-        return {}, ["crop_sheet_failed"], seed_crop, zoom_crop
+        return {}, ["crop_sheet_failed"], seed_crop, zoom_crop, {}
     zoom_rows: list[Any] = []
     for index in range(0, len(zoom_thumbs), 2):
         row = zoom_thumbs[index : index + 2]
@@ -665,12 +681,12 @@ def _write_window_media(
     if not cv2.imwrite(str(zoom_path), cv2.vconcat(zoom_rows)):
         contact_path.unlink(missing_ok=True)
         crop_path.unlink(missing_ok=True)
-        return {}, ["zoom_sheet_failed"], seed_crop, zoom_crop
+        return {}, ["zoom_sheet_failed"], seed_crop, zoom_crop, {}
     if not _is_nonempty_file(contact_path) or not _is_nonempty_file(crop_path) or not _is_nonempty_file(zoom_path):
         contact_path.unlink(missing_ok=True)
         crop_path.unlink(missing_ok=True)
         zoom_path.unlink(missing_ok=True)
-        return {}, ["media_empty"], seed_crop, zoom_crop
+        return {}, ["media_empty"], seed_crop, zoom_crop, {}
 
     contact_rel = _relative_path(output_dir, contact_path)
     crop_rel = _relative_path(output_dir, crop_path)
@@ -678,6 +694,9 @@ def _write_window_media(
     contact_hash = _sha256_file(contact_path)
     crop_hash = _sha256_file(crop_path)
     zoom_hash = _sha256_file(zoom_path)
+    media_integrity, media_warnings = inspect_named_images(
+        {"contact_sheet": contact_path, "crop_sheet": crop_path, "zoom_sheet": zoom_path}
+    )
     return (
         {
             "contact_sheet": contact_rel,
@@ -688,10 +707,21 @@ def _write_window_media(
             "zoom_sheet_sha256": zoom_hash,
             "sha256": _sha256_text(f"{contact_hash}:{crop_hash}:{zoom_hash}"),
         },
-        [],
+        media_warnings,
         seed_crop,
         zoom_crop,
+        media_integrity,
     )
+
+
+def _has_unreviewable_media_warnings(media_warnings: list[str]) -> bool:
+    unreviewable_literals = {"media_empty", "no_sample_frames"}
+    unreviewable_suffixes = ("_failed", "_unreadable", "_low_information")
+    for warning in media_warnings:
+        text = str(warning)
+        if text in unreviewable_literals or text.endswith(unreviewable_suffixes):
+            return True
+    return False
 
 
 def _read_sampled_frames(input_video: Path, frame_indices: list[int]) -> list[tuple[int, Any]]:
@@ -814,6 +844,8 @@ def _window_metadata(
     *,
     video_info: dict[str, Any],
     media: dict[str, Any],
+    media_warnings: list[str],
+    media_integrity: dict[str, Any],
     seed_crop: dict[str, Any],
     zoom_crop: dict[str, Any],
 ) -> dict[str, Any]:
@@ -840,6 +872,8 @@ def _window_metadata(
             for key, value in media.items()
             if key in {"contact_sheet", "crop_sheet", "zoom_sheet", "contact_sheet_sha256", "crop_sheet_sha256", "zoom_sheet_sha256"}
         },
+        "media_warnings": media_warnings,
+        "media_integrity": media_integrity,
     }
 
 
