@@ -5,11 +5,37 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from football_tracking.ai_candidate_lifecycle import build_ai_candidate_lifecycle
+from football_tracking.ai_candidate_lifecycle import (
+    AI_CANDIDATE_LIFECYCLE_REPORT_NAME,
+    build_ai_candidate_lifecycle,
+    write_ai_candidate_lifecycle_report,
+)
 from football_tracking.final_artifact_manifest import finalize_ai_candidate, write_final_artifact_manifest
 
 
 class AiCandidateLifecycleTests(unittest.TestCase):
+    def test_writer_persists_stable_lifecycle_report(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+
+            first = write_ai_candidate_lifecycle_report(output_dir)
+            first_written = json.loads((output_dir / AI_CANDIDATE_LIFECYCLE_REPORT_NAME).read_text(encoding="utf-8"))
+            second = write_ai_candidate_lifecycle_report(output_dir)
+            second_written = json.loads((output_dir / AI_CANDIDATE_LIFECYCLE_REPORT_NAME).read_text(encoding="utf-8"))
+            built = build_ai_candidate_lifecycle(output_dir)
+
+        self.assertEqual(first, first_written)
+        self.assertEqual(second, second_written)
+        self.assertEqual(first, second)
+        self.assertEqual(built, second)
+
+    def test_writer_refuses_to_overwrite_lifecycle_input_artifact(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+
+            with self.assertRaisesRegex(ValueError, "must not overwrite"):
+                write_ai_candidate_lifecycle_report(output_dir, report_name="ai_improvement_report.json")
+
     def test_empty_output_returns_stable_empty_lifecycle(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:
             output_dir = Path(temp_name)

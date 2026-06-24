@@ -10,10 +10,19 @@ from football_tracking.final_artifact_manifest import FINAL_ARTIFACT_MANIFEST_NA
 
 SCHEMA_VERSION = "1.0"
 
+AI_CANDIDATE_LIFECYCLE_REPORT_NAME = "ai_candidate_lifecycle.json"
 AI_IMPROVEMENT_REPORT_NAME = "ai_improvement_report.json"
 APPROVED_ACTIONS_REPORT_NAME = "ai_improvement_approved_actions.json"
 QUALITY_GATE_REPORT_NAME = "ai_improvement_quality_gate.json"
 MISSING_BALL_RESOLUTION_REPORT_NAME = "missing_ball_resolution.json"
+_RESERVED_LIFECYCLE_OUTPUT_NAMES = {
+    AI_IMPROVEMENT_REPORT_NAME,
+    APPROVED_ACTIONS_REPORT_NAME,
+    REGISTRY_REPORT_NAME,
+    QUALITY_GATE_REPORT_NAME,
+    FINAL_ARTIFACT_MANIFEST_NAME,
+    MISSING_BALL_RESOLUTION_REPORT_NAME,
+}
 
 STAGES = (
     "review_only",
@@ -108,6 +117,20 @@ def build_ai_candidate_lifecycle(output_dir: Path) -> dict[str, Any]:
         "candidates": candidates,
         "artifacts": state["artifacts"],
     }
+
+
+def write_ai_candidate_lifecycle_report(
+    output_dir: Path,
+    *,
+    report_name: str = AI_CANDIDATE_LIFECYCLE_REPORT_NAME,
+) -> dict[str, Any]:
+    output_dir = Path(output_dir)
+    if report_name in _RESERVED_LIFECYCLE_OUTPUT_NAMES:
+        raise ValueError(f"report_name must not overwrite lifecycle input artifact: {report_name}")
+    output_dir.mkdir(parents=True, exist_ok=True)
+    report = build_ai_candidate_lifecycle(output_dir)
+    (output_dir / report_name).write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return report
 
 
 def _apply_ai_report(state: dict[str, Any], payload: Any) -> None:

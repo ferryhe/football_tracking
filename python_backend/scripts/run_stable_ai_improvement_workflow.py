@@ -15,14 +15,18 @@ PYTHON_BACKEND_ROOT = Path(__file__).resolve().parents[1]
 REPO_ROOT = PYTHON_BACKEND_ROOT.parent
 sys.path.insert(0, str(PYTHON_BACKEND_ROOT))
 
+from football_tracking.ai_candidate_lifecycle import (
+    AI_CANDIDATE_LIFECYCLE_REPORT_NAME,
+    write_ai_candidate_lifecycle_report,
+)
 from football_tracking.ai_improvement import write_ai_improvement_report
 from football_tracking.ai_improvement_quality_gate import (
     write_ai_improvement_quality_gate,
     write_track_hash_snapshot,
 )
-from football_tracking.ai_visual_review import write_ai_visual_review_report
 from football_tracking.ai_visual_localization import REPORT_NAME as AI_VISUAL_LOCALIZATION_REPORT_NAME
 from football_tracking.ai_visual_localization import write_ai_visual_localization_report
+from football_tracking.ai_visual_review import write_ai_visual_review_report
 from football_tracking.chunk_runner import run_high_recall_windows
 from football_tracking.config import load_config
 from football_tracking.final_artifact_manifest import FINALIZATION_OUTPUT_ROLES, write_final_artifact_manifest
@@ -265,6 +269,8 @@ def run_workflow(
         )
     )
     stages.append(quality_gate_stage)
+    lifecycle_stage, lifecycle_report = _timed_stage(lambda: _ai_candidate_lifecycle_stage(output_dir))
+    stages.append(lifecycle_stage)
     workflow_finished_at = _utc_now_iso()
 
     approval_selection = _approval_selection_summary(approved_payload, approved_actions_path=approved_actions_path)
@@ -307,6 +313,10 @@ def run_workflow(
             "summary": quality_gate["summary"],
             "checks": quality_gate.get("checks", {}),
             "artifact": QUALITY_GATE_REPORT_NAME,
+        },
+        "ai_candidate_lifecycle": {
+            "artifact": lifecycle_stage["artifact"],
+            "summary": lifecycle_report["summary"],
         },
         "strategy": _strategy(parallel_mode),
         "warnings": warnings,
@@ -462,6 +472,19 @@ def _quality_gate_stage(
             "summary": quality_gate["summary"],
         },
         quality_gate,
+    )
+
+
+def _ai_candidate_lifecycle_stage(output_dir: Path) -> tuple[dict[str, Any], dict[str, Any]]:
+    lifecycle_report = write_ai_candidate_lifecycle_report(output_dir)
+    return (
+        {
+            "name": "ai_candidate_lifecycle",
+            "status": "succeeded",
+            "artifact": AI_CANDIDATE_LIFECYCLE_REPORT_NAME,
+            "summary": lifecycle_report["summary"],
+        },
+        lifecycle_report,
     )
 
 
@@ -2361,6 +2384,7 @@ def _produced_artifacts(output_dir: Path, *, extra_names: list[str]) -> list[str
         MISSING_BALL_RESOLUTION_NAME,
         FINAL_ARTIFACT_MANIFEST_NAME,
         QUALITY_GATE_REPORT_NAME,
+        AI_CANDIDATE_LIFECYCLE_REPORT_NAME,
         "ai_candidate_registry.json",
         *extra_names,
     ]
