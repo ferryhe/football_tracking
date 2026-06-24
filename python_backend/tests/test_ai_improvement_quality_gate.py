@@ -153,8 +153,8 @@ class AiImprovementQualityGateTests(unittest.TestCase):
 
             payload = build_ai_improvement_quality_gate(output_dir, mode="real", approved_actions_path=approved_path)
 
-        self.assertNotEqual("pass", payload["summary"]["status"])
-        self.assertEqual("unavailable", payload["checks"]["candidate_comparisons_ok"]["status"])
+        self.assertEqual("fail", payload["summary"]["status"])
+        self.assertEqual("fail", payload["checks"]["candidate_comparisons_ok"]["status"])
         self.assertTrue(
             any(
                 report.get("artifact_status") == "selected_missing_ball_approval_missing_comparison"
@@ -181,7 +181,8 @@ class AiImprovementQualityGateTests(unittest.TestCase):
 
             payload = build_ai_improvement_quality_gate(output_dir, mode="real", approved_actions_path=approved_path)
 
-        self.assertEqual("unavailable", payload["checks"]["candidate_comparisons_ok"]["status"])
+        self.assertEqual("fail", payload["summary"]["status"])
+        self.assertEqual("fail", payload["checks"]["candidate_comparisons_ok"]["status"])
         self.assertTrue(
             any(
                 report.get("artifact_status") == "selected_missing_ball_approval_missing_comparison"
@@ -207,7 +208,8 @@ class AiImprovementQualityGateTests(unittest.TestCase):
 
             payload = build_ai_improvement_quality_gate(output_dir, mode="real", approved_actions_path=approved_path)
 
-        self.assertEqual("unavailable", payload["checks"]["candidate_comparisons_ok"]["status"])
+        self.assertEqual("fail", payload["summary"]["status"])
+        self.assertEqual("fail", payload["checks"]["candidate_comparisons_ok"]["status"])
         self.assertTrue(
             any(
                 report.get("artifact_status") == "selected_missing_ball_approval_missing_comparison"
@@ -255,7 +257,8 @@ class AiImprovementQualityGateTests(unittest.TestCase):
 
             payload = build_ai_improvement_quality_gate(output_dir, mode="real", approved_actions_path=approved_path)
 
-        self.assertEqual("unavailable", payload["checks"]["candidate_comparisons_ok"]["status"])
+        self.assertEqual("fail", payload["summary"]["status"])
+        self.assertEqual("fail", payload["checks"]["candidate_comparisons_ok"]["status"])
         self.assertTrue(
             any(
                 report.get("artifact_status") == "selected_noise_approval_missing_comparison"
@@ -301,7 +304,8 @@ class AiImprovementQualityGateTests(unittest.TestCase):
 
             payload = build_ai_improvement_quality_gate(output_dir, mode="real", approved_actions_path=approved_path)
 
-        self.assertEqual("unavailable", payload["checks"]["candidate_comparisons_ok"]["status"])
+        self.assertEqual("fail", payload["summary"]["status"])
+        self.assertEqual("fail", payload["checks"]["candidate_comparisons_ok"]["status"])
         self.assertTrue(
             any(
                 report.get("artifact_status") == "selected_noise_approval_missing_candidate_id"
@@ -330,7 +334,8 @@ class AiImprovementQualityGateTests(unittest.TestCase):
 
             payload = build_ai_improvement_quality_gate(output_dir, mode="real", approved_actions_path=approved_path)
 
-        self.assertEqual("unavailable", payload["checks"]["candidate_comparisons_ok"]["status"])
+        self.assertEqual("fail", payload["summary"]["status"])
+        self.assertEqual("fail", payload["checks"]["candidate_comparisons_ok"]["status"])
         self.assertTrue(
             any(
                 report.get("artifact_status") == "selected_follow_cam_approval_missing_comparison"
@@ -358,7 +363,8 @@ class AiImprovementQualityGateTests(unittest.TestCase):
 
             payload = build_ai_improvement_quality_gate(output_dir, mode="real", approved_actions_path=approved_path)
 
-        self.assertEqual("unavailable", payload["checks"]["candidate_comparisons_ok"]["status"])
+        self.assertEqual("fail", payload["summary"]["status"])
+        self.assertEqual("fail", payload["checks"]["candidate_comparisons_ok"]["status"])
         self.assertTrue(
             any(
                 report.get("artifact_status") == "selected_follow_cam_approval_missing_candidate_id"
@@ -388,6 +394,7 @@ class AiImprovementQualityGateTests(unittest.TestCase):
 
             payload = build_ai_improvement_quality_gate(output_dir, mode="real", approved_actions_path=approved_path)
 
+        self.assertEqual("fail", payload["summary"]["status"])
         self.assertEqual("fail", payload["checks"]["candidate_comparisons_ok"]["status"])
         self.assertTrue(
             any(
@@ -418,6 +425,7 @@ class AiImprovementQualityGateTests(unittest.TestCase):
 
             payload = build_ai_improvement_quality_gate(output_dir, mode="real", approved_actions_path=approved_path)
 
+        self.assertEqual("fail", payload["summary"]["status"])
         self.assertEqual("fail", payload["checks"]["candidate_comparisons_ok"]["status"])
         self.assertTrue(
             any(
@@ -1141,6 +1149,34 @@ class AiImprovementQualityGateTests(unittest.TestCase):
         self.assertEqual("unavailable", comparison_check["status"])
         self.assertEqual("candidate-missing", comparison_check["reports"][0]["candidate_id"])
         self.assertEqual("missing", comparison_check["reports"][0]["artifact_status"])
+
+    def test_artifact_only_candidate_comparison_unavailable_stays_non_failing(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_json(
+                output_dir / "final_ai_improvement_artifact_manifest.json",
+                {
+                    "candidate_outputs": [
+                        {
+                            "candidate_id": "candidate-missing",
+                            "problem_type": "missing_ball",
+                            "path": "ai_candidates/missing_ball/candidate-missing",
+                        }
+                    ],
+                    "comparison_reports": [
+                        {
+                            "path": "ai_candidates/missing_ball/candidate-missing/missing_ball_recovery_comparison.json",
+                            "candidate_id": "candidate-missing",
+                        }
+                    ],
+                },
+            )
+
+            payload = build_ai_improvement_quality_gate(output_dir, mode="artifact-only")
+
+        comparison_check = payload["checks"]["candidate_comparisons_ok"]
+        self.assertEqual("unavailable", comparison_check["status"])
+        self.assertEqual("warn", payload["summary"]["status"])
 
     def test_missing_ball_and_noise_finalized_outputs_visible_to_lifecycle_quality_gate_and_final_manifest(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:

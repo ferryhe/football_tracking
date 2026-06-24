@@ -21,7 +21,7 @@ from football_tracking.ai_improvement_quality_gate import (
 from football_tracking.ai_visual_review import write_ai_visual_review_report
 from football_tracking.chunk_runner import run_high_recall_windows
 from football_tracking.config import load_config
-from football_tracking.final_artifact_manifest import write_final_artifact_manifest
+from football_tracking.final_artifact_manifest import FINALIZATION_OUTPUT_ROLES, write_final_artifact_manifest
 from football_tracking.follow_cam_candidate_comparison import FOLLOW_CAM_CANDIDATE_COMPARISON_NAME
 from football_tracking.follow_cam_candidate_executor import execute_follow_cam_candidate
 from football_tracking.highlight_candidate_comparison import HIGHLIGHT_CANDIDATE_COMPARISON_NAME
@@ -45,6 +45,7 @@ NOISE_APPROVAL_ACTIONS = {"noise_filter_adjustment", "tighten_noise_filter", "re
 FOLLOW_CAM_APPROVAL_ACTIONS = {"adjust_follow_cam", "tracking_rerun_before_follow_cam"}
 HIGHLIGHT_APPROVAL_ACTIONS = {"adjust_highlight_window", "render_suggested_highlight"}
 SINGLE_ACTION_ID_ACTIONS = FOLLOW_CAM_APPROVAL_ACTIONS | HIGHLIGHT_APPROVAL_ACTIONS
+WORKFLOW_PROBLEM_TYPES = ("missing_ball", "noise", "follow_cam", "highlight")
 
 TEMPORAL_CHUNK_SETTINGS = {
     "enabled": True,
@@ -132,7 +133,6 @@ def run_workflow(
     )
     if approved_actions_path is not None and not approval_ids and approved_action_id is None:
         warnings.append("approved actions path supplied without approval ids; no approval action will execute by path alone.")
-    _discard_stale_workflow_artifacts(output_dir)
     stages.append(
         _ai_improvement_stage(
             output_dir=output_dir,
@@ -233,6 +233,14 @@ def run_workflow(
     quality_gate_stage["summary"] = quality_gate["summary"]
     _sync_final_manifest_quality_gate_status(output_dir, quality_gate["summary"])
 
+    approval_selection = _approval_selection_summary(approved_payload, approved_actions_path=approved_actions_path)
+    final_manifest = _read_json_if_available(output_dir / FINAL_ARTIFACT_MANIFEST_NAME)
+    workflow_summary = _workflow_summary(
+        approved_payload=approved_payload,
+        approval_selection=approval_selection,
+        final_manifest=final_manifest,
+        quality_gate_summary=quality_gate["summary"],
+    )
     produced_artifacts = _produced_artifacts(output_dir, extra_names=[report_name])
     report = {
         "schema_version": SCHEMA_VERSION,
@@ -248,9 +256,10 @@ def run_workflow(
             "approved_action_id": approved_action_id,
             "candidate_intent": candidate_intent,
             "approval_intent": approval_intent,
-            "approval_selection": _approval_selection_summary(approved_payload, approved_actions_path=approved_actions_path),
+            "approval_selection": approval_selection,
         },
         "stages": stages,
+        "workflow_summary": workflow_summary,
         "produced_artifacts": produced_artifacts,
         "quality_gate": {
             "mode": gate_mode,
@@ -1488,14 +1497,17 @@ def _final_artifact_manifest_stage(
         if isinstance(highlight_path, dict) and isinstance(highlight_path.get("errors"), list)
         else []
     )
-    pending_candidates = [
-        *pending_candidates,
-        *_executed_pending_candidate_summaries(
-            [*missing_ball_candidate_outputs, *noise_candidate_outputs, *follow_cam_candidate_outputs, *highlight_candidate_outputs],
-            [*missing_ball_comparison_reports, *noise_comparison_reports, *follow_cam_comparison_reports, *highlight_comparison_reports],
-        ),
-        *follow_cam_blocked_candidates,
-    ]
+    pending_candidates = _unique_json_dicts(
+        [
+            *existing_finalization["pending_candidates"],
+            *pending_candidates,
+            *_executed_pending_candidate_summaries(
+                [*missing_ball_candidate_outputs, *noise_candidate_outputs, *follow_cam_candidate_outputs, *highlight_candidate_outputs],
+                [*missing_ball_comparison_reports, *noise_comparison_reports, *follow_cam_comparison_reports, *highlight_comparison_reports],
+            ),
+            *follow_cam_blocked_candidates,
+        ]
+    )
     manifest = write_final_artifact_manifest(
         output_dir,
         baseline_output={"path": str(output_dir), "status": "baseline"},
@@ -1551,6 +1563,133 @@ def _sync_final_manifest_quality_gate_status(output_dir: Path, quality_gate_summ
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
+def _workflow_summary(
+    *,
+    approved_payload: dict[str, Any],
+    approval_selection: dict[str, Any],
+    final_manifest: dict[str, Any],
+    quality_gate_summary: dict[str, Any],
+) -> dict[str, Any]:
+    actions = approved_payload.get("approved_actions") if isinstance(approved_payload.get("approved_actions"), list) else []
+    selected_approval_ids = _approval_ids([action for action in actions if isinstance(action, dict)])
+    consumed_approval_ids = _string_values(approval_selection.get("consumed_ids"))
+    candidate_outputs = _dict_list(final_manifest.get("candidate_outputs"))
+    comparison_reports = _dict_list(final_manifest.get("comparison_reports"))
+    pending_finalization = _dict_list(final_manifest.get("pending_candidates"))
+    final_selected_artifacts = _dict_list(final_manifest.get("final_selected_artifacts"))
+    rejected_candidates = _dict_list(final_manifest.get("rejected_candidates"))
+    unsupported_candidates = _dict_list(final_manifest.get("unsupported_candidates"))
+    return {
+        "selected_approval_ids": selected_approval_ids,
+        "consumed_approval_ids": consumed_approval_ids,
+        "candidate_outputs": candidate_outputs,
+        "comparison_reports": comparison_reports,
+        "quality_gate_status": dict(quality_gate_summary),
+        "final_manifest": {
+            "artifact": FINAL_ARTIFACT_MANIFEST_NAME,
+            "summary": final_manifest.get("summary", {}) if isinstance(final_manifest.get("summary"), dict) else {},
+        },
+        "final_selected_artifacts": final_selected_artifacts,
+        "rejected_candidates": rejected_candidates,
+        "unsupported_candidates": unsupported_candidates,
+        "finalization_requirements": _finalization_requirements_summary(
+            actions=[action for action in actions if isinstance(action, dict)],
+            selected_approval_ids=selected_approval_ids,
+            consumed_approval_ids=consumed_approval_ids,
+            candidate_outputs=candidate_outputs,
+            comparison_reports=comparison_reports,
+            pending_finalization=pending_finalization,
+        ),
+    }
+
+
+def _finalization_requirements_summary(
+    *,
+    actions: list[dict[str, Any]],
+    selected_approval_ids: list[str],
+    consumed_approval_ids: list[str],
+    candidate_outputs: list[dict[str, Any]],
+    comparison_reports: list[dict[str, Any]],
+    pending_finalization: list[dict[str, Any]],
+) -> dict[str, Any]:
+    return {
+        "requires_explicit_finalization": bool(pending_finalization),
+        "pending_finalization_count": len(pending_finalization),
+        "pending_finalization": pending_finalization,
+        "output_roles_by_problem_type": _output_roles_by_problem_type(),
+        "by_problem_type": _workflow_counts_by_problem_type(
+            actions=actions,
+            selected_approval_ids=set(selected_approval_ids),
+            consumed_approval_ids=set(consumed_approval_ids),
+            candidate_outputs=candidate_outputs,
+            comparison_reports=comparison_reports,
+            pending_finalization=pending_finalization,
+        ),
+    }
+
+
+def _workflow_counts_by_problem_type(
+    *,
+    actions: list[dict[str, Any]],
+    selected_approval_ids: set[str],
+    consumed_approval_ids: set[str],
+    candidate_outputs: list[dict[str, Any]],
+    comparison_reports: list[dict[str, Any]],
+    pending_finalization: list[dict[str, Any]],
+) -> dict[str, dict[str, int]]:
+    counts = {
+        problem_type: {
+            "selected_approval_count": 0,
+            "consumed_approval_count": 0,
+            "candidate_output_count": 0,
+            "comparison_report_count": 0,
+            "pending_finalization_count": 0,
+        }
+        for problem_type in WORKFLOW_PROBLEM_TYPES
+    }
+    for action in actions:
+        problem_type = _action_problem_type(action)
+        if problem_type not in counts:
+            continue
+        approval_id = _action_approval_id(action)
+        if approval_id in selected_approval_ids:
+            counts[problem_type]["selected_approval_count"] += 1
+        if approval_id in consumed_approval_ids:
+            counts[problem_type]["consumed_approval_count"] += 1
+    for item in candidate_outputs:
+        problem_type = _first_string(item, ("problem_type",))
+        if problem_type in counts:
+            counts[problem_type]["candidate_output_count"] += 1
+    for item in comparison_reports:
+        problem_type = _first_string(item, ("problem_type",))
+        if problem_type in counts:
+            counts[problem_type]["comparison_report_count"] += 1
+    for item in pending_finalization:
+        problem_type = _first_string(item, ("problem_type",))
+        if problem_type in counts:
+            counts[problem_type]["pending_finalization_count"] += 1
+    return counts
+
+
+def _output_roles_by_problem_type() -> dict[str, str]:
+    roles: dict[str, str] = {}
+    for role, spec in FINALIZATION_OUTPUT_ROLES.items():
+        problem_type = spec.get("problem_type") if isinstance(spec, dict) else None
+        if isinstance(problem_type, str) and problem_type in WORKFLOW_PROBLEM_TYPES:
+            roles[problem_type] = role
+    return {problem_type: roles[problem_type] for problem_type in WORKFLOW_PROBLEM_TYPES if problem_type in roles}
+
+
+def _action_problem_type(action: dict[str, Any]) -> str:
+    explicit = _first_string(action, ("problem_type",))
+    if explicit in WORKFLOW_PROBLEM_TYPES:
+        return explicit
+    approved_action = str(action.get("approved_action") or "")
+    if approved_action in MISSING_BALL_APPROVAL_ACTIONS or _is_not_visible_noop_action(action):
+        return "missing_ball"
+    return _problem_type_for_action(approved_action)
+
+
 def _strategy(parallel_mode: str) -> dict[str, Any]:
     temporal_enabled = parallel_mode == "temporal"
     return {
@@ -1601,6 +1740,7 @@ def _existing_finalization_context(output_dir: Path) -> dict[str, list[dict[str,
         "final_selected_artifacts": _dict_list(payload.get("final_selected_artifacts")),
         "consumed_approvals": _dict_list(payload.get("consumed_approvals")),
         "comparison_reports": _dict_list(payload.get("comparison_reports")),
+        "pending_candidates": _dict_list(payload.get("pending_candidates")),
         "resolved_noop_candidates": _dict_list(payload.get("resolved_noop_candidates")),
     }
 
@@ -1990,11 +2130,6 @@ def _read_json_if_available(path: Path) -> dict[str, Any]:
     except (OSError, json.JSONDecodeError, UnicodeDecodeError):
         return {}
     return payload if isinstance(payload, dict) else {}
-
-
-def _discard_stale_workflow_artifacts(output_dir: Path) -> None:
-    for name in (FINAL_ARTIFACT_MANIFEST_NAME,):
-        _discard_artifact(output_dir / name)
 
 
 def _discard_artifact(path: Path) -> None:
