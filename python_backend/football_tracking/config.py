@@ -213,6 +213,11 @@ class FollowCamConfig:
     lost_hold_frames: int = 10
     lost_recenter_frames: int = 28
     recenter_smoothing: float = 0.08
+    lost_action_hold_enabled: bool = True
+    lost_action_hold_frames: int = 300
+    lost_action_hold_edge_margin_ratio: float = 0.18
+    lost_action_hold_min_confidence: float = 0.25
+    lost_action_hold_smoothing: float = 0.04
     draw_ball_marker: bool = True
     draw_frame_text: bool = True
     action_center_enabled: bool = False
@@ -224,6 +229,13 @@ class FollowCamConfig:
         if normalized_profile not in FOLLOW_CAM_PROFILE_PRESETS:
             raise ValueError(f"Unknown follow_cam profile: {self.profile}")
         self.profile = normalized_profile
+        self.lost_action_hold_frames = max(0, int(self.lost_action_hold_frames))
+        self.lost_action_hold_edge_margin_ratio = max(
+            0.0,
+            min(0.5, float(self.lost_action_hold_edge_margin_ratio)),
+        )
+        self.lost_action_hold_min_confidence = max(0.0, min(1.0, float(self.lost_action_hold_min_confidence)))
+        self.lost_action_hold_smoothing = max(0.0, min(1.0, float(self.lost_action_hold_smoothing)))
         self.action_center_player_weight = max(0.0, min(1.0, float(self.action_center_player_weight)))
 
 
@@ -842,6 +854,11 @@ def _to_follow_cam(raw_follow_cam: Any, base_dir: Path) -> FollowCamConfig:
         lost_hold_frames=int(raw_follow_cam.get("lost_hold_frames", 10)),
         lost_recenter_frames=int(raw_follow_cam.get("lost_recenter_frames", 28)),
         recenter_smoothing=float(raw_follow_cam.get("recenter_smoothing", 0.08)),
+        lost_action_hold_enabled=bool(raw_follow_cam.get("lost_action_hold_enabled", True)),
+        lost_action_hold_frames=int(raw_follow_cam.get("lost_action_hold_frames", 300)),
+        lost_action_hold_edge_margin_ratio=float(raw_follow_cam.get("lost_action_hold_edge_margin_ratio", 0.18)),
+        lost_action_hold_min_confidence=float(raw_follow_cam.get("lost_action_hold_min_confidence", 0.25)),
+        lost_action_hold_smoothing=float(raw_follow_cam.get("lost_action_hold_smoothing", 0.04)),
         draw_ball_marker=bool(raw_follow_cam.get("draw_ball_marker", True)),
         draw_frame_text=bool(raw_follow_cam.get("draw_frame_text", True)),
         action_center_enabled=action_center_enabled,

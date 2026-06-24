@@ -84,6 +84,10 @@ class FollowCamTests(unittest.TestCase):
                     "follow_cam": {
                         "profile": "tactical",
                         "max_crop_height": 1500,
+                        "lost_action_hold_frames": 120,
+                        "lost_action_hold_edge_margin_ratio": 0.20,
+                        "lost_action_hold_min_confidence": 0.33,
+                        "lost_action_hold_smoothing": 0.06,
                         "action_center": {
                             "enabled": True,
                             "player_tracks_path": "./outputs/players.json",
@@ -99,6 +103,10 @@ class FollowCamTests(unittest.TestCase):
         self.assertEqual(player_tracks_path.resolve(), config.follow_cam.action_center_player_tracks_path)
         self.assertGreater(config.follow_cam.min_crop_height, FollowCamConfig().min_crop_height)
         self.assertEqual(1500, config.follow_cam.max_crop_height)
+        self.assertEqual(120, config.follow_cam.lost_action_hold_frames)
+        self.assertEqual(0.20, config.follow_cam.lost_action_hold_edge_margin_ratio)
+        self.assertEqual(0.33, config.follow_cam.lost_action_hold_min_confidence)
+        self.assertEqual(0.06, config.follow_cam.lost_action_hold_smoothing)
         self.assertEqual("custom", FollowCamConfig().profile)
         self.assertFalse(FollowCamConfig().action_center_enabled)
 
@@ -340,6 +348,319 @@ class FollowCamTests(unittest.TestCase):
         self.assertEqual(1, entries[0].action_center_player_count)
         self.assertGreater(entries[0].action_center_x, entries[0].track_x)
         self.assertGreater(entries[0].action_center_y, entries[0].track_y)
+
+    def test_lost_tail_after_right_edge_action_holds_camera_target(self) -> None:
+        generator = FollowCamGenerator(
+            self.make_app_config(
+                FollowCamConfig(
+                    target_width=640,
+                    target_height=360,
+                    min_crop_height=360,
+                    max_crop_height=360,
+                    lost_recenter_frames=2,
+                    recenter_smoothing=1.0,
+                    draw_ball_marker=False,
+                    draw_frame_text=False,
+                )
+            )
+        )
+        frames = [
+            FollowCamFrame(frame_index, 1180.0, 650.0, 0.90, OutputStatus.DETECTED)
+            for frame_index in range(100, 106)
+        ]
+        frames.extend(
+            FollowCamFrame(frame_index, None, None, 0.0, OutputStatus.LOST)
+            for frame_index in range(106, 112)
+        )
+
+        entries = generator._render_follow_cam(
+            capture=DummyCapture(frame_count=len(frames)),
+            writer=DummyWriter(),
+            frames=frames,
+            source_width=1280,
+            source_height=720,
+        )
+
+        lost_entries = [entry for entry in entries if entry.source_status == OutputStatus.LOST.value]
+        self.assertGreater(lost_entries[-1].center_x, 900.0)
+        self.assertIn("action_hold", {entry.pan_mode for entry in lost_entries})
+
+    def test_lost_tail_action_hold_uses_glide_pan_cap(self) -> None:
+        generator = FollowCamGenerator(
+            self.make_app_config(
+                FollowCamConfig(
+                    glide_max_pan_per_frame_x=12.0,
+                    glide_max_pan_per_frame_y=8.0,
+                    lost_action_hold_smoothing=1.0,
+                )
+            )
+        )
+
+        next_center = generator._move_towards_action_hold((100.0, 100.0), (1000.0, 600.0))
+
+        self.assertEqual((112.0, 108.0), next_center)
+
+    def test_lost_tail_after_midfield_action_recenters_to_home(self) -> None:
+        generator = FollowCamGenerator(
+            self.make_app_config(
+                FollowCamConfig(
+                    target_width=640,
+                    target_height=360,
+                    min_crop_height=360,
+                    max_crop_height=360,
+                    lost_recenter_frames=2,
+                    recenter_smoothing=1.0,
+                    draw_ball_marker=False,
+                    draw_frame_text=False,
+                )
+            )
+        )
+        frames = [
+            FollowCamFrame(frame_index, 500.0, 360.0, 0.90, OutputStatus.DETECTED)
+            for frame_index in range(100, 106)
+        ]
+        frames.extend(
+            FollowCamFrame(frame_index, None, None, 0.0, OutputStatus.LOST)
+            for frame_index in range(106, 112)
+        )
+
+        entries = generator._render_follow_cam(
+            capture=DummyCapture(frame_count=len(frames)),
+            writer=DummyWriter(),
+            frames=frames,
+            source_width=1280,
+            source_height=720,
+        )
+
+        self.assertAlmostEqual(640.0, entries[-1].center_x)
+        self.assertNotIn("action_hold", {entry.pan_mode for entry in entries})
+
+    def test_reliable_midfield_detection_clears_lost_tail_action_hold_seed(self) -> None:
+        generator = FollowCamGenerator(
+            self.make_app_config(
+                FollowCamConfig(
+                    target_width=640,
+                    target_height=360,
+                    min_crop_height=360,
+                    max_crop_height=360,
+                    lost_recenter_frames=2,
+                    recenter_smoothing=1.0,
+                    draw_ball_marker=False,
+                    draw_frame_text=False,
+                )
+            )
+        )
+        frames = [
+            FollowCamFrame(frame_index, 1180.0, 650.0, 0.90, OutputStatus.DETECTED)
+            for frame_index in range(100, 103)
+        ]
+        frames.extend(
+            FollowCamFrame(frame_index, 640.0, 360.0, 0.90, OutputStatus.DETECTED)
+            for frame_index in range(103, 112)
+        )
+        frames.extend(
+            FollowCamFrame(frame_index, None, None, 0.0, OutputStatus.LOST)
+            for frame_index in range(112, 118)
+        )
+
+        entries = generator._render_follow_cam(
+            capture=DummyCapture(frame_count=len(frames)),
+            writer=DummyWriter(),
+            frames=frames,
+            source_width=1280,
+            source_height=720,
+        )
+
+        lost_entries = [entry for entry in entries if entry.source_status == OutputStatus.LOST.value]
+        self.assertNotIn("action_hold", {entry.pan_mode for entry in lost_entries})
+        self.assertAlmostEqual(640.0, entries[-1].center_x)
+
+    def test_bottom_center_detection_does_not_seed_lost_tail_action_hold(self) -> None:
+        generator = FollowCamGenerator(
+            self.make_app_config(
+                FollowCamConfig(
+                    target_width=640,
+                    target_height=360,
+                    min_crop_height=360,
+                    max_crop_height=360,
+                    lost_recenter_frames=2,
+                    recenter_smoothing=1.0,
+                    draw_ball_marker=False,
+                    draw_frame_text=False,
+                )
+            )
+        )
+        frames = [
+            FollowCamFrame(frame_index, 640.0, 650.0, 0.90, OutputStatus.DETECTED)
+            for frame_index in range(100, 106)
+        ]
+        frames.extend(
+            FollowCamFrame(frame_index, None, None, 0.0, OutputStatus.LOST)
+            for frame_index in range(106, 112)
+        )
+
+        entries = generator._render_follow_cam(
+            capture=DummyCapture(frame_count=len(frames)),
+            writer=DummyWriter(),
+            frames=frames,
+            source_width=1280,
+            source_height=720,
+        )
+
+        self.assertAlmostEqual(640.0, entries[-1].center_x)
+        self.assertNotIn("action_hold", {entry.pan_mode for entry in entries})
+
+    def test_lost_tail_action_hold_expires_and_recenters(self) -> None:
+        generator = FollowCamGenerator(
+            self.make_app_config(
+                FollowCamConfig(
+                    target_width=640,
+                    target_height=360,
+                    min_crop_height=360,
+                    max_crop_height=360,
+                    lost_recenter_frames=2,
+                    lost_action_hold_frames=3,
+                    recenter_smoothing=1.0,
+                    draw_ball_marker=False,
+                    draw_frame_text=False,
+                )
+            )
+        )
+        frames = [
+            FollowCamFrame(frame_index, 1180.0, 650.0, 0.90, OutputStatus.DETECTED)
+            for frame_index in range(100, 103)
+        ]
+        frames.extend(
+            FollowCamFrame(frame_index, None, None, 0.0, OutputStatus.LOST)
+            for frame_index in range(103, 109)
+        )
+
+        entries = generator._render_follow_cam(
+            capture=DummyCapture(frame_count=len(frames)),
+            writer=DummyWriter(),
+            frames=frames,
+            source_width=1280,
+            source_height=720,
+        )
+
+        lost_entries = [entry for entry in entries if entry.source_status == OutputStatus.LOST.value]
+        self.assertIn("action_hold", {entry.pan_mode for entry in lost_entries})
+        self.assertEqual("hold", lost_entries[-1].pan_mode)
+        self.assertAlmostEqual(640.0, entries[-1].center_x)
+
+    def test_low_confidence_predicted_edge_point_does_not_replace_lost_action_hold_seed(self) -> None:
+        generator = FollowCamGenerator(
+            self.make_app_config(
+                FollowCamConfig(
+                    target_width=640,
+                    target_height=360,
+                    min_crop_height=360,
+                    max_crop_height=360,
+                    lost_recenter_frames=2,
+                    lost_action_hold_frames=30,
+                    lost_action_hold_min_confidence=0.25,
+                    recenter_smoothing=1.0,
+                    draw_ball_marker=False,
+                    draw_frame_text=False,
+                )
+            )
+        )
+        frames = [
+            FollowCamFrame(frame_index, 1180.0, 650.0, 0.90, OutputStatus.DETECTED)
+            for frame_index in range(100, 106)
+        ]
+        frames.extend(
+            [
+                FollowCamFrame(106, 0.0, 650.0, 0.08, OutputStatus.PREDICTED),
+                FollowCamFrame(107, None, None, 0.0, OutputStatus.LOST),
+                FollowCamFrame(108, None, None, 0.0, OutputStatus.LOST),
+                FollowCamFrame(109, None, None, 0.0, OutputStatus.LOST),
+                FollowCamFrame(110, None, None, 0.0, OutputStatus.LOST),
+                FollowCamFrame(111, None, None, 0.0, OutputStatus.LOST),
+            ]
+        )
+
+        entries = generator._render_follow_cam(
+            capture=DummyCapture(frame_count=len(frames)),
+            writer=DummyWriter(),
+            frames=frames,
+            source_width=1280,
+            source_height=720,
+        )
+
+        lost_entries = [entry for entry in entries if entry.source_status == OutputStatus.LOST.value]
+        self.assertTrue(all(entry.action_center_x == 1180.0 for entry in lost_entries))
+        self.assertGreater(lost_entries[-1].center_x, 900.0)
+
+    def test_low_confidence_predicted_edge_point_does_not_draw_marker(self) -> None:
+        generator = FollowCamGenerator(
+            self.make_app_config(
+                FollowCamConfig(
+                    target_width=640,
+                    target_height=360,
+                    min_crop_height=720,
+                    max_crop_height=720,
+                    lost_action_hold_min_confidence=0.25,
+                    draw_ball_marker=True,
+                    draw_frame_text=False,
+                )
+            )
+        )
+        writer = DummyWriter()
+
+        entries = generator._render_follow_cam(
+            capture=DummyCapture(frame_count=1, width=1280, height=720),
+            writer=writer,
+            frames=[
+                FollowCamFrame(100, 0.0, 360.0, 0.08, OutputStatus.PREDICTED),
+            ],
+            source_width=1280,
+            source_height=720,
+        )
+
+        yellow_pixels = np.count_nonzero(
+            (writer.frames[0][:, :, 0] < 40)
+            & (writer.frames[0][:, :, 1] > 200)
+            & (writer.frames[0][:, :, 2] > 200)
+        )
+        self.assertEqual(0, yellow_pixels)
+        self.assertEqual("missing_track", entries[0].action_center_source)
+
+    def test_lost_tail_action_hold_can_be_disabled(self) -> None:
+        generator = FollowCamGenerator(
+            self.make_app_config(
+                FollowCamConfig(
+                    target_width=640,
+                    target_height=360,
+                    min_crop_height=360,
+                    max_crop_height=360,
+                    lost_recenter_frames=2,
+                    lost_action_hold_enabled=False,
+                    recenter_smoothing=1.0,
+                    draw_ball_marker=False,
+                    draw_frame_text=False,
+                )
+            )
+        )
+        frames = [
+            FollowCamFrame(frame_index, 1180.0, 650.0, 0.90, OutputStatus.DETECTED)
+            for frame_index in range(100, 106)
+        ]
+        frames.extend(
+            FollowCamFrame(frame_index, None, None, 0.0, OutputStatus.LOST)
+            for frame_index in range(106, 112)
+        )
+
+        entries = generator._render_follow_cam(
+            capture=DummyCapture(frame_count=len(frames)),
+            writer=DummyWriter(),
+            frames=frames,
+            source_width=1280,
+            source_height=720,
+        )
+
+        self.assertAlmostEqual(640.0, entries[-1].center_x)
+        self.assertNotIn("action_hold", {entry.pan_mode for entry in entries})
 
     def test_action_center_does_not_auto_load_stale_player_tracks(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:
