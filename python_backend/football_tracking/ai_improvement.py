@@ -1616,11 +1616,23 @@ def _validate_improvement(
         item["local_search_roi"] = local_search_roi
     if isinstance(raw.get("suggested_window"), dict):
         item["suggested_window"] = _frame_window(raw["suggested_window"], f"Improvement {index} suggested_window")
-    if isinstance(raw.get("clip_action"), str):
-        clip_action = raw["clip_action"].strip()
-        if clip_action not in AI_CLIP_ACTIONS:
-            raise ValueError(f"Improvement {index} clip_action is unsupported: {clip_action}")
-        item["clip_action"] = clip_action
+    if "clip_action" in raw:
+        raw_clip_action = raw.get("clip_action")
+        if isinstance(raw_clip_action, str):
+            clip_action = raw_clip_action.strip()
+            if clip_action in AI_CLIP_ACTIONS:
+                item["clip_action"] = clip_action
+            else:
+                item["original_clip_action"] = clip_action
+                patch_warnings.extend(
+                    _handle_invalid_clip_action(item, index, public_recommended_action, "unsupported", clip_action)
+                )
+        else:
+            clip_action_type = type(raw_clip_action).__name__
+            item["original_clip_action_type"] = clip_action_type
+            patch_warnings.extend(
+                _handle_invalid_clip_action(item, index, public_recommended_action, "non-string", clip_action_type)
+            )
     if isinstance(raw.get("follow_cam_rerender_plan"), dict):
         item["follow_cam_rerender_plan"] = dict(raw["follow_cam_rerender_plan"])
     if isinstance(raw.get("expected_artifact"), (dict, str)):
@@ -1637,6 +1649,33 @@ def _validate_improvement(
     _copy_uncovered_subwindow_explanation(raw, item, index)
     _validate_action_specific_improvement(item, index, context=context)
     return item, patch_warnings
+
+
+def _handle_invalid_clip_action(
+    item: dict[str, Any],
+    index: int,
+    recommended_action: str,
+    reason: str,
+    detail: str,
+) -> list[str]:
+    if recommended_action in {"adjust_highlight_window", "render_suggested_highlight"}:
+        _validate_highlight_required_fields_except_clip(item, index, recommended_action)
+        item.setdefault("legacy_recommended_action", recommended_action)
+        item["recommended_action"] = "manual_review"
+        return [
+            f"Improvement {index} {reason} clip_action downgraded to manual_review: {detail}"
+        ]
+    return [
+        f"Improvement {index} {reason} clip_action ignored for {recommended_action}: {detail}"
+    ]
+
+
+def _validate_highlight_required_fields_except_clip(item: dict[str, Any], index: int, action: str) -> None:
+    if not isinstance(item.get("candidate_id"), str) or not str(item.get("candidate_id")).strip():
+        raise ValueError(f"Improvement {index} {action} requires candidate_id.")
+    _highlight_event_candidate_id(item)
+    if "suggested_window" not in item:
+        raise ValueError(f"Improvement {index} {action} requires suggested_window.")
 
 
 def _validate_action_specific_improvement(

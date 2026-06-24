@@ -1078,6 +1078,125 @@ class AiImprovementTests(unittest.TestCase):
             if action == "targeted_rerun":
                 self.assertEqual("targeted_rerun", report["improvements"][0]["legacy_recommended_action"])
 
+    def test_highlight_action_with_unsupported_clip_action_is_downgraded_to_manual_review(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_minimal_artifacts(output_dir)
+            payload = _valid_improvement_for_action(
+                "adjust_highlight_window",
+                candidate_id="highlight_candidate_001",
+            )
+            payload.update(
+                {
+                    "problem_type": "highlight",
+                    "clip_action": "keep_window_but_flag_tracking_issue",
+                    "expected_artifact": {"name": "highlight.mp4", "role": "candidate"},
+                    "comparison_criteria": {"report": "highlight_candidate_comparison.json"},
+                }
+            )
+            client = _FakeImprovementClient({"summary": {"status": "needs_rerun"}, "improvements": [payload]})
+
+            report = build_ai_improvement_report(
+                output_dir,
+                client=client,
+                candidate_intent="prepare_approved_candidates",
+            )
+
+        self.assertNotEqual("error", report["summary"]["status"], report.get("error"))
+        improvement = report["improvements"][0]
+        self.assertEqual("manual_review", improvement["recommended_action"])
+        self.assertEqual("adjust_highlight_window", improvement["legacy_recommended_action"])
+        self.assertFalse(improvement["executable"])
+        self.assertNotIn("clip_action", improvement)
+        self.assertEqual("keep_window_but_flag_tracking_issue", improvement["original_clip_action"])
+        self.assertTrue(any("unsupported clip_action" in warning for warning in report["warnings"]))
+        self.assertEqual(0, report["summary"]["executable_candidate_count"])
+
+    def test_highlight_action_with_non_string_clip_action_is_downgraded_to_manual_review(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_minimal_artifacts(output_dir)
+            payload = _valid_improvement_for_action(
+                "render_suggested_highlight",
+                candidate_id="highlight_candidate_001",
+            )
+            payload.update(
+                {
+                    "problem_type": "highlight",
+                    "clip_action": {"action": "extend_tail"},
+                    "expected_artifact": {"name": "highlight.mp4", "role": "candidate"},
+                    "comparison_criteria": {"report": "highlight_candidate_comparison.json"},
+                }
+            )
+            client = _FakeImprovementClient({"summary": {"status": "needs_rerun"}, "improvements": [payload]})
+
+            report = build_ai_improvement_report(
+                output_dir,
+                client=client,
+                candidate_intent="prepare_approved_candidates",
+            )
+
+        self.assertNotEqual("error", report["summary"]["status"], report.get("error"))
+        improvement = report["improvements"][0]
+        self.assertEqual("manual_review", improvement["recommended_action"])
+        self.assertEqual("render_suggested_highlight", improvement["legacy_recommended_action"])
+        self.assertFalse(improvement["executable"])
+        self.assertNotIn("clip_action", improvement)
+        self.assertEqual("dict", improvement["original_clip_action_type"])
+        self.assertTrue(any("non-string clip_action" in warning for warning in report["warnings"]))
+        self.assertEqual(0, report["summary"]["executable_candidate_count"])
+
+    def test_non_highlight_actions_ignore_invalid_clip_action_with_warning(self) -> None:
+        cases = (
+            ("manual_review", _valid_improvement_for_action("manual_review"), "manual_review"),
+            ("targeted_rerun", _candidate_ready_targeted_rerun(), "rerun_ball_window"),
+        )
+        for label, payload, expected_action in cases:
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as temp_name:
+                output_dir = Path(temp_name)
+                _write_minimal_artifacts(output_dir)
+                payload["clip_action"] = "keep_window_but_flag_tracking_issue"
+                client = _FakeImprovementClient({"summary": {"status": "needs_rerun"}, "improvements": [payload]})
+
+                report = build_ai_improvement_report(output_dir, client=client)
+
+            self.assertNotEqual("error", report["summary"]["status"], report.get("error"))
+            improvement = report["improvements"][0]
+            self.assertEqual(expected_action, improvement["recommended_action"])
+            self.assertNotIn("clip_action", improvement)
+            self.assertNotIn(improvement["recommended_action"], {"adjust_highlight_window", "render_suggested_highlight"})
+            self.assertTrue(any("unsupported clip_action" in warning for warning in report["warnings"]))
+
+    def test_supported_highlight_clip_action_can_remain_executable(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_minimal_artifacts(output_dir)
+            payload = _valid_improvement_for_action(
+                "render_suggested_highlight",
+                candidate_id="highlight_candidate_001",
+            )
+            payload.update(
+                {
+                    "problem_type": "highlight",
+                    "expected_artifact": {"name": "highlight.mp4", "role": "candidate"},
+                    "comparison_criteria": {"report": "highlight_candidate_comparison.json"},
+                }
+            )
+            client = _FakeImprovementClient({"summary": {"status": "needs_rerun"}, "improvements": [payload]})
+
+            report = build_ai_improvement_report(
+                output_dir,
+                client=client,
+                candidate_intent="prepare_approved_candidates",
+            )
+
+        improvement = report["improvements"][0]
+        self.assertEqual("render_suggested_highlight", improvement["recommended_action"])
+        self.assertNotIn("legacy_recommended_action", improvement)
+        self.assertEqual("extend_tail", improvement["clip_action"])
+        self.assertTrue(improvement["executable"])
+        self.assertEqual(1, report["summary"]["executable_candidate_count"])
+
     def test_write_ai_improvement_report_handles_missing_artifacts(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:
             output_dir = Path(temp_name)
