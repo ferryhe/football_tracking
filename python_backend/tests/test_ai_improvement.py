@@ -209,6 +209,76 @@ class AiImprovementTests(unittest.TestCase):
         self.assertFalse(improvement["executable"])
         self.assertTrue(any("missing recommended_action" in warning for warning in report["warnings"]))
 
+    def test_blank_recommended_action_values_are_downgraded_to_manual_review(self) -> None:
+        for blank_value in (None, "", "   \t"):
+            with self.subTest(blank_value=blank_value):
+                with tempfile.TemporaryDirectory() as temp_name:
+                    output_dir = Path(temp_name)
+                    _write_minimal_artifacts(output_dir)
+                    client = _FakeImprovementClient(
+                        {
+                            "summary": {"status": "needs_rerun", "primary_issue": "tracking"},
+                            "improvements": [
+                                {
+                                    "id": "imp_blank_action",
+                                    "priority": "P2",
+                                    "area": "tracking",
+                                    "failure_tags": ["unknown"],
+                                    "root_cause_module": "unknown",
+                                    "diagnosis": "The item is otherwise shaped but supplied a blank action.",
+                                    "recommended_action": blank_value,
+                                    "evidence": ["blank action fixture"],
+                                    "confidence": 0.48,
+                                }
+                            ],
+                        }
+                    )
+
+                    report = build_ai_improvement_report(output_dir, client=client)
+
+                improvement = report["improvements"][0]
+                self.assertEqual("needs_rerun", report["summary"]["status"])
+                self.assertEqual("manual_review", improvement["recommended_action"])
+                self.assertFalse(improvement["executable"])
+                self.assertTrue(any("blank recommended_action" in warning for warning in report["warnings"]))
+
+    def test_blank_missing_ball_action_with_traceable_packet_stays_manual_review(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_minimal_artifacts(output_dir)
+            client = _FakeImprovementClient(
+                {
+                    "summary": {"status": "needs_rerun", "primary_issue": "tracking"},
+                    "improvements": [
+                        {
+                            "id": "imp_blank_locator",
+                            "priority": "P0",
+                            "area": "tracking",
+                            "failure_tags": ["ball_lost"],
+                            "root_cause_module": "reacquisition",
+                            "diagnosis": "The packet has missing-ball evidence but no requested action.",
+                            "recommended_action": "  ",
+                            "source_packet_id": "packet_001",
+                            "evidence": [{"source_packet_id": "packet_001"}],
+                            "confidence": 0.72,
+                        }
+                    ],
+                }
+            )
+
+            report = build_ai_improvement_report(output_dir, client=client)
+
+        improvement = report["improvements"][0]
+        self.assertEqual("needs_rerun", report["summary"]["status"])
+        self.assertEqual("manual_review", improvement["recommended_action"])
+        self.assertNotEqual("request_targeted_localization", improvement["recommended_action"])
+        self.assertNotIn("requested_action", improvement)
+        self.assertNotIn("local_search_roi", improvement)
+        self.assertNotIn("likely_ball_region", improvement)
+        self.assertFalse(improvement["executable"])
+        self.assertEqual(0, report["summary"]["executable_candidate_count"])
+        self.assertTrue(any("blank recommended_action" in warning for warning in report["warnings"]))
+
     def test_missing_required_field_other_than_recommended_action_remains_error(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:
             output_dir = Path(temp_name)
