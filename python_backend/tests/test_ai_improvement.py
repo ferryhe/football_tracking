@@ -242,6 +242,124 @@ class AiImprovementTests(unittest.TestCase):
                 self.assertFalse(improvement["executable"])
                 self.assertTrue(any("blank recommended_action" in warning for warning in report["warnings"]))
 
+    def test_non_string_recommended_action_values_are_downgraded_to_manual_review(self) -> None:
+        invalid_actions: tuple[tuple[object, str], ...] = (
+            ({"action": "targeted_rerun"}, "dict"),
+            (["targeted_rerun"], "list"),
+            (7, "int"),
+            (3.5, "float"),
+            (True, "bool"),
+        )
+        for action_value, expected_type in invalid_actions:
+            with self.subTest(action_value=action_value):
+                with tempfile.TemporaryDirectory() as temp_name:
+                    output_dir = Path(temp_name)
+                    _write_minimal_artifacts(output_dir)
+                    client = _FakeImprovementClient(
+                        {
+                            "summary": {"status": "needs_rerun", "primary_issue": "tracking"},
+                            "improvements": [
+                                {
+                                    "id": "imp_nonstring_action",
+                                    "priority": "P2",
+                                    "area": "tracking",
+                                    "failure_tags": ["unknown"],
+                                    "root_cause_module": "unknown",
+                                    "diagnosis": "The item supplied a non-string action value.",
+                                    "recommended_action": action_value,
+                                    "evidence": ["non-string action fixture"],
+                                    "confidence": 0.48,
+                                }
+                            ],
+                        }
+                    )
+
+                    report = build_ai_improvement_report(output_dir, client=client)
+
+                improvement = report["improvements"][0]
+                warning_text = "\n".join(report["warnings"])
+                self.assertEqual("needs_rerun", report["summary"]["status"])
+                self.assertEqual("manual_review", improvement["recommended_action"])
+                self.assertFalse(improvement["executable"])
+                self.assertEqual(0, report["summary"]["executable_candidate_count"])
+                self.assertNotIn("original_recommended_action", improvement)
+                self.assertEqual(expected_type, improvement["original_recommended_action_type"])
+                self.assertIn("non-string recommended_action", warning_text)
+                self.assertIn(expected_type, warning_text)
+
+    def test_non_string_missing_ball_action_with_traceable_packet_stays_manual_review(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_minimal_artifacts(output_dir)
+            client = _FakeImprovementClient(
+                {
+                    "summary": {"status": "needs_rerun", "primary_issue": "tracking"},
+                    "improvements": [
+                        {
+                            "id": "imp_nonstring_locator",
+                            "priority": "P0",
+                            "area": "tracking",
+                            "failure_tags": ["ball_lost"],
+                            "root_cause_module": "reacquisition",
+                            "diagnosis": "The packet has missing-ball evidence but a non-string action.",
+                            "recommended_action": {"action": "localize_ball_roi"},
+                            "source_packet_id": "packet_001",
+                            "evidence": [{"source_packet_id": "packet_001"}],
+                            "confidence": 0.72,
+                        }
+                    ],
+                }
+            )
+
+            report = build_ai_improvement_report(output_dir, client=client)
+
+        improvement = report["improvements"][0]
+        self.assertEqual("needs_rerun", report["summary"]["status"])
+        self.assertEqual("manual_review", improvement["recommended_action"])
+        self.assertNotEqual("request_targeted_localization", improvement["recommended_action"])
+        self.assertNotIn("requested_action", improvement)
+        self.assertNotIn("local_search_roi", improvement)
+        self.assertNotIn("likely_ball_region", improvement)
+        self.assertNotIn("original_recommended_action", improvement)
+        self.assertEqual("dict", improvement["original_recommended_action_type"])
+        self.assertFalse(improvement["executable"])
+        self.assertEqual(0, report["summary"]["executable_candidate_count"])
+        self.assertTrue(any("non-string recommended_action" in warning for warning in report["warnings"]))
+        self.assertFalse(any("request_targeted_localization" in warning for warning in report["warnings"]))
+
+    def test_unsupported_string_recommended_action_preserves_original_action(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_minimal_artifacts(output_dir)
+            client = _FakeImprovementClient(
+                {
+                    "summary": {"status": "needs_rerun", "primary_issue": "tracking"},
+                    "improvements": [
+                        {
+                            "id": "imp_unsupported_string_action",
+                            "priority": "P2",
+                            "area": "tracking",
+                            "failure_tags": ["unknown"],
+                            "root_cause_module": "unknown",
+                            "diagnosis": "The model used a non-contract action spelling.",
+                            "recommended_action": "targeted rerun",
+                            "evidence": ["unsupported string action fixture"],
+                            "confidence": 0.48,
+                        }
+                    ],
+                }
+            )
+
+            report = build_ai_improvement_report(output_dir, client=client)
+
+        improvement = report["improvements"][0]
+        self.assertEqual("needs_rerun", report["summary"]["status"])
+        self.assertEqual("manual_review", improvement["recommended_action"])
+        self.assertEqual("targeted rerun", improvement["original_recommended_action"])
+        self.assertNotIn("original_recommended_action_type", improvement)
+        self.assertFalse(improvement["executable"])
+        self.assertTrue(any("unsupported recommended_action" in warning for warning in report["warnings"]))
+
     def test_blank_missing_ball_action_with_traceable_packet_stays_manual_review(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:
             output_dir = Path(temp_name)
