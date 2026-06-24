@@ -188,6 +188,7 @@ export const ImproveResponse = zod.object({
         "tracking_rerun_before_follow_cam",
         "human_review_camera_motion",
         "render_suggested_highlight",
+        "request_targeted_localization",
       ]),
       config_patch: zod.record(zod.string(), zod.unknown()).optional(),
       evidence: zod.array(zod.unknown()).optional(),
