@@ -5,8 +5,10 @@ import argparse
 import csv
 import json
 import sys
+from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
+from time import perf_counter
 from typing import Any
 
 PYTHON_BACKEND_ROOT = Path(__file__).resolve().parents[1]
@@ -102,55 +104,59 @@ def run_workflow(
         warnings=warnings,
     )
 
-    stages.append(_metrics_artifacts_refresh(output_dir=output_dir, dry_run=dry_run, warnings=warnings))
-
-    before_snapshot = write_track_hash_snapshot(output_dir, "before_review")
+    workflow_started_at = _utc_now_iso()
+    workflow_timer = perf_counter()
     stages.append(
-        {
-            "name": "before_review_hash_snapshot",
-            "status": "succeeded",
-            "artifact": HASH_SNAPSHOT_REPORT_NAME,
-            "snapshot": _snapshot_summary(before_snapshot),
-        }
+        _timed_stage(
+            lambda: _metrics_artifacts_refresh(output_dir=output_dir, dry_run=dry_run, warnings=warnings)
+        )
     )
 
     stages.append(
-        _review_packets_stage(
-            output_dir=output_dir,
-            input_video=input_video,
-            dry_run=dry_run,
-            warnings=warnings,
+        _timed_stage(
+            lambda: _hash_snapshot_stage(output_dir, "before_review")
+        )
+    )
+
+    stages.append(
+        _timed_stage(
+            lambda: _review_packets_stage(
+                output_dir=output_dir,
+                input_video=input_video,
+                dry_run=dry_run,
+                warnings=warnings,
+            )
         )
     )
     stages.append(
-        _visual_review_stage(
-            output_dir=output_dir,
-            dry_run=dry_run,
-            gate_mode=gate_mode,
-            model=model,
-            warnings=warnings,
+        _timed_stage(
+            lambda: _visual_review_stage(
+                output_dir=output_dir,
+                dry_run=dry_run,
+                gate_mode=gate_mode,
+                model=model,
+                warnings=warnings,
+            )
         )
     )
     if approved_actions_path is not None and not approval_ids and approved_action_id is None:
         warnings.append("approved actions path supplied without approval ids; no approval action will execute by path alone.")
     stages.append(
-        _ai_improvement_stage(
-            output_dir=output_dir,
-            dry_run=dry_run,
-            gate_mode=gate_mode,
-            model=model,
-            candidate_intent=candidate_intent,
+        _timed_stage(
+            lambda: _ai_improvement_stage(
+                output_dir=output_dir,
+                dry_run=dry_run,
+                gate_mode=gate_mode,
+                model=model,
+                candidate_intent=candidate_intent,
+            )
         )
     )
 
-    after_snapshot = write_track_hash_snapshot(output_dir, "after_ai_improvement")
     stages.append(
-        {
-            "name": "after_ai_improvement_hash_snapshot",
-            "status": "succeeded",
-            "artifact": HASH_SNAPSHOT_REPORT_NAME,
-            "snapshot": _snapshot_summary(after_snapshot),
-        }
+        _timed_stage(
+            lambda: _hash_snapshot_stage(output_dir, "after_ai_improvement")
+        )
     )
 
     bounded_windows = _bounded_approved_windows(
@@ -159,36 +165,46 @@ def run_workflow(
         approved_action_id=approved_action_id,
         approved_actions_path=approved_actions_path,
     )
-    dispatcher_stage = _selected_approval_dispatcher_stage(
-        output_dir=output_dir,
-        input_video=input_video,
-        approved_payload=approved_payload,
-        dry_run=dry_run,
+    dispatcher_stage = _timed_stage(
+        lambda: _selected_approval_dispatcher_stage(
+            output_dir=output_dir,
+            input_video=input_video,
+            approved_payload=approved_payload,
+            dry_run=dry_run,
+        )
     )
     stages.append(dispatcher_stage)
     stages.append(
-        _approved_child_rerun_stage(
-            dry_run=dry_run,
-            approval_intent=approval_intent,
-            bounded_windows=bounded_windows,
-            missing_ball_execution_path=dispatcher_stage.get("missing_ball_execution_path"),
+        _timed_stage(
+            lambda: _approved_child_rerun_stage(
+                dry_run=dry_run,
+                approval_intent=approval_intent,
+                bounded_windows=bounded_windows,
+                missing_ball_execution_path=dispatcher_stage.get("missing_ball_execution_path"),
+            )
         )
     )
     stages.append(
-        _follow_cam_rerender_plan_stage(
-            approval_intent=approval_intent,
-            approved_payload=approved_payload,
-            follow_cam_execution_path=dispatcher_stage.get("follow_cam_candidate_execution_path"),
+        _timed_stage(
+            lambda: _follow_cam_rerender_plan_stage(
+                approval_intent=approval_intent,
+                approved_payload=approved_payload,
+                follow_cam_execution_path=dispatcher_stage.get("follow_cam_candidate_execution_path"),
+            )
         )
     )
     stages.append(
-        _highlight_render_stage(
-            approval_intent=approval_intent,
-            approved_payload=approved_payload,
-            highlight_execution_path=dispatcher_stage.get("highlight_candidate_execution_path"),
+        _timed_stage(
+            lambda: _highlight_render_stage(
+                approval_intent=approval_intent,
+                approved_payload=approved_payload,
+                highlight_execution_path=dispatcher_stage.get("highlight_candidate_execution_path"),
+            )
         )
     )
-    noop_stage, resolved_noop_candidates = _missing_ball_noop_resolution_stage(output_dir, approved_payload)
+    noop_stage, resolved_noop_candidates = _timed_stage(
+        lambda: _missing_ball_noop_resolution_stage(output_dir, approved_payload)
+    )
     stages.append(noop_stage)
 
     gate_approved_payload = _quality_gate_approved_payload(
@@ -199,39 +215,39 @@ def run_workflow(
     gate_kwargs: dict[str, Any] = {"report_name": QUALITY_GATE_REPORT_NAME, "mode": gate_mode}
     if gate_approved_payload:
         gate_kwargs["approved_actions_payload"] = gate_approved_payload
-    quality_gate = write_ai_improvement_quality_gate(output_dir, **gate_kwargs)
-    workflow_status = _workflow_status(stages)
-    quality_gate["summary"]["workflow_status"] = workflow_status
-    (output_dir / QUALITY_GATE_REPORT_NAME).write_text(
-        json.dumps(quality_gate, ensure_ascii=False, indent=2) + "\n",
-        encoding="utf-8",
+    pre_manifest_quality_gate_stage, quality_gate = _timed_stage(
+        lambda: _quality_gate_stage(
+            output_dir=output_dir,
+            gate_kwargs=gate_kwargs,
+            gate_mode=gate_mode,
+            workflow_status=_workflow_status(stages),
+            name="pre_manifest_quality_gate",
+        )
     )
-    quality_gate_stage = {
-        "name": "quality_gate",
-        "status": quality_gate["summary"]["status"],
-        "mode": gate_mode,
-        "artifact": QUALITY_GATE_REPORT_NAME,
-        "summary": quality_gate["summary"],
-    }
-    stages.append(quality_gate_stage)
-    manifest_stage = _final_artifact_manifest_stage(
-        output_dir,
-        approved_payload=approved_payload,
-        dispatcher_stage=dispatcher_stage,
-        resolved_noop_candidates=resolved_noop_candidates,
-        quality_gate_summary=quality_gate["summary"],
+    stages.append(pre_manifest_quality_gate_stage)
+    manifest_stage = _timed_stage(
+        lambda: _final_artifact_manifest_stage(
+            output_dir,
+            approved_payload=approved_payload,
+            dispatcher_stage=dispatcher_stage,
+            resolved_noop_candidates=resolved_noop_candidates,
+            quality_gate_summary=quality_gate["summary"],
+        )
     )
     stages.append(manifest_stage)
     final_workflow_status = _workflow_status(stages)
-    quality_gate = write_ai_improvement_quality_gate(output_dir, **gate_kwargs)
-    quality_gate["summary"]["workflow_status"] = final_workflow_status
-    (output_dir / QUALITY_GATE_REPORT_NAME).write_text(
-        json.dumps(quality_gate, ensure_ascii=False, indent=2) + "\n",
-        encoding="utf-8",
+    quality_gate_stage, quality_gate = _timed_stage(
+        lambda: _quality_gate_stage(
+            output_dir=output_dir,
+            gate_kwargs=gate_kwargs,
+            gate_mode=gate_mode,
+            workflow_status=final_workflow_status,
+            name="quality_gate",
+            sync_final_manifest=True,
+        )
     )
-    quality_gate_stage["status"] = quality_gate["summary"]["status"]
-    quality_gate_stage["summary"] = quality_gate["summary"]
-    _sync_final_manifest_quality_gate_status(output_dir, quality_gate["summary"])
+    stages.append(quality_gate_stage)
+    workflow_finished_at = _utc_now_iso()
 
     approval_selection = _approval_selection_summary(approved_payload, approved_actions_path=approved_actions_path)
     final_manifest = _read_json_if_available(output_dir / FINAL_ARTIFACT_MANIFEST_NAME)
@@ -259,6 +275,12 @@ def run_workflow(
             "approval_selection": approval_selection,
         },
         "stages": stages,
+        "stage_timing": _stage_timing_summary(
+            stages,
+            started_at=workflow_started_at,
+            finished_at=workflow_finished_at,
+            total_elapsed_seconds=perf_counter() - workflow_timer,
+        ),
         "workflow_summary": workflow_summary,
         "produced_artifacts": produced_artifacts,
         "quality_gate": {
@@ -322,6 +344,99 @@ def main(argv: list[str] | None = None) -> int:
     print(json.dumps({"stable_ai_improvement_workflow": report["quality_gate"]["summary"]}, ensure_ascii=False, indent=2))
     failed = report["quality_gate"]["summary"].get("status") == "fail" or report["quality_gate"]["summary"].get("workflow_status") == "failed"
     return 1 if failed and not args.dry_run else 0
+
+
+def _timed_stage(build_stage: Callable[[], Any]) -> Any:
+    started_at = _utc_now_iso()
+    timer = perf_counter()
+    result = build_stage()
+    finished_at = _utc_now_iso()
+    elapsed_seconds = perf_counter() - timer
+    if isinstance(result, tuple) and result and isinstance(result[0], dict):
+        return (_stamp_stage_timing(result[0], started_at, finished_at, elapsed_seconds), *result[1:])
+    if isinstance(result, dict):
+        return _stamp_stage_timing(result, started_at, finished_at, elapsed_seconds)
+    return result
+
+
+def _stamp_stage_timing(
+    stage: dict[str, Any],
+    started_at: str | None = None,
+    finished_at: str | None = None,
+    elapsed_seconds: float = 0.0,
+) -> dict[str, Any]:
+    if started_at is None:
+        started_at = _utc_now_iso()
+    if finished_at is None:
+        finished_at = started_at
+    stage["started_at"] = started_at
+    stage["finished_at"] = finished_at
+    stage["elapsed_seconds"] = round(max(0.0, elapsed_seconds), 6)
+    return stage
+
+
+def _stage_timing_summary(
+    stages: list[dict[str, Any]],
+    *,
+    started_at: str,
+    finished_at: str,
+    total_elapsed_seconds: float,
+) -> dict[str, Any]:
+    return {
+        "started_at": started_at,
+        "finished_at": finished_at,
+        "total_elapsed_seconds": round(max(0.0, total_elapsed_seconds), 6),
+        "stage_count": len(stages),
+        "stages": [
+            {
+                "name": stage.get("name"),
+                "status": stage.get("status"),
+                "started_at": stage.get("started_at"),
+                "finished_at": stage.get("finished_at"),
+                "elapsed_seconds": stage.get("elapsed_seconds"),
+            }
+            for stage in stages
+        ],
+    }
+
+
+def _hash_snapshot_stage(output_dir: Path, stage_name: str) -> dict[str, Any]:
+    snapshot = write_track_hash_snapshot(output_dir, stage_name)
+    return {
+        "name": f"{stage_name}_hash_snapshot",
+        "status": "succeeded",
+        "artifact": HASH_SNAPSHOT_REPORT_NAME,
+        "snapshot": _snapshot_summary(snapshot),
+    }
+
+
+def _quality_gate_stage(
+    *,
+    output_dir: Path,
+    gate_kwargs: dict[str, Any],
+    gate_mode: str,
+    workflow_status: str,
+    name: str = "quality_gate",
+    sync_final_manifest: bool = False,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    quality_gate = write_ai_improvement_quality_gate(output_dir, **gate_kwargs)
+    quality_gate["summary"]["workflow_status"] = workflow_status
+    (output_dir / QUALITY_GATE_REPORT_NAME).write_text(
+        json.dumps(quality_gate, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    if sync_final_manifest:
+        _sync_final_manifest_quality_gate_status(output_dir, quality_gate["summary"])
+    return (
+        {
+            "name": name,
+            "status": quality_gate["summary"]["status"],
+            "mode": gate_mode,
+            "artifact": QUALITY_GATE_REPORT_NAME,
+            "summary": quality_gate["summary"],
+        },
+        quality_gate,
+    )
 
 
 def _metrics_artifacts_refresh(*, output_dir: Path, dry_run: bool, warnings: list[str]) -> dict[str, Any]:

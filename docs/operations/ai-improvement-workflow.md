@@ -8,6 +8,12 @@ The stable worker/operator contract lives in [ai-improvement-contract.md](ai-imp
 
 This workflow document explains how to run the stable workflow. If a later executor or UI needs to decide whether an AI artifact is review-only, executable, comparable, promotable, rejected, or final, use the contract document first.
 
+## Audit Versus Improvement
+
+AI audit is the review layer. It reads deterministic evidence such as `ball_audit.json`, `ai_review_triggers.json`, `review_packets.json`, `camera_motion_audit.json`, `event_candidates.json`, and visual-review media, then explains likely problems. Audit output may recommend follow-up work, but it is advisory and cannot mutate tracks, renders, clips, or manifests.
+
+AI improvement is the candidate layer. It turns an evidence-backed recommendation into an isolated candidate only after an explicit approval id is consumed. Improvement work must stay scoped to one of the four supported problem types: missing ball, dense noise, follow-cam motion, and highlight boundary. Every candidate needs traceable evidence, a bounded window, comparison criteria, a valid comparison report, quality-gate evidence, and final-manifest selection before it can affect final output.
+
 ## Command
 
 ```powershell
@@ -19,7 +25,7 @@ $env:PYTHONPATH='python_backend'
   --parallel-mode temporal
 ```
 
-The workflow writes `stable_ai_improvement_workflow_report.json` with the planned stages, hash snapshots, produced artifacts, quality-gate summary, strategy, warnings, and explicit approval intent.
+The workflow writes `stable_ai_improvement_workflow_report.json` with the planned stages, per-stage `stage_timing`, hash snapshots, produced artifacts, quality-gate summary, strategy, warnings, and explicit approval intent.
 
 Stable rules summary:
 
@@ -43,7 +49,10 @@ Stable rules summary:
 7. Explicit approved child rerun plan.
 8. Optional follow-cam rerender plan.
 9. Optional highlight render plan.
-10. AI improvement quality gate.
+10. Missing-ball noop resolution.
+11. Pre-manifest AI improvement quality gate.
+12. Final artifact manifest.
+13. Final AI improvement quality-gate refresh and final-manifest status sync.
 
 In `--dry-run`, provider calls and expensive video work are not required. Hash snapshots and lightweight JSON reports may still be written so the quality gate has stable inputs.
 
@@ -108,6 +117,8 @@ Use the configured strong model for run-level improvement and hard recovery case
 
 When the improvement-capable model is unavailable in real mode, the workflow falls back to non-mutating review-only/unavailable behavior. It does not use a small-model fallback to create executable approvals.
 
+Hard cases include long missing-ball gaps, camera-audit failures, follow-cam regressions, highlight-tail decisions, and candidate promotions that would otherwise land as `warn`. These should use a stronger configured model when a provider is available. Without a provider, record artifact-only evidence and mark provider-dependent decisions `warn` or `unavailable`; do not document them as `pass`.
+
 ## AI Suggestion Contract
 
 Run-level AI suggestions must be evidence-backed before they are eligible for approval. See the contract document for the final gating rules; the stable workflow enforces these operator-facing constraints:
@@ -120,3 +131,7 @@ Run-level AI suggestions must be evidence-backed before they are eligible for ap
 - Highlight suggestions must preserve the candidate `core_window` and required tail unless the source-video end clamps the tail.
 
 Generated missing-ball and noise candidates are written as pending finalization, even when their comparison status is `pass`. They become final output only through `finalize_ai_candidate` with `missing_ball_track` or `noise_cleaned_track`; `warn` candidates require explicit confirmation, while `fail`, `unavailable`, review-only, missing-approval, and unknown-candidate cases cannot promote.
+
+## Real-Video Validation Record
+
+For PR8 or later real-video runs, record the exact command, source video, output directory, parallel mode, model/mode, step timing, key artifacts, visual checks, and final playable outputs in [real-video-ai-improvement-validation.md](real-video-ai-improvement-validation.md). The validation record should explicitly cover the frame `2079` right-bottom lost-ball window, at least one dense-noise window, at least one camera spike or follow-cam motion event, at least one highlight tail, and whether final tracking, follow-cam, and highlight media are decodable.

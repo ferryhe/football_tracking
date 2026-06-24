@@ -50,8 +50,9 @@ class StableAiImprovementWorkflowTests(unittest.TestCase):
                 "follow_cam_rerender_plan",
                 "highlight_render",
                 "missing_ball_noop_resolution",
-                "quality_gate",
+                "pre_manifest_quality_gate",
                 "final_artifact_manifest",
+                "quality_gate",
             ],
             stage_names,
         )
@@ -63,6 +64,32 @@ class StableAiImprovementWorkflowTests(unittest.TestCase):
         self.assertTrue(ai_stage["provider_dry_run"])
         self.assertEqual("dry-run", ai_stage["provider_mode"])
         self.assertEqual("review_only", ai_stage["candidate_intent"])
+
+    def test_workflow_records_stage_timings(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_tracks(output_dir)
+
+            report = run_workflow(output_dir=output_dir, dry_run=True)
+            written = json.loads((output_dir / "stable_ai_improvement_workflow_report.json").read_text(encoding="utf-8"))
+
+        self.assertGreater(report["stage_timing"]["total_elapsed_seconds"], 0)
+        self.assertEqual(len(report["stages"]), report["stage_timing"]["stage_count"])
+        self.assertEqual(report["stage_timing"], written["stage_timing"])
+        self.assertEqual(len(report["stages"]), len(report["stage_timing"]["stages"]))
+        stage_names = [stage["name"] for stage in report["stages"]]
+        self.assertLess(stage_names.index("pre_manifest_quality_gate"), stage_names.index("final_artifact_manifest"))
+        self.assertLess(stage_names.index("final_artifact_manifest"), stage_names.index("quality_gate"))
+        for stage, timing_row in zip(report["stages"], report["stage_timing"]["stages"], strict=True):
+            self.assertIsInstance(stage["started_at"], str)
+            self.assertIsInstance(stage["finished_at"], str)
+            self.assertIsInstance(stage["elapsed_seconds"], float)
+            self.assertGreaterEqual(stage["elapsed_seconds"], 0.0)
+            self.assertEqual(stage["name"], timing_row["name"])
+            self.assertEqual(stage["status"], timing_row["status"])
+            self.assertEqual(stage["started_at"], timing_row["started_at"])
+            self.assertEqual(stage["finished_at"], timing_row["finished_at"])
+            self.assertEqual(stage["elapsed_seconds"], timing_row["elapsed_seconds"])
 
     def test_real_mode_runs_review_packets_then_visual_review_before_ai_improvement(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:

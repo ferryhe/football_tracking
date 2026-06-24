@@ -944,6 +944,7 @@ git diff --check
 - Modify: `README.md`
 - Modify: `python_backend/README.md` if needed.
 - Modify/Create: `docs/operations/ai-improvement-workflow.md`
+- Create/use: `docs/operations/real-video-ai-improvement-validation.md`
 - Modify this plan with final PR references if useful.
 - Do not modify local skill files inside this PR.
 
@@ -1007,7 +1008,7 @@ git diff --check
 
 **Deliver:**
 
-- Real-video validation record.
+- Real-video validation record using `docs/operations/real-video-ai-improvement-validation.md`.
 - Final selected tracking/follow-cam/highlight artifacts.
 - Updated README and operator docs.
 - Managed PR final report with PR URLs, branches, checks, review comments handled, merge status, branch cleanup, artifacts, and residual risks.

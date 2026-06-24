@@ -65,13 +65,14 @@ Highlights of the new Baseline page:
 - **Frame Range** — optional `start_frame` and `max_frames` inputs let you do quick partial-clip tests (leave both empty to process the full video).
 - **Auto-redirect** — after a run is queued, the user is sent to `/history` to watch progress.
 
-Review and highlight outputs:
+Review, improvement, and highlight outputs:
 
-- **Run metrics and manifest** — each run writes reproducible summaries for raw/cleaned tracks, audit reports, AI review triggers, player tracks, event candidates, and generated renders.
+- **Run metrics and manifest** — each run writes reproducible summaries for raw/cleaned tracks, audit reports, AI review triggers, player-track artifacts when available, event candidates, and generated renders. `player_tracks.json` is an artifact, not a guarantee that stable continuous player tracking is fully productized.
 - **Camera motion audit** — follow-cam renders also write `camera_motion_audit.json`, a standalone review report for abrupt pan, acceleration, or zoom changes in the final camera path.
 - **Event candidates** — completed runs can expose `event_candidates.json` with shot and goal candidates. These are review candidates, not confirmed football events.
 - **Highlight clips** — the Deliverable page can render a short `highlight.mp4` from a selected event candidate; the child run writes `highlight_report.json` and appears in History as a highlight job.
-- **Stable AI improvement workflow** — use [`docs/operations/ai-improvement-workflow.md`](./docs/operations/ai-improvement-workflow.md) to rerun review/improvement checks against an existing output directory. The recipe favors temporal chunks for full-video speed, reserves SAHI/ROI for explicit bounded approvals, and never executes approval files just because they exist.
+- **Stable AI improvement workflow** — use [`docs/operations/ai-improvement-workflow.md`](./docs/operations/ai-improvement-workflow.md) to rerun review/improvement checks against an existing output directory. AI audit explains issues; AI improvement creates bounded candidates for missing balls, dense noise, follow-cam motion, or highlight boundaries and then compares them before final selection. The recipe favors temporal chunks for full-video speed, reserves SAHI/ROI for explicit bounded approvals, and never executes approval files just because they exist.
+- **Real-video validation record** — use [`docs/operations/real-video-ai-improvement-validation.md`](./docs/operations/real-video-ai-improvement-validation.md) to record the exact command, video, output directory, model/mode, timing, produced artifacts, visual checks, and final playable tracking/follow-cam/highlight outputs.
 
 ### Workflows (managed automatically on Replit)
 
@@ -126,7 +127,7 @@ These are stored as Replit Secrets. **Do not** create `.env` files for them.
 - A Node.js Express **reverse proxy** sits in front of FastAPI to fit Replit's path-routed proxy and to simplify local dev URLs.
 - The frontend gained: 5 pages with sidebar nav, Dashboard overview, dark/light mode, EN/中文 i18n, mobile responsive layout.
 - Frame-range partial-clip runs (`start_frame` / `max_frames`) were added to the baseline UI; the backend already accepted these fields.
-- The backend now writes review artifacts (`ball_audit.json`, `ai_review_triggers.json`, `camera_motion_audit.json`, `event_candidates.json`, `player_tracks.json`) and supports child render jobs for follow-cam deliverables and highlight clips.
+- The backend now writes review artifacts (`ball_audit.json`, `ai_review_triggers.json`, `camera_motion_audit.json`, `event_candidates.json`, and player artifacts such as `player_tracks.json` when available) and supports child render jobs for follow-cam deliverables and highlight clips.
 
 ---
 
@@ -191,12 +192,14 @@ These are stored as Replit Secrets. **Do not** create `.env` files for them.
 - **帧范围** —— 可选 `start_frame` / `max_frames`，便于快速试跑一小段（留空则处理整段）。
 - **自动跳转** —— 任务排队后自动跳到「历史」页让你看进度。
 
-审核与集锦输出：
+审核、改进与集锦输出：
 
-- **指标与运行清单** —— 每次任务都会写出 raw/cleaned 轨迹、审核报告、AI 审核触发、球员轨迹、事件候选和渲染结果摘要。
+- **指标与运行清单** —— 每次任务都会写出 raw/cleaned 轨迹、审核报告、AI 审核触发、可用时的球员轨迹产物、事件候选和渲染结果摘要。`player_tracks.json` 是产物记录，不等同于已经完成稳定连续追人能力。
 - **镜头运动审核** —— follow-cam 渲染会额外写出 `camera_motion_audit.json`，专门复核最终镜头路径里的突然平移、突然加速或突然缩放。
 - **事件候选** —— 已完成任务可生成 `event_candidates.json`，其中包含射门和进球候选；这些是待复核候选，不是已确认事件。
 - **集锦短片** —— 「成品任务」页可以从某个事件候选渲染 `highlight.mp4`；子任务会写 `highlight_report.json`，并在「历史」页显示为集锦任务。
+- **稳定 AI improvement 工作流** —— 见 [`docs/operations/ai-improvement-workflow.md`](./docs/operations/ai-improvement-workflow.md)。AI audit 只解释问题；AI improvement 会为丢球、密集噪声、follow-cam 抖动或集锦边界创建有界候选，并在最终选择前比较质量。整视频提速默认走 temporal chunk；SAHI/ROI 只用于显式批准的有界恢复窗口；approval 文件不会因为存在就自动执行。
+- **真实视频验证记录** —— 见 [`docs/operations/real-video-ai-improvement-validation.md`](./docs/operations/real-video-ai-improvement-validation.md)，记录命令、视频、输出目录、模型/模式、耗时、关键产物、视觉检查和最终 tracking/follow-cam/highlight 是否可播放。
 
 ### Replit 工作流（自动管理）
 
@@ -251,4 +254,4 @@ curl -s -X POST -H "Content-Type: application/json" \
 - 在 FastAPI 前面加了一个 Node.js Express **反向代理**，匹配 Replit 的路径路由模型，也方便本地调用。
 - 前端新增了：5 个页面 + 侧边栏、概览页、暗黑/明亮主题、中英切换、移动端响应式布局。
 - 「跑基线」UI 增加了 `start_frame` / `max_frames` 帧范围（后端早已支持，只是 UI 没暴露）。
-- 后端新增审核产物（`ball_audit.json`、`ai_review_triggers.json`、`camera_motion_audit.json`、`event_candidates.json`、`player_tracks.json`），并支持跟随镜头成品和集锦短片两类子渲染任务。
+- 后端新增审核产物（`ball_audit.json`、`ai_review_triggers.json`、`camera_motion_audit.json`、`event_candidates.json`，以及可用时的 `player_tracks.json` 等球员产物），并支持跟随镜头成品和集锦短片两类子渲染任务。
