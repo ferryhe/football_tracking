@@ -44,6 +44,28 @@ class HighlightCandidateExecutorTests(unittest.TestCase):
             self.assertEqual(1.2, report["duration_seconds"])
             self.assertEqual(-2, report["pre_frame_delta"])
             self.assertEqual(2, report["post_frame_delta"])
+            self.assertTrue(report["core_window_preserved"])
+            self.assertEqual(4, report["required_tail_frames"])
+            self.assertEqual(6, report["actual_tail_frames"])
+            self.assertEqual("preserved", report["tail_status"])
+            self.assertFalse(report["source_end_clamp"])
+            comparison = json.loads((candidate_dir / "highlight_candidate_comparison.json").read_text(encoding="utf-8"))
+            self.assertEqual(4, comparison["required_tail_frames"])
+            self.assertEqual(6, comparison["actual_tail_frames"])
+            highlight_report = json.loads((candidate_dir / "highlight_report.json").read_text(encoding="utf-8"))
+            self.assertEqual({"start_frame": 5, "end_frame": 8}, highlight_report["core_window"])
+            self.assertEqual({"start_frame": 3, "end_frame": 14}, highlight_report["render_window"])
+            self.assertTrue(highlight_report["core_window_preserved"])
+            self.assertEqual(4, highlight_report["required_tail_frames"])
+            self.assertEqual(6, highlight_report["actual_tail_frames"])
+            self.assertEqual("preserved", highlight_report["tail_status"])
+            self.assertFalse(highlight_report["source_end_clamp"])
+            self.assertTrue(highlight_report["window_validation"]["core_window_preserved"])
+            self.assertEqual(4, highlight_report["window_validation"]["required_tail_frames"])
+            self.assertEqual(6, highlight_report["window_validation"]["actual_tail_frames"])
+            manifest = json.loads((candidate_dir / "candidate_manifest.json").read_text(encoding="utf-8"))
+            self.assertEqual(4, manifest["required_tail_frames"])
+            self.assertEqual(6, manifest["actual_tail_frames"])
             registry = load_candidate_registry(output_dir)
             self.assertEqual("loaded", registry["artifact_status"])
             self.assertEqual(["highlight-candidate-1"], [item["candidate_id"] for item in registry["candidates"]])
@@ -86,16 +108,25 @@ class HighlightCandidateExecutorTests(unittest.TestCase):
                     "candidate_id": "highlight-candidate-1",
                     "event_candidate_id": "event-1",
                     "approved_action": "adjust_highlight_window",
-                    "suggested_window": {"start_frame": 3, "end_frame": 20},
+                    "suggested_window": {"start_frame": 3, "end_frame": 11},
                 },
                 input_video=input_video,
             )
+            candidate_dir = output_dir / "ai_candidates" / "highlight" / "highlight-candidate-1"
+            validation = json.loads((candidate_dir / "highlight_window_validation.json").read_text(encoding="utf-8"))
 
         self.assertEqual("pass", report["comparison_status"])
         self.assertTrue(report["source_end_clamp"])
         self.assertEqual({"start_frame": 3, "end_frame": 11}, report["render_window"])
         self.assertEqual(9, report["frame_count"])
         self.assertEqual("source_end_clamped", report["tail_status"])
+        self.assertEqual(6, report["required_tail_frames"])
+        self.assertEqual(2, report["actual_tail_frames"])
+        self.assertTrue(report["core_window_preserved"])
+        source_bounds = self.check(report, "source_bounds")
+        self.assertTrue(source_bounds["source_end_clamp"])
+        validation_source_bounds = self.check(validation, "source_bounds")
+        self.assertTrue(validation_source_bounds["source_end_clamp"])
 
     def test_invalid_approved_window_keeps_failed_comparison_artifacts(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:
@@ -119,6 +150,10 @@ class HighlightCandidateExecutorTests(unittest.TestCase):
 
             candidate_dir = output_dir / "ai_candidates" / "highlight" / "highlight-candidate-1"
             self.assertEqual("fail", report["comparison_status"])
+            self.assertTrue(report["core_window_preserved"])
+            self.assertEqual(4, report["required_tail_frames"])
+            self.assertEqual(1, report["actual_tail_frames"])
+            self.assertEqual("cut_available_tail", report["tail_status"])
             self.assertFalse((candidate_dir / "highlight.mp4").exists())
             self.assertTrue((candidate_dir / "highlight_window_validation.json").exists())
             self.assertTrue((candidate_dir / "highlight_candidate_comparison.json").exists())
@@ -209,6 +244,14 @@ class HighlightCandidateExecutorTests(unittest.TestCase):
             + "\n",
             encoding="utf-8",
         )
+
+    def check(self, payload: dict[str, object], name: str) -> dict[str, object]:
+        checks = payload["checks"]
+        self.assertIsInstance(checks, list)
+        for check in checks:
+            if isinstance(check, dict) and check.get("name") == name:
+                return check
+        raise AssertionError(f"missing check {name}")
 
 
 if __name__ == "__main__":

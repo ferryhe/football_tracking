@@ -37,6 +37,17 @@ Provider-dependent hard cases, including long missing-ball gaps, camera failures
 
 The input video, output directory, media sheets, and generated workflow artifacts named in this record are local validation artifacts. They are ignored by Git and are not preserved in the repository history.
 
+## Required Evidence For Future Runs
+
+Every real-video validation update must record evidence, not just artifact presence:
+
+- Exact command, source video, output directory, branch or build identifier, workflow mode, model/provider, approval source, consumed approval ids, and exit code.
+- `stable_ai_improvement_workflow_report.json` `stage_timing` rows for each executed, skipped, or failed stage, including final manifest and quality-gate refresh stages.
+- `final_ai_improvement_artifact_manifest.json` summary, final selected artifacts, rejected candidates, comparison reports, and final tracking/follow-cam/highlight paths.
+- Final tracking, follow-cam, and highlight playback checks. A file path is insufficient; record whether each final output opens, has sampled frames, and is the artifact selected by the final manifest.
+- Highlight validation from `highlight_candidate_comparison.json`, `highlight_report.json`, or `candidate_manifest.json`: `core_window`, `render_window`, `core_window_preserved`, `required_tail_frames`, `actual_tail_frames`, `tail_status`, and `source_end_clamp`. Passing highlight evidence must show the core action and required post-event tail are preserved, or that the source video end limited the available tail.
+- Baseline/candidate visual evidence from review packets, overlay sheets, crop/contact sheets, media sheets, or decoded video samples. Do not mark missing-ball, dense-noise, follow-cam, or highlight checks as pass by checking only that JSON or media files exist.
+
 ## Command
 
 ```powershell
@@ -124,10 +135,10 @@ Candidate output semantics are conservative: a candidate must have consumed appr
 | Recovered missing-ball candidate | No candidate directory or comparison report | unavailable | No approved `localize_ball_roi` or targeted rerun was consumed, so there is no candidate to promote. |
 | Dense-noise window | `review_packets\packet_002_dense_noise_cluster_245_308\crop_sheet.jpg` plus quality gate | fail | The crop sheet shows markers on grass/body/ambiguous regions rather than a clear ball. Quality gate failed `noise_failure_tags_present` with `45` noise windows missing classification coverage. |
 | Camera spike or follow-cam motion event | `camera_motion_audit.json` and `manual_checks\pr8_follow_cam_sample_sheet.jpg` | warn | Media is decodable and often keeps play in frame, but camera audit has `15` review events and no approved follow-cam candidate/comparison exists. |
-| Highlight tail | Goal/shot packets and `event_candidates.json` | unavailable | Event candidates exist, but no approved highlight render or `highlight_comparison.json` exists, so highlight clips are not validated as final outputs. |
-| Final tracking playback | `ball_track.csv` / `ball_track.cleaned.csv`; no selected final media | unavailable | Baseline tracks exist and hashes were stable, but no final selected tracking media was produced by the AI improvement loop. |
-| Final follow-cam playback | `follow_cam.latest_review.mp4` and media decode check | warn | Video opens and samples correctly, but sampled overlays include questionable marker placement and camera audit is only `warn`. |
-| Final highlight playback | Review packet clips only | unavailable | Packet clips open, but no promoted highlight clip exists. |
+| Highlight tail | Goal/shot packets, `event_candidates.json`, and any final `highlight_candidate_comparison.json` / `highlight_report.json` / `candidate_manifest.json` | unavailable | Event candidates exist, but no approved final highlight render or comparison exists. Future pass evidence must list `core_window`, `render_window`, `core_window_preserved`, `required_tail_frames`, `actual_tail_frames`, `tail_status`, and `source_end_clamp`, then confirm the decoded clip covers the core action plus post-event tail. |
+| Final tracking playback | Final manifest plus selected tracking media/overlays | unavailable | Baseline tracks exist and hashes were stable, but no final selected tracking media was produced by the AI improvement loop. Future pass evidence must verify the final-manifest-selected output opens and sampled overlays match the claimed recovery/cleanup. |
+| Final follow-cam playback | Final manifest, `follow_cam.latest_review.mp4`, media decode check, and follow-cam sample sheet | warn | Video opens and samples correctly, but sampled overlays include questionable marker placement and camera audit is only `warn`. Future pass evidence must verify the selected final follow-cam media, not only a baseline render. |
+| Final highlight playback | Final manifest plus promoted highlight clip and comparison/report fields | unavailable | Packet clips open, but no promoted highlight clip exists. Future pass evidence must decode the final-manifest-selected highlight and compare sampled frames against the recorded core/tail fields. |
 
 ## Quality Gate Result
 

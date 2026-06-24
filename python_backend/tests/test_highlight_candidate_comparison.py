@@ -39,6 +39,41 @@ class HighlightCandidateComparisonTests(unittest.TestCase):
         self.assertEqual("preserved", payload["tail_status"])
         self.assertEqual(51, payload["frame_count"])
         self.assertEqual(5.1, payload["duration_seconds"])
+        self.assertTrue(payload["core_window_preserved"])
+        self.assertEqual(30, payload["required_tail_frames"])
+        self.assertEqual(35, payload["actual_tail_frames"])
+
+    def test_legacy_validation_named_check_derives_core_window_preserved(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            root = Path(temp_name)
+            baseline = root / "baseline"
+            candidate = root / "candidate"
+            self.write_event_candidates(baseline, source_frames=100)
+            self.write_highlight_report(candidate, start=35, end=85, frame_count=51, fps=10.0)
+            self.write_json(
+                candidate / "highlight_window_validation.json",
+                {
+                    "status": "pass",
+                    "event_candidate_id": "event-1",
+                    "core_window": {"start_frame": 40, "end_frame": 50},
+                    "render_window": {"start_frame": 35, "end_frame": 85},
+                    "checks": [
+                        {"name": "core_window_preserved", "status": "pass"},
+                        {"name": "source_bounds", "status": "pass", "source_end_clamp": False},
+                    ],
+                },
+            )
+
+            report_path = write_highlight_candidate_comparison(
+                candidate,
+                baseline_dir=baseline,
+                candidate_id="highlight-candidate-1",
+                approval=self.approval(start=35, end=85),
+            )
+            payload = self.read_json(report_path)
+
+        self.assertTrue(payload["core_window_preserved"])
+        self.assertFalse(payload["source_end_clamp"])
 
     def test_invalid_highlight_windows_fail_named_checks(self) -> None:
         cases = [

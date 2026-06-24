@@ -50,7 +50,10 @@ def build_highlight_window_validation(
         suggested_window is not None
         and render_window is not None
         and last_source_frame is not None
-        and int(suggested_window["end_frame"]) > last_source_frame
+        and (
+            int(suggested_window["end_frame"]) > last_source_frame
+            or (required_tail_end is not None and required_tail_end > last_source_frame)
+        )
         and int(render_window["end_frame"]) == last_source_frame
     )
     tail_status = _tail_status(
@@ -59,15 +62,23 @@ def build_highlight_window_validation(
         available_tail_end=available_tail_end,
         last_source_frame=last_source_frame,
     )
+    core_window_preserved = _core_window_preserved(core_window, render_window)
+    actual_tail_frames = _actual_tail_frames(core_window, render_window)
     checks = [
         _approval_action_supported_check(approval_payload),
         _event_candidate_linkage_check(event_candidate_id, event_candidate),
         _suggested_window_valid_check(approval_payload.get("suggested_window"), suggested_window),
-        _source_bounds_check(suggested_window, render_window, last_source_frame=last_source_frame),
+        _source_bounds_check(
+            suggested_window,
+            render_window,
+            last_source_frame=last_source_frame,
+            source_end_clamp=source_end_clamp,
+        ),
         _core_window_preserved_check(core_window, render_window),
         _tail_preserved_check(
             tail_status,
             required_tail_end=required_tail_end,
+            actual_tail_frames=actual_tail_frames,
             available_tail_end=available_tail_end,
             render_window=render_window,
         ),
@@ -96,7 +107,9 @@ def build_highlight_window_validation(
         "suggested_post_buffer_frames": suggested_post,
         "pre_frame_delta": None if suggested_pre is None else suggested_pre - default_pre,
         "post_frame_delta": None if suggested_post is None else suggested_post - default_post,
+        "core_window_preserved": core_window_preserved,
         "required_tail_frames": min_tail,
+        "actual_tail_frames": actual_tail_frames,
         "required_tail_end_frame": required_tail_end,
         "available_tail_end_frame": available_tail_end,
         "source_total_frames": source_frames,
@@ -170,6 +183,7 @@ def _source_bounds_check(
     render_window: dict[str, int] | None,
     *,
     last_source_frame: int | None,
+    source_end_clamp: bool,
 ) -> dict[str, Any]:
     if suggested_window is None:
         return {"name": "source_bounds", "status": "fail", "reason": "suggested_window is invalid"}
@@ -187,7 +201,7 @@ def _source_bounds_check(
         "name": "source_bounds",
         "status": "pass",
         "last_source_frame": last_source_frame,
-        "source_end_clamp": render_window is not None and int(suggested_window["end_frame"]) > last_source_frame,
+        "source_end_clamp": bool(source_end_clamp),
     }
 
 
@@ -199,7 +213,7 @@ def _core_window_preserved_check(
         return {"name": "core_window_preserved", "status": "fail", "reason": "event candidate has no valid core_window"}
     if render_window is None:
         return {"name": "core_window_preserved", "status": "fail", "core_window": core_window, "reason": "render_window is invalid"}
-    preserved = int(render_window["start_frame"]) <= int(core_window["start_frame"]) and int(render_window["end_frame"]) >= int(core_window["end_frame"])
+    preserved = _core_window_preserved(core_window, render_window)
     return {
         "name": "core_window_preserved",
         "status": "pass" if preserved else "fail",
@@ -209,10 +223,23 @@ def _core_window_preserved_check(
     }
 
 
+def _core_window_preserved(
+    core_window: dict[str, int] | None,
+    render_window: dict[str, int] | None,
+) -> bool:
+    return (
+        core_window is not None
+        and render_window is not None
+        and int(render_window["start_frame"]) <= int(core_window["start_frame"])
+        and int(render_window["end_frame"]) >= int(core_window["end_frame"])
+    )
+
+
 def _tail_preserved_check(
     tail_status: str,
     *,
     required_tail_end: int | None,
+    actual_tail_frames: int | None,
     available_tail_end: int | None,
     render_window: dict[str, int] | None,
 ) -> dict[str, Any]:
@@ -221,6 +248,7 @@ def _tail_preserved_check(
         "name": "tail_preserved",
         "status": status,
         "tail_status": tail_status,
+        "actual_tail_frames": actual_tail_frames,
         "required_tail_end_frame": required_tail_end,
         "available_tail_end_frame": available_tail_end,
         "render_window": render_window,
@@ -250,6 +278,15 @@ def _tail_status(
     if available_tail_end <= int(render_window["end_frame"]):
         return "preserved"
     return "cut_available_tail"
+
+
+def _actual_tail_frames(
+    core_window: dict[str, int] | None,
+    render_window: dict[str, int] | None,
+) -> int | None:
+    if core_window is None or render_window is None:
+        return None
+    return max(0, int(render_window["end_frame"]) - int(core_window["end_frame"]))
 
 
 def _event_candidate_id(approval: dict[str, Any], candidates_by_id: dict[str, dict[str, Any]]) -> str | None:

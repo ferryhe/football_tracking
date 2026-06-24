@@ -36,7 +36,7 @@ Stable rules summary:
 - Missing-ball closure is either a bounded recovery candidate with `missing_ball_recovery_comparison.json` or an evidence-backed full-window `missing_ball_resolution.json`.
 - The `2049-2544` long missing-ball window cannot be closed by only proving a short frame `2079` neighborhood.
 - Follow-cam candidates must improve or stay below motion thresholds while preserving Detected/Predicted crop coverage; sparse data warns instead of silently passing.
-- Highlight candidates must preserve the event `core_window` and required post-event tail, with source-video-end clamps recorded as evidence.
+- Highlight candidates must preserve the event `core_window` and required post-event tail. Reports must expose `core_window`, `render_window`, `core_window_preserved`, `required_tail_frames`, `actual_tail_frames`, `tail_status`, and `source_end_clamp`; source-video-end clamps are valid only when recorded as evidence.
 - Final output requires explicit approval, candidate artifacts or a valid resolved-noop, comparison, quality gate, and `final_ai_improvement_artifact_manifest.json`.
 
 ## Stage Order
@@ -153,4 +153,4 @@ Generated missing-ball and noise candidates are written as pending finalization,
 
 ## Real-Video Validation Record
 
-For PR8 or later real-video runs, record the exact command, source video, output directory, parallel mode, model/mode, step timing, key artifacts, visual checks, and final playable outputs in [real-video-ai-improvement-validation.md](real-video-ai-improvement-validation.md). The validation record should explicitly cover the frame `2079` right-bottom lost-ball window, at least one dense-noise window, at least one camera spike or follow-cam motion event, at least one highlight tail, and whether final tracking, follow-cam, and highlight media are decodable.
+For PR8 or later real-video runs, record the exact command, source video, output directory, parallel mode, model/mode, stage timing, final manifest, visual checks, and final playable outputs in [real-video-ai-improvement-validation.md](real-video-ai-improvement-validation.md). The validation record should explicitly cover the frame `2079` right-bottom lost-ball window, at least one dense-noise window, at least one camera spike or follow-cam motion event, at least one highlight tail, and whether final tracking, follow-cam, and highlight media are decodable. Use baseline/candidate overlay or media-sheet evidence for those checks; file existence alone is not acceptance evidence.
