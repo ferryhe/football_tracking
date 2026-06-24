@@ -418,8 +418,65 @@ class ReviewPacketTests(unittest.TestCase):
             report = build_review_packet_report(output_dir, input_video=fake_video, max_packets=4, include_media=True)
 
         coverage = report["long_lost_gap_coverage"][0]
-        self.assertEqual(["start", "middle", "end"], coverage["covered_labels"])
-        self.assertEqual([{"label": "tail", "start_frame": 801, "end_frame": 830}], coverage["uncovered_ranges"])
+        self.assertEqual([], coverage["covered_labels"])
+        self.assertEqual(
+            [
+                {"label": "start", "start_frame": 100, "end_frame": 195},
+                {"label": "middle", "start_frame": 418, "end_frame": 481},
+                {"label": "end", "start_frame": 705, "end_frame": 800},
+                {"label": "tail", "start_frame": 801, "end_frame": 830},
+            ],
+            coverage["uncovered_ranges"],
+        )
+
+    def test_long_lost_gap_with_low_information_media_is_uncovered(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            output_dir = Path(temp)
+            input_video = output_dir / "flat_input.mp4"
+            _write_constant_video(input_video, width=160, height=90, frame_count=840)
+            rows = ["Frame,X,Y,Confidence,Status"]
+            for frame in range(831):
+                if 100 <= frame <= 800:
+                    rows.append(f"{frame},,,0.00,Lost")
+                else:
+                    rows.append(f"{frame},{100 + frame * 0.1:.1f},100,0.90,Detected")
+            (output_dir / "ball_track.cleaned.csv").write_text("\n".join(rows) + "\n", encoding="utf-8")
+            (output_dir / "ai_review_triggers.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": "1.0",
+                        "triggers": [
+                            {
+                                "id": "event:1:lost_gap:100-800",
+                                "type": "lost_gap",
+                                "priority": "medium",
+                                "source": "cleaned",
+                                "start_frame": 100,
+                                "end_frame": 800,
+                                "frame_count": 701,
+                                "reason": "Ball track is lost with low-information review media.",
+                                "evidence": {"lost_frame_count": 701},
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            report = build_review_packet_report(output_dir, input_video=input_video, max_packets=4, include_media=True)
+
+        coverage = report["long_lost_gap_coverage"][0]
+        self.assertEqual([], coverage["covered_labels"])
+        self.assertEqual(
+            [
+                {"label": "start", "start_frame": 100, "end_frame": 195},
+                {"label": "middle", "start_frame": 418, "end_frame": 481},
+                {"label": "end", "start_frame": 705, "end_frame": 800},
+                {"label": "tail", "start_frame": 801, "end_frame": 830},
+            ],
+            coverage["uncovered_ranges"],
+        )
+        self.assertTrue(all("contact_sheet_low_information" in packet["media_warnings"] for packet in report["packets"]))
 
     def test_build_review_packet_report_keeps_oversized_long_lost_gap_for_audit(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -1314,6 +1371,99 @@ class ReviewPacketTests(unittest.TestCase):
 
         self.assertEqual({"width": 160, "height": 90}, report["packets"][0]["frame_dimensions"])
 
+    def test_build_review_packet_report_warns_on_low_information_sheets_and_records_provenance(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            output_dir = Path(temp)
+            input_video = output_dir / "input.mp4"
+            _write_constant_video(input_video, width=160, height=90, frame_count=5)
+            rows = ["Frame,X,Y,Confidence,Status"]
+            rows.extend(f"{frame},,,0.00,Lost" for frame in range(5))
+            (output_dir / "ball_track.cleaned.csv").write_text("\n".join(rows) + "\n", encoding="utf-8")
+            (output_dir / "ai_review_triggers.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": "1.0",
+                        "triggers": [
+                            {
+                                "id": "event:lost_gap:0-4",
+                                "type": "lost_gap",
+                                "priority": "medium",
+                                "start_frame": 0,
+                                "end_frame": 4,
+                                "reason": "lost",
+                                "evidence": {},
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            report = build_review_packet_report(
+                output_dir,
+                input_video=input_video,
+                max_packets=1,
+                include_media=True,
+            )
+
+        packet = report["packets"][0]
+        self.assertIn("contact_sheet_low_information", packet["media_warnings"])
+        self.assertIn("crop_sheet_low_information", packet["media_warnings"])
+        self.assertEqual(str(input_video.resolve()), report["review_source"]["input_video"])
+        self.assertFalse(report["review_source"]["used_review_friendly_source"])
+        self.assertIn("python_backend/scripts/transcode_review_source.py", report["review_source"]["fallback_command"])
+        self.assertIn("media_integrity", report["summary"])
+        self.assertEqual(2, report["summary"]["media_integrity"]["low_information_image_count"])
+        self.assertEqual(report["media_integrity"], report["summary"]["media_integrity"])
+
+    def test_build_review_packet_report_preserves_missing_input_video_provenance(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            output_dir = Path(temp)
+            missing_video = output_dir / "missing_hevc.mp4"
+
+            report = build_review_packet_report(output_dir, input_video=missing_video, include_media=False)
+
+        self.assertEqual(str(missing_video.resolve()), report["review_source"]["input_video"])
+        self.assertIn("transcode_review_source.py", report["review_source"]["fallback_command"])
+
+    def test_missing_input_video_does_not_close_long_gap_coverage(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            output_dir = Path(temp)
+            missing_video = output_dir / "missing_hevc.mp4"
+            rows = ["Frame,X,Y,Confidence,Status"]
+            for frame in range(831):
+                if 100 <= frame <= 800:
+                    rows.append(f"{frame},,,0.00,Lost")
+                else:
+                    rows.append(f"{frame},{100 + frame * 0.1:.1f},100,0.90,Detected")
+            (output_dir / "ball_track.cleaned.csv").write_text("\n".join(rows) + "\n", encoding="utf-8")
+            (output_dir / "ai_review_triggers.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": "1.0",
+                        "triggers": [
+                            {
+                                "id": "event:1:lost_gap:100-800",
+                                "type": "lost_gap",
+                                "priority": "medium",
+                                "source": "cleaned",
+                                "start_frame": 100,
+                                "end_frame": 800,
+                                "frame_count": 701,
+                                "reason": "Ball track is lost but input video is missing.",
+                                "evidence": {"lost_frame_count": 701},
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            report = build_review_packet_report(output_dir, input_video=missing_video, max_packets=4, include_media=True)
+
+        self.assertEqual([], report["long_lost_gap_coverage"][0]["covered_labels"])
+        self.assertTrue(all("input_video_missing" in packet["media_warnings"] for packet in report["packets"]))
+
     def test_write_review_packet_report_persists_packet_manifests(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             output_dir = Path(temp)
@@ -1483,6 +1633,21 @@ def _write_video(path: Path, *, width: int, height: int, frame_count: int) -> No
         raise unittest.SkipTest("OpenCV video writer is unavailable in this environment.")
     for frame_index in range(frame_count):
         frame = np.full((height, width, 3), frame_index * 20, dtype=np.uint8)
+        writer.write(frame)
+    writer.release()
+
+
+def _write_constant_video(path: Path, *, width: int, height: int, frame_count: int) -> None:
+    writer = cv2.VideoWriter(
+        str(path),
+        cv2.VideoWriter.fourcc(*"mp4v"),
+        6.0,
+        (width, height),
+    )
+    if not writer.isOpened():
+        raise unittest.SkipTest("OpenCV video writer is unavailable in this environment.")
+    frame = np.full((height, width, 3), 128, dtype=np.uint8)
+    for _ in range(frame_count):
         writer.write(frame)
     writer.release()
 
