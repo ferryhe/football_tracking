@@ -72,7 +72,15 @@ def build_highlight_candidate_comparison(
             "default_post_buffer_frames": validation.get("default_post_buffer_frames"),
             "pre_frame_delta": validation.get("pre_frame_delta"),
             "post_frame_delta": validation.get("post_frame_delta"),
-            "source_end_clamp": bool(validation.get("source_end_clamp")),
+            "core_window_preserved": _validation_bool(
+                validation,
+                "core_window_preserved",
+                check_name="core_window_preserved",
+                status_as_bool=True,
+            ),
+            "required_tail_frames": validation.get("required_tail_frames"),
+            "actual_tail_frames": validation.get("actual_tail_frames"),
+            "source_end_clamp": _validation_bool(validation, "source_end_clamp", check_name="source_bounds"),
             "tail_status": validation.get("tail_status"),
             "frame_count": frame_count,
             "duration_seconds": duration_seconds,
@@ -130,6 +138,27 @@ def _validation_checks(validation: dict[str, Any]) -> list[dict[str, Any]]:
             }
         )
     return result
+
+
+def _validation_bool(
+    validation: dict[str, Any],
+    key: str,
+    *,
+    check_name: str,
+    status_as_bool: bool = False,
+) -> bool | None:
+    value = validation.get(key)
+    if isinstance(value, bool):
+        return value
+    for check in validation.get("checks", []) if isinstance(validation.get("checks"), list) else []:
+        if not isinstance(check, dict) or check.get("name") != check_name:
+            continue
+        check_value = check.get(key)
+        if isinstance(check_value, bool):
+            return check_value
+        if status_as_bool and check.get("status") in {"pass", "fail"}:
+            return check.get("status") == "pass"
+    return None
 
 
 def _approval_linkage_check(approval: dict[str, Any] | None, *, candidate_id: str) -> dict[str, Any]:
