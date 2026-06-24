@@ -9,6 +9,7 @@ from typing import Any
 from football_tracking.ai_candidate_comparison import CANDIDATE_STATUSES, comparison_payload_status
 from football_tracking.ai_candidate_registry import REGISTRY_REPORT_NAME, load_candidate_registry
 from football_tracking.final_artifact_manifest import FINAL_ARTIFACT_MANIFEST_NAME
+from football_tracking.stable_output_evaluation import evaluate_stable_final_outputs
 
 SCHEMA_VERSION = "1.0"
 QUALITY_GATE_REPORT_NAME = "ai_improvement_quality_gate.json"
@@ -29,6 +30,7 @@ CHECK_NAMES = (
     "highlight_tail_ok",
     "model_routing_recorded",
     "candidate_comparisons_ok",
+    "stable_final_outputs",
 )
 
 FAILURE_TAG_ALIASES = {
@@ -124,6 +126,7 @@ def build_ai_improvement_quality_gate(
         "camera_motion_audit": _load_artifact(output_dir / "camera_motion_audit.json"),
         "event_candidates": _load_artifact(output_dir / "event_candidates.json"),
         "ai_visual_review": _load_artifact(output_dir / "ai_visual_review.json"),
+        "ai_visual_localization": _load_artifact(output_dir / "ai_visual_localization.json"),
         "missing_ball_resolution": _load_artifact(output_dir / "missing_ball_resolution.json"),
         "final_artifact_manifest": _load_artifact(output_dir / FINAL_ARTIFACT_MANIFEST_NAME),
     }
@@ -169,6 +172,13 @@ def build_ai_improvement_quality_gate(
             approved_actions=approved_actions,
             mode=mode,
         ),
+        "stable_final_outputs": evaluate_stable_final_outputs(
+            output_dir,
+            mode=mode,
+            final_manifest_artifact=artifacts["final_artifact_manifest"],
+            review_packets_artifact=artifacts["review_packets"],
+            ai_visual_localization_artifact=artifacts["ai_visual_localization"],
+        ),
     }
     long_gap_check, missing_ball_check = _check_long_lost_gap_coverage(
         artifacts["ball_audit"],
@@ -192,6 +202,7 @@ def build_ai_improvement_quality_gate(
     checks = {name: checks[name] for name in CHECK_NAMES}
     summary = _summary(checks)
     summary["candidate_comparisons"] = _candidate_comparisons_summary(checks["candidate_comparisons_ok"])
+    summary["stable_final_outputs"] = _stable_final_outputs_summary(checks["stable_final_outputs"])
     return {
         "schema_version": SCHEMA_VERSION,
         "generated_at": _utc_now_iso(),
@@ -1771,6 +1782,16 @@ def _candidate_comparisons_summary(check: dict[str, Any]) -> dict[str, Any]:
         "status": check.get("status"),
         "report_count": check.get("report_count", 0),
         "status_counts": check.get("status_counts", {status: 0 for status in CANDIDATE_COMPARISON_STATUSES}),
+    }
+
+
+def _stable_final_outputs_summary(check: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "status": check.get("status"),
+        "selected_media_count": check.get("selected_media_count", 0),
+        "review_media_status": check.get("review_media", {}).get("status")
+        if isinstance(check.get("review_media"), dict)
+        else None,
     }
 
 

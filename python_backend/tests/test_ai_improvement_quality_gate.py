@@ -7,6 +7,9 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+import cv2
+import numpy as np
+
 from football_tracking.ai_candidate_lifecycle import build_ai_candidate_lifecycle
 from football_tracking.ai_candidate_registry import write_candidate_registry
 from football_tracking.ai_improvement_quality_gate import (
@@ -783,6 +786,25 @@ class AiImprovementQualityGateTests(unittest.TestCase):
             write_track_hash_snapshot(output_dir, "after_ai_improvement")
             _write_json(output_dir / "ball_audit.json", {"review_events": []})
             _write_json(output_dir / "review_packets.json", {"packets": []})
+            _write_useful_video(output_dir / "final" / "selected.mp4")
+            comparison = _comparison_payload("candidate-good", "pass")
+            comparison["comparison_report"] = "missing_ball_comparison.json"
+            _write_json(output_dir / "missing_ball_comparison.json", comparison)
+            _write_json(
+                output_dir / "final_ai_improvement_artifact_manifest.json",
+                {
+                    "final_selected_artifacts": [
+                        {"candidate_id": "candidate-good", "type": "video", "path": "final/selected.mp4"}
+                    ],
+                    "comparison_reports": [
+                        {
+                            "path": "missing_ball_comparison.json",
+                            "candidate_id": "candidate-good",
+                            "problem_type": "missing_ball",
+                        }
+                    ],
+                },
+            )
             _write_json(
                 output_dir / "ai_improvement_report.json",
                 {
@@ -1024,6 +1046,30 @@ class AiImprovementQualityGateTests(unittest.TestCase):
         self.assertEqual("pass", comparison_check["status"])
         self.assertEqual(0, comparison_check["report_count"])
         self.assertEqual("No candidate comparison reports found", comparison_check["reason"])
+
+    def test_quality_gate_includes_stable_final_outputs_check(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_useful_video(output_dir / "final" / "selected.mp4")
+            _write_json(
+                output_dir / "review_packets.json",
+                {"media_integrity": {"status": "ok", "image_count": 1, "low_information_image_count": 0}},
+            )
+            _write_json(
+                output_dir / "final_ai_improvement_artifact_manifest.json",
+                {
+                    "final_selected_artifacts": [
+                        {"candidate_id": "candidate-good", "type": "video", "path": "final/selected.mp4"}
+                    ]
+                },
+            )
+
+            payload = build_ai_improvement_quality_gate(output_dir, mode="artifact-only")
+
+        stable_check = payload["checks"]["stable_final_outputs"]
+        self.assertEqual("pass", stable_check["status"])
+        self.assertEqual(1, stable_check["selected_media_count"])
+        self.assertEqual("pass", stable_check["artifacts"][0]["status"])
 
     def test_candidate_comparison_summary_mismatch_is_fail(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:
@@ -1489,6 +1535,22 @@ def _write_tracks(output_dir: Path, *, raw: str = "Frame,X,Y,Status\n1,10,20,Det
     output_dir.mkdir(parents=True, exist_ok=True)
     (output_dir / "ball_track.csv").write_text(raw, encoding="utf-8")
     (output_dir / "ball_track.cleaned.csv").write_text(raw, encoding="utf-8")
+
+
+def _write_useful_video(path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    writer = cv2.VideoWriter(str(path), cv2.VideoWriter.fourcc(*"mp4v"), 8.0, (64, 48))
+    if not writer.isOpened():
+        raise RuntimeError("OpenCV VideoWriter could not create a tiny test video.")
+    for index in range(4):
+        frame = np.zeros((48, 64, 3), dtype=np.uint8)
+        frame[:, :, 0] = np.arange(64, dtype=np.uint8)
+        frame[:, :, 1] = (np.arange(48, dtype=np.uint8)[:, None] * 3 + index * 11) % 255
+        frame[:, :, 2] = ((frame[:, :, 0].astype(np.uint16) * 5 + index * 17) % 255).astype(np.uint8)
+        cv2.line(frame, (0, 12 + index), (63, 40 - index), (240, 240, 240), 2)
+        cv2.circle(frame, (10 + index * 5, 24), 4, (20, 220, 40), -1)
+        writer.write(frame)
+    writer.release()
 
 
 def _sha256_file(path: Path) -> str:

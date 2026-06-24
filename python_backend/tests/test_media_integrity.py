@@ -22,6 +22,7 @@ class MediaIntegrityTests(unittest.TestCase):
 
             result = inspect_image(image_path)
 
+        self.assertEqual(str(image_path), result["path"])
         self.assertFalse(result["likely_corrupt"])
         self.assertTrue(result["gray"])
         self.assertTrue(result["low_information"])
