@@ -7,6 +7,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from football_tracking.recovery_stitcher import (
+    is_localize_ball_roi_window,
+    stitch_localize_recovery_rows,
+    write_recovery_stitch_report,
+)
+
 CSV_HEADER = ["Frame", "X", "Y", "Confidence", "Status"]
 STATUS_BY_KEY = {"detected": "Detected", "predicted": "Predicted", "lost": "Lost"}
 VALID_STATUSES = {"Detected", "Predicted"}
@@ -49,6 +55,30 @@ def reconcile_high_recall_window(
         max_jump_px=max_jump_px,
     )
 
+    if is_localize_ball_roi_window(window):
+        stitched_rows, stitch_attempt = stitch_localize_recovery_rows(main_rows, high_recall_rows, window)
+        if stitch_attempt.get("status") == "pass":
+            result = {
+                "accepted": True,
+                "reason": "roi_stitch_accepted",
+                "window": _window_clue(window),
+                "accepted_frames": stitch_attempt.get("accepted_frames", []),
+                "rows": stitched_rows,
+                "review_packet_clues": [],
+                "gate_violations": [],
+                "recovery_stitch": stitch_attempt,
+            }
+            boundary_violations = stitch_attempt.get("boundary_transition_violations")
+            if boundary_violations:
+                result["boundary_transition_warning"] = True
+                result["boundary_transition_violations"] = boundary_violations
+            return _with_ai_improvement_metadata(result, window)
+        result = _rejected_result(main_rows, window, "roi_stitch_rejected")
+        result["recovery_stitch"] = stitch_attempt
+        result["gate_violations"] = []
+        result["review_packet_clues"] = [_window_clue(window, rejection_reason="roi_stitch_rejected")]
+        return _with_ai_improvement_metadata(result, window)
+
     for segment in sorted(high_segments, key=_segment_acceptance_key):
         candidate_by_frame, touched_frames, violations, rejected_segment = _try_apply_segment(
             proposed_by_frame,
@@ -71,9 +101,15 @@ def reconcile_high_recall_window(
         accepted_frames.extend(touched_frames)
 
     if not accepted_frames:
+        blocked_replacement_attempt = _disallowed_ai_replacement_attempt(main_by_frame, high_segments, window)
+        if blocked_replacement_attempt:
+            gate_violations.append(blocked_replacement_attempt)
+            review_packet_clues.append(_window_clue(window, rejection_reason="jump_gate_failed"))
         reason = "jump_gate_failed" if gate_violations else "no_continuity_improvement"
         result = _rejected_result(main_rows, window, reason)
         result["gate_violations"] = gate_violations
+        if blocked_replacement_attempt:
+            result["review_packet_clues"] = review_packet_clues
         return _with_ai_improvement_metadata(result, window)
 
     proposed_rows = _rows_from_frame_map(proposed_by_frame)
@@ -103,6 +139,7 @@ def reconcile_high_recall_outputs(
     main_rows = read_track_csv(main_csv_path)
 
     results: list[dict[str, Any]] = []
+    recovery_stitch_attempts: list[dict[str, Any]] = []
     current_rows = main_rows
     for index, window in enumerate(windows):
         window_dir = root / f"window_{index:03d}"
@@ -123,12 +160,18 @@ def reconcile_high_recall_outputs(
         )
         if result["accepted"]:
             current_rows = result["rows"]
+        stitch_attempt = result.get("recovery_stitch")
+        if isinstance(stitch_attempt, dict):
+            recovery_stitch_attempts.append(stitch_attempt)
         result["window_dir"] = str(window_dir)
         results.append(_report_result(result))
 
     accepted_count = sum(1 for result in results if result.get("accepted"))
     if accepted_count:
         write_track_csv(main_csv_path, current_rows)
+    recovery_stitch_report: dict[str, Any] | None = None
+    if recovery_stitch_attempts:
+        recovery_stitch_report = write_recovery_stitch_report(output_dir, recovery_stitch_attempts)
 
     report = {
         "schema_version": SCHEMA_VERSION,
@@ -152,6 +195,9 @@ def reconcile_high_recall_outputs(
             if isinstance(clue, dict)
         ],
     }
+    if recovery_stitch_report is not None:
+        report["recovery_stitch_report"] = "recovery_stitch_report.json"
+        report["recovery_stitch_summary"] = recovery_stitch_report.get("summary", {})
     root.mkdir(parents=True, exist_ok=True)
     (root / "reconcile_report.json").write_text(
         json.dumps(report, ensure_ascii=False, indent=2) + "\n",
@@ -190,7 +236,16 @@ def _report_result(result: dict[str, Any]) -> dict[str, Any]:
         "review_packet_clues": result.get("review_packet_clues", []),
         "gate_violations": result.get("gate_violations", []),
     }
-    for key in ("source", "improvement_id", "approval_source", "approval_provenance", "changed_frame_count"):
+    for key in (
+        "source",
+        "improvement_id",
+        "approval_source",
+        "approval_provenance",
+        "changed_frame_count",
+        "boundary_transition_warning",
+        "boundary_transition_violations",
+        "recovery_stitch",
+    ):
         if key in result:
             reported[key] = result[key]
     return reported
@@ -384,8 +439,52 @@ def _segment_acceptance_key(segment: list[dict[str, Any]]) -> tuple[float, float
 
 
 def _window_allows_replacement(window: dict[str, Any]) -> bool:
+    if _approved_recovery_action(window) in {"localize_ball_roi", "targeted_rerun", "rerun_ball_window"}:
+        return False
     reason = str(window.get("reason") or "").casefold()
     return any(marker in reason for marker in REPLACEMENT_REASON_MARKERS)
+
+
+def _approved_recovery_action(window: dict[str, Any]) -> str | None:
+    approved_action = window.get("approved_action")
+    if approved_action in {"localize_ball_roi", "targeted_rerun", "rerun_ball_window"}:
+        return str(approved_action)
+    provenance = window.get("approval_provenance")
+    if isinstance(provenance, list):
+        for item in provenance:
+            if not isinstance(item, dict):
+                continue
+            approved_action = item.get("approved_action")
+            if approved_action in {"localize_ball_roi", "targeted_rerun", "rerun_ball_window"}:
+                return str(approved_action)
+    return None
+
+
+def _disallowed_ai_replacement_attempt(
+    main_by_frame: dict[int, dict[str, Any]],
+    high_segments: list[list[dict[str, Any]]],
+    window: dict[str, Any],
+) -> dict[str, Any] | None:
+    if _approved_recovery_action(window) not in {"targeted_rerun", "rerun_ball_window"}:
+        return None
+    reason = str(window.get("reason") or "").casefold()
+    if not any(marker in reason for marker in REPLACEMENT_REASON_MARKERS):
+        return None
+    blocked_frames: list[int] = []
+    for segment in high_segments:
+        for row in segment:
+            frame = _parse_int(row.get("Frame"))
+            if frame is None:
+                continue
+            if _is_valid_track_row(main_by_frame.get(frame, {})):
+                blocked_frames.append(frame)
+    if not blocked_frames:
+        return None
+    return {
+        "reason": "replacement_requires_localize_ball_roi",
+        "blocked_frames": sorted(set(blocked_frames)),
+        "approved_action": _approved_recovery_action(window),
+    }
 
 
 def _csv_row(row: dict[str, Any]) -> dict[str, str]:

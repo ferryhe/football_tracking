@@ -50,6 +50,7 @@ from football_tracking.metrics import (
     write_run_artifacts,
 )
 from football_tracking.missing_ball_candidate_executor import (
+    apply_localize_recovery_stitches,
     assert_parent_fingerprints_unchanged,
     capture_parent_fingerprints,
     combined_recovery_action_window,
@@ -69,6 +70,8 @@ from football_tracking.missing_ball_recovery_comparison import write_missing_bal
 from football_tracking.pipeline import BallTrackingPipeline
 from football_tracking.player_tracks import compact_player_tracks_summary
 from football_tracking.quality import assess_video_quality
+from football_tracking.recovery_stitcher import REPORT_NAME as RECOVERY_STITCH_REPORT_NAME
+from football_tracking.recovery_stitcher import stitch_recovery_window
 
 _WINDOWS_RESERVED_NAMES = {
     "CON",
@@ -3069,6 +3072,15 @@ class ApiService:
                 lambda update: self._update_run_progress(run_id, update, progress_plan),
                 cancel_event.is_set,
             )
+            parent_output_dir = Path(self.get_run(parent_run_id)["output_dir"]).resolve()
+            selected_artifact = self._load_approved_actions_artifact(config.output_dir / APPROVED_ACTIONS_FILE_NAME)
+            apply_localize_recovery_stitches(
+                parent_output_dir=parent_output_dir,
+                candidate_output_dir=config.output_dir,
+                selected_artifact=selected_artifact,
+                csv_name=config.output.csv_name,
+                high_recall_report=high_recall_report,
+            )
             self._write_approved_child_candidate_audit(config)
             comparison_registration = self._write_approved_child_missing_ball_comparison(
                 parent_run_id,
@@ -3195,6 +3207,12 @@ class ApiService:
             raise RuntimeError("Approved child recovery comparison requires candidate_id.")
         baseline_track = self._preferred_track_path(parent_output_dir, csv_name=config.output.csv_name)
         candidate_track = self._preferred_track_path(config.output_dir, csv_name=config.output.csv_name)
+        self._ensure_localize_stitch_report_from_candidate_track(
+            baseline_track=baseline_track,
+            candidate_track=candidate_track,
+            candidate_output_dir=config.output_dir,
+            recovery_actions=recovery_actions,
+        )
         comparison_path = write_missing_ball_recovery_comparison(
             config.output_dir,
             baseline_track,
@@ -3206,6 +3224,7 @@ class ApiService:
             require_candidate_audit=True,
             review_packets_path=config.output_dir / "review_packets.json",
             require_packet_coverage=True,
+            recovery_stitch_report_path=config.output_dir / "recovery_stitch_report.json",
         )
         return {
             "parent_output_dir": parent_output_dir,
@@ -3213,6 +3232,33 @@ class ApiService:
             "comparison_path": comparison_path,
             "candidate_id": candidate_id,
         }
+
+    def _ensure_localize_stitch_report_from_candidate_track(
+        self,
+        *,
+        baseline_track: Path,
+        candidate_track: Path,
+        candidate_output_dir: Path,
+        recovery_actions: list[dict[str, Any]],
+    ) -> None:
+        if (candidate_output_dir / RECOVERY_STITCH_REPORT_NAME).exists():
+            return
+        if not baseline_track.exists() or not candidate_track.exists():
+            return
+        if self._file_fingerprint(baseline_track) == self._file_fingerprint(candidate_track):
+            return
+        for action in recovery_actions:
+            if action.get("approved_action") != "localize_ball_roi":
+                continue
+            effective_roi = action.get("effective_roi") or action.get("padded_roi") or action.get("approved_roi") or action.get("local_search_roi")
+            temp_output = candidate_track.with_name(f".{candidate_track.name}.stitch.tmp")
+            report = stitch_recovery_window(baseline_track, candidate_track, temp_output, dict(action), effective_roi)
+            summary = report.get("summary") if isinstance(report.get("summary"), dict) else {}
+            if summary.get("status") == "pass":
+                temp_output.replace(candidate_track)
+            elif temp_output.exists():
+                temp_output.unlink()
+            return
 
     def _register_approved_child_missing_ball_candidate(
         self,

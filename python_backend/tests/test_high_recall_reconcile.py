@@ -85,6 +85,77 @@ class HighRecallReconcileTests(unittest.TestCase):
             result["review_packet_clues"][0],
         )
 
+    def test_reconcile_localize_roi_can_replace_wrong_parent_segment_with_boundary_warning(self) -> None:
+        main_rows = [_row(0, 0, 0, "Detected")]
+        main_rows.extend(_row(frame, 20, 20, "Detected", 0.3) for frame in range(1, 13))
+        high_recall_rows = [_row(frame, 500 + frame, 900 + frame, "Detected", 0.91) for frame in range(1, 13)]
+
+        result = reconcile_high_recall_window(
+            main_rows,
+            high_recall_rows,
+            {
+                "start_frame": 1,
+                "end_frame": 12,
+                "approved_action": "localize_ball_roi",
+                "approval_id": "approval_roi",
+                "source_packet_id": "packet_roi",
+                "effective_roi": [480, 880, 620, 1040],
+                "sources": ["ai_improvement"],
+                "improvement_id": "imp_roi",
+            },
+            max_speed_px_per_frame=100.0,
+            max_jump_px=120.0,
+        )
+
+        self.assertTrue(result["accepted"])
+        self.assertEqual("roi_stitch_accepted", result["reason"])
+        self.assertTrue(result["boundary_transition_warning"])
+        self.assertEqual(12, result["changed_frame_count"])
+        by_frame = {int(row["Frame"]): row for row in result["rows"]}
+        self.assertEqual("501.0", by_frame[1]["X"])
+        self.assertEqual("512.0", by_frame[12]["X"])
+
+    def test_reconcile_non_localize_window_does_not_downgrade_boundary_jump(self) -> None:
+        main_rows = [_row(0, 0, 0, "Detected")]
+        main_rows.append(_row(1, None, None, "Lost", 0.0))
+        high_recall_rows = [_row(1, 500, 900, "Detected", 0.91)]
+
+        result = reconcile_high_recall_window(
+            main_rows,
+            high_recall_rows,
+            {"start_frame": 1, "end_frame": 1, "reason": "ai_improvement: approved rerun_ball_window"},
+            max_speed_px_per_frame=100.0,
+            max_jump_px=120.0,
+        )
+
+        self.assertFalse(result["accepted"])
+        self.assertEqual("jump_gate_failed", result["reason"])
+
+    def test_reconcile_localize_roi_failure_does_not_fall_back_to_generic_acceptance(self) -> None:
+        main_rows = [_row(0, 0, 0, "Detected")]
+        main_rows.extend(_row(frame, None, None, "Lost", 0.0) for frame in range(1, 20))
+        high_recall_rows = [_row(frame, 500 + frame, 900 + frame, "Detected", 0.9) for frame in range(1, 20)]
+
+        result = reconcile_high_recall_window(
+            main_rows,
+            high_recall_rows,
+            {
+                "start_frame": 1,
+                "end_frame": 19,
+                "approval_id": "approval_roi",
+                "approved_action": "localize_ball_roi",
+                "source_packet_id": "packet_roi",
+                "effective_roi": [100, 100, 200, 200],
+                "sources": ["ai_improvement"],
+            },
+            max_speed_px_per_frame=500.0,
+            max_jump_px=800.0,
+        )
+
+        self.assertFalse(result["accepted"])
+        self.assertEqual("roi_stitch_rejected", result["reason"])
+        self.assertEqual("fail", result["recovery_stitch"]["status"])
+
     def test_reconcile_accepts_clean_subsegments_from_noisy_high_recall_window(self) -> None:
         main_rows = [
             _row(0, 4700, 940, "Detected"),
@@ -267,6 +338,40 @@ class HighRecallReconcileTests(unittest.TestCase):
         self.assertEqual("api", result["approval_source"])
         self.assertEqual("approval_001", result["approval_provenance"][0]["approval_id"])
         self.assertEqual(1, result["changed_frame_count"])
+
+    def test_approved_rerun_ball_window_does_not_replace_existing_jump_segment(self) -> None:
+        main_rows = [
+            _row(0, 0, 0, "Detected"),
+            _row(1, 5000, 1400, "Detected"),
+            _row(2, 20, 0, "Detected"),
+        ]
+        high_recall_rows = [_row(1, 10, 0, "Detected", 0.9)]
+
+        result = reconcile_high_recall_window(
+            main_rows,
+            high_recall_rows,
+            {
+                "start_frame": 1,
+                "end_frame": 1,
+                "reason": "ai_improvement: approved rerun_ball_window: large_jump; suspicious_tracklet",
+                "priority": "high",
+                "sources": ["ai_improvement"],
+                "approved_action": "rerun_ball_window",
+                "approval_provenance": [
+                    {
+                        "approval_id": "approval_rerun",
+                        "approved_action": "rerun_ball_window",
+                    }
+                ],
+            },
+            max_speed_px_per_frame=180.0,
+            max_jump_px=260.0,
+        )
+
+        self.assertFalse(result["accepted"])
+        self.assertEqual("jump_gate_failed", result["reason"])
+        self.assertEqual([], result["accepted_frames"])
+        self.assertEqual("5000", {int(row["Frame"]): row for row in result["rows"]}[1]["X"])
 
     def test_reconcile_outputs_preserve_ai_provenance_when_window_csv_missing(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:

@@ -9,6 +9,7 @@ from football_tracking.ai_candidate_comparison import (
     build_candidate_comparison,
     write_candidate_comparison_report,
 )
+from football_tracking.recovery_stitcher import MIN_STITCH_RUN_FRAMES
 
 SUSTAINED_RECOVERY_MIN_FRAMES = 24
 SHORT_ISLAND_MAX_FRAMES = 3
@@ -26,10 +27,12 @@ def build_missing_ball_recovery_comparison(
     require_candidate_audit: bool = False,
     review_packets_path: Path | None = None,
     require_packet_coverage: bool = False,
+    recovery_stitch_report_path: Path | None = None,
 ) -> dict[str, Any]:
     baseline_path = Path(baseline_track_path)
     candidate_path = Path(candidate_track_path)
     artifact_check = _artifact_check(baseline_path, candidate_path)
+    recovery_stitch_report: dict[str, Any] | None = None
     if artifact_check is not None:
         checks = [artifact_check]
         metrics: dict[str, Any] = {}
@@ -40,6 +43,9 @@ def build_missing_ball_recovery_comparison(
         metrics = _comparison_metrics(baseline_rows, candidate_rows, window)
         candidate_audit = _load_candidate_audit(candidate_audit_path)
         review_packets = _load_review_packets(review_packets_path)
+        recovery_stitch_report = _load_recovery_stitch_report(recovery_stitch_report_path)
+        if recovery_stitch_report is not None:
+            metrics["roi_stitch_recovery"] = _recovery_stitch_metrics(recovery_stitch_report, target_window=window)
         checks = _comparison_checks(
             metrics,
             approval,
@@ -50,6 +56,7 @@ def build_missing_ball_recovery_comparison(
             require_candidate_audit=require_candidate_audit,
             review_packets=review_packets,
             require_packet_coverage=require_packet_coverage,
+            recovery_stitch_report=recovery_stitch_report,
         )
 
     payload = build_candidate_comparison(
@@ -69,6 +76,10 @@ def build_missing_ball_recovery_comparison(
     payload["promotion_status"] = "not_promoted"
     payload["consumed_approval_ids"] = _consumed_approval_ids(approval)
     payload["candidate_artifacts"] = [str(candidate_path)]
+    if recovery_stitch_report is not None:
+        stitch_path = recovery_stitch_report.get("path")
+        if isinstance(stitch_path, str) and stitch_path.strip():
+            payload["candidate_artifacts"].append(stitch_path)
     return payload
 
 
@@ -84,6 +95,7 @@ def write_missing_ball_recovery_comparison(
     require_candidate_audit: bool = False,
     review_packets_path: Path | None = None,
     require_packet_coverage: bool = False,
+    recovery_stitch_report_path: Path | None = None,
 ) -> Path:
     payload = build_missing_ball_recovery_comparison(
         baseline_track_path,
@@ -95,6 +107,7 @@ def write_missing_ball_recovery_comparison(
         require_candidate_audit=require_candidate_audit,
         review_packets_path=review_packets_path,
         require_packet_coverage=require_packet_coverage,
+        recovery_stitch_report_path=recovery_stitch_report_path,
     )
     return write_candidate_comparison_report(
         Path(output_dir),
@@ -126,30 +139,51 @@ def _comparison_checks(
     require_candidate_audit: bool,
     review_packets: dict[str, Any] | None,
     require_packet_coverage: bool,
+    recovery_stitch_report: dict[str, Any] | None,
 ) -> list[dict[str, Any]]:
     checks: list[dict[str, Any]] = []
     baseline_lost = int(metrics["baseline_lost_frames"])
     candidate_lost = int(metrics["candidate_lost_frames"])
-    sustained = int(metrics["sustained_recovered_frames"])
+    localize_stitch_passed = bool(_localize_approvals(approval)) and _passing_stitch_report(recovery_stitch_report)
+    localize_stitch_fully_covers = localize_stitch_passed and _stitch_required_window_coverage_passed(
+        recovery_stitch_report,
+        target_window=target_window,
+    )
+    recovery_min_frames = _recovery_min_frames(recovery_stitch_report) if localize_stitch_fully_covers else SUSTAINED_RECOVERY_MIN_FRAMES
+    sustained = (
+        int(metrics.get("longest_recovered_run_frames") or 0)
+        if recovery_min_frames < SUSTAINED_RECOVERY_MIN_FRAMES
+        else int(metrics["sustained_recovered_frames"])
+    )
+    stitch_accepted_frames = _stitch_accepted_frame_count(recovery_stitch_report) if localize_stitch_fully_covers else 0
     islands = int(metrics["new_short_false_positive_islands"])
     lost_delta = baseline_lost - candidate_lost
 
     checks.append(
         {
             "name": "lost_gap_reduced",
-            "status": "pass" if lost_delta >= SUSTAINED_RECOVERY_MIN_FRAMES else "fail",
+            "status": "pass" if lost_delta >= recovery_min_frames or localize_stitch_fully_covers else "fail",
             "baseline_value": baseline_lost,
             "candidate_value": candidate_lost,
-            "reason": _lost_gap_reduced_reason(lost_delta),
+            "minimum_reduction_frames": recovery_min_frames,
+            "reason": (
+                "localize ROI stitch evidence replaces the fully covered bounded recovery window"
+                if localize_stitch_fully_covers and lost_delta < recovery_min_frames
+                else _lost_gap_reduced_reason(lost_delta, minimum_frames=recovery_min_frames)
+            ),
         }
     )
     checks.append(
         {
             "name": "sustained_recovered_frames",
-            "status": "pass" if sustained >= SUSTAINED_RECOVERY_MIN_FRAMES else "fail",
-            "candidate_value": sustained,
-            "minimum_value": SUSTAINED_RECOVERY_MIN_FRAMES,
-            "reason": "candidate recovers a sustained segment" if sustained >= SUSTAINED_RECOVERY_MIN_FRAMES else "only short recovery spans found",
+            "status": "pass" if sustained >= recovery_min_frames or localize_stitch_fully_covers else "fail",
+            "candidate_value": max(sustained, stitch_accepted_frames),
+            "minimum_value": recovery_min_frames,
+            "reason": (
+                "localize ROI stitch evidence satisfies the fully covered bounded recovery window"
+                if localize_stitch_fully_covers and sustained < recovery_min_frames
+                else ("candidate recovers a sustained segment" if sustained >= recovery_min_frames else "only short recovery spans found")
+            ),
         }
     )
     checks.append(
@@ -181,8 +215,11 @@ def _comparison_checks(
             candidate_audit,
             target_window=target_window,
             require_candidate_audit=require_candidate_audit,
+            recovery_stitch_report=recovery_stitch_report,
         )
     )
+    recovery_stitch_check = _recovery_stitch_check(approval, recovery_stitch_report, target_window=target_window)
+    checks.append(recovery_stitch_check)
     checks.append(_localize_roi_plausibility_check(approval, candidate_rows))
     checks.append(_match_ball_confirmation_check(approval))
     checks.append(
@@ -231,20 +268,24 @@ def _approval_linkage_check(approval: dict[str, Any] | None, *, candidate_id: st
             "approval_candidate_id": approval_candidate_id,
             "reason": "approval candidate_id does not match comparison candidate",
         }
-    if approval.get("source_packet_id") not in (None, "") or approval.get("visual_review_id") not in (None, ""):
+    if (
+        approval.get("source_packet_id") not in (None, "")
+        or approval.get("visual_review_id") not in (None, "")
+        or approval.get("visual_localization_id") not in (None, "")
+    ):
         return {
             "name": "approval_linkage",
             "status": "pass",
             "approval_id": approval_id,
             "approved_action": approved_action,
             "candidate_id": candidate_id,
-            "reason": "approval is tied to packet or visual review provenance",
+            "reason": "approval is tied to packet, visual review, or visual localization provenance",
         }
     return {
         "name": "approval_linkage",
         "status": "fail",
         "approval_id": approval_id,
-        "reason": "approval lacks packet or visual review provenance",
+        "reason": "approval lacks packet, visual review, or visual localization provenance",
     }
 
 
@@ -268,6 +309,8 @@ def _comparison_metrics(
         "candidate_missing_frames": len(candidate_missing_frames),
         "candidate_missing_frame_ranges": [_range(run) for run in _contiguous_runs(candidate_missing_frames)],
         "lost_gap_reduction_frames": len(baseline_lost_frames) - len(candidate_lost_frames),
+        "recovered_frame_count": len(recovered_frames),
+        "longest_recovered_run_frames": _longest_run(recovered_runs),
         "sustained_recovered_frames": sum(len(run) for run in sustained_runs),
         "new_short_false_positive_islands": len(short_islands),
         "short_false_positive_island_ranges": [_range(run) for run in short_islands],
@@ -319,6 +362,7 @@ def _candidate_reaudit_check(
     *,
     target_window: tuple[int, int],
     require_candidate_audit: bool,
+    recovery_stitch_report: dict[str, Any] | None,
 ) -> dict[str, Any]:
     if audit is None:
         status = "unavailable" if require_candidate_audit else "pass"
@@ -333,6 +377,26 @@ def _candidate_reaudit_check(
     overlapping = [event for event in events if isinstance(event, dict) and _event_overlaps(event, target_window)]
     fail_events = [event for event in overlapping if event.get("severity") == "fail"]
     warn_events = [event for event in overlapping if event.get("severity") == "warn"]
+    boundary_warnings = _stitch_boundary_warnings(recovery_stitch_report)
+    if fail_events and _passing_stitch_report(recovery_stitch_report) and boundary_warnings:
+        accepted_boundary_events = [
+            event
+            for event in fail_events
+            if event.get("type") == "large_jump" and _event_matches_stitch_boundary_warning(event, boundary_warnings)
+        ]
+        remaining_fail_events = [
+            event for event in fail_events if event not in accepted_boundary_events
+        ]
+        if accepted_boundary_events and not remaining_fail_events:
+            return {
+                "name": "candidate_reaudit",
+                "status": "pass",
+                "reason": "candidate audit large-jump events are covered by an accepted localize ROI stitch boundary warning",
+                "event_count": len(accepted_boundary_events),
+                "event_types": sorted({str(event.get("type")) for event in accepted_boundary_events}),
+                "boundary_transition_warning": True,
+            }
+        fail_events = remaining_fail_events
     if fail_events:
         return {
             "name": "candidate_reaudit",
@@ -388,6 +452,41 @@ def _localize_roi_plausibility_check(
         "status": "pass",
         "reason": "all localize approval ROI frames match candidate points",
         "results": results,
+    }
+
+
+def _recovery_stitch_check(
+    approval: dict[str, Any] | None,
+    recovery_stitch_report: dict[str, Any] | None,
+    *,
+    target_window: tuple[int, int],
+) -> dict[str, Any]:
+    if not isinstance(approval, dict) or not _localize_approvals(approval):
+        return {"name": "roi_stitch_recovery", "status": "pass", "reason": "not a localize recovery"}
+    if recovery_stitch_report is None:
+        return {"name": "roi_stitch_recovery", "status": "fail", "reason": "localize recovery requires recovery_stitch_report.json"}
+    summary = recovery_stitch_report.get("summary") if isinstance(recovery_stitch_report.get("summary"), dict) else {}
+    attempts = _stitch_attempts(recovery_stitch_report)
+    passed = [attempt for attempt in attempts if isinstance(attempt, dict) and attempt.get("status") == "pass"]
+    if _passing_stitch_report(recovery_stitch_report) and _stitch_required_window_coverage_passed(recovery_stitch_report, target_window=target_window):
+        return {
+            "name": "roi_stitch_recovery",
+            "status": "pass",
+            "reason": "localize ROI stitch report accepted the recovery",
+            "passed_count": len(passed) or 1,
+            "path": recovery_stitch_report.get("path"),
+            "boundary_transition_warning_count": summary.get("boundary_transition_warning_count", 0),
+        }
+    failed = [attempt for attempt in attempts if isinstance(attempt, dict) and attempt.get("status") == "fail"]
+    coverage = _stitch_required_window_coverage(recovery_stitch_report, target_window=target_window)
+    coverage_failed = coverage.get("status") == "fail" or bool(coverage.get("uncovered_ranges"))
+    return {
+        "name": "roi_stitch_recovery",
+        "status": "fail" if failed or coverage_failed else "unavailable",
+        "reason": "localize ROI stitch report did not accept the recovery",
+        "summary_status": summary.get("status"),
+        "failed_count": len(failed),
+        "required_window_coverage": coverage,
     }
 
 
@@ -540,6 +639,248 @@ def _load_candidate_audit(path: Path | None) -> dict[str, Any] | None:
     except (OSError, json.JSONDecodeError, UnicodeDecodeError):
         return None
     return loaded if isinstance(loaded, dict) else None
+
+
+def _load_recovery_stitch_report(path: Path | None) -> dict[str, Any] | None:
+    if path is None or not Path(path).exists():
+        return None
+    try:
+        loaded = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+        return None
+    if not isinstance(loaded, dict):
+        return None
+    loaded["path"] = Path(path).name
+    return loaded
+
+
+def _recovery_stitch_metrics(recovery_stitch_report: dict[str, Any], *, target_window: tuple[int, int]) -> dict[str, Any]:
+    summary = recovery_stitch_report.get("summary") if isinstance(recovery_stitch_report.get("summary"), dict) else {}
+    metrics = recovery_stitch_report.get("metrics") if isinstance(recovery_stitch_report.get("metrics"), dict) else {}
+    attempt_metrics = [
+        attempt.get("metrics")
+        for attempt in _stitch_attempts(recovery_stitch_report)
+        if isinstance(attempt.get("metrics"), dict)
+    ]
+    coverage = metrics.get("required_window_coverage")
+    if not isinstance(coverage, dict):
+        coverage = _aggregate_stitch_coverage(attempt_metrics)
+    target_coverage = _coverage_from_stitch_ranges(recovery_stitch_report, target_window=target_window)
+    if target_coverage.get("status") != "unavailable":
+        coverage = target_coverage
+    roi_quality = metrics.get("roi_internal_quality")
+    if not isinstance(roi_quality, dict):
+        roi_quality = _aggregate_roi_internal_quality(attempt_metrics)
+    return {
+        "path": recovery_stitch_report.get("path"),
+        "status": summary.get("status") or metrics.get("status"),
+        "accepted_frame_count": summary.get("accepted_frame_count") or metrics.get("accepted_frame_count", 0),
+        "accepted_frame_ranges": metrics.get("accepted_frame_ranges", []),
+        "required_window_coverage": coverage,
+        "roi_internal_quality": roi_quality,
+        "boundary_transition_warnings": _stitch_boundary_warnings(recovery_stitch_report),
+    }
+
+
+def _recovery_min_frames(recovery_stitch_report: dict[str, Any] | None) -> int:
+    return MIN_STITCH_RUN_FRAMES if _passing_stitch_report(recovery_stitch_report) else SUSTAINED_RECOVERY_MIN_FRAMES
+
+
+def _stitch_accepted_frame_count(recovery_stitch_report: dict[str, Any] | None) -> int:
+    if not isinstance(recovery_stitch_report, dict):
+        return 0
+    summary = recovery_stitch_report.get("summary") if isinstance(recovery_stitch_report.get("summary"), dict) else {}
+    value = _parse_int(summary.get("accepted_frame_count"))
+    if value is not None:
+        return value
+    metrics = recovery_stitch_report.get("metrics") if isinstance(recovery_stitch_report.get("metrics"), dict) else {}
+    value = _parse_int(metrics.get("accepted_frame_count"))
+    if value is not None:
+        return value
+    attempts = _stitch_attempts(recovery_stitch_report)
+    return sum(_parse_int(attempt.get("accepted_frame_count")) or 0 for attempt in attempts)
+
+
+def _passing_stitch_report(recovery_stitch_report: dict[str, Any] | None) -> bool:
+    if not isinstance(recovery_stitch_report, dict):
+        return False
+    summary = recovery_stitch_report.get("summary")
+    if not isinstance(summary, dict) or summary.get("status") != "pass":
+        return False
+    metrics = recovery_stitch_report.get("metrics")
+    if isinstance(metrics, dict) and metrics.get("status") == "pass":
+        return True
+    attempts = _stitch_attempts(recovery_stitch_report)
+    if any(
+        isinstance(attempt, dict) and attempt.get("status") == "pass"
+        for attempt in attempts
+    ):
+        return True
+    accepted_frame_count = _parse_int(summary.get("accepted_frame_count")) or 0
+    return accepted_frame_count >= MIN_STITCH_RUN_FRAMES
+
+
+def _stitch_required_window_coverage(
+    recovery_stitch_report: dict[str, Any] | None,
+    *,
+    target_window: tuple[int, int] | None = None,
+) -> dict[str, Any]:
+    if not isinstance(recovery_stitch_report, dict):
+        return {"status": "unavailable", "uncovered_ranges": []}
+    if target_window is not None:
+        target_coverage = _coverage_from_stitch_ranges(recovery_stitch_report, target_window=target_window)
+        if target_coverage.get("status") != "unavailable":
+            return target_coverage
+    metrics = recovery_stitch_report.get("metrics") if isinstance(recovery_stitch_report.get("metrics"), dict) else {}
+    coverage = metrics.get("required_window_coverage")
+    if isinstance(coverage, dict):
+        return coverage
+    attempt_metrics = [
+        attempt.get("metrics")
+        for attempt in _stitch_attempts(recovery_stitch_report)
+        if isinstance(attempt.get("metrics"), dict)
+    ]
+    return _aggregate_stitch_coverage(attempt_metrics)
+
+
+def _stitch_required_window_coverage_passed(
+    recovery_stitch_report: dict[str, Any] | None,
+    *,
+    target_window: tuple[int, int] | None = None,
+) -> bool:
+    coverage = _stitch_required_window_coverage(recovery_stitch_report, target_window=target_window)
+    return coverage.get("status") == "pass" and not coverage.get("uncovered_ranges")
+
+
+def _coverage_from_stitch_ranges(
+    recovery_stitch_report: dict[str, Any],
+    *,
+    target_window: tuple[int, int],
+) -> dict[str, Any]:
+    accepted_ranges = _stitch_accepted_ranges(recovery_stitch_report)
+    if not accepted_ranges:
+        return {"status": "unavailable", "uncovered_ranges": []}
+    start, end = target_window
+    uncovered = _uncovered_ranges(accepted_ranges, start, end)
+    uncovered_with_counts = [
+        {
+            "start_frame": item["start_frame"],
+            "end_frame": item["end_frame"],
+            "frame_count": item["end_frame"] - item["start_frame"] + 1,
+        }
+        for item in uncovered
+    ]
+    return {
+        "status": "pass" if not uncovered_with_counts else "fail",
+        "uncovered_ranges": uncovered_with_counts,
+    }
+
+
+def _stitch_accepted_ranges(recovery_stitch_report: dict[str, Any]) -> list[dict[str, int]]:
+    ranges: list[dict[str, int]] = []
+    metrics_items: list[dict[str, Any]] = []
+    metrics = recovery_stitch_report.get("metrics")
+    if isinstance(metrics, dict):
+        metrics_items.append(metrics)
+    metrics_items.extend(
+        attempt.get("metrics")
+        for attempt in _stitch_attempts(recovery_stitch_report)
+        if isinstance(attempt.get("metrics"), dict)
+    )
+    for metrics_item in metrics_items:
+        raw_ranges = metrics_item.get("accepted_frame_ranges")
+        if not isinstance(raw_ranges, list):
+            continue
+        for item in raw_ranges:
+            if not isinstance(item, dict):
+                continue
+            start = _parse_int(item.get("start_frame"))
+            end = _parse_int(item.get("end_frame"))
+            if start is None or end is None:
+                continue
+            ranges.append({"start_frame": min(start, end), "end_frame": max(start, end)})
+    return ranges
+
+
+def _aggregate_stitch_coverage(metrics_items: list[dict[str, Any]]) -> dict[str, Any]:
+    if not metrics_items:
+        return {"status": "unavailable", "uncovered_ranges": []}
+    uncovered_ranges: list[dict[str, Any]] = []
+    for metrics in metrics_items:
+        coverage = metrics.get("required_window_coverage")
+        if not isinstance(coverage, dict):
+            return {"status": "unavailable", "uncovered_ranges": uncovered_ranges}
+        ranges = coverage.get("uncovered_ranges")
+        if isinstance(ranges, list):
+            uncovered_ranges.extend(item for item in ranges if isinstance(item, dict))
+        if coverage.get("status") != "pass":
+            return {"status": "fail", "uncovered_ranges": uncovered_ranges}
+    return {"status": "pass", "uncovered_ranges": uncovered_ranges}
+
+
+def _aggregate_roi_internal_quality(metrics_items: list[dict[str, Any]]) -> dict[str, Any]:
+    if not metrics_items:
+        return {"status": "unavailable"}
+    qualities: list[dict[str, Any]] = []
+    for metrics in metrics_items:
+        quality = metrics.get("roi_internal_quality")
+        if isinstance(quality, dict):
+            qualities.append(quality)
+    if not qualities:
+        return {"status": "unavailable"}
+    return {
+        "status": "pass" if all(item.get("status") == "pass" for item in qualities) else "fail",
+        "outside_roi_ratio": max((float(item.get("outside_roi_ratio") or 0.0) for item in qualities), default=0.0),
+        "max_step_px": max((float(item.get("max_step_px") or 0.0) for item in qualities), default=0.0),
+    }
+
+
+def _stitch_boundary_warnings(recovery_stitch_report: dict[str, Any] | None) -> list[dict[str, Any]]:
+    if not isinstance(recovery_stitch_report, dict):
+        return []
+    warnings: list[dict[str, Any]] = []
+    metrics_items: list[dict[str, Any]] = []
+    metrics = recovery_stitch_report.get("metrics")
+    if isinstance(metrics, dict):
+        metrics_items.append(metrics)
+    metrics_items.extend(
+        attempt.get("metrics")
+        for attempt in _stitch_attempts(recovery_stitch_report)
+        if isinstance(attempt.get("metrics"), dict)
+    )
+    for metrics_item in metrics_items:
+        boundary = metrics_item.get("boundary_transition_warning")
+        if not isinstance(boundary, dict):
+            continue
+        raw_warnings = boundary.get("warnings")
+        if isinstance(raw_warnings, list):
+            warnings.extend(item for item in raw_warnings if isinstance(item, dict))
+    return warnings
+
+
+def _event_matches_stitch_boundary_warning(event: dict[str, Any], warnings: list[dict[str, Any]]) -> bool:
+    event_start = _parse_int(event.get("start_frame"))
+    event_end = _parse_int(event.get("end_frame"))
+    if event_start is None or event_end is None:
+        return False
+    if event_end < event_start:
+        event_start, event_end = event_end, event_start
+    for warning in warnings:
+        previous_frame = _parse_int(warning.get("previous_frame"))
+        current_frame = _parse_int(warning.get("current_frame"))
+        if previous_frame is None or current_frame is None:
+            continue
+        if event_start <= previous_frame <= event_end and event_start <= current_frame <= event_end:
+            return True
+    return False
+
+
+def _stitch_attempts(recovery_stitch_report: dict[str, Any]) -> list[dict[str, Any]]:
+    for key in ("attempts", "windows"):
+        value = recovery_stitch_report.get(key)
+        if isinstance(value, list):
+            return [item for item in value if isinstance(item, dict)]
+    return []
 
 
 def _load_review_packets(path: Path | None) -> dict[str, Any] | None:
@@ -728,8 +1069,8 @@ def _packet_label_coverage_check(
     }
 
 
-def _lost_gap_reduced_reason(lost_delta: int) -> str:
-    if lost_delta >= SUSTAINED_RECOVERY_MIN_FRAMES:
+def _lost_gap_reduced_reason(lost_delta: int, *, minimum_frames: int = SUSTAINED_RECOVERY_MIN_FRAMES) -> str:
+    if lost_delta >= minimum_frames:
         return "candidate reduces the sustained lost gap"
     if lost_delta > 0:
         return "candidate reduces lost frames, but not enough for sustained recovery"
