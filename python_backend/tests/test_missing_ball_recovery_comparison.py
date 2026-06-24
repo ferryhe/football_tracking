@@ -30,7 +30,7 @@ class MissingBallRecoveryComparisonTests(unittest.TestCase):
                     baseline,
                     candidate,
                     candidate_id="candidate-pass",
-                    approval=_approval(),
+                    approval=_targeted_approval(),
                     target_window={"start_frame": 10, "end_frame": 60},
                 )
 
@@ -67,6 +67,178 @@ class MissingBallRecoveryComparisonTests(unittest.TestCase):
         lost_gap_check = next(check for check in report["checks"] if check["name"] == "lost_gap_reduced")
         self.assertEqual("fail", lost_gap_check["status"])
         self.assertIn("not enough for sustained recovery", lost_gap_check["reason"])
+
+    def test_localize_roi_stitch_report_allows_shorter_sustained_recovery_threshold(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            baseline = output_dir / "baseline.csv"
+            candidate = output_dir / "candidate.csv"
+            stitch_report = output_dir / "recovery_stitch_report.json"
+            _write_track(baseline, lost_ranges=[(10, 31)])
+            _write_localize_short_recovery(candidate, recovered_start=19, recovered_end=31)
+            stitch_report.write_text(
+                json.dumps(
+                    {
+                        "summary": {
+                            "status": "pass",
+                            "accepted_frame_count": 13,
+                            "passed_count": 1,
+                            "boundary_transition_warning_count": 1,
+                        },
+                        "attempts": [
+                            {
+                                "status": "pass",
+                                "boundary_transition_warning": True,
+                                "metrics": {
+                                    "longest_roi_run_frames": 13,
+                                    "candidate_lost_frames": 9,
+                                    "baseline_lost_frames": 22,
+                                    "accepted_frame_count": 13,
+                                    "required_window_coverage": {"status": "pass", "uncovered_ranges": []},
+                                    "roi_internal_quality": {"status": "pass", "outside_roi_ratio": 0.0, "max_step_px": 1.0},
+                                },
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            report = build_missing_ball_recovery_comparison(
+                baseline,
+                candidate,
+                candidate_id="candidate-short-roi",
+                approval=_approval("candidate-short-roi"),
+                target_window={"start_frame": 10, "end_frame": 31},
+                recovery_stitch_report_path=stitch_report,
+            )
+
+        self.assertEqual("pass", report["comparison_status"])
+        self.assertTrue(report["promotion_eligible"])
+        sustained_check = next(check for check in report["checks"] if check["name"] == "sustained_recovered_frames")
+        self.assertEqual(13, sustained_check["candidate_value"])
+        self.assertEqual(12, sustained_check["minimum_value"])
+        stitch_check = next(check for check in report["checks"] if check["name"] == "roi_stitch_recovery")
+        self.assertEqual("pass", stitch_check["status"])
+
+    def test_short_localize_recovery_without_stitch_report_keeps_default_threshold(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            baseline = output_dir / "baseline.csv"
+            candidate = output_dir / "candidate.csv"
+            _write_track(baseline, lost_ranges=[(10, 31)])
+            _write_localize_short_recovery(candidate, recovered_start=19, recovered_end=31)
+
+            report = build_missing_ball_recovery_comparison(
+                baseline,
+                candidate,
+                candidate_id="candidate-short-no-stitch",
+                approval=_approval("candidate-short-no-stitch"),
+                target_window={"start_frame": 10, "end_frame": 31},
+            )
+
+        failed_checks = {check["name"] for check in report["checks"] if check["status"] == "fail"}
+        self.assertIn("sustained_recovered_frames", failed_checks)
+
+    def test_partial_localize_stitch_does_not_close_full_target_window(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            baseline = output_dir / "baseline.csv"
+            candidate = output_dir / "candidate.csv"
+            stitch_report = output_dir / "recovery_stitch_report.json"
+            _write_track(baseline, lost_ranges=[(2049, 2544)], frame_count=2600)
+            _write_track(candidate, lost_ranges=[(2049, 2078), (2301, 2544)], frame_count=2600)
+            _write_json(
+                stitch_report,
+                {
+                    "schema_version": "1.0",
+                    "summary": {"status": "pass", "accepted_frame_count": 222},
+                    "metrics": {
+                        "status": "pass",
+                        "accepted_frame_count": 222,
+                        "accepted_frame_ranges": [{"start_frame": 2079, "end_frame": 2300, "frame_count": 222}],
+                        "required_window_coverage": {
+                            "status": "fail",
+                            "uncovered_ranges": [
+                                {"start_frame": 2049, "end_frame": 2078, "frame_count": 30},
+                                {"start_frame": 2301, "end_frame": 2544, "frame_count": 244},
+                            ],
+                        },
+                        "roi_internal_quality": {"status": "pass", "outside_roi_ratio": 0.0, "max_step_px": 1.0},
+                    },
+                },
+            )
+
+            report = build_missing_ball_recovery_comparison(
+                baseline,
+                candidate,
+                candidate_id="candidate-partial-localize",
+                approval={**_approval("candidate-partial-localize"), "start_frame": 2049, "end_frame": 2544},
+                target_window={"start_frame": 2049, "end_frame": 2544},
+                recovery_stitch_report_path=stitch_report,
+            )
+
+        self.assertEqual("fail", report["comparison_status"])
+        roi_stitch_check = next(check for check in report["checks"] if check["name"] == "roi_stitch_recovery")
+        self.assertEqual("fail", roi_stitch_check["status"])
+        self.assertEqual(
+            [
+                {"start_frame": 2049, "end_frame": 2078, "frame_count": 30},
+                {"start_frame": 2301, "end_frame": 2544, "frame_count": 244},
+            ],
+            roi_stitch_check["required_window_coverage"]["uncovered_ranges"],
+        )
+
+    def test_aggregate_localize_stitch_windows_do_not_hide_gap_between_attempts(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            baseline = output_dir / "baseline.csv"
+            candidate = output_dir / "candidate.csv"
+            stitch_report = output_dir / "recovery_stitch_report.json"
+            _write_track(baseline, lost_ranges=[(10, 25)])
+            _write_track(candidate, lost_ranges=[])
+            _write_json(
+                stitch_report,
+                {
+                    "schema_version": "1.0",
+                    "summary": {"status": "pass", "accepted_frame_count": 12},
+                    "attempts": [
+                        {
+                            "status": "pass",
+                            "metrics": {
+                                "status": "pass",
+                                "accepted_frame_count": 6,
+                                "accepted_frame_ranges": [{"start_frame": 10, "end_frame": 15, "frame_count": 6}],
+                                "required_window_coverage": {"status": "pass", "uncovered_ranges": []},
+                                "roi_internal_quality": {"status": "pass", "outside_roi_ratio": 0.0, "max_step_px": 1.0},
+                            },
+                        },
+                        {
+                            "status": "pass",
+                            "metrics": {
+                                "status": "pass",
+                                "accepted_frame_count": 6,
+                                "accepted_frame_ranges": [{"start_frame": 20, "end_frame": 25, "frame_count": 6}],
+                                "required_window_coverage": {"status": "pass", "uncovered_ranges": []},
+                                "roi_internal_quality": {"status": "pass", "outside_roi_ratio": 0.0, "max_step_px": 1.0},
+                            },
+                        },
+                    ],
+                },
+            )
+
+            report = build_missing_ball_recovery_comparison(
+                baseline,
+                candidate,
+                candidate_id="candidate-aggregate-gap",
+                approval={**_approval("candidate-aggregate-gap"), "start_frame": 10, "end_frame": 25},
+                target_window={"start_frame": 10, "end_frame": 25},
+                recovery_stitch_report_path=stitch_report,
+            )
+
+        self.assertEqual("fail", report["comparison_status"])
+        roi_stitch_check = next(check for check in report["checks"] if check["name"] == "roi_stitch_recovery")
+        self.assertEqual([{"start_frame": 16, "end_frame": 19, "frame_count": 4}], roi_stitch_check["required_window_coverage"]["uncovered_ranges"])
 
     def test_candidate_fails_when_gap_is_filled_only_with_predictions(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:
@@ -291,7 +463,7 @@ class MissingBallRecoveryComparisonTests(unittest.TestCase):
                 baseline,
                 candidate,
                 candidate_id="candidate-needs-audit",
-                approval=_approval("candidate-needs-audit"),
+                approval=_targeted_approval("candidate-needs-audit"),
                 target_window={"start_frame": 10, "end_frame": 60},
                 candidate_audit_path=output_dir / "missing_ball_audit.json",
                 require_candidate_audit=True,
@@ -718,6 +890,8 @@ class MissingBallRecoveryComparisonTests(unittest.TestCase):
             _write_track(candidate, lost_ranges=[(10, 20)])
             approval = _approval("candidate-in-roi-uncertain")
             approval.pop("match_ball_confirmed")
+            stitch_report = output_dir / "recovery_stitch_report.json"
+            _write_pass_stitch_report(stitch_report, start=10, end=60, accepted_frame_count=40)
 
             report = build_missing_ball_recovery_comparison(
                 baseline,
@@ -725,12 +899,73 @@ class MissingBallRecoveryComparisonTests(unittest.TestCase):
                 candidate_id="candidate-in-roi-uncertain",
                 approval=approval,
                 target_window={"start_frame": 10, "end_frame": 60},
+                recovery_stitch_report_path=stitch_report,
             )
 
         self.assertEqual("warn", report["summary"]["status"])
         self.assertTrue(report["requires_human_confirmation"])
         warning_checks = {check["name"] for check in report["checks"] if check["status"] == "warn"}
         self.assertIn("match_ball_confirmation", warning_checks)
+
+    def test_localize_roi_stitch_evidence_can_pass_short_bounded_recovery(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            baseline = output_dir / "baseline.csv"
+            candidate = output_dir / "candidate.csv"
+            stitch_report = output_dir / "recovery_stitch_report.json"
+            _write_track(baseline, lost_ranges=[(10, 21)])
+            _write_track(candidate, lost_ranges=[])
+            _write_json(
+                stitch_report,
+                {
+                    "schema_version": "1.0",
+                    "summary": {
+                        "status": "pass",
+                        "accepted_frame_count": 12,
+                        "approval_id": "approval_001",
+                        "start_frame": 10,
+                        "end_frame": 21,
+                    },
+                    "metrics": {
+                        "status": "pass",
+                        "accepted_frame_count": 12,
+                        "required_window": {"start_frame": 10, "end_frame": 21, "frame_count": 12},
+                        "accepted_frame_ranges": [{"start_frame": 10, "end_frame": 21, "frame_count": 12}],
+                        "required_window_coverage": {"status": "pass", "uncovered_ranges": []},
+                        "roi_internal_quality": {"status": "pass", "outside_roi_ratio": 0.0, "max_step_px": 1.0},
+                    },
+                },
+            )
+            approval = {
+                **_approval("candidate-short-localize"),
+                "start_frame": 10,
+                "end_frame": 21,
+                "local_search_roi": {
+                    "coordinate_space": "image",
+                    "frame": 15,
+                    "x": 100,
+                    "y": 200,
+                    "width": 60,
+                    "height": 60,
+                },
+            }
+
+            report = build_missing_ball_recovery_comparison(
+                baseline,
+                candidate,
+                candidate_id="candidate-short-localize",
+                approval=approval,
+                target_window={"start_frame": 10, "end_frame": 21},
+                recovery_stitch_report_path=stitch_report,
+            )
+
+        self.assertEqual("pass", report["summary"]["status"])
+        self.assertEqual("pass", report["comparison_status"])
+        roi_stitch_check = next(check for check in report["checks"] if check["name"] == "roi_stitch_recovery")
+        sustained_check = next(check for check in report["checks"] if check["name"] == "sustained_recovered_frames")
+        self.assertEqual("pass", roi_stitch_check["status"])
+        self.assertEqual("pass", sustained_check["status"])
+        self.assertEqual("recovery_stitch_report.json", report["metrics"]["roi_stitch_recovery"]["path"])
 
     def test_approval_linkage_requires_id_action_and_matching_candidate(self) -> None:
         cases = [
@@ -775,6 +1010,28 @@ class MissingBallRecoveryComparisonTests(unittest.TestCase):
                 failed_checks = {check["name"] for check in report["checks"] if check["status"] == "fail"}
                 self.assertIn("approval_linkage", failed_checks)
 
+    def test_approval_linkage_accepts_visual_localization_provenance(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            baseline = output_dir / "baseline.csv"
+            candidate = output_dir / "candidate.csv"
+            _write_track(baseline, lost_ranges=[(10, 20)])
+            _write_track(candidate, lost_ranges=[(10, 20)])
+            approval = _approval("candidate-visual-localization")
+            approval.pop("source_packet_id", None)
+            approval["visual_localization_id"] = "visual_localization:10_20_corner"
+
+            report = build_missing_ball_recovery_comparison(
+                baseline,
+                candidate,
+                candidate_id="candidate-visual-localization",
+                approval=approval,
+                target_window={"start_frame": 10, "end_frame": 20},
+            )
+
+        approval_check = next(check for check in report["checks"] if check["name"] == "approval_linkage")
+        self.assertEqual("pass", approval_check["status"])
+
     def test_comparison_is_unavailable_when_required_track_artifacts_are_missing(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:
             output_dir = Path(temp_name)
@@ -803,7 +1060,7 @@ class MissingBallRecoveryComparisonTests(unittest.TestCase):
                 baseline,
                 candidate,
                 candidate_id="candidate-pass",
-                approval=_approval("candidate-pass"),
+                approval=_targeted_approval("candidate-pass"),
                 target_window={"start_frame": 10, "end_frame": 60},
             )
 
@@ -840,6 +1097,40 @@ def _approval(candidate_id: str = "candidate-pass") -> dict[str, object]:
     }
 
 
+def _targeted_approval(candidate_id: str = "candidate-pass") -> dict[str, object]:
+    return {
+        "approval_id": "approval_001",
+        "approved_action": "targeted_rerun",
+        "candidate_id": candidate_id,
+        "source_packet_id": "packet_001",
+        "rerun_scope": {"start_frame": 10, "end_frame": 60},
+    }
+
+
+def _write_pass_stitch_report(path: Path, *, start: int, end: int, accepted_frame_count: int) -> None:
+    _write_json(
+        path,
+        {
+            "schema_version": "1.0",
+            "summary": {
+                "status": "pass",
+                "accepted_frame_count": accepted_frame_count,
+                "approval_id": "approval_001",
+                "start_frame": start,
+                "end_frame": end,
+            },
+            "metrics": {
+                "status": "pass",
+                "accepted_frame_count": accepted_frame_count,
+                "required_window": {"start_frame": start, "end_frame": end, "frame_count": end - start + 1},
+                "accepted_frame_ranges": [{"start_frame": start, "end_frame": end, "frame_count": end - start + 1}],
+                "required_window_coverage": {"status": "pass", "uncovered_ranges": []},
+                "roi_internal_quality": {"status": "pass", "outside_roi_ratio": 0.0, "max_step_px": 1.0},
+            },
+        },
+    )
+
+
 def _write_track(
     path: Path,
     *,
@@ -865,6 +1156,18 @@ def _write_sparse_track(path: Path, *, detected_frames: range) -> None:
     rows = ["Frame,X,Y,Confidence,Status"]
     for frame in detected_frames:
         rows.append(f"{frame},{100 + frame},{200 + frame},0.90,Detected")
+    path.write_text("\n".join(rows) + "\n", encoding="utf-8")
+
+
+def _write_localize_short_recovery(path: Path, *, recovered_start: int, recovered_end: int, frame_count: int = 80) -> None:
+    rows = ["Frame,X,Y,Confidence,Status"]
+    for frame in range(frame_count):
+        if recovered_start <= frame <= recovered_end:
+            rows.append(f"{frame},140,240,0.90,Detected")
+        elif 10 <= frame <= 31:
+            rows.append(f"{frame},,,0.00,Lost")
+        else:
+            rows.append(f"{frame},{100 + frame},{200 + frame},0.90,Detected")
     path.write_text("\n".join(rows) + "\n", encoding="utf-8")
 
 
@@ -901,6 +1204,10 @@ def _packet(packet_id: str, label: str, start: int, end: int) -> dict[str, objec
 
 def _hashes(*paths: Path) -> dict[str, str]:
     return {path.name: hashlib.sha256(path.read_bytes()).hexdigest() for path in paths}
+
+
+def _write_json(path: Path, payload: object) -> None:
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
 if __name__ == "__main__":

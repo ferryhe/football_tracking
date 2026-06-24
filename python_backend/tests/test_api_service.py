@@ -2191,6 +2191,7 @@ class ApiServiceSmokeTests(unittest.TestCase):
                 "ai_candidates/missing_ball/candidate_keep/ball_audit.json",
                 "ai_candidates/missing_ball/candidate_keep/metrics_report.json",
                 "ai_candidates/missing_ball/candidate_keep/run_manifest.json",
+                "ai_candidates/missing_ball/candidate_keep/recovery_stitch_report.json",
                 "ai_candidates/missing_ball/candidate_keep/ai_improvement_approved_actions.json",
                 "ai_candidates/missing_ball/candidate_keep/approved_recovery_config.yaml",
             ],
@@ -2205,6 +2206,10 @@ class ApiServiceSmokeTests(unittest.TestCase):
         self.assertIn(
             "ai_candidates/missing_ball/candidate_keep/candidate_manifest.json",
             candidate_manifest["generated_artifacts"],
+        )
+        self.assertEqual(
+            "ai_candidates/missing_ball/candidate_keep/recovery_stitch_report.json",
+            candidate_manifest["stitch_report"],
         )
         comparison = json.loads((child_output_dir / "missing_ball_recovery_comparison.json").read_text(encoding="utf-8"))
         self.assertEqual("pass", comparison["summary"]["status"], comparison["checks"])

@@ -20,6 +20,8 @@ from football_tracking.config import DEFAULT_HIGH_RECALL_MAX_TOTAL_FRAMES, AppCo
 from football_tracking.high_recall_windows import approved_action_windows_from_report
 from football_tracking.metrics import build_metrics_report, write_run_artifacts
 from football_tracking.missing_ball_recovery_comparison import write_missing_ball_recovery_comparison
+from football_tracking.recovery_stitcher import REPORT_NAME as RECOVERY_STITCH_REPORT_NAME
+from football_tracking.recovery_stitcher import stitch_recovery_window, write_recovery_stitch_report
 
 MISSING_BALL_RECOVERY_ACTIONS = {"targeted_rerun", "rerun_ball_window", "localize_ball_roi"}
 MISSING_BALL_COMPARISON_NAME = "missing_ball_recovery_comparison.json"
@@ -163,6 +165,13 @@ def execute_missing_ball_candidate(
         child_artifact_path.write_text(json.dumps(selected_artifact, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         write_recovery_config(child_config_path, config)
         high_recall_report = _run_recovery(config, runner=runner, source_total_frames=source_total_frames)
+        apply_localize_recovery_stitches(
+            parent_output_dir=parent_output_dir,
+            candidate_output_dir=candidate_output_dir,
+            selected_artifact=selected_artifact,
+            csv_name=config.output.csv_name,
+            high_recall_report=high_recall_report,
+        )
         write_candidate_audit(candidate_output_dir, csv_name=config.output.csv_name)
         run_snapshot = _candidate_run_snapshot(
             run_id=run_id or f"missing_ball_{candidate_id}",
@@ -264,6 +273,129 @@ def write_run_manifest_and_metrics_preserving_candidate_audit(output_dir: Path, 
         )
 
 
+def apply_localize_recovery_stitches(
+    *,
+    parent_output_dir: Path,
+    candidate_output_dir: Path,
+    selected_artifact: dict[str, Any],
+    csv_name: str,
+    high_recall_report: dict[str, Any] | None,
+) -> list[dict[str, Any]]:
+    recovery_actions = _recovery_actions_with_execution_roi(_selected_recovery_actions(selected_artifact), high_recall_report)
+    localize_actions = [action for action in recovery_actions if action.get("approved_action") == "localize_ball_roi"]
+    if not localize_actions:
+        return []
+    existing_report = _read_json(candidate_output_dir / RECOVERY_STITCH_REPORT_NAME)
+    if existing_report is not None and preferred_track_path(candidate_output_dir, csv_name=csv_name).exists():
+        return [existing_report]
+    parent_track = preferred_track_path(parent_output_dir, csv_name=csv_name)
+    output_track = preferred_track_path(candidate_output_dir, csv_name=csv_name)
+    if not output_track.exists():
+        output_track = candidate_output_dir / csv_name
+    reports: list[dict[str, Any]] = []
+    windows_by_approval_id = _execution_windows_by_approval_id(high_recall_report)
+    for action in localize_actions:
+        approval_id = str(action.get("approval_id") or "").strip()
+        effective_roi = action.get("effective_roi")
+        execution_window = windows_by_approval_id.get(approval_id, {})
+        if effective_roi is None and isinstance(execution_window, dict):
+            effective_roi = execution_window.get("effective_roi")
+        child_track = _window_track_path(candidate_output_dir, execution_window, csv_name=csv_name)
+        if not child_track.exists() and _track_differs_from_parent(output_track, parent_track):
+            child_track = output_track
+        if not approval_id or not child_track.exists():
+            reports.append(
+                {
+                    "schema_version": "1.0",
+                    "summary": {
+                        "status": "fail",
+                        "approval_id": approval_id,
+                        "approved_action": action.get("approved_action"),
+                        "start_frame": action.get("start_frame"),
+                        "end_frame": action.get("end_frame"),
+                        "accepted_frame_count": 0,
+                    },
+                    "window": _jsonable(action),
+                    "metrics": {
+                        "status": "fail",
+                        "blocking_reasons": ["child_track_missing" if approval_id else "approval_id_missing"],
+                        "accepted_frame_count": 0,
+                        "accepted_frames": [],
+                        "required_window_coverage": {"status": "fail", "uncovered_ranges": []},
+                        "roi_internal_quality": {"status": "fail"},
+                    },
+                }
+            )
+            continue
+        stitch_window = dict(action)
+        if isinstance(execution_window, dict):
+            for key in ("start_frame", "end_frame", "approved_action", "effective_roi"):
+                if key not in stitch_window and execution_window.get(key) not in (None, ""):
+                    stitch_window[key] = execution_window[key]
+        report = _stitch_recovery_window_preserving_failed_candidate(
+            parent_track,
+            child_track,
+            output_track,
+            stitch_window,
+            effective_roi,
+        )
+        reports.append(report)
+        summary = report.get("summary") if isinstance(report.get("summary"), dict) else {}
+        if summary.get("status") == "pass":
+            parent_track = output_track
+    if reports and (len(reports) > 1 or not (candidate_output_dir / RECOVERY_STITCH_REPORT_NAME).exists()):
+        write_recovery_stitch_report(candidate_output_dir, [_stitch_attempt_from_report(report) for report in reports])
+    return reports
+
+
+def _track_differs_from_parent(candidate_track: Path, parent_track: Path) -> bool:
+    if not candidate_track.exists() or not parent_track.exists():
+        return False
+    return _file_fingerprint(candidate_track) != _file_fingerprint(parent_track)
+
+
+def _ensure_localize_stitch_report_from_candidate_track(
+    *,
+    baseline_track: Path,
+    candidate_track: Path,
+    candidate_output_dir: Path,
+    recovery_actions: list[dict[str, Any]],
+) -> None:
+    if (candidate_output_dir / RECOVERY_STITCH_REPORT_NAME).exists():
+        return
+    if not _track_differs_from_parent(candidate_track, baseline_track):
+        return
+    for action in recovery_actions:
+        if action.get("approved_action") != "localize_ball_roi":
+            continue
+        effective_roi = action.get("effective_roi") or action.get("padded_roi") or action.get("approved_roi") or action.get("local_search_roi")
+        _stitch_recovery_window_preserving_failed_candidate(
+            baseline_track,
+            candidate_track,
+            candidate_track,
+            dict(action),
+            effective_roi,
+        )
+        return
+
+
+def _stitch_recovery_window_preserving_failed_candidate(
+    parent_track: Path,
+    child_track: Path,
+    output_track: Path,
+    stitch_window: dict[str, Any],
+    effective_roi: Any,
+) -> dict[str, Any]:
+    temp_output = output_track.with_name(f".{output_track.name}.stitch.tmp")
+    report = stitch_recovery_window(parent_track, child_track, temp_output, stitch_window, effective_roi)
+    summary = report.get("summary") if isinstance(report.get("summary"), dict) else {}
+    if summary.get("status") == "pass":
+        temp_output.replace(output_track)
+    elif temp_output.exists():
+        temp_output.unlink()
+    return report
+
+
 def write_missing_ball_candidate_comparison_and_manifest(
     *,
     parent_output_dir: Path,
@@ -278,6 +410,12 @@ def write_missing_ball_candidate_comparison_and_manifest(
     candidate_id = str(approval.get("candidate_id") or "").strip()
     baseline_track = preferred_track_path(parent_output_dir, csv_name=csv_name)
     candidate_track = preferred_track_path(candidate_output_dir, csv_name=csv_name)
+    _ensure_localize_stitch_report_from_candidate_track(
+        baseline_track=baseline_track,
+        candidate_track=candidate_track,
+        candidate_output_dir=candidate_output_dir,
+        recovery_actions=recovery_actions,
+    )
     comparison_path = write_missing_ball_recovery_comparison(
         candidate_output_dir,
         baseline_track,
@@ -289,6 +427,7 @@ def write_missing_ball_candidate_comparison_and_manifest(
         require_candidate_audit=True,
         review_packets_path=candidate_output_dir / "review_packets.json",
         require_packet_coverage=True,
+        recovery_stitch_report_path=candidate_output_dir / "recovery_stitch_report.json",
     )
     return register_missing_ball_candidate(
         parent_output_dir=parent_output_dir,
@@ -388,6 +527,7 @@ def missing_ball_candidate_artifacts(
         candidate_output_dir / "ball_audit.json",
         candidate_output_dir / "metrics_report.json",
         candidate_output_dir / "run_manifest.json",
+        candidate_output_dir / "recovery_stitch_report.json",
         candidate_output_dir / APPROVED_ACTIONS_FILE_NAME,
         candidate_output_dir / APPROVED_RECOVERY_CONFIG_NAME,
     ):
@@ -421,6 +561,14 @@ def write_missing_ball_candidate_manifest(
     metrics = comparison_payload.get("metrics") if isinstance(comparison_payload.get("metrics"), dict) else {}
     target_window = metrics.get("target_window") if isinstance(metrics.get("target_window"), dict) else None
     baseline = comparison_payload.get("baseline") if isinstance(comparison_payload.get("baseline"), dict) else {}
+    generated_artifacts = comparison_payload.get("candidate_artifacts") if isinstance(comparison_payload.get("candidate_artifacts"), list) else []
+    stitch_artifacts = [
+        artifact
+        for artifact in generated_artifacts
+        if isinstance(artifact, str) and artifact.replace("\\", "/").endswith(f"/{RECOVERY_STITCH_REPORT_NAME}")
+    ]
+    if RECOVERY_STITCH_REPORT_NAME in generated_artifacts:
+        stitch_artifacts.append(str(candidate_output_dir.relative_to(parent_output_dir) / RECOVERY_STITCH_REPORT_NAME).replace("\\", "/"))
     manifest = {
         "schema_version": "1.0",
         "generated_at": _utc_now_iso(),
@@ -441,10 +589,12 @@ def write_missing_ball_candidate_manifest(
         "effective_rois": effective_rois,
         "comparison_report": comparison_path.relative_to(parent_output_dir).as_posix(),
         "comparison_status": comparison_payload.get("comparison_status"),
-        "generated_artifacts": comparison_payload.get("candidate_artifacts")
-        if isinstance(comparison_payload.get("candidate_artifacts"), list)
-        else [],
+        "generated_artifacts": generated_artifacts,
     }
+    if stitch_artifacts:
+        manifest["stitch_report"] = stitch_artifacts[0]
+        stitch_metrics = metrics.get("roi_stitch_recovery") if isinstance(metrics.get("roi_stitch_recovery"), dict) else {}
+        manifest["stitch_evidence"] = stitch_metrics
     manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
@@ -725,6 +875,66 @@ def _recovery_actions_with_execution_roi(
             copied["effective_roi"] = effective_roi_by_approval_id[approval_id]
         enriched.append(copied)
     return enriched
+
+
+def _execution_windows_by_approval_id(high_recall_report: dict[str, Any] | None) -> dict[str, dict[str, Any]]:
+    result: dict[str, dict[str, Any]] = {}
+    windows = high_recall_report.get("windows") if isinstance(high_recall_report, dict) else None
+    if not isinstance(windows, list):
+        return result
+    for index, window in enumerate(windows):
+        if not isinstance(window, dict):
+            continue
+        approval_ids: set[str] = set()
+        approval_id = window.get("approval_id")
+        if isinstance(approval_id, str) and approval_id.strip():
+            approval_ids.add(approval_id.strip())
+        provenance = window.get("approval_provenance")
+        if isinstance(provenance, list):
+            for item in provenance:
+                if not isinstance(item, dict):
+                    continue
+                provenance_approval_id = item.get("approval_id")
+                if isinstance(provenance_approval_id, str) and provenance_approval_id.strip():
+                    approval_ids.add(provenance_approval_id.strip())
+        indexed_window = dict(window)
+        indexed_window.setdefault("execution_window_index", index)
+        for approval_id_value in approval_ids:
+            result[approval_id_value] = indexed_window
+    return result
+
+
+def _window_track_path(candidate_output_dir: Path, window: dict[str, Any], *, csv_name: str) -> Path:
+    index = _optional_int(window.get("execution_window_index"))
+    if index is None:
+        index = _optional_int(window.get("window_index"))
+    if index is None:
+        index = _optional_int(window.get("source_window_index"))
+    if index is None:
+        index = 0
+    window_dir = candidate_output_dir / "high_recall_windows" / f"window_{index:03d}"
+    preferred = window_dir / csv_name
+    if preferred.exists():
+        return preferred
+    return window_dir / "ball_track.csv"
+
+
+def _stitch_attempt_from_report(report: dict[str, Any]) -> dict[str, Any]:
+    summary = report.get("summary") if isinstance(report.get("summary"), dict) else {}
+    metrics = report.get("metrics") if isinstance(report.get("metrics"), dict) else {}
+    boundary = metrics.get("boundary_transition_warning") if isinstance(metrics.get("boundary_transition_warning"), dict) else {}
+    return {
+        "status": summary.get("status"),
+        "approval_id": summary.get("approval_id"),
+        "approved_action": summary.get("approved_action"),
+        "start_frame": summary.get("start_frame"),
+        "end_frame": summary.get("end_frame"),
+        "accepted_frame_count": summary.get("accepted_frame_count", metrics.get("accepted_frame_count", 0)),
+        "accepted_frames": metrics.get("accepted_frames", []),
+        "accepted_frame_ranges": metrics.get("accepted_frame_ranges", []),
+        "boundary_transition_violations": boundary.get("warnings", []),
+        "metrics": metrics,
+    }
 
 
 def _file_fingerprint(path: Path) -> tuple[int, str]:
