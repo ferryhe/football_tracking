@@ -3250,6 +3250,157 @@ class AiImprovementTests(unittest.TestCase):
         self.assertEqual("unknown_false_positive", improvement["false_positive_class"])
         self.assertFalse(any("false_positive_class normalized to unknown" in warning for warning in report["warnings"]))
 
+    def test_noise_filter_adjustment_missing_config_patch_downgrades_to_manual_review(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_minimal_artifacts(output_dir)
+            client = _FakeImprovementClient(
+                {
+                    "summary": {"status": "needs_rerun", "primary_issue": "noise"},
+                    "improvements": [
+                        {
+                            "id": "imp_noise",
+                            "priority": "P1",
+                            "area": "tracking",
+                            "failure_tags": ["unknown"],
+                            "root_cause_module": "selection",
+                            "start_frame": 120,
+                            "end_frame": 142,
+                            "diagnosis": "Packet shows a spare ball outside the active play.",
+                            "recommended_action": "noise_filter_adjustment",
+                            "false_positive_class": "extra_ball",
+                            "source_packet_id": "packet_001",
+                            "evidence": [{"source_packet_id": "packet_001"}],
+                            "confidence": 0.73,
+                        }
+                    ],
+                }
+            )
+
+            report = build_ai_improvement_report(output_dir, client=client)
+
+        self.assertEqual("needs_rerun", report["summary"]["status"])
+        improvement = report["improvements"][0]
+        self.assertEqual("manual_review", improvement["recommended_action"])
+        self.assertEqual("noise_filter_adjustment", improvement["legacy_recommended_action"])
+        self.assertEqual("missing_config_patch", improvement["noise_filter_contract_gap"])
+        self.assertEqual({}, improvement["config_patch"])
+        self.assertEqual("extra_ball", improvement["false_positive_class"])
+        self.assertEqual(120, improvement["start_frame"])
+        self.assertEqual(142, improvement["end_frame"])
+        self.assertEqual([{"source_packet_id": "packet_001"}], improvement["evidence"])
+        self.assertEqual(0.73, improvement["confidence"])
+        self.assertFalse(improvement["executable"])
+        self.assertTrue(any("missing safe config_patch" in warning for warning in report["warnings"]))
+
+    def test_noise_filter_adjustment_missing_patch_still_requires_noise_contract_fields(self) -> None:
+        cases = [
+            ("missing false_positive_class", {"start_frame": 120, "end_frame": 142}, "false_positive_class"),
+            ("missing frame scope", {"false_positive_class": "extra_ball"}, "start_frame and end_frame"),
+        ]
+        for name, fields, expected_error in cases:
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as temp_name:
+                output_dir = Path(temp_name)
+                _write_minimal_artifacts(output_dir)
+                payload = {
+                    "id": "imp_noise",
+                    "priority": "P1",
+                    "area": "tracking",
+                    "failure_tags": ["unknown"],
+                    "root_cause_module": "selection",
+                    "diagnosis": "Noise filter suggestion is missing required context.",
+                    "recommended_action": "noise_filter_adjustment",
+                    "source_packet_id": "packet_001",
+                    "evidence": [{"source_packet_id": "packet_001"}],
+                    "confidence": 0.73,
+                }
+                payload.update(fields)
+                client = _FakeImprovementClient(
+                    {
+                        "summary": {"status": "needs_rerun", "primary_issue": "noise"},
+                        "improvements": [payload],
+                    }
+                )
+
+                report = build_ai_improvement_report(output_dir, client=client)
+
+            self.assertEqual("error", report["summary"]["status"])
+            self.assertIn(expected_error, report["error"])
+
+    def test_noise_filter_adjustment_filtered_out_config_patch_downgrades_to_manual_review(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_minimal_artifacts(output_dir)
+            client = _FakeImprovementClient(
+                {
+                    "summary": {"status": "needs_rerun", "primary_issue": "noise"},
+                    "improvements": [
+                        {
+                            "id": "imp_noise",
+                            "priority": "P1",
+                            "area": "tracking",
+                            "failure_tags": ["unknown"],
+                            "root_cause_module": "selection",
+                            "start_frame": 120,
+                            "end_frame": 142,
+                            "diagnosis": "Packet shows a spare ball outside the active play.",
+                            "recommended_action": "noise_filter_adjustment",
+                            "false_positive_class": "extra_ball",
+                            "source_packet_id": "packet_001",
+                            "config_patch": {"detector": {"confidence_threshold": 0.01}},
+                            "evidence": [{"source_packet_id": "packet_001"}],
+                            "confidence": 0.73,
+                        }
+                    ],
+                }
+            )
+
+            report = build_ai_improvement_report(output_dir, client=client)
+
+        improvement = report["improvements"][0]
+        self.assertEqual("manual_review", improvement["recommended_action"])
+        self.assertEqual("noise_filter_adjustment", improvement["legacy_recommended_action"])
+        self.assertEqual("unsafe_config_patch", improvement["noise_filter_contract_gap"])
+        self.assertEqual({}, improvement["config_patch"])
+        self.assertTrue(any("detector.confidence_threshold" in warning for warning in report["warnings"]))
+        self.assertTrue(any("unsafe config_patch" in warning for warning in report["warnings"]))
+
+    def test_noise_filter_adjustment_valid_config_patch_remains_actionable(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_minimal_artifacts(output_dir)
+            client = _FakeImprovementClient(
+                {
+                    "summary": {"status": "needs_rerun", "primary_issue": "noise"},
+                    "improvements": [
+                        {
+                            "id": "imp_noise",
+                            "priority": "P1",
+                            "area": "tracking",
+                            "failure_tags": ["unknown"],
+                            "root_cause_module": "selection",
+                            "start_frame": 120,
+                            "end_frame": 142,
+                            "diagnosis": "Packet shows a spare ball outside the active play.",
+                            "recommended_action": "noise_filter_adjustment",
+                            "false_positive_class": "extra_ball",
+                            "source_packet_id": "packet_001",
+                            "config_patch": {"selection": {"min_accept_score": 0.62}},
+                            "evidence": [{"source_packet_id": "packet_001"}],
+                            "confidence": 0.73,
+                        }
+                    ],
+                }
+            )
+
+            report = build_ai_improvement_report(output_dir, client=client)
+
+        improvement = report["improvements"][0]
+        self.assertEqual("noise_filter_adjustment", improvement["recommended_action"])
+        self.assertEqual({"selection": {"min_accept_score": 0.62}}, improvement["config_patch"])
+        self.assertNotIn("legacy_recommended_action", improvement)
+        self.assertNotIn("noise_filter_contract_gap", improvement)
+
     def test_false_positive_class_in_failure_tags_is_rehomed(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:
             output_dir = Path(temp_name)

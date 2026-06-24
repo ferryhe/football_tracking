@@ -1600,7 +1600,8 @@ def _validate_improvement(
                 "downgraded to manual_review because no traceable packet or visual provenance was cited."
             )
 
-    config_patch_raw = raw.get("config_patch") if isinstance(raw.get("config_patch"), dict) else {}
+    has_raw_config_patch = "config_patch" in raw and isinstance(raw.get("config_patch"), dict)
+    config_patch_raw = raw.get("config_patch") if has_raw_config_patch else {}
     config_patch, patch_warnings = _filter_config_patch(config_patch_raw)
     patch_warnings = [*repair_warnings, *patch_warnings]
 
@@ -1705,8 +1706,27 @@ def _validate_improvement(
         else:
             item["comparison_criteria"] = raw["comparison_criteria"]
     _copy_uncovered_subwindow_explanation(raw, item, index)
-    _validate_action_specific_improvement(item, index, context=context)
+    try:
+        _validate_action_specific_improvement(item, index, context=context)
+    except ValueError as exc:
+        if recommended_action != "noise_filter_adjustment" or not _is_noise_filter_safe_patch_error(index, exc):
+            raise
+        noise_filter_contract_gap = "unsafe_config_patch" if has_raw_config_patch else "missing_config_patch"
+        item["recommended_action"] = "manual_review"
+        item["legacy_recommended_action"] = recommended_action
+        item["noise_filter_contract_gap"] = noise_filter_contract_gap
+        patch_warnings.append(_noise_filter_config_patch_downgrade_warning(index, noise_filter_contract_gap))
     return item, patch_warnings
+
+
+def _is_noise_filter_safe_patch_error(index: int, exc: ValueError) -> bool:
+    return str(exc) == f"Improvement {index} noise_filter_adjustment requires a safe config_patch."
+
+
+def _noise_filter_config_patch_downgrade_warning(index: int, gap: str) -> str:
+    if gap == "unsafe_config_patch":
+        return f"Improvement {index} noise_filter_adjustment unsafe config_patch downgraded to manual_review."
+    return f"Improvement {index} noise_filter_adjustment missing safe config_patch downgraded to manual_review."
 
 
 def _handle_invalid_clip_action(
