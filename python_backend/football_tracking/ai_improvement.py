@@ -88,6 +88,7 @@ _REQUIRED_IMPROVEMENT_FIELDS = (
     "recommended_action",
     "confidence",
 )
+_STRUCTURED_RECOMMENDED_ACTION_KEYS = ("recommended_action", "action", "name", "type", "value")
 _MISSING_BALL_TAGS = {"ball_lost", "missing_ball", "lost_gap", "ball_not_visible", "missed_ball"}
 _KNOWN_FALSE_POSITIVE_CLASSES = {
     "advertising_board",
@@ -1471,6 +1472,27 @@ def _is_item_scoped_highlight_invariant_error(reason: str) -> bool:
     return True
 
 
+def _structured_recommended_action(raw_action: dict[str, Any]) -> tuple[str | None, str | None]:
+    seen: list[tuple[str, str]] = []
+    for key in _STRUCTURED_RECOMMENDED_ACTION_KEYS:
+        value = raw_action.get(key)
+        if not isinstance(value, str):
+            continue
+        action = value.strip()
+        if not action:
+            continue
+        seen.append((key, action))
+    if not seen:
+        return None, None
+    unique_actions = {action for _key, action in seen}
+    if len(unique_actions) != 1:
+        return None, None
+    action = seen[0][1]
+    if action not in AI_RECOMMENDED_ACTIONS:
+        return None, None
+    return action, seen[0][0]
+
+
 def _validate_improvement(
     raw: Any, index: int, *, context: dict[str, Any] | None = None
 ) -> tuple[dict[str, Any], list[str]]:
@@ -1509,6 +1531,8 @@ def _validate_improvement(
     confidence = _confidence(raw.get("confidence"), f"Improvement {index} confidence")
     raw_action_value = raw.get("recommended_action")
     non_string_recommended_action_type: str | None = None
+    recommended_action_repair: str | None = None
+    recommended_action_repair_key: str | None = None
     if raw_action_value is None or (isinstance(raw_action_value, str) and not raw_action_value.strip()):
         raw = dict(raw)
         raw["recommended_action"] = "manual_review"
@@ -1517,6 +1541,29 @@ def _validate_improvement(
         repair_warnings.append(
             f"Improvement {index} blank recommended_action downgraded to manual_review."
         )
+    elif isinstance(raw_action_value, dict):
+        non_string_recommended_action_type = "dict"
+        repaired_action, repair_key = _structured_recommended_action(raw_action_value)
+        if repaired_action is None:
+            raw = dict(raw)
+            raw["recommended_action"] = "manual_review"
+            raw_recommended_action = "manual_review"
+            recommended_action_repaired = True
+            repair_warnings.append(
+                "Improvement "
+                f"{index} non-string recommended_action "
+                f"({non_string_recommended_action_type}) downgraded to manual_review."
+            )
+        else:
+            raw = dict(raw)
+            raw["recommended_action"] = repaired_action
+            raw_recommended_action = repaired_action
+            recommended_action_repair = "structured_dict"
+            recommended_action_repair_key = repair_key
+            repair_warnings.append(
+                f"Improvement {index} structured dict recommended_action repaired "
+                f"from key {repair_key}."
+            )
     elif not isinstance(raw_action_value, str):
         raw = dict(raw)
         raw["recommended_action"] = "manual_review"
@@ -1625,6 +1672,10 @@ def _validate_improvement(
         item["downgrade_reason"] = downgrade_reason
     if non_string_recommended_action_type is not None:
         item["original_recommended_action_type"] = non_string_recommended_action_type
+    if recommended_action_repair is not None:
+        item["recommended_action_repair"] = recommended_action_repair
+    if recommended_action_repair_key is not None:
+        item["recommended_action_repair_key"] = recommended_action_repair_key
     if rerun_scope_contract_gap is not None:
         item["rerun_scope_contract_gap"] = rerun_scope_contract_gap
     if unsupported_recommended_action:
