@@ -274,6 +274,114 @@ class AiImprovementTests(unittest.TestCase):
             any("structured dict recommended_action repaired" in warning for warning in report["warnings"])
         )
 
+    def test_review_only_failure_tag_is_stripped_when_valid_tag_remains(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_minimal_artifacts(output_dir)
+            improvement_payload = _candidate_ready_targeted_rerun()
+            improvement_payload["failure_tags"] = ["ball_lost", "review_only_note"]
+            client = _FakeImprovementClient(
+                {
+                    "summary": {"status": "needs_rerun", "primary_issue": "tracking"},
+                    "improvements": [improvement_payload],
+                }
+            )
+
+            report = build_ai_improvement_report(
+                output_dir,
+                client=client,
+                candidate_intent="prepare_approved_candidates",
+            )
+
+        improvement = report["improvements"][0]
+        self.assertEqual("needs_rerun", report["summary"]["status"])
+        self.assertEqual(["ball_lost"], improvement["failure_tags"])
+        self.assertEqual(["review_only_note"], improvement["ignored_failure_tags"])
+        self.assertEqual("rerun_ball_window", improvement["recommended_action"])
+        self.assertTrue(improvement["executable"])
+        self.assertTrue(any("review-only failure_tags ignored" in warning for warning in report["warnings"]))
+
+    def test_review_only_failure_tag_only_is_manual_review_unknown(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_minimal_artifacts(output_dir)
+            improvement_payload = _candidate_ready_targeted_rerun()
+            improvement_payload["failure_tags"] = ["review_only_note"]
+            client = _FakeImprovementClient(
+                {
+                    "summary": {"status": "needs_rerun", "primary_issue": "tracking"},
+                    "improvements": [improvement_payload],
+                }
+            )
+
+            report = build_ai_improvement_report(
+                output_dir,
+                client=client,
+                candidate_intent="prepare_approved_candidates",
+            )
+
+        improvement = report["improvements"][0]
+        self.assertEqual("needs_rerun", report["summary"]["status"])
+        self.assertEqual(["unknown"], improvement["failure_tags"])
+        self.assertEqual(["review_only_note"], improvement["ignored_failure_tags"])
+        self.assertEqual("review_only_tags_only", improvement["failure_tag_contract_gap"])
+        self.assertEqual("manual_review", improvement["recommended_action"])
+        self.assertEqual("targeted_rerun", improvement["legacy_recommended_action"])
+        self.assertFalse(improvement["executable"])
+        self.assertEqual(0, report["summary"]["executable_candidate_count"])
+        self.assertTrue(any("review-only failure_tags ignored" in warning for warning in report["warnings"]))
+
+    def test_unknown_failure_tag_remains_error(self) -> None:
+        for tags in (["made_up_tag"], ["review_only_note", "made_up_tag"]):
+            with self.subTest(tags=tags), tempfile.TemporaryDirectory() as temp_name:
+                output_dir = Path(temp_name)
+                _write_minimal_artifacts(output_dir)
+                improvement_payload = _candidate_ready_targeted_rerun()
+                improvement_payload["failure_tags"] = tags
+                client = _FakeImprovementClient(
+                    {
+                        "summary": {"status": "needs_rerun", "primary_issue": "tracking"},
+                        "improvements": [improvement_payload],
+                    }
+                )
+
+                report = build_ai_improvement_report(output_dir, client=client)
+
+            self.assertEqual("error", report["summary"]["status"])
+            self.assertIn("unsupported values: made_up_tag", report["error"])
+
+    def test_review_only_failure_tag_only_keeps_structured_action_non_executable(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_minimal_artifacts(output_dir)
+            improvement_payload = _candidate_ready_targeted_rerun()
+            improvement_payload["failure_tags"] = ["review_only_note"]
+            improvement_payload["recommended_action"] = {"action": "targeted_rerun"}
+            client = _FakeImprovementClient(
+                {
+                    "summary": {"status": "needs_rerun", "primary_issue": "tracking"},
+                    "improvements": [improvement_payload],
+                }
+            )
+
+            report = build_ai_improvement_report(
+                output_dir,
+                client=client,
+                candidate_intent="prepare_approved_candidates",
+            )
+
+        improvement = report["improvements"][0]
+        self.assertEqual(["unknown"], improvement["failure_tags"])
+        self.assertEqual(["review_only_note"], improvement["ignored_failure_tags"])
+        self.assertEqual("review_only_tags_only", improvement["failure_tag_contract_gap"])
+        self.assertEqual("manual_review", improvement["recommended_action"])
+        self.assertEqual("targeted_rerun", improvement["legacy_recommended_action"])
+        self.assertFalse(improvement["executable"])
+        self.assertEqual(0, report["summary"]["executable_candidate_count"])
+        self.assertEqual("dict", improvement["original_recommended_action_type"])
+        self.assertEqual("structured_dict", improvement["recommended_action_repair"])
+        self.assertTrue(any("review-only failure_tags ignored" in warning for warning in report["warnings"]))
+
     def test_structured_dict_localize_without_roi_follows_string_review_path(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:
             output_dir = Path(temp_name)
@@ -3587,7 +3695,7 @@ class AiImprovementTests(unittest.TestCase):
                             "id": "imp_noise",
                             "priority": "P1",
                             "area": "tracking",
-                            "failure_tags": ["extra_ball"],
+                            "failure_tags": ["extra_ball", "review_only_note"],
                             "root_cause_module": "selection",
                             "diagnosis": "A second ball-like object appears near the advertising board.",
                             "recommended_action": "noise_filter_adjustment",
@@ -3607,6 +3715,7 @@ class AiImprovementTests(unittest.TestCase):
         improvement = report["improvements"][0]
         self.assertEqual(["unknown"], improvement["failure_tags"])
         self.assertEqual("extra_ball", improvement["false_positive_class"])
+        self.assertEqual(["review_only_note"], improvement["ignored_failure_tags"])
 
     def test_camera_actions_are_validated_and_strip_invalid_follow_cam_patch_names(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:

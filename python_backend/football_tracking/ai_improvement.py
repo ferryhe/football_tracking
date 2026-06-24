@@ -90,6 +90,7 @@ _REQUIRED_IMPROVEMENT_FIELDS = (
 )
 _STRUCTURED_RECOMMENDED_ACTION_KEYS = ("recommended_action", "action", "name", "type", "value")
 _MISSING_BALL_TAGS = {"ball_lost", "missing_ball", "lost_gap", "ball_not_visible", "missed_ball"}
+_REVIEW_ONLY_FAILURE_TAGS = {"review_only_note"}
 _KNOWN_FALSE_POSITIVE_CLASSES = {
     "advertising_board",
     "extra_ball",
@@ -1516,6 +1517,16 @@ def _validate_improvement(
     if not isinstance(failure_tags, list):
         raise ValueError(f"Improvement {index} failure_tags must be a list.")
     normalized_tags = [str(item) for item in failure_tags if str(item).strip()]
+    ignored_failure_tags = [tag for tag in normalized_tags if tag in _REVIEW_ONLY_FAILURE_TAGS]
+    failure_tag_contract_gap: str | None = None
+    if ignored_failure_tags:
+        normalized_tags = [tag for tag in normalized_tags if tag not in _REVIEW_ONLY_FAILURE_TAGS]
+        repair_warnings.append(
+            f"Improvement {index} review-only failure_tags ignored: {', '.join(ignored_failure_tags)}."
+        )
+        if not normalized_tags:
+            normalized_tags = ["unknown"]
+            failure_tag_contract_gap = "review_only_tags_only"
     false_positive_from_tags = [
         tag for tag in normalized_tags if tag in _KNOWN_FALSE_POSITIVE_CLASSES and tag not in AI_FAILURE_TAGS
     ]
@@ -1586,6 +1597,9 @@ def _validate_improvement(
     if root_cause_module not in AI_ROOT_CAUSE_MODULES:
         raise ValueError(f"Improvement {index} root_cause_module is unsupported: {root_cause_module}")
     public_recommended_action = _normalized_public_recommended_action(recommended_action)
+    if failure_tag_contract_gap == "review_only_tags_only":
+        public_recommended_action = "manual_review"
+        recommended_action_repaired = True
 
     rerun_scope = raw.get("rerun_scope")
     rerun_scope_contract_gap: str | None = None
@@ -1678,6 +1692,10 @@ def _validate_improvement(
         item["recommended_action_repair_key"] = recommended_action_repair_key
     if rerun_scope_contract_gap is not None:
         item["rerun_scope_contract_gap"] = rerun_scope_contract_gap
+    if ignored_failure_tags:
+        item["ignored_failure_tags"] = ignored_failure_tags
+    if failure_tag_contract_gap is not None:
+        item["failure_tag_contract_gap"] = failure_tag_contract_gap
     if unsupported_recommended_action:
         item["original_recommended_action"] = raw_recommended_action
         patch_warnings.append(
