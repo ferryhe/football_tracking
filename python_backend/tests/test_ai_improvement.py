@@ -178,6 +178,65 @@ class AiImprovementTests(unittest.TestCase):
         self.assertFalse(report["improvements"][0]["executable"])
         self.assertEqual(0, report["summary"]["executable_candidate_count"])
 
+    def test_missing_recommended_action_is_downgraded_to_manual_review(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_minimal_artifacts(output_dir)
+            client = _FakeImprovementClient(
+                {
+                    "summary": {"status": "needs_rerun", "primary_issue": "tracking"},
+                    "improvements": [
+                        {
+                            "id": "imp_missing_action",
+                            "priority": "P2",
+                            "area": "tracking",
+                            "failure_tags": ["ball_lost"],
+                            "root_cause_module": "reacquisition",
+                            "diagnosis": "The item is otherwise shaped but omitted recommended_action.",
+                            "likely_ball_region": {"description": "not visible", "confidence": 0.0},
+                            "evidence": [{"source_packet_id": "packet_001"}],
+                            "confidence": 0.48,
+                        }
+                    ],
+                }
+            )
+
+            report = build_ai_improvement_report(output_dir, client=client)
+
+        improvement = report["improvements"][0]
+        self.assertEqual("needs_rerun", report["summary"]["status"])
+        self.assertEqual("manual_review", improvement["recommended_action"])
+        self.assertFalse(improvement["executable"])
+        self.assertTrue(any("missing recommended_action" in warning for warning in report["warnings"]))
+
+    def test_missing_required_field_other_than_recommended_action_remains_error(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_minimal_artifacts(output_dir)
+            client = _FakeImprovementClient(
+                {
+                    "summary": {"status": "needs_rerun", "primary_issue": "tracking"},
+                    "improvements": [
+                        {
+                            "id": "imp_missing_priority",
+                            "area": "tracking",
+                            "failure_tags": ["ball_lost"],
+                            "root_cause_module": "reacquisition",
+                            "diagnosis": "Missing priority must still fail the contract.",
+                            "likely_ball_region": {"description": "not visible", "confidence": 0.0},
+                            "recommended_action": "manual_review",
+                            "evidence": [{"source_packet_id": "packet_001"}],
+                            "confidence": 0.48,
+                        }
+                    ],
+                }
+            )
+
+            report = build_ai_improvement_report(output_dir, client=client)
+
+        self.assertEqual("error", report["summary"]["status"])
+        self.assertIn("missing required fields: priority", report["error"])
+
     def test_executable_action_missing_candidate_contract_fields_is_review_only(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:
             output_dir = Path(temp_name)
@@ -378,6 +437,233 @@ class AiImprovementTests(unittest.TestCase):
         self.assertEqual("prepare_approved_candidates", improvement["candidate_intent"])
         self.assertEqual([], improvement["candidate_contract"]["missing_fields"])
         self.assertEqual(1, report["summary"]["executable_candidate_count"])
+
+    def test_clean_visual_localization_can_back_executable_localize_ball_roi(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_minimal_artifacts(output_dir)
+            local_roi = {
+                "coordinate_space": "image",
+                "frame": 15,
+                "x": 120,
+                "y": 40,
+                "width": 80,
+                "height": 50,
+                "confidence": 0.72,
+            }
+            _write_json(
+                output_dir / "ai_visual_localization.json",
+                {
+                    "requests": [
+                        _clean_visual_localization_request(
+                            "visual_localization:packet_001",
+                            source_packet_id="packet_001",
+                            local_search_roi=local_roi,
+                        )
+                    ]
+                },
+            )
+            client = _FakeImprovementClient(
+                {
+                    "summary": {"status": "needs_rerun", "primary_issue": "tracking"},
+                    "improvements": [
+                        {
+                            "id": "imp_visual_localized",
+                            "priority": "P0",
+                            "area": "tracking",
+                            "failure_tags": ["ball_lost"],
+                            "root_cause_module": "reacquisition",
+                            "diagnosis": "Clean visual localization supplied a bounded ROI.",
+                            "recommended_action": "localize_ball_roi",
+                            "problem_type": "missing_ball",
+                            "candidate_id": "candidate_001",
+                            "start_frame": 10,
+                            "end_frame": 20,
+                            "visual_localization_id": "visual_localization:packet_001",
+                            "local_search_roi": local_roi,
+                            "expected_artifact": {"name": "ball_track.csv"},
+                            "comparison_criteria": {"report": "missing_ball_recovery_comparison.json"},
+                            "confidence": 0.82,
+                        }
+                    ],
+                }
+            )
+
+            report = build_ai_improvement_report(output_dir, client=client)
+
+        improvement = report["improvements"][0]
+        self.assertEqual("needs_rerun", report["summary"]["status"])
+        self.assertTrue(improvement["executable"])
+        self.assertEqual(1, report["summary"]["executable_candidate_count"])
+
+    def test_dirty_visual_localization_media_cannot_back_executable_localize_ball_roi(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_minimal_artifacts(output_dir)
+            local_roi = {
+                "coordinate_space": "image",
+                "frame": 15,
+                "x": 120,
+                "y": 40,
+                "width": 80,
+                "height": 50,
+                "confidence": 0.72,
+            }
+            dirty_request = _clean_visual_localization_request(
+                "visual_localization:packet_001",
+                source_packet_id="packet_001",
+                local_search_roi=local_roi,
+            )
+            dirty_request["media_warnings"] = ["crop_sheet_low_information"]
+            dirty_request["media_integrity"] = {"status": "warn", "low_information_image_count": 1}
+            _write_json(output_dir / "ai_visual_localization.json", {"requests": [dirty_request]})
+            client = _FakeImprovementClient(
+                {
+                    "summary": {"status": "needs_rerun", "primary_issue": "tracking"},
+                    "improvements": [
+                        {
+                            "id": "imp_dirty_visual_localized",
+                            "priority": "P0",
+                            "area": "tracking",
+                            "failure_tags": ["ball_lost"],
+                            "root_cause_module": "reacquisition",
+                            "diagnosis": "Dirty visual localization must not certify the ROI.",
+                            "recommended_action": "localize_ball_roi",
+                            "problem_type": "missing_ball",
+                            "candidate_id": "candidate_001",
+                            "start_frame": 10,
+                            "end_frame": 20,
+                            "visual_localization_id": "visual_localization:packet_001",
+                            "local_search_roi": local_roi,
+                            "expected_artifact": {"name": "ball_track.csv"},
+                            "comparison_criteria": {"report": "missing_ball_recovery_comparison.json"},
+                            "confidence": 0.82,
+                        }
+                    ],
+                }
+            )
+
+            report = build_ai_improvement_report(output_dir, client=client)
+
+        self.assertEqual("error", report["summary"]["status"])
+        self.assertIn("clean ai_visual_localization evidence", report["error"])
+
+    def test_nested_corrupt_visual_localization_media_cannot_back_executable_localize_ball_roi(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_minimal_artifacts(output_dir)
+            local_roi = {
+                "coordinate_space": "image",
+                "frame": 15,
+                "x": 120,
+                "y": 40,
+                "width": 80,
+                "height": 50,
+                "confidence": 0.72,
+            }
+            dirty_request = _clean_visual_localization_request(
+                "visual_localization:packet_001",
+                source_packet_id="packet_001",
+                local_search_roi=local_roi,
+            )
+            dirty_request["media_warnings"] = []
+            dirty_request["media_integrity"] = {
+                "contact_sheet": {
+                    "status": "ok",
+                    "likely_corrupt": True,
+                    "low_information": False,
+                    "gray": False,
+                }
+            }
+            _write_json(output_dir / "ai_visual_localization.json", {"requests": [dirty_request]})
+            client = _FakeImprovementClient(
+                {
+                    "summary": {"status": "needs_rerun", "primary_issue": "tracking"},
+                    "improvements": [
+                        {
+                            "id": "imp_nested_dirty_visual_localized",
+                            "priority": "P0",
+                            "area": "tracking",
+                            "failure_tags": ["ball_lost"],
+                            "root_cause_module": "reacquisition",
+                            "diagnosis": "Nested corrupt media integrity must block executable ROI.",
+                            "recommended_action": "localize_ball_roi",
+                            "problem_type": "missing_ball",
+                            "candidate_id": "candidate_001",
+                            "start_frame": 10,
+                            "end_frame": 20,
+                            "visual_localization_id": "visual_localization:packet_001",
+                            "local_search_roi": local_roi,
+                            "expected_artifact": {"name": "ball_track.csv"},
+                            "comparison_criteria": {"report": "missing_ball_recovery_comparison.json"},
+                            "confidence": 0.82,
+                        }
+                    ],
+                }
+            )
+
+            report = build_ai_improvement_report(output_dir, client=client)
+
+        self.assertEqual("error", report["summary"]["status"])
+        self.assertIn("clean ai_visual_localization evidence", report["error"])
+
+    def test_status_only_visual_localization_cannot_back_executable_localize_ball_roi(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_minimal_artifacts(output_dir)
+            local_roi = {
+                "coordinate_space": "image",
+                "frame": 15,
+                "x": 120,
+                "y": 40,
+                "width": 80,
+                "height": 50,
+                "confidence": 0.72,
+            }
+            _write_json(
+                output_dir / "ai_visual_localization.json",
+                {
+                    "requests": [
+                        {
+                            "visual_localization_id": "visual_localization:packet_001",
+                            "source_packet_id": "packet_001",
+                            "status": "localized",
+                            "media_warnings": [],
+                            "media_integrity": {"status": "ok"},
+                        }
+                    ]
+                },
+            )
+            client = _FakeImprovementClient(
+                {
+                    "summary": {"status": "needs_rerun", "primary_issue": "tracking"},
+                    "improvements": [
+                        {
+                            "id": "imp_status_only_visual_localized",
+                            "priority": "P0",
+                            "area": "tracking",
+                            "failure_tags": ["ball_lost"],
+                            "root_cause_module": "reacquisition",
+                            "diagnosis": "A localized status without ROI or ball-visible frame is too weak.",
+                            "recommended_action": "localize_ball_roi",
+                            "problem_type": "missing_ball",
+                            "candidate_id": "candidate_001",
+                            "start_frame": 10,
+                            "end_frame": 20,
+                            "visual_localization_id": "visual_localization:packet_001",
+                            "local_search_roi": local_roi,
+                            "expected_artifact": {"name": "ball_track.csv"},
+                            "comparison_criteria": {"report": "missing_ball_recovery_comparison.json"},
+                            "confidence": 0.82,
+                        }
+                    ],
+                }
+            )
+
+            report = build_ai_improvement_report(output_dir, client=client)
+
+        self.assertEqual("error", report["summary"]["status"])
+        self.assertIn("usable visual evidence", report["error"])
 
     def test_legacy_targeted_rerun_input_is_canonicalized_for_public_executable_output(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:
@@ -3184,7 +3470,23 @@ class AiImprovementTests(unittest.TestCase):
             _write_minimal_artifacts(output_dir)
             _write_json(
                 output_dir / "ai_visual_localization.json",
-                {"requests": [{"visual_localization_id": "visual_localization:packet_001"}]},
+                {
+                    "requests": [
+                        _clean_visual_localization_request(
+                            "visual_localization:packet_001",
+                            source_packet_id="packet_001",
+                            local_search_roi={
+                                "coordinate_space": "image",
+                                "frame": 15,
+                                "x": 120,
+                                "y": 40,
+                                "width": 80,
+                                "height": 50,
+                                "confidence": 0.72,
+                            },
+                        )
+                    ]
+                },
             )
             _write_json(
                 output_dir / "ai_improvement_report.json",
@@ -4320,6 +4622,42 @@ def _write_minimal_artifacts_with_media(output_dir: Path) -> None:
             ]
         },
     )
+
+
+def _clean_visual_localization_request(
+    visual_localization_id: str,
+    *,
+    source_packet_id: str,
+    local_search_roi: dict[str, object],
+) -> dict[str, object]:
+    frame = int(local_search_roi["frame"])
+    return {
+        "visual_localization_id": visual_localization_id,
+        "source_packet_id": source_packet_id,
+        "status": "localized",
+        "media_warnings": [],
+        "media_integrity": {
+            "status": "ok",
+            "image_count": 2,
+            "low_information_image_count": 0,
+            "likely_corrupt_image_count": 0,
+        },
+        "local_search_roi": dict(local_search_roi),
+        "roi_status": "accepted",
+        "frames": [
+            {
+                "frame": frame,
+                "status": "localized",
+                "ball_visible": True,
+                "confidence": local_search_roi.get("confidence", 0.7),
+                "local_search_roi": dict(local_search_roi),
+            }
+        ],
+        "coverage": {
+            "covered_subwindows": [{"start_frame": frame, "end_frame": frame, "status": "localized"}],
+            "uncovered_subwindows": [],
+        },
+    }
 
 
 def _candidate_ready_targeted_rerun() -> dict[str, object]:

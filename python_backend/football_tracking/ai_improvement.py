@@ -29,6 +29,15 @@ from football_tracking.review_packets import (
     MICRO_PACKET_MIN_FRAMES,
     MICRO_PACKET_TARGET_FRAMES,
 )
+from football_tracking.visual_localization_quality import (
+    visual_localization_has_clean_executable_evidence as _visual_localization_has_clean_executable_evidence,
+)
+from football_tracking.visual_localization_quality import (
+    visual_localization_items as _ai_visual_localization_items,
+)
+from football_tracking.visual_localization_quality import (
+    visual_localization_sources as _visual_localization_sources,
+)
 
 SCHEMA_VERSION = "1.0"
 REPORT_FILE_NAME = "ai_improvement_report.json"
@@ -675,10 +684,20 @@ def _approved_action_entry(
         provenance_item = dict(improvement)
         provenance_item.update(action)
         if "source_packet_id" not in action and "visual_review_id" not in action:
-            traceable = _first_traceable_packet_or_visual_provenance(provenance_item, roi_provenance_context)
+            traceable = _first_traceable_packet_or_visual_provenance(
+                provenance_item,
+                roi_provenance_context,
+                require_clean_visual_localization=approved_action == "localize_ball_roi",
+            )
             action.update(traceable)
             provenance_item.update(traceable)
-        if not _has_traceable_packet_or_visual_provenance(provenance_item, roi_provenance_context):
+        if approved_action == "localize_ball_roi":
+            _validate_visual_localization_provenance_is_clean(provenance_item, roi_provenance_context, approval_id)
+        if not _has_traceable_packet_or_visual_provenance(
+            provenance_item,
+            roi_provenance_context,
+            require_clean_visual_localization=approved_action == "localize_ball_roi",
+        ):
             raise ValueError(
                 f"Approval {approval_id} {approved_action} requires traceable packet or visual review provenance, "
                 "or visual localization provenance."
@@ -1429,8 +1448,16 @@ def _validate_improvement(
     if not isinstance(raw, dict):
         raise ValueError(f"Improvement {index} must be a JSON object.")
     missing = [field for field in _REQUIRED_IMPROVEMENT_FIELDS if field not in raw]
+    repair_warnings: list[str] = []
     if missing:
-        raise ValueError(f"Improvement {index} missing required fields: {', '.join(missing)}")
+        if missing == ["recommended_action"]:
+            raw = dict(raw)
+            raw["recommended_action"] = "manual_review"
+            repair_warnings.append(
+                f"Improvement {index} missing recommended_action downgraded to manual_review."
+            )
+        else:
+            raise ValueError(f"Improvement {index} missing required fields: {', '.join(missing)}")
 
     failure_tags = raw.get("failure_tags")
     if not isinstance(failure_tags, list):
@@ -1485,6 +1512,7 @@ def _validate_improvement(
 
     config_patch_raw = raw.get("config_patch") if isinstance(raw.get("config_patch"), dict) else {}
     config_patch, patch_warnings = _filter_config_patch(config_patch_raw)
+    patch_warnings = [*repair_warnings, *patch_warnings]
 
     item: dict[str, Any] = {
         "id": str(raw.get("id") or f"imp_{index:03d}"),
@@ -2001,8 +2029,15 @@ def _windows_cover_uncovered_ranges(windows: list[dict[str, Any]], uncovered_ran
     )
 
 
-def _has_traceable_packet_or_visual_provenance(item: dict[str, Any], context: dict[str, Any] | None) -> bool:
+def _has_traceable_packet_or_visual_provenance(
+    item: dict[str, Any],
+    context: dict[str, Any] | None,
+    *,
+    require_clean_visual_localization: bool = False,
+) -> bool:
     packet_ids, visual_review_ids, visual_localization_ids = _traceable_packet_and_visual_ids(context)
+    if require_clean_visual_localization:
+        visual_localization_ids = _clean_visual_localization_ids(context)
     for packet_id in _packet_provenance_values(item):
         if packet_id in packet_ids:
             return True
@@ -2018,8 +2053,12 @@ def _has_traceable_packet_or_visual_provenance(item: dict[str, Any], context: di
 def _first_traceable_packet_or_visual_provenance(
     item: dict[str, Any],
     context: dict[str, Any] | None,
+    *,
+    require_clean_visual_localization: bool = False,
 ) -> dict[str, str]:
     packet_ids, visual_review_ids, visual_localization_ids = _traceable_packet_and_visual_ids(context)
+    if require_clean_visual_localization:
+        visual_localization_ids = _clean_visual_localization_ids(context)
     for packet_id in sorted(_packet_provenance_values(item)):
         if packet_id in packet_ids:
             return {"source_packet_id": packet_id}
@@ -2181,25 +2220,70 @@ def _traceable_provenance_payload(context: dict[str, Any]) -> dict[str, list[str
     }
 
 
-def _ai_visual_localization_items(report: dict[str, Any]) -> list[dict[str, Any]]:
-    items: list[dict[str, Any]] = []
-    for key in ("requests", "localizations", "reviews"):
-        value = report.get(key)
-        if isinstance(value, list):
-            items.extend(item for item in value if isinstance(item, dict))
-    return items
+def _clean_visual_localization_ids(context: dict[str, Any] | None) -> set[str]:
+    localization_report = _visual_localization_report(context)
+    ids: set[str] = set()
+    for item in _ai_visual_localization_items(localization_report):
+        if not _visual_localization_has_clean_executable_evidence(item):
+            continue
+        for source in _visual_localization_sources(item):
+            value = source.get("visual_localization_id")
+            if isinstance(value, str) and value.strip():
+                ids.add(value.strip())
+    return ids
 
 
-def _visual_localization_sources(item: dict[str, Any]) -> list[dict[str, Any]]:
-    sources = [item]
-    for key in ("localization", "review", "provenance"):
-        value = item.get(key)
-        if isinstance(value, dict):
-            sources.append(value)
-    frames = item.get("frames")
-    if isinstance(frames, list):
-        sources.extend(frame for frame in frames if isinstance(frame, dict))
-    return sources
+def _visual_localization_report(context: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(context, dict):
+        return {}
+    artifacts = context.get("artifacts") if isinstance(context.get("artifacts"), dict) else {}
+    report = artifacts.get("ai_visual_localization")
+    return report if isinstance(report, dict) else {}
+
+
+def _visual_localizations_for_ids(
+    context: dict[str, Any] | None,
+    visual_localization_ids: set[str],
+) -> list[dict[str, Any]]:
+    if not visual_localization_ids:
+        return []
+    matches: list[dict[str, Any]] = []
+    for item in _ai_visual_localization_items(_visual_localization_report(context)):
+        source_ids = {
+            value.strip()
+            for source in _visual_localization_sources(item)
+            for value in [source.get("visual_localization_id")]
+            if isinstance(value, str) and value.strip()
+        }
+        if source_ids & visual_localization_ids:
+            matches.append(item)
+    return matches
+
+
+def _has_clean_visual_localization_provenance(item: dict[str, Any], context: dict[str, Any] | None) -> bool:
+    clean_ids = _clean_visual_localization_ids(context)
+    return any(visual_id in clean_ids for visual_id in _visual_localization_provenance_values(item))
+
+
+def _validate_visual_localization_provenance_is_clean(
+    item: dict[str, Any],
+    context: dict[str, Any] | None,
+    approval_id: str,
+) -> None:
+    visual_ids = _visual_localization_provenance_values(item)
+    if not visual_ids:
+        return
+    _packet_ids, _review_ids, known_visual_ids = _traceable_packet_and_visual_ids(context)
+    unknown_ids = sorted(visual_id for visual_id in visual_ids if visual_id not in known_visual_ids)
+    if unknown_ids:
+        raise ValueError(
+            f"Approval {approval_id} localize_ball_roi visual_localization_id does not match "
+            f"ai_visual_localization.json: {', '.join(unknown_ids)}"
+        )
+    if not _has_clean_visual_localization_provenance(item, context):
+        raise ValueError(
+            f"Approval {approval_id} localize_ball_roi requires clean ai_visual_localization evidence."
+        )
 
 
 def _has_evidence_backed_not_visible(item: dict[str, Any], context: dict[str, Any] | None) -> bool:
@@ -2552,7 +2636,8 @@ def _validate_executable_visual_contracts(improvements: list[dict[str, Any]], co
         if not _has_usable_visual_evidence(item, context):
             raise ValueError(
                 f"Improvement {index} localize_ball_roi requires usable visual evidence "
-                "from ai_visual_review or equivalent vision-reviewed wide/crop evidence."
+                "from ai_visual_review, equivalent vision-reviewed wide/crop evidence, "
+                "or clean ai_visual_localization evidence."
             )
 
 
@@ -2561,6 +2646,10 @@ def _has_usable_visual_evidence(item: dict[str, Any], context: dict[str, Any] | 
     visual_values = _visual_review_provenance_values(item)
     for review in _visual_reviews_for_ids(context, packet_values=packet_values, visual_values=visual_values):
         if _review_has_usable_visual_evidence(review, context):
+            return True
+    visual_localization_values = _visual_localization_provenance_values(item)
+    for localization in _visual_localizations_for_ids(context, visual_localization_values):
+        if _visual_localization_has_clean_executable_evidence(localization):
             return True
     return False
 

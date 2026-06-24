@@ -7,6 +7,16 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from football_tracking.visual_localization_quality import (
+    visual_localization_has_clean_executable_evidence as _visual_localization_has_clean_executable_evidence,
+)
+from football_tracking.visual_localization_quality import (
+    visual_localization_items as _visual_localization_items,
+)
+from football_tracking.visual_localization_quality import (
+    visual_localization_sources as _visual_localization_sources,
+)
+
 SCHEMA_VERSION = "1.0"
 DEFAULT_MERGE_GAP_FRAMES = 30
 DEFAULT_MAX_TOTAL_FRAMES = 1800
@@ -634,7 +644,10 @@ def _approved_roi_metadata(
         and visual_localization_id
         and visual_localization_id not in known_visual_localization_ids
     ):
-        raise ValueError(f"{label} visual_localization_id does not match ai_visual_localization.json.")
+        raise ValueError(
+            f"{label} visual_localization_id does not match ai_visual_localization.json "
+            "with clean ai_visual_localization evidence."
+        )
     if (
         known_source_packet_ids is not None
         and known_visual_review_ids is not None
@@ -684,7 +697,10 @@ def _validate_recovery_action_provenance(
         and visual_localization_id
         and visual_localization_id not in known_visual_localization_ids
     ):
-        raise ValueError(f"{label} visual_localization_id does not match ai_visual_localization.json.")
+        raise ValueError(
+            f"{label} visual_localization_id does not match ai_visual_localization.json "
+            "with clean ai_visual_localization evidence."
+        )
     if (
         known_source_packet_ids is not None
         and known_visual_review_ids is not None
@@ -1048,31 +1064,14 @@ def _traceable_provenance_ids(output_dir: Path) -> tuple[set[str] | None, set[st
     visual_localization = _read_optional_json(visual_localization_path)
     if isinstance(visual_localization, dict):
         for item in _visual_localization_items(visual_localization):
+            if not _visual_localization_has_clean_executable_evidence(item):
+                continue
             for source in _visual_localization_sources(item):
                 value = source.get("visual_localization_id")
                 if isinstance(value, str) and value.strip():
                     visual_localization_ids.add(value.strip())
 
     return packet_ids, visual_review_ids, visual_localization_ids
-
-
-def _visual_localization_items(report: dict[str, Any]) -> list[dict[str, Any]]:
-    items: list[dict[str, Any]] = []
-    for key in ("requests", "localizations", "reviews"):
-        items.extend(_list_dicts(report.get(key)))
-    return items
-
-
-def _visual_localization_sources(item: dict[str, Any]) -> list[dict[str, Any]]:
-    sources = [item]
-    for key in ("localization", "review", "provenance"):
-        value = item.get(key)
-        if isinstance(value, dict):
-            sources.append(value)
-    frames = item.get("frames")
-    if isinstance(frames, list):
-        sources.extend(frame for frame in frames if isinstance(frame, dict))
-    return sources
 
 
 def _list_dicts(value: Any) -> list[dict[str, Any]]:

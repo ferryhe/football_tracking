@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import csv
 import hashlib
 import json
 import shutil
@@ -22,6 +21,15 @@ from football_tracking.metrics import build_metrics_report, write_run_artifacts
 from football_tracking.missing_ball_recovery_comparison import write_missing_ball_recovery_comparison
 from football_tracking.recovery_stitcher import REPORT_NAME as RECOVERY_STITCH_REPORT_NAME
 from football_tracking.recovery_stitcher import stitch_recovery_window, write_recovery_stitch_report
+from football_tracking.visual_localization_quality import (
+    visual_localization_has_clean_executable_evidence as _visual_localization_has_clean_executable_evidence,
+)
+from football_tracking.visual_localization_quality import (
+    visual_localization_items as _visual_localization_items,
+)
+from football_tracking.visual_localization_quality import (
+    visual_localization_sources as _visual_localization_sources,
+)
 
 MISSING_BALL_RECOVERY_ACTIONS = {"targeted_rerun", "rerun_ball_window", "localize_ball_roi"}
 MISSING_BALL_COMPARISON_NAME = "missing_ball_recovery_comparison.json"
@@ -626,6 +634,8 @@ def traceable_approval_provenance_ids(output_dir: Path) -> tuple[set[str] | None
     visual_localization = _read_json(output_dir / "ai_visual_localization.json")
     if isinstance(visual_localization, dict):
         for item in _visual_localization_items(visual_localization):
+            if not _visual_localization_has_clean_executable_evidence(item):
+                continue
             for source in _visual_localization_sources(item):
                 _add_string_value(visual_localization_ids, source.get("visual_localization_id"))
     return packet_ids, visual_review_ids, visual_localization_ids
@@ -962,25 +972,6 @@ def _read_json(path: Path) -> dict[str, Any] | None:
 
 def _list_dicts(value: Any) -> list[dict[str, Any]]:
     return [item for item in value if isinstance(item, dict)] if isinstance(value, list) else []
-
-
-def _visual_localization_items(report: dict[str, Any]) -> list[dict[str, Any]]:
-    items: list[dict[str, Any]] = []
-    for key in ("requests", "localizations", "reviews"):
-        items.extend(_list_dicts(report.get(key)))
-    return items
-
-
-def _visual_localization_sources(item: dict[str, Any]) -> list[dict[str, Any]]:
-    sources = [item]
-    for key in ("localization", "review", "provenance"):
-        value = item.get(key)
-        if isinstance(value, dict):
-            sources.append(value)
-    frames = item.get("frames")
-    if isinstance(frames, list):
-        sources.extend(frame for frame in frames if isinstance(frame, dict))
-    return sources
 
 
 def _add_string_value(target: set[str], value: Any) -> None:

@@ -26,6 +26,45 @@ def _write_review_packets(output_dir: Path, *packet_ids: str) -> None:
     _write_json(output_dir / "review_packets.json", {"packets": [{"packet_id": packet_id} for packet_id in packet_ids]})
 
 
+def _clean_visual_localization_request(visual_localization_id: str, *, source_packet_id: str) -> dict:
+    local_roi = {
+        "coordinate_space": "image",
+        "frame": 2121,
+        "x": 5000,
+        "y": 960,
+        "width": 120,
+        "height": 200,
+        "confidence": 0.9,
+    }
+    return {
+        "visual_localization_id": visual_localization_id,
+        "source_packet_id": source_packet_id,
+        "status": "localized",
+        "media_warnings": [],
+        "media_integrity": {
+            "status": "ok",
+            "image_count": 2,
+            "low_information_image_count": 0,
+            "likely_corrupt_image_count": 0,
+        },
+        "local_search_roi": local_roi,
+        "roi_status": "accepted",
+        "frames": [
+            {
+                "frame": 2121,
+                "status": "localized",
+                "ball_visible": True,
+                "confidence": 0.9,
+                "local_search_roi": local_roi,
+            }
+        ],
+        "coverage": {
+            "covered_subwindows": [{"start_frame": 2121, "end_frame": 2121, "status": "localized"}],
+            "uncovered_subwindows": [],
+        },
+    }
+
+
 class HighRecallWindowTests(unittest.TestCase):
     def test_max_frame_in_csv_streams_frame_column_and_skips_invalid_rows(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:
@@ -653,10 +692,10 @@ class HighRecallWindowTests(unittest.TestCase):
                 output_dir / "ai_visual_localization.json",
                 {
                     "requests": [
-                        {
-                            "visual_localization_id": "visual_localization:2049_2544_right_corner",
-                            "source_packet_id": "packet_001",
-                        }
+                        _clean_visual_localization_request(
+                            "visual_localization:2049_2544_right_corner",
+                            source_packet_id="packet_001",
+                        )
                     ]
                 },
             )
@@ -704,6 +743,108 @@ class HighRecallWindowTests(unittest.TestCase):
             "visual_localization:2049_2544_right_corner",
             window["approval_provenance"][0]["visual_localization_id"],
         )
+
+    def test_approved_localize_ball_roi_rejects_dirty_visual_localization_provenance(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_review_packets(output_dir, "packet_001")
+            dirty_request = _clean_visual_localization_request(
+                "visual_localization:2049_2544_right_corner",
+                source_packet_id="packet_001",
+            )
+            dirty_request["media_warnings"] = ["contact_sheet_unreadable"]
+            _write_json(output_dir / "ai_visual_localization.json", {"requests": [dirty_request]})
+            approved_path = output_dir / "ai_improvement_approved_actions.json"
+            _write_json(
+                approved_path,
+                {
+                    "schema_version": "1.0",
+                    "approved_actions": [
+                        {
+                            "approval_id": "approval_001",
+                            "improvement_id": "imp_001",
+                            "candidate_id": "candidate_001",
+                            "approved_action": "localize_ball_roi",
+                            "start_frame": 2049,
+                            "end_frame": 2544,
+                            "source_packet_id": "packet_001",
+                            "visual_localization_id": "visual_localization:2049_2544_right_corner",
+                            "local_search_roi": {
+                                "coordinate_space": "image",
+                                "frame": 2121,
+                                "x": 5000,
+                                "y": 960,
+                                "width": 120,
+                                "height": 200,
+                                "confidence": 0.9,
+                            },
+                        }
+                    ],
+                },
+            )
+
+            with self.assertRaisesRegex(ValueError, "clean ai_visual_localization evidence"):
+                build_high_recall_windows(
+                    output_dir,
+                    total_frames=3000,
+                    approved_actions_path=approved_path,
+                    approved_only=True,
+                )
+
+    def test_approved_localize_ball_roi_rejects_nested_corrupt_visual_localization_provenance(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_review_packets(output_dir, "packet_001")
+            dirty_request = _clean_visual_localization_request(
+                "visual_localization:2049_2544_right_corner",
+                source_packet_id="packet_001",
+            )
+            dirty_request["media_warnings"] = []
+            dirty_request["media_integrity"] = {
+                "contact_sheet": {
+                    "status": "ok",
+                    "likely_corrupt": True,
+                    "low_information": False,
+                    "gray": False,
+                }
+            }
+            _write_json(output_dir / "ai_visual_localization.json", {"requests": [dirty_request]})
+            approved_path = output_dir / "ai_improvement_approved_actions.json"
+            _write_json(
+                approved_path,
+                {
+                    "schema_version": "1.0",
+                    "approved_actions": [
+                        {
+                            "approval_id": "approval_001",
+                            "improvement_id": "imp_001",
+                            "candidate_id": "candidate_001",
+                            "approved_action": "localize_ball_roi",
+                            "start_frame": 2049,
+                            "end_frame": 2544,
+                            "source_packet_id": "packet_001",
+                            "visual_localization_id": "visual_localization:2049_2544_right_corner",
+                            "local_search_roi": {
+                                "coordinate_space": "image",
+                                "frame": 2121,
+                                "x": 5000,
+                                "y": 960,
+                                "width": 120,
+                                "height": 200,
+                                "confidence": 0.9,
+                            },
+                        }
+                    ],
+                },
+            )
+
+            with self.assertRaisesRegex(ValueError, "clean ai_visual_localization evidence"):
+                build_high_recall_windows(
+                    output_dir,
+                    total_frames=3000,
+                    approved_actions_path=approved_path,
+                    approved_only=True,
+                )
 
     def test_approved_localize_ball_roi_rejects_unknown_visual_localization_provenance(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:
