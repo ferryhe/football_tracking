@@ -8,7 +8,6 @@ import json
 import mimetypes
 import re
 import shutil
-import tempfile
 import threading
 import unicodedata
 from concurrent.futures import CancelledError
@@ -32,19 +31,24 @@ from football_tracking.ai_improvement import (
     compact_ai_improvement_summary,
     write_ai_improvement_report,
 )
-from football_tracking.ai_candidate_registry import load_candidate_registry, write_candidate_registry
 from football_tracking.ai_review_triggers import compact_ai_review_trigger_summary
 from football_tracking.api.ai_provider import OpenAIResponsesClient, load_provider_settings
-from football_tracking.ball_audit import build_ball_audit_report, compact_ball_audit_summary
+from football_tracking.ball_audit import compact_ball_audit_summary
 from football_tracking.calibration import build_pitch_calibration_from_field_polygon
 from football_tracking.chunk_runner import run_high_recall_windows, run_temporal_chunks
 from football_tracking.config import DEFAULT_HIGH_RECALL_MAX_TOTAL_FRAMES, AppConfig, load_config
 from football_tracking.events import compact_event_candidate_summary
 from football_tracking.final_artifact_manifest import finalize_ai_candidate
 from football_tracking.follow_cam import FollowCamGenerator
-from football_tracking.highlights import render_highlight_clip
 from football_tracking.high_recall_windows import approved_action_windows_from_report
-from football_tracking.metrics import build_metrics_report, compute_track_metrics, stats_from_metrics_report, write_run_artifacts
+from football_tracking.highlight_window_validation import build_highlight_window_validation
+from football_tracking.highlights import render_highlight_clip
+from football_tracking.metrics import (
+    build_metrics_report,
+    compute_track_metrics,
+    stats_from_metrics_report,
+    write_run_artifacts,
+)
 from football_tracking.missing_ball_candidate_executor import (
     assert_parent_fingerprints_unchanged,
     capture_parent_fingerprints,
@@ -2182,13 +2186,17 @@ class ApiService:
         if source_run.get("status") != "completed":
             raise RuntimeError(f"Run must be completed before rendering a highlight: {source_run_id}")
 
-        highlight_selection = self._resolve_highlight_selection(source_run_id, request)
         config_path, relative_name = self._resolve_run_config_reference(source_run)
         config = load_config(config_path)
         input_video = source_run.get("input_video") or str(config.input_video)
         if not input_video:
             raise FileNotFoundError(f"Run {source_run_id} is not linked to an input video.")
         config.input_video = self._resolve_input_video_path(input_video)
+        highlight_selection = self._resolve_highlight_selection(
+            source_run_id,
+            request,
+            source_total_frames=self._source_video_frame_count(config.input_video),
+        )
 
         requested_output_name = request.get("output_dir_name")
         run_id = Path(requested_output_name).name if requested_output_name else ""
@@ -3335,10 +3343,21 @@ class ApiService:
             raise FileNotFoundError(f"Input video not found: {input_video}")
         return candidate
 
-    def _resolve_highlight_selection(self, source_run_id: str, request: dict[str, Any]) -> dict[str, Any]:
+    def _resolve_highlight_selection(
+        self,
+        source_run_id: str,
+        request: dict[str, Any],
+        *,
+        source_total_frames: int | None = None,
+    ) -> dict[str, Any]:
         approved_action_id = request.get("approved_action_id")
         if approved_action_id:
-            return self._resolve_approved_highlight_selection(source_run_id, str(approved_action_id), request)
+            return self._resolve_approved_highlight_selection(
+                source_run_id,
+                str(approved_action_id),
+                request,
+                source_total_frames=source_total_frames,
+            )
 
         candidate_id = request.get("candidate_id")
         if candidate_id:
@@ -3394,6 +3413,8 @@ class ApiService:
         source_run_id: str,
         approved_action_id: str,
         request: dict[str, Any],
+        *,
+        source_total_frames: int | None = None,
     ) -> dict[str, Any]:
         source_run = self.get_run(source_run_id)
         source_output_dir = Path(source_run["output_dir"]).resolve()
@@ -3426,27 +3447,45 @@ class ApiService:
         report = self.get_event_candidates_report(source_run_id)
         candidates_raw = report.get("candidates")
         candidates = candidates_raw if isinstance(candidates_raw, list) else []
-        candidate = self._candidate_by_id(candidates, candidate_id.strip())
+        event_candidate_id = self._approved_highlight_event_candidate_id(action, candidates)
+        candidate = self._candidate_by_id(candidates, event_candidate_id)
         approval = {
             "approval_id": action.get("approval_id"),
             "improvement_id": action.get("improvement_id"),
             "approved_action": action.get("approved_action"),
+            "candidate_id": candidate_id.strip(),
+            "event_candidate_id": event_candidate_id,
             "clip_action": action.get("clip_action"),
             "approved_by": action.get("approved_by"),
             "approved_at": action.get("approved_at"),
             "source_approved_actions": "ai_improvement_approved_actions.json",
             "provenance": action.get("provenance") if isinstance(action.get("provenance"), dict) else {},
         }
-        self._validate_approved_highlight_window(candidate, window, approved_action_id)
-        return self._highlight_selection_payload(
+        validation = self._validate_approved_highlight_window(
+            source_output_dir=source_output_dir,
+            candidate=candidate,
+            approval={**action, "candidate_id": candidate_id.strip(), "event_candidate_id": event_candidate_id},
+            window=window,
+            approved_action_id=approved_action_id,
+            source_total_frames=source_total_frames,
+        )
+        render_window = validation.get("render_window") if isinstance(validation.get("render_window"), dict) else window
+        selection = self._highlight_selection_payload(
             candidate_id=candidate_id.strip(),
             candidate=candidate,
-            start_frame=window["start_frame"],
-            end_frame=window["end_frame"],
+            start_frame=int(render_window["start_frame"]),
+            end_frame=int(render_window["end_frame"]),
             request=request,
             selection_source="approved_ai_suggested_window",
             approval=approval,
         )
+        if validation.get("tail_status") == "source_end_clamped":
+            selection["warnings"] = [
+                warning
+                for warning in selection.get("warnings", [])
+                if isinstance(warning, str) and "minimum post-event tail" not in warning
+            ]
+        return selection
 
     def _highlight_selection_payload(
         self,
@@ -3478,18 +3517,64 @@ class ApiService:
             },
         }
 
+    def _approved_highlight_event_candidate_id(self, action: dict[str, Any], candidates: list[Any]) -> str:
+        for key in ("event_candidate_id", "source_event_candidate_id"):
+            value = action.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        legacy_candidate_id = action.get("candidate_id")
+        if isinstance(legacy_candidate_id, str) and legacy_candidate_id.strip():
+            legacy = legacy_candidate_id.strip()
+            if any(isinstance(item, dict) and item.get("id") == legacy for item in candidates):
+                return legacy
+        raise RuntimeError("Approved highlight action requires event_candidate_id.")
+
     def _validate_approved_highlight_window(
         self,
+        *,
+        source_output_dir: Path,
         candidate: dict[str, Any],
+        approval: dict[str, Any],
         window: dict[str, int],
         approved_action_id: str,
-    ) -> None:
+        source_total_frames: int | None = None,
+    ) -> dict[str, Any]:
+        validation = build_highlight_window_validation(
+            source_output_dir,
+            approval,
+            source_total_frames=source_total_frames,
+        )
         warnings = self._highlight_window_warnings(candidate, window)
-        if warnings:
+        if validation.get("tail_status") == "source_end_clamped":
+            warnings = [
+                warning
+                for warning in warnings
+                if "minimum post-event tail" not in warning
+            ]
+        if validation.get("status") == "pass" and not warnings:
+            return validation
+        validation_reasons = [
+            str(check.get("reason"))
+            for check in validation.get("checks", [])
+            if isinstance(check, dict) and check.get("status") == "fail" and check.get("reason")
+        ]
+        reasons = warnings or validation_reasons
+        if reasons:
             raise RuntimeError(
                 f"Approved highlight action has invalid suggested_window: {approved_action_id}. "
-                + " ".join(warnings)
+                + " ".join(reasons)
             )
+        return validation
+
+    def _source_video_frame_count(self, input_video: Path) -> int | None:
+        capture = cv2.VideoCapture(str(input_video))
+        if not capture.isOpened():
+            return None
+        try:
+            frame_count = int(capture.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+            return frame_count if frame_count > 0 else None
+        finally:
+            capture.release()
 
     def _candidate_by_id(self, candidates: list[Any], candidate_id: str) -> dict[str, Any]:
         candidate = next(

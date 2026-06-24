@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+# ruff: noqa: E402
 import argparse
 import csv
 import json
@@ -23,11 +24,12 @@ from football_tracking.config import load_config
 from football_tracking.final_artifact_manifest import write_final_artifact_manifest
 from football_tracking.follow_cam_candidate_comparison import FOLLOW_CAM_CANDIDATE_COMPARISON_NAME
 from football_tracking.follow_cam_candidate_executor import execute_follow_cam_candidate
+from football_tracking.highlight_candidate_comparison import HIGHLIGHT_CANDIDATE_COMPARISON_NAME
+from football_tracking.highlight_candidate_executor import execute_highlight_candidate
 from football_tracking.metrics import build_metrics_report
 from football_tracking.missing_ball_candidate_executor import execute_missing_ball_candidate
 from football_tracking.noise_candidate_comparison import execute_noise_cleanup_candidate
 from football_tracking.review_packets import write_review_packet_report
-
 
 SCHEMA_VERSION = "1.0"
 DEFAULT_REPORT_NAME = "stable_ai_improvement_workflow_report.json"
@@ -179,7 +181,13 @@ def run_workflow(
             follow_cam_execution_path=dispatcher_stage.get("follow_cam_candidate_execution_path"),
         )
     )
-    stages.append(_highlight_render_stage(approval_intent=approval_intent, approved_payload=approved_payload))
+    stages.append(
+        _highlight_render_stage(
+            approval_intent=approval_intent,
+            approved_payload=approved_payload,
+            highlight_execution_path=dispatcher_stage.get("highlight_candidate_execution_path"),
+        )
+    )
     noop_stage, resolved_noop_candidates = _missing_ball_noop_resolution_stage(output_dir, approved_payload)
     stages.append(noop_stage)
 
@@ -198,15 +206,14 @@ def run_workflow(
         json.dumps(quality_gate, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
     )
-    stages.append(
-        {
-            "name": "quality_gate",
-            "status": quality_gate["summary"]["status"],
-            "mode": gate_mode,
-            "artifact": QUALITY_GATE_REPORT_NAME,
-            "summary": quality_gate["summary"],
-        }
-    )
+    quality_gate_stage = {
+        "name": "quality_gate",
+        "status": quality_gate["summary"]["status"],
+        "mode": gate_mode,
+        "artifact": QUALITY_GATE_REPORT_NAME,
+        "summary": quality_gate["summary"],
+    }
+    stages.append(quality_gate_stage)
     manifest_stage = _final_artifact_manifest_stage(
         output_dir,
         approved_payload=approved_payload,
@@ -215,6 +222,16 @@ def run_workflow(
         quality_gate_summary=quality_gate["summary"],
     )
     stages.append(manifest_stage)
+    final_workflow_status = _workflow_status(stages)
+    quality_gate = write_ai_improvement_quality_gate(output_dir, **gate_kwargs)
+    quality_gate["summary"]["workflow_status"] = final_workflow_status
+    (output_dir / QUALITY_GATE_REPORT_NAME).write_text(
+        json.dumps(quality_gate, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    quality_gate_stage["status"] = quality_gate["summary"]["status"]
+    quality_gate_stage["summary"] = quality_gate["summary"]
+    _sync_final_manifest_quality_gate_status(output_dir, quality_gate["summary"])
 
     produced_artifacts = _produced_artifacts(output_dir, extra_names=[report_name])
     report = {
@@ -744,6 +761,7 @@ def _selected_approval_dispatcher_stage(
     missing_ball_actions: list[dict[str, Any]] = []
     noise_actions: list[dict[str, Any]] = []
     follow_cam_actions: list[dict[str, Any]] = []
+    highlight_actions: list[dict[str, Any]] = []
     unsupported_actions: list[dict[str, Any]] = []
     noop_actions: list[dict[str, Any]] = []
     for action in actions:
@@ -756,9 +774,11 @@ def _selected_approval_dispatcher_stage(
             noise_actions.append(action)
         elif approved_action in FOLLOW_CAM_APPROVAL_ACTIONS:
             follow_cam_actions.append(action)
+        elif approved_action in HIGHLIGHT_APPROVAL_ACTIONS:
+            highlight_actions.append(action)
         elif _is_not_visible_noop_action(action):
             noop_actions.append(action)
-        elif approved_action in HIGHLIGHT_APPROVAL_ACTIONS:
+        else:
             unsupported_actions.append(_unsupported_action_summary(action))
     missing_ball_path = _missing_ball_candidate_execution_path(
         output_dir=output_dir,
@@ -774,8 +794,20 @@ def _selected_approval_dispatcher_stage(
         actions=follow_cam_actions,
         dry_run=dry_run,
     )
+    highlight_path = _highlight_candidate_execution_path(
+        output_dir=output_dir,
+        input_video=input_video,
+        actions=highlight_actions,
+        dry_run=dry_run,
+    )
     dispatcher_failed = (
-        noise_path.get("status") == "failed"
+        bool(unsupported_actions)
+        or noise_path.get("status") == "failed"
+        or highlight_path.get("status")
+        in {
+            "failed",
+            "partial_failure",
+        }
         or follow_cam_path.get("status")
         in {
             "failed",
@@ -798,6 +830,7 @@ def _selected_approval_dispatcher_stage(
         },
         "noise_candidate_execution_path": noise_path,
         "follow_cam_candidate_execution_path": follow_cam_path,
+        "highlight_candidate_execution_path": highlight_path,
         "unsupported_actions": unsupported_actions,
     }
 
@@ -1121,6 +1154,83 @@ def _follow_cam_candidate_execution_path(
     }
 
 
+def _highlight_candidate_execution_path(
+    *,
+    output_dir: Path,
+    input_video: Path | None,
+    actions: list[dict[str, Any]],
+    dry_run: bool,
+) -> dict[str, Any]:
+    if not actions:
+        return {
+            "status": "skipped",
+            "approval_ids": [],
+            "candidate_ids": [],
+            "execution_status": "not_run",
+            "reason": "No selected highlight approvals.",
+        }
+    approval_ids = _approval_ids(actions)
+    candidate_ids = [
+        candidate_id
+        for action in actions
+        if (candidate_id := _highlight_candidate_id(action)) is not None
+    ]
+    if dry_run:
+        return {
+            "status": "planned",
+            "approval_ids": approval_ids,
+            "candidate_ids": candidate_ids,
+            "execution_status": "not_run",
+            "reason": "Dry-run records selected highlight approvals without rendering candidate artifacts.",
+        }
+    resolved_input_video = input_video or _run_manifest_input_video(output_dir)
+    reports: list[dict[str, Any]] = []
+    errors: list[dict[str, Any]] = []
+    for action in actions:
+        try:
+            reports.append(
+                execute_highlight_candidate(
+                    output_dir,
+                    action,
+                    input_video=resolved_input_video,
+                )
+            )
+        except Exception as exc:  # pragma: no cover - defensive workflow reporting
+            errors.append(
+                {
+                    "approval_id": _action_approval_id(action),
+                    "candidate_id": _highlight_candidate_id(action),
+                    "error": str(exc),
+                }
+            )
+    candidate_outputs = [
+        {
+            "id": report.get("candidate_id"),
+            "candidate_id": report.get("candidate_id"),
+            "problem_type": "highlight",
+            "path": report.get("candidate_dir"),
+            "type": "clip",
+            "status": report.get("comparison_status"),
+            "candidate_artifacts": report.get("candidate_artifacts", []),
+        }
+        for report in reports
+        if isinstance(report.get("candidate_id"), str)
+    ]
+    comparison_reports = [{**report, "path": report.get("comparison_report")} for report in reports]
+    status = "partial_failure" if reports and errors else "failed" if errors else "succeeded"
+    return {
+        "status": status,
+        "approval_ids": approval_ids,
+        "candidate_ids": [str(report.get("candidate_id")) for report in reports if isinstance(report.get("candidate_id"), str)]
+        or candidate_ids,
+        "execution_status": "partial_failure" if status == "partial_failure" else "failed" if errors else "executed",
+        "candidate_outputs": candidate_outputs,
+        "comparison_reports": comparison_reports,
+        "errors": errors,
+        "strategy": "highlight_candidate_render",
+    }
+
+
 def _group_missing_ball_actions_by_candidate_id(actions: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
     grouped: dict[str, list[dict[str, Any]]] = {}
     for action in actions:
@@ -1181,7 +1291,30 @@ def _follow_cam_rerender_plan_stage(
     return {"name": "follow_cam_rerender_plan", "status": "skipped", "artifact": "follow_cam_rerender_plan.json", "reason": reason}
 
 
-def _highlight_render_stage(*, approval_intent: dict[str, Any], approved_payload: dict[str, Any]) -> dict[str, Any]:
+def _highlight_render_stage(
+    *,
+    approval_intent: dict[str, Any],
+    approved_payload: dict[str, Any],
+    highlight_execution_path: Any = None,
+) -> dict[str, Any]:
+    if isinstance(highlight_execution_path, dict) and highlight_execution_path.get("status") in {
+        "succeeded",
+        "failed",
+        "partial_failure",
+        "planned",
+    }:
+        return {
+            "name": "highlight_render",
+            "status": highlight_execution_path.get("status"),
+            "artifact": HIGHLIGHT_CANDIDATE_COMPARISON_NAME,
+            "reason": highlight_execution_path.get("reason"),
+            "execution_status": highlight_execution_path.get("execution_status", "not_run"),
+            "approval_ids": highlight_execution_path.get("approval_ids", []),
+            "candidate_ids": highlight_execution_path.get("candidate_ids", []),
+            "candidate_outputs": highlight_execution_path.get("candidate_outputs", []),
+            "comparison_reports": highlight_execution_path.get("comparison_reports", []),
+            "errors": highlight_execution_path.get("errors", []),
+        }
     actions = approved_payload.get("approved_actions") if isinstance(approved_payload.get("approved_actions"), list) else []
     approved_action_id = approval_intent.get("approved_action_id") if isinstance(approval_intent.get("approved_action_id"), str) else None
     highlight_actions = [
@@ -1194,7 +1327,7 @@ def _highlight_render_stage(*, approval_intent: dict[str, Any], approved_payload
     selected_highlight = any(
         isinstance(action, dict) and str(action.get("approved_action") or "") in HIGHLIGHT_APPROVAL_ACTIONS for action in actions
     )
-    reason = "unsupported_candidate_type" if (selected_highlight or highlight_actions) else "no selected highlight action"
+    reason = "highlight_candidate_execution_not_run" if (selected_highlight or highlight_actions) else "no selected highlight action"
     return {"name": "highlight_render", "status": "skipped", "artifact": "highlight_report.json", "reason": reason}
 
 
@@ -1288,6 +1421,7 @@ def _final_artifact_manifest_stage(
     unsupported_candidates = unsupported if isinstance(unsupported, list) else []
     noise_path = dispatcher_stage.get("noise_candidate_execution_path")
     follow_cam_path = dispatcher_stage.get("follow_cam_candidate_execution_path")
+    highlight_path = dispatcher_stage.get("highlight_candidate_execution_path")
     missing_ball_path = dispatcher_stage.get("missing_ball_execution_path")
     missing_ball_candidate_outputs = (
         missing_ball_path.get("candidate_outputs", [])
@@ -1339,11 +1473,26 @@ def _final_artifact_manifest_stage(
         if isinstance(follow_cam_path, dict) and isinstance(follow_cam_path.get("blocked"), list)
         else []
     )
+    highlight_candidate_outputs = (
+        highlight_path.get("candidate_outputs", [])
+        if isinstance(highlight_path, dict) and isinstance(highlight_path.get("candidate_outputs"), list)
+        else []
+    )
+    highlight_comparison_reports = (
+        highlight_path.get("comparison_reports", [])
+        if isinstance(highlight_path, dict) and isinstance(highlight_path.get("comparison_reports"), list)
+        else []
+    )
+    highlight_rejected_candidates = (
+        [_highlight_rejected_candidate_summary(item) for item in highlight_path.get("errors", [])]
+        if isinstance(highlight_path, dict) and isinstance(highlight_path.get("errors"), list)
+        else []
+    )
     pending_candidates = [
         *pending_candidates,
         *_executed_pending_candidate_summaries(
-            [*missing_ball_candidate_outputs, *noise_candidate_outputs, *follow_cam_candidate_outputs],
-            [*missing_ball_comparison_reports, *noise_comparison_reports, *follow_cam_comparison_reports],
+            [*missing_ball_candidate_outputs, *noise_candidate_outputs, *follow_cam_candidate_outputs, *highlight_candidate_outputs],
+            [*missing_ball_comparison_reports, *noise_comparison_reports, *follow_cam_comparison_reports, *highlight_comparison_reports],
         ),
         *follow_cam_blocked_candidates,
     ]
@@ -1356,6 +1505,7 @@ def _final_artifact_manifest_stage(
                 *missing_ball_candidate_outputs,
                 *noise_candidate_outputs,
                 *follow_cam_candidate_outputs,
+                *highlight_candidate_outputs,
             ]
         ),
         final_artifacts=existing_finalization["final_selected_artifacts"],
@@ -1368,10 +1518,16 @@ def _final_artifact_manifest_stage(
                 *missing_ball_comparison_reports,
                 *noise_comparison_reports,
                 *follow_cam_comparison_reports,
+                *highlight_comparison_reports,
             ]
         ),
         quality_gate_status=quality_gate_summary,
-        rejected_candidates=[*missing_ball_rejected_candidates, *noise_rejected_candidates, *follow_cam_rejected_candidates],
+        rejected_candidates=[
+            *missing_ball_rejected_candidates,
+            *noise_rejected_candidates,
+            *follow_cam_rejected_candidates,
+            *highlight_rejected_candidates,
+        ],
         pending_candidates=pending_candidates,
         unsupported_candidates=unsupported_candidates,
         resolved_noop_candidates=_unique_json_dicts(
@@ -1384,6 +1540,15 @@ def _final_artifact_manifest_stage(
         "artifact": FINAL_ARTIFACT_MANIFEST_NAME,
         "summary": manifest.get("summary", {}),
     }
+
+
+def _sync_final_manifest_quality_gate_status(output_dir: Path, quality_gate_summary: dict[str, Any]) -> None:
+    path = output_dir / FINAL_ARTIFACT_MANIFEST_NAME
+    payload = _read_json_if_available(path)
+    if not isinstance(payload, dict):
+        return
+    payload["quality_gate_status"] = dict(quality_gate_summary)
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
 def _strategy(parallel_mode: str) -> dict[str, Any]:
@@ -1611,6 +1776,26 @@ def _follow_cam_blocked_candidate_summary(error: dict[str, Any]) -> dict[str, An
     }
 
 
+def _highlight_rejected_candidate_summary(error: dict[str, Any]) -> dict[str, Any]:
+    candidate_id = _first_string(error, ("candidate_id",))
+    approval_id = _first_string(error, ("approval_id",))
+    approval_ids = [item for item in error.get("approval_ids", []) if isinstance(item, str) and item.strip()]
+    if approval_id is not None and approval_id not in approval_ids:
+        approval_ids.insert(0, approval_id)
+    return {
+        "candidate_id": candidate_id,
+        "candidate_ids": [candidate_id] if candidate_id else [],
+        "approval_id": approval_id,
+        "approval_ids": approval_ids,
+        "problem_type": "highlight",
+        "reason": "comparison_unavailable",
+        "error": str(error.get("error") or "Highlight candidate execution failed."),
+        "status": "rejected",
+        "execution_status": str(error.get("execution_status") or error.get("status") or "failed"),
+        "comparison_status": "unavailable",
+    }
+
+
 def _problem_type_for_action(approved_action: str) -> str:
     if approved_action in NOISE_APPROVAL_ACTIONS:
         return "noise"
@@ -1633,6 +1818,13 @@ def _noise_candidate_id(action: dict[str, Any]) -> str | None:
 
 
 def _follow_cam_candidate_id(action: dict[str, Any]) -> str | None:
+    value = action.get("candidate_id")
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    return None
+
+
+def _highlight_candidate_id(action: dict[str, Any]) -> str | None:
     value = action.get("candidate_id")
     if isinstance(value, str) and value.strip():
         return value.strip()
@@ -1915,6 +2107,18 @@ def _recovery_input_video(output_dir: Path, config_path: Path) -> Path | None:
     except Exception:
         return None
     return Path(config.input_video) if config.input_video else None
+
+
+def _run_manifest_input_video(output_dir: Path) -> Path | None:
+    run_manifest = _read_json_if_available(output_dir / "run_manifest.json")
+    manifest_video = run_manifest.get("input_video")
+    if isinstance(manifest_video, str) and manifest_video.strip():
+        return _resolve_run_manifest_path(manifest_video, output_dir=output_dir, must_exist=False)
+    try:
+        config_path = _recovery_config_path(output_dir)
+    except Exception:
+        return None
+    return _recovery_input_video(output_dir, config_path)
 
 
 def _resolve_run_manifest_path(value: str | Path, *, output_dir: Path, must_exist: bool) -> Path | None:
