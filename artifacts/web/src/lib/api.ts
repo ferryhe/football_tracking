@@ -2,6 +2,7 @@ import type {
   AIExplainResponse,
   AIImproveApprovalRequest,
   AIImproveApprovalResponse,
+  AIImprovementStatusResponse,
   AIImproveRequest,
   AIImproveResponse,
   AISuggestion,
@@ -52,6 +53,8 @@ export const api = {
   getRun: (id: string) => request<RunRecord>(`/runs/${id}`),
   getRunArtifactJson: <T>(runId: string, artifactName: string) =>
     request<T>(`/runs/${encodeURIComponent(runId)}/artifacts/${encodePathSegmented(artifactName)}`),
+  getAIImprovementStatus: (runId: string) =>
+    request<AIImprovementStatusResponse>(`/runs/${encodeURIComponent(runId)}/ai-improvement-status`),
   listAssetGroups: () => request<AssetGroup[]>("/runs/asset-groups"),
   createRun: (body: CreateRunRequest) =>
     request<RunRecord>("/runs", { method: "POST", body: JSON.stringify(body) }),
