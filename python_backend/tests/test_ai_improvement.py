@@ -307,9 +307,13 @@ class AiImprovementTests(unittest.TestCase):
         self.assertFalse(improvement["executable"])
         self.assertEqual("review_only", improvement["candidate_intent"])
         self.assertEqual(["local_search_roi"], improvement["candidate_contract"]["missing_fields"])
+        self.assertIn("missing likely_ball_region/local_search_roi", improvement["downgrade_reason"])
         self.assertEqual(0, report["summary"]["executable_candidate_count"])
+        self.assertTrue(
+            any("missing-ball suggestion missing likely_ball_region/local_search_roi" in warning for warning in report["warnings"])
+        )
 
-    def test_incomplete_localize_ball_roi_without_traceable_provenance_remains_error(self) -> None:
+    def test_incomplete_localize_ball_roi_without_traceable_provenance_becomes_manual_review(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:
             output_dir = Path(temp_name)
             _write_minimal_artifacts(output_dir)
@@ -334,8 +338,99 @@ class AiImprovementTests(unittest.TestCase):
 
             report = build_ai_improvement_report(output_dir, client=client)
 
-        self.assertEqual("error", report["summary"]["status"])
-        self.assertIn("missing-ball suggestions require likely_ball_region or local_search_roi", report["error"])
+        improvement = report["improvements"][0]
+        self.assertEqual("needs_rerun", report["summary"]["status"])
+        self.assertEqual("manual_review", improvement["recommended_action"])
+        self.assertFalse(improvement["executable"])
+        self.assertEqual("review_only", improvement["candidate_intent"])
+        self.assertIn("missing likely_ball_region/local_search_roi", improvement["downgrade_reason"])
+        self.assertNotIn("local_search_roi", improvement)
+        self.assertNotIn("likely_ball_region", improvement)
+        self.assertEqual(0, report["summary"]["executable_candidate_count"])
+        self.assertTrue(
+            any("missing-ball suggestion missing likely_ball_region/local_search_roi" in warning for warning in report["warnings"])
+        )
+
+    def test_incomplete_missing_ball_suggestion_does_not_block_valid_candidate(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_minimal_artifacts(output_dir)
+            client = _FakeImprovementClient(
+                {
+                    "summary": {"status": "needs_rerun", "primary_issue": "tracking"},
+                    "improvements": [
+                        {
+                            "id": "imp_unlinked_locator",
+                            "priority": "P0",
+                            "area": "tracking",
+                            "failure_tags": ["ball_lost"],
+                            "root_cause_module": "reacquisition",
+                            "diagnosis": "No packet or visual evidence is cited.",
+                            "recommended_action": "localize_ball_roi",
+                            "evidence": ["unlinked impression"],
+                            "confidence": 0.76,
+                        },
+                        _candidate_ready_targeted_rerun(),
+                    ],
+                }
+            )
+
+            report = build_ai_improvement_report(
+                output_dir,
+                client=client,
+                candidate_intent="prepare_approved_candidates",
+            )
+
+        self.assertEqual("needs_rerun", report["summary"]["status"])
+        self.assertEqual("manual_review", report["improvements"][0]["recommended_action"])
+        self.assertFalse(report["improvements"][0]["executable"])
+        self.assertTrue(report["improvements"][1]["executable"])
+        self.assertEqual("rerun_ball_window", report["improvements"][1]["recommended_action"])
+        self.assertEqual(1, report["summary"]["executable_candidate_count"])
+
+    def test_unsupported_traceable_missing_ball_action_warning_matches_final_downgrade(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_minimal_artifacts(output_dir)
+            client = _FakeImprovementClient(
+                {
+                    "summary": {"status": "needs_rerun", "primary_issue": "tracking"},
+                    "improvements": [
+                        {
+                            "id": "imp_unknown_locator",
+                            "priority": "P0",
+                            "area": "tracking",
+                            "failure_tags": ["ball_lost"],
+                            "root_cause_module": "reacquisition",
+                            "diagnosis": "The packet needs a locator, but the model used a non-contract action.",
+                            "recommended_action": "find_ball_in_corner",
+                            "source_packet_id": "packet_001",
+                            "evidence": [{"source_packet_id": "packet_001"}],
+                            "confidence": 0.72,
+                        }
+                    ],
+                }
+            )
+
+            report = build_ai_improvement_report(output_dir, client=client)
+
+        improvement = report["improvements"][0]
+        self.assertEqual("request_targeted_localization", improvement["recommended_action"])
+        self.assertEqual("find_ball_in_corner", improvement["original_recommended_action"])
+        self.assertFalse(improvement["executable"])
+        self.assertTrue(
+            any(
+                "unsupported recommended_action downgraded to request_targeted_localization"
+                in warning
+                for warning in report["warnings"]
+            )
+        )
+        self.assertFalse(
+            any(
+                "unsupported recommended_action downgraded to manual_review" in warning
+                for warning in report["warnings"]
+            )
+        )
 
     def test_direct_request_targeted_localization_with_traceable_packet_is_review_only(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:
