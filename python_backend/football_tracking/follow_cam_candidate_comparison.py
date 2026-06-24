@@ -17,10 +17,13 @@ FOLLOW_CAM_CANDIDATE_COMPARISON_NAME = "follow_cam_candidate_comparison.json"
 FOLLOW_CAM_APPROVAL_ACTIONS = {"adjust_follow_cam", "tracking_rerun_before_follow_cam"}
 MIN_CAMERA_PATH_FRAMES = 3
 MIN_BALL_CROP_COVERAGE = 0.90
+MIN_TARGET_WINDOW_VISIBILITY = 0.80
 MAX_COVERAGE_DROP = 0.05
+MAX_CAMERA_REGRESSION_RATIO = 0.05
 ZOOM_OUT_ONLY_MEAN_CROP_RATIO = 1.20
 MIN_RAW_PAN_IMPROVEMENT_RATIO = 0.10
 MIN_MOTION_IMPROVEMENT_RATIO = 0.20
+TARGET_WINDOW_ROI_KEYS = ("effective_roi", "local_search_roi", "approved_roi", "padded_roi")
 
 
 def build_follow_cam_candidate_comparison(
@@ -49,6 +52,7 @@ def build_follow_cam_candidate_comparison(
         candidate_audit=candidate_audit,
         baseline_rows=baseline_rows,
         candidate_rows=candidate_rows,
+        approval=approval,
     )
     checks = _comparison_checks(metrics, approval, candidate_id=candidate_id)
     payload = build_candidate_comparison(
@@ -116,9 +120,11 @@ def _comparison_checks(metrics: dict[str, Any], approval: dict[str, Any] | None,
         _evidence_available_check(metrics),
         _approval_linkage_check(approval, candidate_id=candidate_id),
         _review_events_not_worse_check(metrics),
+        _camera_regression_check(metrics),
         _motion_improvement_check(metrics),
         _zoom_step_check(metrics),
         _not_zoom_out_only_check(metrics),
+        _target_window_visibility_check(metrics),
         _ball_crop_coverage_check(metrics),
     ]
 
@@ -129,16 +135,21 @@ def _comparison_metrics(
     candidate_audit: dict[str, Any] | None,
     baseline_rows: list[dict[str, Any]] | None,
     candidate_rows: list[dict[str, Any]] | None,
+    approval: dict[str, Any] | None,
 ) -> dict[str, Any]:
     baseline_summary = _audit_summary(baseline_audit)
     candidate_summary = _audit_summary(candidate_audit)
     baseline_path = _path_metrics(baseline_rows)
     candidate_path = _path_metrics(candidate_rows)
     coverage = _coverage_metrics(baseline_rows, candidate_rows)
+    camera_regression = _camera_regression_metrics(baseline_summary, candidate_summary)
+    target_window_visibility = _target_window_visibility_metrics(approval, candidate_rows)
     return {
         "baseline": {**baseline_summary, **baseline_path},
         "candidate": {**candidate_summary, **candidate_path},
         "ball_crop_coverage": coverage,
+        "target_window_visibility": target_window_visibility,
+        "camera_regression": camera_regression,
         "p95_pan_improvement_ratio": _decrease_ratio(
             baseline_summary["p95_pan_step_px"],
             candidate_summary["p95_pan_step_px"],
@@ -212,6 +223,27 @@ def _review_events_not_worse_check(metrics: dict[str, Any]) -> dict[str, Any]:
         "baseline_value": baseline,
         "candidate_value": candidate,
         "reason": "candidate review event count is not worse" if status == "pass" else "candidate adds camera review events",
+    }
+
+
+def _camera_regression_check(metrics: dict[str, Any]) -> dict[str, Any]:
+    regression = metrics["camera_regression"]
+    regressions = list(regression["regressions"])
+    status = "pass" if not regressions else "fail"
+    return {
+        "name": "camera_regression",
+        "status": status,
+        "regressions": regressions,
+        "max_allowed_regression_ratio": MAX_CAMERA_REGRESSION_RATIO,
+        "baseline_review_event_count": regression["baseline_review_event_count"],
+        "candidate_review_event_count": regression["candidate_review_event_count"],
+        "baseline_max_pan_step_px": regression["baseline_max_pan_step_px"],
+        "candidate_max_pan_step_px": regression["candidate_max_pan_step_px"],
+        "max_allowed_pan_step_px": regression["max_allowed_pan_step_px"],
+        "baseline_max_pan_accel_px": regression["baseline_max_pan_accel_px"],
+        "candidate_max_pan_accel_px": regression["candidate_max_pan_accel_px"],
+        "max_allowed_pan_accel_px": regression["max_allowed_pan_accel_px"],
+        "reason": "candidate camera motion does not regress" if status == "pass" else "candidate camera motion regresses beyond allowed limits",
     }
 
 
@@ -295,6 +327,312 @@ def _ball_crop_coverage_check(metrics: dict[str, Any]) -> dict[str, Any]:
         "matched_frame_count": matched,
         "reason": reason,
     }
+
+
+def _target_window_visibility_check(metrics: dict[str, Any]) -> dict[str, Any]:
+    visibility = metrics["target_window_visibility"]
+    sample_count = int(visibility["sample_count"])
+    if sample_count == 0:
+        return {
+            "name": "target_window_visibility",
+            "status": "unavailable",
+            "reason": "no target window, ROI, or TrackX/TrackY samples were available",
+            "sample_count": 0,
+            "minimum_visibility": MIN_TARGET_WINDOW_VISIBILITY,
+        }
+    ratio = float(visibility["visibility_ratio"])
+    status = "pass" if ratio >= MIN_TARGET_WINDOW_VISIBILITY else "fail"
+    return {
+        "name": "target_window_visibility",
+        "status": status,
+        "baseline_value": MIN_TARGET_WINDOW_VISIBILITY,
+        "candidate_value": ratio,
+        "visibility_ratio": ratio,
+        "visible_sample_count": int(visibility["visible_sample_count"]),
+        "hidden_sample_count": int(visibility["hidden_sample_count"]),
+        "sample_count": sample_count,
+        "minimum_visibility": MIN_TARGET_WINDOW_VISIBILITY,
+        "hidden_samples": visibility["hidden_samples"],
+        "target_windows": visibility["target_windows"],
+        "reason": "candidate crop keeps the target window visible" if status == "pass" else "candidate crop hides the target in too many sampled frames",
+    }
+
+
+def _camera_regression_metrics(baseline: dict[str, Any], candidate: dict[str, Any]) -> dict[str, Any]:
+    baseline_review_events = int(baseline["review_event_count"])
+    candidate_review_events = int(candidate["review_event_count"])
+    baseline_step = float(baseline["max_pan_step_px"])
+    candidate_step = float(candidate["max_pan_step_px"])
+    baseline_accel = float(baseline["max_pan_accel_px"])
+    candidate_accel = float(candidate["max_pan_accel_px"])
+    max_allowed_step = _regression_limit(baseline_step)
+    max_allowed_accel = _regression_limit(baseline_accel)
+    regressions: list[str] = []
+    if candidate_review_events > baseline_review_events:
+        regressions.append("review_event_count")
+    if candidate_step > max_allowed_step + 1e-9:
+        regressions.append("max_pan_step_px")
+    if candidate_accel > max_allowed_accel + 1e-9:
+        regressions.append("max_pan_accel_px")
+    return {
+        "max_allowed_regression_ratio": MAX_CAMERA_REGRESSION_RATIO,
+        "baseline_review_event_count": baseline_review_events,
+        "candidate_review_event_count": candidate_review_events,
+        "baseline_max_pan_step_px": baseline_step,
+        "candidate_max_pan_step_px": candidate_step,
+        "max_allowed_pan_step_px": round(max_allowed_step, 6),
+        "baseline_max_pan_accel_px": baseline_accel,
+        "candidate_max_pan_accel_px": candidate_accel,
+        "max_allowed_pan_accel_px": round(max_allowed_accel, 6),
+        "regressions": regressions,
+    }
+
+
+def _target_window_visibility_metrics(
+    approval: dict[str, Any] | None,
+    candidate_rows: list[dict[str, Any]] | None,
+) -> dict[str, Any]:
+    rows_by_frame = _rows_by_frame(candidate_rows)
+    samples = _target_visibility_samples(approval, rows_by_frame)
+    visible = [sample for sample in samples if sample["in_crop"]]
+    hidden = [sample for sample in samples if not sample["in_crop"]]
+    sample_count = len(samples)
+    return {
+        "minimum_visibility": MIN_TARGET_WINDOW_VISIBILITY,
+        "sample_count": sample_count,
+        "visible_sample_count": len(visible),
+        "hidden_sample_count": len(hidden),
+        "visibility_ratio": round(len(visible) / sample_count, 6) if sample_count else 0.0,
+        "target_windows": _target_windows_payload(approval, rows_by_frame, samples),
+        "hidden_samples": hidden[:20],
+        "sample_sources": sorted({str(sample["source"]) for sample in samples}),
+    }
+
+
+def _target_visibility_samples(
+    approval: dict[str, Any] | None,
+    rows_by_frame: dict[int, dict[str, Any]],
+) -> list[dict[str, Any]]:
+    windows = _target_windows(approval)
+    roi_specs = _roi_target_specs(approval)
+    samples: list[dict[str, Any]] = []
+    for spec in roi_specs:
+        for frame in _frames_for_roi_spec(spec, windows, rows_by_frame):
+            sample = _visibility_sample(
+                frame,
+                float(spec["x"]),
+                float(spec["y"]),
+                rows_by_frame.get(frame),
+                source=str(spec["source"]),
+            )
+            samples.append(sample)
+
+    for start, end in windows:
+        for frame in range(start, end + 1):
+            row = rows_by_frame.get(frame)
+            x = _optional_float(row.get("TrackX")) if isinstance(row, dict) else None
+            y = _optional_float(row.get("TrackY")) if isinstance(row, dict) else None
+            if x is None or y is None:
+                samples.append(_missing_visibility_sample(frame, source="candidate_camera_path_track", reason="missing_track_point"))
+                continue
+            samples.append(_visibility_sample(frame, x, y, row, source="candidate_camera_path_track"))
+    return sorted(samples, key=lambda sample: (int(sample["frame"]), str(sample["source"])))
+
+
+def _visibility_sample(
+    frame: int,
+    x: float,
+    y: float,
+    row: dict[str, Any] | None,
+    *,
+    source: str,
+) -> dict[str, Any]:
+    crop = _crop_bounds(row)
+    in_crop = bool(crop is not None and crop[0] <= x <= crop[2] and crop[1] <= y <= crop[3])
+    return {
+        "frame": frame,
+        "target_x": round(float(x), 6),
+        "target_y": round(float(y), 6),
+        "in_crop": in_crop,
+        "source": source,
+    }
+
+
+def _missing_visibility_sample(frame: int, *, source: str, reason: str) -> dict[str, Any]:
+    return {
+        "frame": frame,
+        "target_x": None,
+        "target_y": None,
+        "in_crop": False,
+        "source": source,
+        "reason": reason,
+    }
+
+
+def _frames_for_roi_spec(
+    spec: dict[str, Any],
+    windows: list[tuple[int, int]],
+    rows_by_frame: dict[int, dict[str, Any]],
+) -> list[int]:
+    frame = spec.get("frame")
+    if isinstance(frame, int):
+        return [frame]
+    start = spec.get("start_frame")
+    end = spec.get("end_frame")
+    if isinstance(start, int) and isinstance(end, int):
+        return list(range(start, end + 1))
+    if windows:
+        frames: list[int] = []
+        for start_frame, end_frame in windows:
+            frames.extend(range(start_frame, end_frame + 1))
+        return sorted(set(frames))
+    return sorted(rows_by_frame)
+
+
+def _roi_target_specs(approval: dict[str, Any] | None) -> list[dict[str, Any]]:
+    specs: list[dict[str, Any]] = []
+    seen: set[tuple[Any, ...]] = set()
+    for entry in _target_scope_entries(approval):
+        window = _window_from_mapping(entry)
+        for key in TARGET_WINDOW_ROI_KEYS:
+            center = _roi_center(entry.get(key))
+            if center is None:
+                continue
+            frame = _roi_frame(entry.get(key), fallback=entry.get("frame"))
+            spec = {
+                "source": key,
+                "x": center[0],
+                "y": center[1],
+                "frame": frame,
+                "start_frame": window[0] if window is not None else None,
+                "end_frame": window[1] if window is not None else None,
+            }
+            identity = (
+                spec["source"],
+                spec["frame"],
+                spec["start_frame"],
+                spec["end_frame"],
+                round(float(spec["x"]), 6),
+                round(float(spec["y"]), 6),
+            )
+            if identity in seen:
+                continue
+            seen.add(identity)
+            specs.append(spec)
+    return specs
+
+
+def _target_windows(approval: dict[str, Any] | None) -> list[tuple[int, int]]:
+    windows: list[tuple[int, int]] = []
+    seen: set[tuple[int, int]] = set()
+    for entry in _target_scope_entries(approval):
+        window = _window_from_mapping(entry)
+        if window is None or window in seen:
+            continue
+        seen.add(window)
+        windows.append(window)
+    return _merge_windows(windows)
+
+
+def _merge_windows(windows: list[tuple[int, int]]) -> list[tuple[int, int]]:
+    merged: list[tuple[int, int]] = []
+    for start, end in sorted(windows):
+        if not merged or start > merged[-1][1] + 1:
+            merged.append((start, end))
+            continue
+        merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+    return merged
+
+
+def _target_windows_payload(
+    approval: dict[str, Any] | None,
+    rows_by_frame: dict[int, dict[str, Any]],
+    samples: list[dict[str, Any]],
+) -> list[dict[str, int]]:
+    windows = _target_windows(approval)
+    if not windows and samples:
+        frames = [int(sample["frame"]) for sample in samples]
+        windows = [(min(frames), max(frames))]
+    return [
+        {"start_frame": start, "end_frame": end, "frame_count": end - start + 1}
+        for start, end in windows
+    ]
+
+
+def _target_scope_entries(approval: dict[str, Any] | None) -> list[dict[str, Any]]:
+    if not isinstance(approval, dict):
+        return []
+    entries = [approval]
+    for key in ("target_window", "required_window", "rerun_scope", "window"):
+        value = approval.get(key)
+        if isinstance(value, dict):
+            entries.append(value)
+    return entries
+
+
+def _window_from_mapping(value: dict[str, Any]) -> tuple[int, int] | None:
+    start = _optional_int(value.get("start_frame"))
+    end = _optional_int(value.get("end_frame"))
+    if start is not None and end is not None:
+        return (start, end) if start <= end else (end, start)
+    return None
+
+
+def _roi_center(value: Any) -> tuple[float, float] | None:
+    bounds = _roi_bounds(value)
+    if bounds is None:
+        return None
+    left, top, right, bottom = bounds
+    return (left + right) / 2.0, (top + bottom) / 2.0
+
+
+def _roi_bounds(value: Any) -> tuple[float, float, float, float] | None:
+    if isinstance(value, list) and len(value) == 4:
+        parsed = [_optional_float(item) for item in value]
+        if any(item is None for item in parsed):
+            return None
+        left, top, right, bottom = [float(item) for item in parsed if item is not None]
+    elif isinstance(value, dict):
+        left = _optional_float(value.get("left"))
+        top = _optional_float(value.get("top"))
+        right = _optional_float(value.get("right"))
+        bottom = _optional_float(value.get("bottom"))
+        if None in (left, top, right, bottom):
+            x = _optional_float(value.get("x"))
+            y = _optional_float(value.get("y"))
+            width = _optional_float(value.get("width"))
+            height = _optional_float(value.get("height"))
+            if x is None or y is None or width is None or height is None:
+                return None
+            left, top, right, bottom = x, y, x + width, y + height
+        left, top, right, bottom = float(left), float(top), float(right), float(bottom)
+    else:
+        return None
+    if right < left or bottom < top:
+        return None
+    return left, top, right, bottom
+
+
+def _roi_frame(value: Any, *, fallback: Any = None) -> int | None:
+    if isinstance(value, dict):
+        parsed = _optional_int(value.get("frame"))
+        if parsed is not None:
+            return parsed
+    return _optional_int(fallback)
+
+
+def _crop_bounds(row: dict[str, Any] | None) -> tuple[float, float, float, float] | None:
+    if not isinstance(row, dict):
+        return None
+    x1 = _optional_float(row.get("CropX1"))
+    y1 = _optional_float(row.get("CropY1"))
+    x2 = _optional_float(row.get("CropX2"))
+    y2 = _optional_float(row.get("CropY2"))
+    if None in (x1, y1, x2, y2):
+        return None
+    left, right = sorted((float(x1), float(x2)))
+    top, bottom = sorted((float(y1), float(y2)))
+    return left, top, right, bottom
 
 
 def _audit_summary(audit: dict[str, Any] | None) -> dict[str, Any]:
@@ -477,6 +815,12 @@ def _ratio(value: float, baseline: float) -> float:
     if baseline <= 0:
         return 0.0
     return round(value / baseline, 6)
+
+
+def _regression_limit(baseline: float) -> float:
+    if baseline <= 0:
+        return 0.0
+    return baseline * (1.0 + MAX_CAMERA_REGRESSION_RATIO)
 
 
 def _int(value: Any) -> int:
