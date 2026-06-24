@@ -1543,6 +1543,176 @@ class AiImprovementTests(unittest.TestCase):
         self.assertEqual(report["summary"], compact)
         self.assertTrue(written_exists)
 
+    def test_invalid_highlight_adjustment_missing_candidate_is_skipped_with_warning(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_minimal_artifacts(output_dir)
+            client = _FakeImprovementClient(
+                {
+                    "summary": {"status": "ok"},
+                    "improvements": [],
+                    "highlight_adjustments": [
+                        {
+                            "current_window": {"start_frame": 10, "end_frame": 20},
+                            "suggested_window": {"start_frame": 5, "end_frame": 45},
+                            "reason": "Post-shot result is truncated.",
+                            "confidence": 0.74,
+                        }
+                    ],
+                }
+            )
+
+            report = build_ai_improvement_report(output_dir, client=client, model="gpt-improve")
+
+        self.assertEqual("ok", report["summary"]["status"])
+        self.assertNotIn("error", report)
+        self.assertEqual([], report["highlight_adjustments"])
+        self.assertEqual(0, report["summary"]["highlight_adjustment_count"])
+        self.assertIn("Highlight adjustment 1 skipped: requires candidate_id", report["warnings"])
+
+    def test_invalid_only_highlight_adjustments_normalize_needs_rerun_to_ok(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_minimal_artifacts(output_dir)
+            client = _FakeImprovementClient(
+                {
+                    "summary": {"status": "needs_rerun"},
+                    "improvements": [],
+                    "highlight_adjustments": [
+                        {
+                            "current_window": {"start_frame": 10, "end_frame": 20},
+                            "suggested_window": {"start_frame": 5, "end_frame": 45},
+                            "reason": "Post-shot result is truncated.",
+                            "confidence": 0.74,
+                        }
+                    ],
+                }
+            )
+
+            report = build_ai_improvement_report(output_dir, client=client, model="gpt-improve")
+
+        self.assertEqual("ok", report["summary"]["status"])
+        self.assertNotIn("error", report)
+        self.assertEqual([], report["highlight_adjustments"])
+        self.assertEqual(0, report["summary"]["highlight_adjustment_count"])
+        self.assertIn("Highlight adjustment 1 skipped: requires candidate_id", report["warnings"])
+        self.assertTrue(any("normalized from needs_rerun to ok" in warning for warning in report["warnings"]))
+
+    def test_highlight_adjustment_missing_candidate_artifact_still_errors(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_minimal_artifacts(output_dir)
+            (output_dir / "event_candidates.json").unlink()
+            client = _FakeImprovementClient(
+                {
+                    "summary": {"status": "needs_rerun"},
+                    "improvements": [],
+                    "highlight_adjustments": [
+                        {
+                            "candidate_id": "cleaned:shot_candidate:10-20",
+                            "current_window": {"start_frame": 10, "end_frame": 20},
+                            "suggested_window": {"start_frame": 5, "end_frame": 45},
+                            "reason": "Post-shot result is truncated.",
+                            "confidence": 0.74,
+                        }
+                    ],
+                }
+            )
+
+            report = build_ai_improvement_report(output_dir, client=client, model="gpt-improve")
+
+        self.assertEqual("error", report["summary"]["status"])
+        self.assertIn("event_candidates.json has no matching candidates", report["error"])
+
+    def test_highlight_adjustment_candidate_without_usable_core_window_still_errors(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_minimal_artifacts(output_dir)
+            candidates_path = output_dir / "event_candidates.json"
+            event_candidates = json.loads(candidates_path.read_text(encoding="utf-8"))
+            event_candidates["candidates"][0].pop("core_window")
+            event_candidates["candidates"][0].pop("start_frame")
+            event_candidates["candidates"][0].pop("end_frame")
+            _write_json(candidates_path, event_candidates)
+            client = _FakeImprovementClient(
+                {
+                    "summary": {"status": "needs_rerun"},
+                    "improvements": [],
+                    "highlight_adjustments": [
+                        {
+                            "candidate_id": "cleaned:shot_candidate:10-20",
+                            "current_window": {"start_frame": 10, "end_frame": 20},
+                            "suggested_window": {"start_frame": 5, "end_frame": 45},
+                            "reason": "Post-shot result is truncated.",
+                            "confidence": 0.74,
+                        }
+                    ],
+                }
+            )
+
+            report = build_ai_improvement_report(output_dir, client=client, model="gpt-improve")
+
+        self.assertEqual("error", report["summary"]["status"])
+        self.assertIn("requires event candidate cleaned:shot_candidate:10-20 to include core_window", report["error"])
+
+    def test_mixed_highlight_adjustments_keep_valid_items_and_warn_for_bad_items(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_minimal_artifacts(output_dir)
+            client = _FakeImprovementClient(
+                {
+                    "summary": {"status": "ok"},
+                    "improvements": [],
+                    "highlight_adjustments": [
+                        {
+                            "candidate_id": "cleaned:shot_candidate:10-20",
+                            "current_window": {"start_frame": 10, "end_frame": 20},
+                            "suggested_window": {"start_frame": 5, "end_frame": 45},
+                            "reason": "Post-shot result is truncated.",
+                            "confidence": 0.74,
+                        },
+                        {
+                            "current_window": {"start_frame": 10, "end_frame": 20},
+                            "suggested_window": {"start_frame": 5, "end_frame": 45},
+                            "reason": "Missing candidate id should not poison the report.",
+                            "confidence": 0.51,
+                        },
+                    ],
+                }
+            )
+
+            report = build_ai_improvement_report(output_dir, client=client, model="gpt-improve")
+
+        self.assertEqual("needs_rerun", report["summary"]["status"])
+        self.assertNotIn("error", report)
+        self.assertEqual(1, len(report["highlight_adjustments"]))
+        self.assertEqual("cleaned:shot_candidate:10-20", report["highlight_adjustments"][0]["candidate_id"])
+        self.assertEqual(1, report["summary"]["highlight_adjustment_count"])
+        self.assertIn("Highlight adjustment 2 skipped: requires candidate_id", report["warnings"])
+
+    def test_highlight_adjustments_non_list_still_errors(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_minimal_artifacts(output_dir)
+            client = _FakeImprovementClient(
+                {
+                    "summary": {"status": "ok"},
+                    "improvements": [],
+                    "highlight_adjustments": {
+                        "candidate_id": "cleaned:shot_candidate:10-20",
+                        "current_window": {"start_frame": 10, "end_frame": 20},
+                        "suggested_window": {"start_frame": 5, "end_frame": 45},
+                        "reason": "Wrong container shape.",
+                        "confidence": 0.74,
+                    },
+                }
+            )
+
+            report = build_ai_improvement_report(output_dir, client=client, model="gpt-improve")
+
+        self.assertEqual("error", report["summary"]["status"])
+        self.assertIn("highlight_adjustments must be a list", report["error"])
+
     def test_improvement_model_setting_is_used_when_model_is_not_explicit(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:
             output_dir = Path(temp_name)
