@@ -53,7 +53,7 @@ Executable candidates are stricter than ordinary review suggestions. They must c
 | `problem_type` | Required for candidate workflows. Valid values are `missing_ball`, `noise`, `follow_cam`, and `highlight`. |
 | Artifact refs | Candidate artifacts stay under `ai_candidates/<problem_type>/<candidate_id>/`. Reports reference paths and statuses only; comparison and final manifest builders must not copy media or mutate baseline tracks. |
 
-An executable candidate must also include evidence ids, a bounded frame window, `expected_artifact`, and `comparison_criteria`. Evidence ids may be packet ids, visual review ids, camera motion event ids, or event candidate ids as appropriate for the problem type. If evidence is insufficient, the AI output must stay `review_only` rather than pretending to be approval-ready.
+An executable candidate must also include evidence ids, a bounded frame window, `expected_artifact`, and `comparison_criteria`. Evidence ids may be packet ids, visual review ids, visual localization ids, camera motion event ids, or event candidate ids as appropriate for the problem type. `visual_localization_id` is valid only when it appears in `ai_visual_localization.json`. If evidence is insufficient, the AI output must stay `review_only` rather than pretending to be approval-ready.
 
 ## Executable Actions
 
@@ -74,6 +74,8 @@ Legacy `targeted_rerun` inputs are normalized to `rerun_ball_window` for new app
 Schemas may continue to accept `targeted_rerun` as a legacy input value during the migration window. That compatibility value is not part of the closed executable output set; approved artifacts should expose `approved_action: "rerun_ball_window"` and may keep `legacy_approved_action: "targeted_rerun"` only as provenance metadata.
 
 Unknown, broad, unbounded, full-video spatial split/SAHI, or untraceable actions are review-only/manual-review. They must not become executable candidates and must not mutate final output.
+
+Review-only missing-ball localization requests may use `recommended_action: "request_targeted_localization"` when packet or visual-review evidence is traceable but the AI cannot yet provide a bounded `local_search_roi`. This action is not executable and must not appear as an approved recovery action. It is a request to create `ai_visual_localization.json` evidence first.
 
 ## Model Policy
 
@@ -97,6 +99,64 @@ Missing-ball problems have exactly two valid closures.
 The long right-bottom gap `2049-2544` is protected as a full-window requirement. A short neighborhood around frame `2079` may be useful evidence, but it cannot close `2049-2544` unless packet, visual, AI suggestion, approval, recovery comparison, or not-visible resolution evidence covers the entire long window or explicitly records or lists uncovered subwindows.
 
 `localize_ball_roi` is bounded-window-only. It must not expand into broad full-video SAHI. Broad full-video SAHI is not a stable closure path; SAHI/ROI work belongs inside approved bounded recovery windows with packet or visual provenance.
+
+Valid executable `localize_ball_roi` example:
+
+```json
+{
+  "recommended_action": "localize_ball_roi",
+  "problem_type": "missing_ball",
+  "candidate_id": "candidate_2049_2544_right_corner",
+  "start_frame": 2049,
+  "end_frame": 2544,
+  "visual_localization_id": "visual_localization:2049_2544_right_corner",
+  "local_search_roi": {
+    "coordinate_space": "image",
+    "frame": 2121,
+    "x": 5000,
+    "y": 960,
+    "width": 120,
+    "height": 200,
+    "confidence": 0.9
+  },
+  "expected_artifact": {"name": "ball_track.csv", "role": "candidate"},
+  "comparison_criteria": {"report": "missing_ball_recovery_comparison.json"}
+}
+```
+
+Valid non-executable localization request example:
+
+```json
+{
+  "recommended_action": "request_targeted_localization",
+  "requested_action": "localize_ball_roi",
+  "source_packet_id": "packet_2049_2544_right_corner",
+  "candidate_contract": {
+    "approved_action": "localize_ball_roi",
+    "required_fields_present": false,
+    "missing_fields": ["local_search_roi"]
+  }
+}
+```
+
+Valid evidence-backed not-visible example:
+
+```json
+{
+  "recommended_action": "mark_ball_not_visible",
+  "problem_type": "missing_ball",
+  "candidate_id": "resolution_2049_2078_hidden",
+  "source_packet_id": "packet_2049_2078",
+  "start_frame": 2049,
+  "end_frame": 2078,
+  "likely_ball_region": {
+    "description": "not visible",
+    "confidence": 0.0
+  },
+  "expected_artifact": {"name": "missing_ball_resolution.json", "role": "resolved_noop"},
+  "comparison_criteria": {"resolution": "not_visible"}
+}
+```
 
 ## Follow-Cam Thresholds
 

@@ -481,6 +481,7 @@ export const AIImprovementItemRecommendedAction = {
   tracking_rerun_before_follow_cam: "tracking_rerun_before_follow_cam",
   human_review_camera_motion: "human_review_camera_motion",
   render_suggested_highlight: "render_suggested_highlight",
+  request_targeted_localization: "request_targeted_localization",
 } as const;
 
 export interface AILikelyBallRegion {

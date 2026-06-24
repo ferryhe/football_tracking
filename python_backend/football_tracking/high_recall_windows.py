@@ -119,6 +119,7 @@ def approved_action_windows_from_report(
     *,
     known_source_packet_ids: set[str] | None = None,
     known_visual_review_ids: set[str] | None = None,
+    known_visual_localization_ids: set[str] | None = None,
 ) -> list[dict[str, Any]]:
     """Return executable approved recovery windows from an approved actions artifact."""
     return _normalize_windows(
@@ -126,6 +127,7 @@ def approved_action_windows_from_report(
             report,
             known_source_packet_ids=known_source_packet_ids,
             known_visual_review_ids=known_visual_review_ids,
+            known_visual_localization_ids=known_visual_localization_ids,
         ),
         margin_frames=0,
         total_frames=None,
@@ -169,13 +171,16 @@ def _collect_candidate_windows(
             )
         )
     if approved_actions_path is not None:
-        known_source_packet_ids, known_visual_review_ids = _traceable_provenance_ids(output_dir)
+        known_source_packet_ids, known_visual_review_ids, known_visual_localization_ids = _traceable_provenance_ids(
+            output_dir
+        )
         windows.extend(
             _normalize_windows(
                 _approved_action_windows(
                     _read_required_approved_actions(Path(approved_actions_path)),
                     known_source_packet_ids=known_source_packet_ids,
                     known_visual_review_ids=known_visual_review_ids,
+                    known_visual_localization_ids=known_visual_localization_ids,
                 ),
                 margin_frames=margin_frames,
                 total_frames=total_frames,
@@ -293,6 +298,7 @@ def _approved_action_windows(
     *,
     known_source_packet_ids: set[str] | None = None,
     known_visual_review_ids: set[str] | None = None,
+    known_visual_localization_ids: set[str] | None = None,
 ) -> list[dict[str, Any]]:
     if not isinstance(report, dict):
         return []
@@ -330,12 +336,14 @@ def _approved_action_windows(
             f"approved {approved_action} action {action_label}",
             known_source_packet_ids=known_source_packet_ids,
             known_visual_review_ids=known_visual_review_ids,
+            known_visual_localization_ids=known_visual_localization_ids,
         )
         roi_metadata = _approved_roi_metadata(
             action,
             f"approved {approved_action} action {action_label} local_search_roi",
             known_source_packet_ids=known_source_packet_ids,
             known_visual_review_ids=known_visual_review_ids,
+            known_visual_localization_ids=known_visual_localization_ids,
         )
         if approved_action == "localize_ball_roi":
             if not roi_metadata:
@@ -350,6 +358,7 @@ def _approved_action_windows(
                 "approved_action": approved_action,
                 "source_packet_id": action.get("source_packet_id"),
                 "visual_review_id": action.get("visual_review_id"),
+                "visual_localization_id": action.get("visual_localization_id"),
                 "local_search_roi": action.get("local_search_roi"),
                 "provenance": action.get("provenance"),
                 **roi_metadata,
@@ -387,6 +396,7 @@ def _raw_window(item: dict[str, Any], *, source: str, priority: str, reason: str
         "rerun_scope",
         "source_packet_id",
         "visual_review_id",
+        "visual_localization_id",
         "local_search_roi",
         "approved_roi",
         "padded_roi",
@@ -455,6 +465,7 @@ def _window_metadata(raw_window: dict[str, Any]) -> dict[str, Any]:
         "rerun_scope",
         "source_packet_id",
         "visual_review_id",
+        "visual_localization_id",
         "local_search_roi",
         "approved_roi",
         "padded_roi",
@@ -483,6 +494,7 @@ def _approval_provenance_entry(window: dict[str, Any]) -> dict[str, Any] | None:
         "rerun_scope",
         "source_packet_id",
         "visual_review_id",
+        "visual_localization_id",
         "local_search_roi",
         "approved_roi",
         "padded_roi",
@@ -582,6 +594,7 @@ def _merge_window_metadata(target: dict[str, Any], incoming: dict[str, Any]) -> 
             "rerun_scope",
             "source_packet_id",
             "visual_review_id",
+            "visual_localization_id",
             "local_search_roi",
             "approved_roi",
             "padded_roi",
@@ -599,24 +612,43 @@ def _approved_roi_metadata(
     *,
     known_source_packet_ids: set[str] | None = None,
     known_visual_review_ids: set[str] | None = None,
+    known_visual_localization_ids: set[str] | None = None,
 ) -> dict[str, Any]:
     value = action.get("local_search_roi")
     if value in (None, "", {}):
         return {}
     source_packet_id = str(action.get("source_packet_id") or "").strip()
     visual_review_id = str(action.get("visual_review_id") or "").strip()
-    if not source_packet_id and not visual_review_id:
-        raise ValueError(f"{label} requires source_packet_id or visual_review_id provenance.")
+    visual_localization_id = str(action.get("visual_localization_id") or "").strip()
+    if not source_packet_id and not visual_review_id and not visual_localization_id:
+        raise ValueError(
+            f"{label} requires source_packet_id or visual_review_id provenance, "
+            "or visual_localization_id provenance."
+        )
     if known_source_packet_ids is not None and source_packet_id and source_packet_id not in known_source_packet_ids:
         raise ValueError(f"{label} source_packet_id does not match review_packets.json.")
     if known_visual_review_ids is not None and visual_review_id and visual_review_id not in known_visual_review_ids:
         raise ValueError(f"{label} visual_review_id does not match ai_visual_review.json.")
     if (
+        known_visual_localization_ids is not None
+        and visual_localization_id
+        and visual_localization_id not in known_visual_localization_ids
+    ):
+        raise ValueError(f"{label} visual_localization_id does not match ai_visual_localization.json.")
+    if (
         known_source_packet_ids is not None
         and known_visual_review_ids is not None
-        and not (source_packet_id in known_source_packet_ids or visual_review_id in known_visual_review_ids)
+        and known_visual_localization_ids is not None
+        and not (
+            source_packet_id in known_source_packet_ids
+            or visual_review_id in known_visual_review_ids
+            or visual_localization_id in known_visual_localization_ids
+        )
     ):
-        raise ValueError(f"{label} requires provenance that matches review_packets.json or ai_visual_review.json.")
+        raise ValueError(
+            f"{label} requires provenance that matches review_packets.json, "
+            "ai_visual_review.json, or ai_visual_localization.json."
+        )
     roi = _roi_from_local_search_roi(value, label)
     padded_roi = _pad_roi(roi, DEFAULT_APPROVED_ROI_PADDING_PX)
     return {
@@ -633,21 +665,40 @@ def _validate_recovery_action_provenance(
     *,
     known_source_packet_ids: set[str] | None = None,
     known_visual_review_ids: set[str] | None = None,
+    known_visual_localization_ids: set[str] | None = None,
 ) -> None:
     source_packet_id = str(action.get("source_packet_id") or "").strip()
     visual_review_id = str(action.get("visual_review_id") or "").strip()
-    if not source_packet_id and not visual_review_id:
-        raise ValueError(f"{label} requires source_packet_id or visual_review_id provenance.")
+    visual_localization_id = str(action.get("visual_localization_id") or "").strip()
+    if not source_packet_id and not visual_review_id and not visual_localization_id:
+        raise ValueError(
+            f"{label} requires source_packet_id or visual_review_id provenance, "
+            "or visual_localization_id provenance."
+        )
     if known_source_packet_ids is not None and source_packet_id and source_packet_id not in known_source_packet_ids:
         raise ValueError(f"{label} source_packet_id does not match review_packets.json.")
     if known_visual_review_ids is not None and visual_review_id and visual_review_id not in known_visual_review_ids:
         raise ValueError(f"{label} visual_review_id does not match ai_visual_review.json.")
     if (
+        known_visual_localization_ids is not None
+        and visual_localization_id
+        and visual_localization_id not in known_visual_localization_ids
+    ):
+        raise ValueError(f"{label} visual_localization_id does not match ai_visual_localization.json.")
+    if (
         known_source_packet_ids is not None
         and known_visual_review_ids is not None
-        and not (source_packet_id in known_source_packet_ids or visual_review_id in known_visual_review_ids)
+        and known_visual_localization_ids is not None
+        and not (
+            source_packet_id in known_source_packet_ids
+            or visual_review_id in known_visual_review_ids
+            or visual_localization_id in known_visual_localization_ids
+        )
     ):
-        raise ValueError(f"{label} requires provenance that matches review_packets.json or ai_visual_review.json.")
+        raise ValueError(
+            f"{label} requires provenance that matches review_packets.json, "
+            "ai_visual_review.json, or ai_visual_localization.json."
+        )
 
 
 def _required_localize_frame_window(action: dict[str, Any], label: str) -> dict[str, int]:
@@ -947,12 +998,14 @@ def _read_optional_json(path: Path) -> dict[str, Any] | None:
     return loaded if isinstance(loaded, dict) else None
 
 
-def _traceable_provenance_ids(output_dir: Path) -> tuple[set[str] | None, set[str] | None]:
+def _traceable_provenance_ids(output_dir: Path) -> tuple[set[str] | None, set[str] | None, set[str] | None]:
     packet_ids: set[str] = set()
     visual_review_ids: set[str] = set()
+    visual_localization_ids: set[str] = set()
 
     review_packets_path = Path(output_dir) / "review_packets.json"
     visual_review_path = Path(output_dir) / "ai_visual_review.json"
+    visual_localization_path = Path(output_dir) / "ai_visual_localization.json"
     review_packets = _read_optional_json(review_packets_path)
     if isinstance(review_packets, dict):
         for packet in _list_dicts(review_packets.get("packets")):
@@ -992,7 +1045,34 @@ def _traceable_provenance_ids(output_dir: Path) -> tuple[set[str] | None, set[st
             if isinstance(value, str) and value.strip():
                 packet_ids.add(value.strip())
 
-    return packet_ids, visual_review_ids
+    visual_localization = _read_optional_json(visual_localization_path)
+    if isinstance(visual_localization, dict):
+        for item in _visual_localization_items(visual_localization):
+            for source in _visual_localization_sources(item):
+                value = source.get("visual_localization_id")
+                if isinstance(value, str) and value.strip():
+                    visual_localization_ids.add(value.strip())
+
+    return packet_ids, visual_review_ids, visual_localization_ids
+
+
+def _visual_localization_items(report: dict[str, Any]) -> list[dict[str, Any]]:
+    items: list[dict[str, Any]] = []
+    for key in ("requests", "localizations", "reviews"):
+        items.extend(_list_dicts(report.get(key)))
+    return items
+
+
+def _visual_localization_sources(item: dict[str, Any]) -> list[dict[str, Any]]:
+    sources = [item]
+    for key in ("localization", "review", "provenance"):
+        value = item.get(key)
+        if isinstance(value, dict):
+            sources.append(value)
+    frames = item.get("frames")
+    if isinstance(frames, list):
+        sources.extend(frame for frame in frames if isinstance(frame, dict))
+    return sources
 
 
 def _list_dicts(value: Any) -> list[dict[str, Any]]:

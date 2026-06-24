@@ -215,6 +215,130 @@ class AiImprovementTests(unittest.TestCase):
         )
         self.assertEqual(0, report["summary"]["executable_candidate_count"])
 
+    def test_incomplete_localize_ball_roi_with_traceable_packet_requests_targeted_localization(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_minimal_artifacts(output_dir)
+            client = _FakeImprovementClient(
+                {
+                    "summary": {"status": "needs_rerun", "primary_issue": "tracking"},
+                    "improvements": [
+                        {
+                            "id": "imp_needs_locator",
+                            "priority": "P0",
+                            "area": "tracking",
+                            "failure_tags": ["ball_lost"],
+                            "root_cause_module": "reacquisition",
+                            "diagnosis": "The right corner packet likely needs a visual locator before ROI rerun.",
+                            "recommended_action": "localize_ball_roi",
+                            "source_packet_id": "packet_001",
+                            "evidence": [{"source_packet_id": "packet_001"}],
+                            "confidence": 0.76,
+                        }
+                    ],
+                }
+            )
+
+            report = build_ai_improvement_report(output_dir, client=client)
+
+        improvement = report["improvements"][0]
+        self.assertEqual("needs_rerun", report["summary"]["status"])
+        self.assertEqual("request_targeted_localization", improvement["recommended_action"])
+        self.assertEqual("localize_ball_roi", improvement["requested_action"])
+        self.assertFalse(improvement["executable"])
+        self.assertEqual("review_only", improvement["candidate_intent"])
+        self.assertEqual(["local_search_roi"], improvement["candidate_contract"]["missing_fields"])
+        self.assertEqual(0, report["summary"]["executable_candidate_count"])
+
+    def test_incomplete_localize_ball_roi_without_traceable_provenance_remains_error(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_minimal_artifacts(output_dir)
+            client = _FakeImprovementClient(
+                {
+                    "summary": {"status": "needs_rerun", "primary_issue": "tracking"},
+                    "improvements": [
+                        {
+                            "id": "imp_unlinked_locator",
+                            "priority": "P0",
+                            "area": "tracking",
+                            "failure_tags": ["ball_lost"],
+                            "root_cause_module": "reacquisition",
+                            "diagnosis": "No packet or visual evidence is cited.",
+                            "recommended_action": "localize_ball_roi",
+                            "evidence": ["unlinked impression"],
+                            "confidence": 0.76,
+                        }
+                    ],
+                }
+            )
+
+            report = build_ai_improvement_report(output_dir, client=client)
+
+        self.assertEqual("error", report["summary"]["status"])
+        self.assertIn("missing-ball suggestions require likely_ball_region or local_search_roi", report["error"])
+
+    def test_direct_request_targeted_localization_with_traceable_packet_is_review_only(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_minimal_artifacts(output_dir)
+            client = _FakeImprovementClient(
+                {
+                    "summary": {"status": "needs_rerun", "primary_issue": "tracking"},
+                    "improvements": [
+                        {
+                            "id": "imp_direct_locator",
+                            "priority": "P0",
+                            "area": "tracking",
+                            "failure_tags": ["ball_lost"],
+                            "root_cause_module": "reacquisition",
+                            "diagnosis": "Need a targeted visual localization pass.",
+                            "recommended_action": "request_targeted_localization",
+                            "source_packet_id": "packet_001",
+                            "evidence": [{"source_packet_id": "packet_001"}],
+                            "confidence": 0.8,
+                        }
+                    ],
+                }
+            )
+
+            report = build_ai_improvement_report(output_dir, client=client)
+
+        improvement = report["improvements"][0]
+        self.assertEqual("request_targeted_localization", improvement["recommended_action"])
+        self.assertEqual("localize_ball_roi", improvement["requested_action"])
+        self.assertFalse(improvement["executable"])
+        self.assertEqual(["local_search_roi"], improvement["candidate_contract"]["missing_fields"])
+
+    def test_request_targeted_localization_without_traceable_provenance_becomes_error_report(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_minimal_artifacts(output_dir)
+            client = _FakeImprovementClient(
+                {
+                    "summary": {"status": "needs_rerun", "primary_issue": "tracking"},
+                    "improvements": [
+                        {
+                            "id": "imp_unlinked_direct_locator",
+                            "priority": "P0",
+                            "area": "tracking",
+                            "failure_tags": ["ball_lost"],
+                            "root_cause_module": "reacquisition",
+                            "diagnosis": "Unlinked request should not self-certify.",
+                            "recommended_action": "request_targeted_localization",
+                            "likely_ball_region": {"description": "right corner", "confidence": 0.5},
+                            "evidence": ["unlinked impression"],
+                            "confidence": 0.8,
+                        }
+                    ],
+                }
+            )
+
+            report = build_ai_improvement_report(output_dir, client=client)
+
+        self.assertEqual("error", report["summary"]["status"])
+        self.assertIn("request_targeted_localization requires", report["error"])
+
     def test_review_only_candidate_intent_overrides_executable_action(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:
             output_dir = Path(temp_name)
@@ -3054,6 +3178,100 @@ class AiImprovementTests(unittest.TestCase):
         self.assertEqual(1, rerun_report["summary"]["selected_window_count"])
         self.assertEqual("packet_001", rerun_report["windows"][0]["source_packet_id"])
 
+    def test_approval_accepts_localize_ball_roi_with_visual_localization_provenance(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_minimal_artifacts(output_dir)
+            _write_json(
+                output_dir / "ai_visual_localization.json",
+                {"requests": [{"visual_localization_id": "visual_localization:packet_001"}]},
+            )
+            _write_json(
+                output_dir / "ai_improvement_report.json",
+                {
+                    "schema_version": "1.0",
+                    "generated_at": "2026-06-22T00:00:00+00:00",
+                    "model": "gpt-improve",
+                    "summary": {"status": "needs_rerun"},
+                    "improvements": [
+                        {
+                            "id": "imp_visual_localized",
+                            "priority": "P0",
+                            "area": "tracking",
+                            "failure_tags": ["ball_lost"],
+                            "root_cause_module": "reacquisition",
+                            "diagnosis": "Visual localization artifact carries the ROI provenance.",
+                            "recommended_action": "localize_ball_roi",
+                            "candidate_id": "candidate_001",
+                            "problem_type": "missing_ball",
+                            "match_ball_confirmed": True,
+                            "start_frame": 10,
+                            "end_frame": 20,
+                            "visual_localization_id": "visual_localization:packet_001",
+                            "local_search_roi": {
+                                "coordinate_space": "image",
+                                "frame": 15,
+                                "x": 120,
+                                "y": 40,
+                                "width": 80,
+                                "height": 50,
+                                "confidence": 0.72,
+                            },
+                            "expected_artifact": {"name": "ball_track.csv"},
+                            "comparison_criteria": {"report": "missing_ball_recovery_comparison.json"},
+                            "confidence": 0.82,
+                        }
+                    ],
+                },
+            )
+
+            artifact = approve_ai_improvement_actions(
+                output_dir,
+                run_id="run_123",
+                improvement_ids=["imp_visual_localized"],
+                approved_by="operator-a",
+            )
+            rerun_report = build_high_recall_windows(
+                output_dir,
+                approved_actions_path=output_dir / "ai_improvement_approved_actions.json",
+                approved_only=True,
+                total_frames=100,
+            )
+
+        action = artifact["approved_actions"][0]
+        self.assertEqual("visual_localization:packet_001", action["visual_localization_id"])
+        self.assertEqual("visual_localization:packet_001", rerun_report["windows"][0]["visual_localization_id"])
+
+    def test_approval_rejects_request_targeted_localization(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_minimal_artifacts(output_dir)
+            _write_json(
+                output_dir / "ai_improvement_report.json",
+                {
+                    "schema_version": "1.0",
+                    "generated_at": "2026-06-22T00:00:00+00:00",
+                    "model": "gpt-improve",
+                    "summary": {"status": "needs_rerun"},
+                    "improvements": [
+                        {
+                            "id": "imp_direct_locator",
+                            "priority": "P0",
+                            "area": "tracking",
+                            "failure_tags": ["ball_lost"],
+                            "root_cause_module": "reacquisition",
+                            "diagnosis": "This is a review-only locator request.",
+                            "recommended_action": "request_targeted_localization",
+                            "source_packet_id": "packet_001",
+                            "confidence": 0.82,
+                        }
+                    ],
+                },
+            )
+
+            with self.assertRaisesRegex(ValueError, "review-only"):
+                approve_ai_improvement_actions(output_dir, run_id="run_123", improvement_ids=["imp_direct_locator"])
+
     def test_approval_rejects_localize_ball_roi_without_frame_bounds(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:
             output_dir = Path(temp_name)
@@ -4178,6 +4396,15 @@ def _valid_improvement_for_action(action: str, *, candidate_id: str = "candidate
                     "height": 40,
                     "confidence": 0.7,
                 },
+                "evidence": [{"source_packet_id": "packet_001"}],
+            }
+        )
+    elif action == "request_targeted_localization":
+        base.update(
+            {
+                "failure_tags": ["ball_lost"],
+                "root_cause_module": "reacquisition",
+                "source_packet_id": "packet_001",
                 "evidence": [{"source_packet_id": "packet_001"}],
             }
         )
