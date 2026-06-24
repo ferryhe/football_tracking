@@ -9,6 +9,7 @@ from unittest.mock import patch
 from football_tracking.ai_visual_localization import (
     AI_VISUAL_LOCALIZATION_RESPONSE_SCHEMA,
     OpenAIVisualLocalizationClient,
+    _sample_frames,
     write_ai_visual_localization_report,
 )
 
@@ -20,6 +21,30 @@ class _FakeLocalizationClient:
 
     def localize_window(self, **kwargs: object) -> dict[str, object]:
         self.calls.append(kwargs)
+        return self.response
+
+
+class _LegacyLocalizationClient:
+    def __init__(self, response: dict[str, object]) -> None:
+        self.response = response
+        self.calls: list[dict[str, object]] = []
+
+    def localize_window(
+        self,
+        *,
+        metadata: dict[str, object],
+        contact_sheet_data_url: str,
+        crop_sheet_data_url: str,
+        model: str,
+    ) -> dict[str, object]:
+        self.calls.append(
+            {
+                "metadata": metadata,
+                "contact_sheet_data_url": contact_sheet_data_url,
+                "crop_sheet_data_url": crop_sheet_data_url,
+                "model": model,
+            }
+        )
         return self.response
 
 
@@ -72,6 +97,7 @@ class AiVisualLocalizationTests(unittest.TestCase):
             request = report["requests"][0]
             contact_sheet_exists = (output_dir / request["media"]["contact_sheet"]).exists()
             crop_sheet_exists = (output_dir / request["media"]["crop_sheet"]).exists()
+            zoom_sheet_exists = (output_dir / request["media"]["zoom_sheet"]).exists()
 
         self.assertEqual(64, report["source_video"]["width"])
         self.assertEqual(36, report["source_video"]["height"])
@@ -83,6 +109,12 @@ class AiVisualLocalizationTests(unittest.TestCase):
         self.assertLessEqual(request["crop"]["y"] + request["crop"]["height"], 36)
         self.assertTrue(contact_sheet_exists)
         self.assertTrue(crop_sheet_exists)
+        self.assertTrue(zoom_sheet_exists)
+        self.assertIn("ai_visual_localization/visual_localization_5_15_right_corner/zoom_sheet.jpg", request["media"]["zoom_sheet"])
+        self.assertRegex(request["media"]["zoom_sheet_sha256"], r"^[0-9a-f]{64}$")
+        self.assertIn("zoom_crop", request)
+        self.assertLessEqual(request["zoom_crop"]["x"] + request["zoom_crop"]["width"], 64)
+        self.assertLessEqual(request["zoom_crop"]["y"] + request["zoom_crop"]["height"], 36)
 
     def test_video_must_decode_first_frame_before_dimensions_are_available(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:
@@ -105,6 +137,9 @@ class AiVisualLocalizationTests(unittest.TestCase):
         self.assertEqual(0, report["video_width"])
         self.assertEqual(0, report["video_height"])
         self.assertIn("first frame", report["requests"][0]["reason"])
+
+    def test_long_window_sampling_keeps_early_recovery_frames(self) -> None:
+        self.assertEqual([2049, 2079, 2109, 2296, 2544], _sample_frames(2049, 2544, 5))
 
     def test_provider_response_records_traceable_roi_and_uncovered_subwindows(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:
@@ -145,13 +180,16 @@ class AiVisualLocalizationTests(unittest.TestCase):
 
         self.assertEqual(1, len(client.calls))
         self.assertEqual(80, client.calls[0]["metadata"]["source_video"]["width"])
+        self.assertIn("zoom_crop", client.calls[0]["metadata"])
+        self.assertIn("zoom_sheet", client.calls[0]["metadata"]["media"])
+        self.assertRegex(client.calls[0]["metadata"]["media"]["zoom_sheet_sha256"], r"^[0-9a-f]{64}$")
         request = report["requests"][0]
         self.assertEqual("localized", request["status"])
         self.assertEqual("visual_localization:10_20_right_corner", request["visual_localization_id"])
         roi = request["frames"][0]["local_search_roi"]
         self.assertEqual("image", roi["coordinate_space"])
         self.assertEqual(
-            [{"start_frame": 10, "end_frame": 11, "status": "needs_review"}, {"start_frame": 13, "end_frame": 20, "status": "needs_review"}],
+            [{"start_frame": 10, "end_frame": 11, "status": "needs_review"}, {"start_frame": 16, "end_frame": 20, "status": "needs_review"}],
             request["coverage"]["uncovered_subwindows"],
         )
         self.assertEqual("localize_ball_roi", request["suggestions"][0]["recommended_action"])
@@ -159,6 +197,32 @@ class AiVisualLocalizationTests(unittest.TestCase):
         self.assertNotIn("source_packet_id", request["suggestions"][0])
         self.assertEqual("warn", report["summary"]["status"])
         self.assertEqual(2, report["summary"]["uncovered_subwindow_count"])
+
+    def test_legacy_localization_client_without_zoom_argument_still_runs(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            video_path = output_dir / "source.mp4"
+            _write_tiny_video(video_path, width=80, height=40, frame_count=30)
+            client = _LegacyLocalizationClient(
+                {
+                    "reason": "Needs review.",
+                    "frames": [],
+                    "coverage": {"covered_subwindows": []},
+                }
+            )
+
+            report = write_ai_visual_localization_report(
+                output_dir,
+                video_path,
+                ["10:20:right_corner"],
+                client=client,
+                model="vision-test",
+            )
+
+        self.assertEqual(1, len(client.calls))
+        self.assertIn("zoom_crop", client.calls[0]["metadata"])
+        self.assertNotIn("zoom_sheet_data_url", client.calls[0])
+        self.assertEqual("needs_review", report["requests"][0]["status"])
 
     def test_out_of_bounds_roi_is_rejected_without_silent_clamping(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:
@@ -224,13 +288,15 @@ class AiVisualLocalizationTests(unittest.TestCase):
             metadata={"visual_localization_id": "visual_localization:1_2_right"},
             contact_sheet_data_url="data:image/jpeg;base64,contact",
             crop_sheet_data_url="data:image/jpeg;base64,crop",
+            zoom_sheet_data_url="data:image/jpeg;base64,zoom",
             model="vision-test",
         )
 
         call = response_client.calls[0]
         self.assertEqual("vision-test", call["model"])
         self.assertEqual(AI_VISUAL_LOCALIZATION_RESPONSE_SCHEMA, call["json_schema"])
-        self.assertEqual(["contact_sheet", "crop_sheet"], [image["label"] for image in call["images"]])
+        self.assertEqual(["contact_sheet", "crop_sheet", "zoom_sheet"], [image["label"] for image in call["images"]])
+        self.assertIn("zoom", f"{call['instructions']} {call['prompt']}")
         self.assertIn("local_search_roi", f"{call['instructions']} {call['prompt']}")
 
 

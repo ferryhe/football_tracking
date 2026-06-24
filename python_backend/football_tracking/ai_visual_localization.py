@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import inspect
 import json
 import math
 import mimetypes
@@ -17,7 +18,8 @@ REPORT_NAME = "ai_visual_localization.json"
 DEFAULT_SAMPLE_COUNT = 5
 
 AI_VISUAL_LOCALIZATION_INSTRUCTIONS = (
-    "You are a conservative football ball localization agent. Inspect the full contact sheet and labeled crop sheet. "
+    "You are a conservative football ball localization agent. Inspect the full contact sheet, labeled crop sheet, "
+    "and zoom sheet when provided. Use the zoom sheet for tiny-ball detail inside the seed crop. "
     "Return local_search_roi only when the real match ball is visible and the ROI fits inside the decoded source image. "
     "If evidence is ambiguous or the ball is not visible, set ball_visible=false and local_search_roi=null. "
     "Use coverage.covered_subwindows only for frame ranges supported by visual evidence."
@@ -122,15 +124,19 @@ class OpenAIVisualLocalizationClient:
         metadata: dict[str, Any],
         contact_sheet_data_url: str,
         crop_sheet_data_url: str,
+        zoom_sheet_data_url: str | None = None,
         model: str | None,
     ) -> dict[str, Any]:
+        images = [
+            {"label": "contact_sheet", "data_url": contact_sheet_data_url},
+            {"label": "crop_sheet", "data_url": crop_sheet_data_url},
+        ]
+        if zoom_sheet_data_url is not None:
+            images.append({"label": "zoom_sheet", "data_url": zoom_sheet_data_url})
         return self.responses_client.create_json_vision_response(
             instructions=AI_VISUAL_LOCALIZATION_INSTRUCTIONS,
             prompt=_build_prompt(metadata),
-            images=[
-                {"label": "contact_sheet", "data_url": contact_sheet_data_url},
-                {"label": "crop_sheet", "data_url": crop_sheet_data_url},
-            ],
+            images=images,
             model=model,
             json_schema=AI_VISUAL_LOCALIZATION_RESPONSE_SCHEMA,
             temperature=0.0,
@@ -233,13 +239,14 @@ def build_ai_visual_localization_report(
     for window in parsed_windows:
         request = _base_request(window)
         try:
-            media, media_warnings, seed_crop = _write_window_media(
+            media, media_warnings, seed_crop, zoom_crop = _write_window_media(
                 output_dir=output_path,
                 input_video=source_path,
                 window=window,
                 video_info=video_info,
             )
             request["crop"] = seed_crop
+            request["zoom_crop"] = zoom_crop
             request["media"] = media
             request["media_warnings"] = media_warnings
             if dry_run:
@@ -249,12 +256,20 @@ def build_ai_visual_localization_report(
                     raise RuntimeError("Strong visual localization model is not configured.")
                 if active_client is None:
                     raise RuntimeError("Visual localization client is unavailable.")
-                if not media.get("contact_sheet") or not media.get("crop_sheet"):
+                if not media.get("contact_sheet") or not media.get("crop_sheet") or not media.get("zoom_sheet"):
                     raise RuntimeError("Targeted localization media could not be generated.")
-                response = active_client.localize_window(
-                    metadata=_window_metadata(window, video_info=video_info, media=media, seed_crop=seed_crop),
+                response = _call_localization_client(
+                    active_client,
+                    metadata=_window_metadata(
+                        window,
+                        video_info=video_info,
+                        media=media,
+                        seed_crop=seed_crop,
+                        zoom_crop=zoom_crop,
+                    ),
                     contact_sheet_data_url=_image_data_url(output_path / str(media["contact_sheet"])),
                     crop_sheet_data_url=_image_data_url(output_path / str(media["crop_sheet"])),
+                    zoom_sheet_data_url=_image_data_url(output_path / str(media["zoom_sheet"])),
                     model=selected_model,
                 )
                 request.update(_validate_localization_response(response, window=window, video_info=video_info))
@@ -436,7 +451,11 @@ def _validate_localization_response(response: Any, *, window: LocalizationWindow
         invalid_roi_count += int(invalid_roi)
         frames.append(frame)
 
-    covered = _covered_subwindows_from_valid_frames(valid_roi_frames)
+    covered = _covered_subwindows_from_response(
+        response.get("coverage"),
+        window=window,
+        valid_roi_frames=valid_roi_frames,
+    )
     payload: dict[str, Any] = {
         "status": "localized" if valid_roi_frames and invalid_roi_count == 0 else "warn" if valid_roi_frames else "needs_review",
         "reason": reason.strip(),
@@ -533,6 +552,36 @@ def _covered_subwindows_from_valid_frames(valid_roi_frames: list[int]) -> list[d
     )
 
 
+def _covered_subwindows_from_response(
+    value: Any,
+    *,
+    window: LocalizationWindow,
+    valid_roi_frames: list[int],
+) -> list[dict[str, Any]]:
+    fallback = _covered_subwindows_from_valid_frames(valid_roi_frames)
+    if not valid_roi_frames:
+        return fallback
+    if not isinstance(value, dict):
+        raise ValueError("Model response coverage must be an object.")
+    raw_items = value.get("covered_subwindows")
+    if not isinstance(raw_items, list):
+        raise ValueError("Model response coverage.covered_subwindows must be a list.")
+
+    covered: list[dict[str, Any]] = []
+    for index, raw_item in enumerate(raw_items, start=1):
+        if not isinstance(raw_item, dict):
+            raise ValueError(f"Model response covered_subwindows[{index}] must be an object.")
+        start = _nonnegative_int(raw_item.get("start_frame"), f"covered_subwindows[{index}].start_frame")
+        end = _nonnegative_int(raw_item.get("end_frame"), f"covered_subwindows[{index}].end_frame")
+        if end < start:
+            raise ValueError(f"Model response covered_subwindows[{index}] end_frame must be >= start_frame.")
+        if start < window.start_frame or end > window.end_frame:
+            raise ValueError(f"Model response covered_subwindows[{index}] must fit inside the requested window.")
+        if any(start <= frame <= end for frame in valid_roi_frames):
+            covered.append({"start_frame": start, "end_frame": end, "status": str(raw_item.get("status") or "localized")})
+    return _merge_subwindows(covered) if covered else fallback
+
+
 def _coverage(covered_subwindows: list[dict[str, Any]], start_frame: int, end_frame: int) -> dict[str, Any]:
     covered = _merge_subwindows(covered_subwindows)
     uncovered: list[dict[str, Any]] = []
@@ -568,29 +617,36 @@ def _write_window_media(
     input_video: Path,
     window: LocalizationWindow,
     video_info: dict[str, Any],
-) -> tuple[dict[str, Any], list[str], dict[str, Any]]:
+) -> tuple[dict[str, Any], list[str], dict[str, Any], dict[str, Any]]:
     import cv2
 
     media_dir = output_dir / "ai_visual_localization" / _safe_token(window.visual_localization_id)
     media_dir.mkdir(parents=True, exist_ok=True)
     contact_path = media_dir / "contact_sheet.jpg"
     crop_path = media_dir / "crop_sheet.jpg"
+    zoom_path = media_dir / "zoom_sheet.jpg"
     seed_crop = _seed_crop_for_label(window.label, width=int(video_info["width"]), height=int(video_info["height"]))
+    zoom_crop = _zoom_crop_for_label(seed_crop, window.label, width=int(video_info["width"]), height=int(video_info["height"]))
     frames = _read_sampled_frames(input_video, _sample_frames(window.start_frame, window.end_frame, DEFAULT_SAMPLE_COUNT))
     if not frames:
-        return {}, ["no_sample_frames"], seed_crop
+        return {}, ["no_sample_frames"], seed_crop, zoom_crop
 
     contact_thumbs: list[Any] = []
     crop_thumbs: list[Any] = []
+    zoom_thumbs: list[Any] = []
     for frame_index, frame in frames:
         full = frame.copy()
         crop = _crop_frame(full, seed_crop)
+        zoom = _crop_frame(full, zoom_crop)
         _draw_label(full, f"frame {frame_index}")
         _draw_label(crop, f"frame {frame_index}", scale=0.8, y=40)
         contact_thumbs.append(cv2.resize(full, (960, 270), interpolation=cv2.INTER_AREA))
         crop_thumbs.append(cv2.resize(crop, (480, 270), interpolation=cv2.INTER_AREA))
+        zoom_thumb = _resize_for_inspection(zoom, (640, 360))
+        _draw_label(zoom_thumb, f"frame {frame_index} zoom", scale=0.8, y=40)
+        zoom_thumbs.append(zoom_thumb)
     if not cv2.imwrite(str(contact_path), cv2.vconcat(contact_thumbs)):
-        return {}, ["contact_sheet_failed"], seed_crop
+        return {}, ["contact_sheet_failed"], seed_crop, zoom_crop
     crop_rows: list[Any] = []
     for index in range(0, len(crop_thumbs), 2):
         row = crop_thumbs[index : index + 2]
@@ -599,26 +655,42 @@ def _write_window_media(
         crop_rows.append(cv2.hconcat(row))
     if not cv2.imwrite(str(crop_path), cv2.vconcat(crop_rows)):
         contact_path.unlink(missing_ok=True)
-        return {}, ["crop_sheet_failed"], seed_crop
-    if not _is_nonempty_file(contact_path) or not _is_nonempty_file(crop_path):
+        return {}, ["crop_sheet_failed"], seed_crop, zoom_crop
+    zoom_rows: list[Any] = []
+    for index in range(0, len(zoom_thumbs), 2):
+        row = zoom_thumbs[index : index + 2]
+        if len(row) == 1:
+            row.append(_blank_like(row[0]))
+        zoom_rows.append(cv2.hconcat(row))
+    if not cv2.imwrite(str(zoom_path), cv2.vconcat(zoom_rows)):
         contact_path.unlink(missing_ok=True)
         crop_path.unlink(missing_ok=True)
-        return {}, ["media_empty"], seed_crop
+        return {}, ["zoom_sheet_failed"], seed_crop, zoom_crop
+    if not _is_nonempty_file(contact_path) or not _is_nonempty_file(crop_path) or not _is_nonempty_file(zoom_path):
+        contact_path.unlink(missing_ok=True)
+        crop_path.unlink(missing_ok=True)
+        zoom_path.unlink(missing_ok=True)
+        return {}, ["media_empty"], seed_crop, zoom_crop
 
     contact_rel = _relative_path(output_dir, contact_path)
     crop_rel = _relative_path(output_dir, crop_path)
+    zoom_rel = _relative_path(output_dir, zoom_path)
     contact_hash = _sha256_file(contact_path)
     crop_hash = _sha256_file(crop_path)
+    zoom_hash = _sha256_file(zoom_path)
     return (
         {
             "contact_sheet": contact_rel,
             "crop_sheet": crop_rel,
+            "zoom_sheet": zoom_rel,
             "contact_sheet_sha256": contact_hash,
             "crop_sheet_sha256": crop_hash,
-            "sha256": _sha256_text(f"{contact_hash}:{crop_hash}"),
+            "zoom_sheet_sha256": zoom_hash,
+            "sha256": _sha256_text(f"{contact_hash}:{crop_hash}:{zoom_hash}"),
         },
         [],
         seed_crop,
+        zoom_crop,
     )
 
 
@@ -682,6 +754,44 @@ def _seed_crop_for_label(label: str, *, width: int, height: int) -> dict[str, An
     return {"x": int(max(0, x)), "y": int(max(0, y)), "width": int(max(1, crop_width)), "height": int(max(1, crop_height)), "coordinate_space": "image", "label_hint": label}
 
 
+def _zoom_crop_for_label(seed_crop: dict[str, Any], label: str, *, width: int, height: int) -> dict[str, Any]:
+    normalized = label.casefold().replace("-", "_")
+    seed_x = int(seed_crop["x"])
+    seed_y = int(seed_crop["y"])
+    seed_width = min(int(seed_crop["width"]), max(1, width - seed_x))
+    seed_height = min(int(seed_crop["height"]), max(1, height - seed_y))
+    scale = 0.56 if "corner" in normalized else 0.50
+    crop_width = min(seed_width, max(1, int(round(seed_width * scale))))
+    crop_height = min(seed_height, max(1, int(round(seed_height * scale))))
+
+    if "right" in normalized:
+        x = seed_x + seed_width - crop_width
+    elif "left" in normalized:
+        x = seed_x
+    else:
+        x = seed_x + (seed_width - crop_width) // 2
+
+    if "upper" in normalized or "top" in normalized:
+        y = seed_y
+    elif "lower" in normalized or "bottom" in normalized:
+        y = seed_y + seed_height - crop_height
+    elif "corner" in normalized:
+        y = seed_y + max(0, int(round((seed_height - crop_height) * 0.7)))
+    else:
+        y = seed_y + (seed_height - crop_height) // 2
+
+    max_x = seed_x + seed_width - crop_width
+    max_y = seed_y + seed_height - crop_height
+    return {
+        "x": int(min(max(seed_x, x), max_x)),
+        "y": int(min(max(seed_y, y), max_y)),
+        "width": int(max(1, crop_width)),
+        "height": int(max(1, crop_height)),
+        "coordinate_space": "image",
+        "label_hint": label,
+    }
+
+
 def _crop_frame(frame: Any, crop: dict[str, Any]) -> Any:
     x = int(crop["x"])
     y = int(crop["y"])
@@ -691,7 +801,22 @@ def _crop_frame(frame: Any, crop: dict[str, Any]) -> Any:
     return frame if getattr(sliced, "size", 0) == 0 else sliced
 
 
-def _window_metadata(window: LocalizationWindow, *, video_info: dict[str, Any], media: dict[str, Any], seed_crop: dict[str, Any]) -> dict[str, Any]:
+def _resize_for_inspection(frame: Any, size: tuple[int, int]) -> Any:
+    import cv2
+
+    height, width = frame.shape[:2]
+    interpolation = cv2.INTER_CUBIC if width < size[0] or height < size[1] else cv2.INTER_AREA
+    return cv2.resize(frame, size, interpolation=interpolation)
+
+
+def _window_metadata(
+    window: LocalizationWindow,
+    *,
+    video_info: dict[str, Any],
+    media: dict[str, Any],
+    seed_crop: dict[str, Any],
+    zoom_crop: dict[str, Any],
+) -> dict[str, Any]:
     return {
         "visual_localization_id": window.visual_localization_id,
         "source_packet_id": window.source_packet_id,
@@ -709,13 +834,20 @@ def _window_metadata(window: LocalizationWindow, *, video_info: dict[str, Any], 
             "dimension_source": "opencv",
         },
         "seed_crop": seed_crop,
-        "media": {key: value for key, value in media.items() if key in {"contact_sheet", "crop_sheet", "contact_sheet_sha256", "crop_sheet_sha256"}},
+        "zoom_crop": zoom_crop,
+        "media": {
+            key: value
+            for key, value in media.items()
+            if key in {"contact_sheet", "crop_sheet", "zoom_sheet", "contact_sheet_sha256", "crop_sheet_sha256", "zoom_sheet_sha256"}
+        },
     }
 
 
 def _build_prompt(metadata: dict[str, Any]) -> str:
     return (
         "Locate the real match ball for this requested window. The crop sheet is only a hint, not ground truth. "
+        "When a zoom_sheet is present, use zoom_crop metadata to map that tighter upsampled detail region "
+        "back to decoded source-video coordinates. "
         "Return local_search_roi only when the ball is visible and the ROI fits inside decoded source_video dimensions. "
         "If only part of the requested window is localized, list only that range in coverage.covered_subwindows.\n\n"
         f"{json.dumps({'metadata': metadata}, ensure_ascii=False, indent=2)}"
@@ -781,6 +913,16 @@ def _build_default_client() -> OpenAIVisualLocalizationClient:
 def _sample_frames(start_frame: int, end_frame: int, count: int) -> list[int]:
     if count <= 1 or end_frame <= start_frame:
         return [start_frame]
+    span = end_frame - start_frame
+    if span >= 180 and count >= 5:
+        anchors = [
+            start_frame,
+            min(end_frame, start_frame + 30),
+            min(end_frame, start_frame + 60),
+            int(round(start_frame + span / 2.0)),
+            end_frame,
+        ]
+        return sorted(set(anchors))
     step = (end_frame - start_frame) / float(count - 1)
     return sorted({int(round(start_frame + step * index)) for index in range(count)})
 
@@ -789,6 +931,39 @@ def _image_data_url(path: Path) -> str:
     mime_type = mimetypes.guess_type(path.name)[0] or "image/jpeg"
     payload = base64.b64encode(path.read_bytes()).decode("ascii")
     return f"data:{mime_type};base64,{payload}"
+
+
+def _call_localization_client(
+    client: Any,
+    *,
+    metadata: dict[str, Any],
+    contact_sheet_data_url: str,
+    crop_sheet_data_url: str,
+    zoom_sheet_data_url: str | None,
+    model: str | None,
+) -> dict[str, Any]:
+    kwargs: dict[str, Any] = {
+        "metadata": metadata,
+        "contact_sheet_data_url": contact_sheet_data_url,
+        "crop_sheet_data_url": crop_sheet_data_url,
+        "model": model,
+    }
+    if zoom_sheet_data_url is not None and _client_accepts_zoom_sheet(client):
+        kwargs["zoom_sheet_data_url"] = zoom_sheet_data_url
+    return client.localize_window(**kwargs)
+
+
+def _client_accepts_zoom_sheet(client: Any) -> bool:
+    try:
+        signature = inspect.signature(client.localize_window)
+    except (TypeError, ValueError, AttributeError):
+        return True
+    for parameter in signature.parameters.values():
+        if parameter.kind == inspect.Parameter.VAR_KEYWORD:
+            return True
+        if parameter.name == "zoom_sheet_data_url":
+            return True
+    return False
 
 
 def _safe_error_message(exc: Exception) -> str:
