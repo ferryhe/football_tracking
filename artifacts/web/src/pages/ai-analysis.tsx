@@ -2,6 +2,18 @@ import { useEffect, useMemo, useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/lib/api";
 import {
+  buildAIImprovementApprovalRequest,
+  buildApprovedChildRunRequest,
+  buildApprovedHighlightRenderRequest,
+  buildRejectIntentForStatusItem,
+  buildStatusItemPresentation,
+  groupAIImprovementStatusItems,
+  isExecutableApprovedAction,
+  statusItemCanBeApproved,
+  statusItemKey,
+  type AIImprovementRejectIntent,
+} from "@/lib/aiImprovementStatus";
+import {
   buildLifecycleCandidateIndex,
   createProposedLifecycleCandidate,
   getRunLifecycle,
@@ -34,6 +46,7 @@ import {
   AlertCircle,
   Loader2,
   CheckCircle2,
+  Ban,
   ChevronDown,
   ChevronUp,
   Film,
@@ -56,10 +69,15 @@ import type {
   AIHighlightAdjustment,
   AIImprovementItem,
   AIImproveReportArtifact,
+  AIImproveApprovalRequest,
   AIImproveApprovalResponse,
   AIImproveResponse,
+  AIImprovementArtifactReference,
+  AIImprovementArtifactStatus,
+  AIImprovementFinalSelectedArtifact,
   AISuggestion,
   AICandidateLifecycleCandidate,
+  AIImprovementStatusItem,
   ArtifactSummary,
   FieldPreviewResponse,
 } from "@/lib/types";
@@ -87,8 +105,8 @@ function pickPlaybackArtifact(artifacts: ArtifactSummary[]): ArtifactSummary | n
 
 type AIAnalysisLabels = Translations["aiAnalysis"];
 type ImprovementGroupKey = "missingBall" | "noise" | "cameraMotion" | "highlightBoundary";
+type ApprovedExecutionAction = Pick<AIApprovedAction, "approval_id" | "approved_action">;
 
-const EXECUTABLE_RERUN_ACTIONS = new Set(["targeted_rerun", "rerun_ball_window"]);
 const MISSING_BALL_ACTIONS = new Set([
   "targeted_rerun",
   "rerun_ball_window",
@@ -187,6 +205,70 @@ function lifecycleToneClass(tone: LifecycleTone): string {
     default:
       return "border-muted bg-muted/50 text-muted-foreground";
   }
+}
+
+function aiStatusToneClass(status: string | null | undefined): string {
+  switch (status) {
+    case "pass":
+    case "promoted":
+    case "approved":
+    case "available":
+      return "border-emerald-200 bg-emerald-50 text-emerald-700";
+    case "warn":
+    case "pending_confirmation":
+      return "border-amber-200 bg-amber-50 text-amber-700";
+    case "fail":
+    case "rejected":
+    case "blocked":
+    case "error":
+      return "border-red-200 bg-red-50 text-red-700";
+    case "unavailable":
+      return "border-slate-200 bg-slate-50 text-slate-700";
+    case "none":
+    case "not_promoted":
+    default:
+      return "border-muted bg-muted/50 text-muted-foreground";
+  }
+}
+
+function statusText(labels: AIAnalysisLabels, status: string | null | undefined): string {
+  if (!status) return labels.lifecycleStatusValues.none;
+  return lifecycleStatusText(labels, status);
+}
+
+function artifactStatusText(labels: AIAnalysisLabels, status: string | null | undefined): string {
+  if (!status) return labels.lifecycleStatusValues.unavailable;
+  return (labels.artifactAvailabilityValues as Record<string, string>)[status] ?? status;
+}
+
+function StatusBadge({
+  labels,
+  label,
+  value,
+}: {
+  labels: AIAnalysisLabels;
+  label: string;
+  value: string | null | undefined;
+}) {
+  return (
+    <Badge variant="outline" className={cn("max-w-full truncate", aiStatusToneClass(value))}>
+      {label}: {statusText(labels, value)}
+    </Badge>
+  );
+}
+
+function ArtifactAvailabilityBadge({
+  labels,
+  status,
+}: {
+  labels: AIAnalysisLabels;
+  status: string | null | undefined;
+}) {
+  return (
+    <Badge variant="outline" className={cn("max-w-full truncate", aiStatusToneClass(status))}>
+      {artifactStatusText(labels, status)}
+    </Badge>
+  );
 }
 
 function lifecycleCandidateFromHighlight(adjustment: AIHighlightAdjustment): AICandidateLifecycleCandidate {
@@ -293,8 +375,15 @@ function normalizeImprovementReportArtifact(
   artifact: AIImproveReportArtifact,
   sourceArtifact: ArtifactSummary | null,
 ): AIImproveResponse {
+  const summary = {
+    ...(artifact.summary ?? {}),
+    model: artifact.model ?? (artifact.summary ?? {}).model,
+    model_selection: artifact.model_selection ?? (artifact.summary ?? {}).model_selection,
+    provider_mode: artifact.provider_mode ?? (artifact.summary ?? {}).provider_mode,
+    provider_dry_run: artifact.provider_dry_run ?? (artifact.summary ?? {}).provider_dry_run,
+  };
   return {
-    summary: artifact.summary ?? {},
+    summary,
     artifact_name: sourceArtifact?.name ?? "ai_improvement_report.json",
     artifact_path: sourceArtifact?.path ?? "",
     improvements: artifact.improvements ?? [],
@@ -313,6 +402,15 @@ function approvalsByImprovement(
     mapped[action.improvement_id] = approval;
   }
   return mapped;
+}
+
+function collectApprovedActions(
+  approval: AIImproveApprovalResponse | null | undefined,
+  target: Map<string, AIApprovedAction>,
+): void {
+  for (const action of approval?.approved_actions ?? []) {
+    if (action.approval_id) target.set(action.approval_id, action);
+  }
 }
 
 function FieldRow({ label, value }: { label: string; value: string | number | null | undefined }) {
@@ -470,6 +568,447 @@ function LifecycleEvidencePanel({
   );
 }
 
+function CandidateArtifactReferences({
+  labels,
+  references,
+}: {
+  labels: AIAnalysisLabels;
+  references: AIImprovementArtifactReference[];
+}) {
+  if (references.length === 0) {
+    return <p className="rounded-md border border-dashed p-2 text-xs text-muted-foreground">{labels.noCandidateArtifacts}</p>;
+  }
+  return (
+    <div className="space-y-1.5">
+      {references.map((reference, index) => (
+        <div key={`${reference.name}-${index}`} className="rounded-md bg-background/80 p-2 text-xs">
+          <div className="flex flex-wrap items-center gap-2">
+            <ArtifactAvailabilityBadge labels={labels} status={reference.status} />
+            {reference.category && <Badge variant="secondary">{reference.category}</Badge>}
+            <span className="min-w-0 truncate font-mono">{reference.name}</span>
+          </div>
+          {reference.path && <p className="mt-1 truncate font-mono text-muted-foreground">{reference.path}</p>}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function AIImprovementArtifactStatusPanel({
+  labels,
+  artifacts,
+}: {
+  labels: AIAnalysisLabels;
+  artifacts: AIImprovementArtifactStatus[];
+}) {
+  if (artifacts.length === 0) return null;
+  return (
+    <div className="rounded-md border bg-muted/20 p-3 space-y-2">
+      <p className="text-sm font-medium">{labels.artifactStatusSummary}</p>
+      <div className="grid gap-2 lg:grid-cols-2">
+        {artifacts.map((artifact) => (
+          <div key={artifact.name} className="rounded-md bg-background/80 p-2 text-xs">
+            <div className="flex flex-wrap items-center gap-2">
+              <ArtifactAvailabilityBadge labels={labels} status={artifact.status} />
+              <Badge variant="secondary">{artifact.category}</Badge>
+              <span className="min-w-0 truncate font-mono">{artifact.name}</span>
+            </div>
+            <p className="mt-1 text-muted-foreground">{artifact.summary}</p>
+            {artifact.path && <p className="mt-1 truncate font-mono text-muted-foreground">{artifact.path}</p>}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function finalArtifactLabel(artifact: AIImprovementFinalSelectedArtifact, index: number): string {
+  const candidateId = typeof artifact.candidate_id === "string" ? artifact.candidate_id : null;
+  const role = typeof artifact.role === "string" ? artifact.role : typeof artifact.output_role === "string" ? artifact.output_role : null;
+  return [candidateId, role].filter(Boolean).join(" / ") || `selection ${index + 1}`;
+}
+
+function finalArtifactPath(artifact: AIImprovementFinalSelectedArtifact): string | null {
+  return typeof artifact.path === "string" && artifact.path.trim() ? artifact.path : null;
+}
+
+function FinalManifestSelectionPanel({
+  labels,
+  status,
+}: {
+  labels: AIAnalysisLabels;
+  status: {
+    final_manifest_status: { status?: string | null; artifact_status?: string | null; summary?: string | null; path?: string | null };
+    final_selected_artifacts: AIImprovementFinalSelectedArtifact[];
+    final_selected_artifact_candidate_ids: string[];
+  };
+}) {
+  return (
+    <div className="rounded-md border bg-muted/20 p-3 space-y-3">
+      <div className="flex flex-wrap items-center gap-2">
+        <p className="text-sm font-medium">{labels.finalManifestSelection}</p>
+        <StatusBadge labels={labels} label={labels.finalManifestStatus} value={status.final_manifest_status.status} />
+        <ArtifactAvailabilityBadge labels={labels} status={status.final_manifest_status.artifact_status} />
+      </div>
+      {status.final_manifest_status.summary && (
+        <p className="text-xs text-muted-foreground">{status.final_manifest_status.summary}</p>
+      )}
+      {status.final_manifest_status.path && (
+        <p className="truncate font-mono text-xs text-muted-foreground">{status.final_manifest_status.path}</p>
+      )}
+      {status.final_selected_artifact_candidate_ids.length > 0 && (
+        <div className="flex flex-wrap gap-1.5">
+          {status.final_selected_artifact_candidate_ids.map((candidateId, index) => (
+            <Badge key={`${candidateId}-${index}`} variant="outline" className="font-mono">
+              {candidateId}
+            </Badge>
+          ))}
+        </div>
+      )}
+      {status.final_selected_artifacts.length > 0 ? (
+        <div className="space-y-1.5">
+          {status.final_selected_artifacts.map((artifact, index) => (
+            <div key={`${finalArtifactLabel(artifact, index)}-${index}`} className="rounded-md bg-background/80 p-2 text-xs">
+              <p className="font-mono">{finalArtifactLabel(artifact, index)}</p>
+              {finalArtifactPath(artifact) && (
+                <p className="mt-1 truncate font-mono text-muted-foreground">{finalArtifactPath(artifact)}</p>
+              )}
+            </div>
+          ))}
+        </div>
+      ) : (
+        <p className="rounded-md border border-dashed p-2 text-xs text-muted-foreground">{labels.noFinalSelection}</p>
+      )}
+    </div>
+  );
+}
+
+function AIImprovementStatusItemPanel({
+  labels,
+  item,
+  reportItem,
+  reportSummary,
+  approvedAction,
+  approvalArtifactName,
+  rejectedIntent,
+  approvePending,
+  queuePending,
+  renderPending,
+  onApprove,
+  onReject,
+  onQueueRerun,
+  onRenderHighlight,
+}: {
+  labels: AIAnalysisLabels;
+  item: AIImprovementStatusItem;
+  reportItem: AIImprovementItem | null;
+  reportSummary: Record<string, unknown> | null;
+  approvedAction: AIApprovedAction | null;
+  approvalArtifactName: string | null;
+  rejectedIntent: AIImprovementRejectIntent | null;
+  approvePending: boolean;
+  queuePending: boolean;
+  renderPending: boolean;
+  onApprove: (item: AIImprovementStatusItem, reportItem: AIImprovementItem | null) => void;
+  onReject: (item: AIImprovementStatusItem) => void;
+  onQueueRerun: (action: ApprovedExecutionAction, artifactName: string) => void;
+  onRenderHighlight: (action: ApprovedExecutionAction) => void;
+}) {
+  const presentation = buildStatusItemPresentation(item, reportItem, reportSummary, approvedAction);
+  const executionAction = approvedAction ?? statusExecutionAction(item, presentation);
+  const shouldShowQueueRerun = !!executionAction && isExecutableApprovedAction(executionAction) && !!approvalArtifactName;
+  const shouldShowRenderHighlight = !!executionAction && HIGHLIGHT_ACTIONS.has(executionAction.approved_action);
+  const canApprove = statusItemCanBeApproved(item) && presentation.approvalStatus !== "approved" && !rejectedIntent;
+  const canReject = !rejectedIntent && presentation.approvalStatus !== "approved";
+  return (
+    <div className="rounded-md border p-3 space-y-3" data-testid={`ai-improvement-status-${presentation.key}`}>
+      <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+        <div className="min-w-0 space-y-1">
+          <div className="flex flex-wrap items-center gap-1.5">
+            {presentation.improvementId && (
+              <Badge variant="secondary" className="font-mono">
+                {presentation.improvementId}
+              </Badge>
+            )}
+            {presentation.candidateId && (
+              <Badge variant="outline" className="font-mono">
+                {labels.candidateIdLabel}: {presentation.candidateId}
+              </Badge>
+            )}
+            {presentation.recommendedAction && <Badge>{presentation.recommendedAction}</Badge>}
+            <StatusBadge labels={labels} label={labels.approvalStatus} value={presentation.approvalStatus} />
+            <StatusBadge labels={labels} label={labels.comparisonStatus} value={presentation.comparisonStatus} />
+            <StatusBadge labels={labels} label={labels.promotionStatus} value={presentation.promotionStatus} />
+            {rejectedIntent && (
+              <Badge variant="outline" className="border-red-200 bg-red-50 text-red-700">
+                {labels.rejectedIntent}
+              </Badge>
+            )}
+          </div>
+        </div>
+        <div className="flex shrink-0 flex-wrap gap-2">
+          <Button
+            type="button"
+            size="sm"
+            onClick={() => onApprove(item, reportItem)}
+            disabled={approvePending || !canApprove}
+            data-testid={`button-approve-status-${presentation.key}`}
+          >
+            {approvePending ? (
+              <>
+                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                {labels.approvingSuggestion}
+              </>
+            ) : presentation.approvalStatus === "approved" ? (
+              <>
+                <CheckCircle2 className="mr-2 h-4 w-4" />
+                {labels.approvedIntent}
+              </>
+            ) : (
+              <>
+                <ShieldCheck className="mr-2 h-4 w-4" />
+                {labels.approveSuggestion}
+              </>
+            )}
+          </Button>
+          <Button
+            type="button"
+            size="sm"
+            variant="outline"
+            onClick={() => onReject(item)}
+            disabled={!canReject}
+            data-testid={`button-reject-status-${presentation.key}`}
+          >
+            <Ban className="mr-2 h-4 w-4" />
+            {rejectedIntent ? labels.rejectedIntent : labels.rejectSuggestion}
+          </Button>
+        </div>
+      </div>
+
+      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+        <FieldRow label={labels.frameWindow} value={presentation.frameWindowLabel} />
+        <FieldRow label={labels.roiState} value={labels.roiStateValues[presentation.roiState]} />
+        <FieldRow label={labels.falsePositiveClass} value={presentation.falsePositiveClass} />
+        <FieldRow label={labels.confidence} value={presentation.confidenceLabel} />
+        <FieldRow label={labels.recommendedActionLabel} value={presentation.recommendedAction} />
+        <FieldRow label={labels.actionId} value={presentation.approvedAction} />
+        <FieldRow label={labels.modelTier} value={presentation.modelTier} />
+        <FieldRow label={labels.approvalId} value={presentation.approvalIds.join(", ")} />
+      </div>
+
+      {presentation.needsHumanConfirmation && (
+        <Alert>
+          <AlertCircle className="h-4 w-4" />
+          <AlertDescription>{labels.warningNeedsConfirmation}</AlertDescription>
+        </Alert>
+      )}
+
+      <div className="rounded-md bg-muted/20 p-2 text-xs text-muted-foreground">{labels.exactActionHint}</div>
+
+      {(shouldShowQueueRerun || shouldShowRenderHighlight) && executionAction && (
+        <div className="flex flex-wrap gap-2">
+          {shouldShowQueueRerun && approvalArtifactName && (
+            <Button
+              type="button"
+              size="sm"
+              onClick={() => onQueueRerun(executionAction, approvalArtifactName)}
+              disabled={queuePending}
+              data-testid={`button-queue-status-approved-rerun-${executionAction.approval_id}`}
+            >
+              {queuePending ? (
+                <>
+                  <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                  {labels.queueingApprovedRerun}
+                </>
+              ) : (
+                <>
+                  <Play className="mr-2 h-4 w-4" />
+                  {labels.queueApprovedRerun}
+                </>
+              )}
+            </Button>
+          )}
+          {shouldShowRenderHighlight && (
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              onClick={() => onRenderHighlight(executionAction)}
+              disabled={renderPending}
+              data-testid={`button-render-status-approved-highlight-${executionAction.approval_id}`}
+            >
+              {renderPending ? (
+                <>
+                  <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                  {labels.renderingApprovedHighlight}
+                </>
+              ) : (
+                <>
+                  <Film className="mr-2 h-4 w-4" />
+                  {labels.renderApprovedHighlight}
+                </>
+              )}
+            </Button>
+          )}
+        </div>
+      )}
+
+      {presentation.evidenceIds.length > 0 && (
+        <div>
+          <p className="mb-1 text-xs font-medium">{labels.evidenceIds}</p>
+          <div className="flex flex-wrap gap-1.5">
+            {presentation.evidenceIds.map((evidenceId) => (
+              <Badge key={evidenceId} variant="outline" className="font-mono">
+                {evidenceId}
+              </Badge>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {presentation.localSearchRoi && (
+        <div>
+          <p className="mb-1 text-xs font-medium">{labels.localSearchRoi}</p>
+          <JsonBlock value={presentation.localSearchRoi} />
+        </div>
+      )}
+
+      {presentation.provenance && (
+        <div>
+          <p className="mb-1 text-xs font-medium">{labels.provenance}</p>
+          <JsonBlock value={presentation.provenance} />
+        </div>
+      )}
+
+      <div>
+        <p className="mb-1 text-xs font-medium">{labels.candidateArtifacts}</p>
+        <CandidateArtifactReferences labels={labels} references={presentation.artifactReferences} />
+      </div>
+
+      {rejectedIntent && <p className="text-xs text-muted-foreground">{labels.rejectedIntentDesc}</p>}
+    </div>
+  );
+}
+
+function AIImprovementGroupedStatusPanel({
+  labels,
+  status,
+  loading,
+  error,
+  reportSummary,
+  resolveReportItem,
+  resolveApprovedAction,
+  approvalArtifactName,
+  rejectedItems,
+  approvePending,
+  queuePending,
+  renderPending,
+  onApprove,
+  onReject,
+  onQueueRerun,
+  onRenderHighlight,
+}: {
+  labels: AIAnalysisLabels;
+  status: {
+    artifacts: AIImprovementArtifactStatus[];
+    items_by_problem_type: Record<string, AIImprovementStatusItem[]>;
+    final_manifest_status: { status?: string | null; artifact_status?: string | null; summary?: string | null; path?: string | null };
+    final_selected_artifacts: AIImprovementFinalSelectedArtifact[];
+    final_selected_artifact_candidate_ids: string[];
+  } | null | undefined;
+  loading: boolean;
+  error: unknown;
+  reportSummary: Record<string, unknown> | null;
+  resolveReportItem: (item: AIImprovementStatusItem) => AIImprovementItem | null;
+  resolveApprovedAction: (item: AIImprovementStatusItem) => AIApprovedAction | null;
+  approvalArtifactName: string | null;
+  rejectedItems: Record<string, AIImprovementRejectIntent>;
+  approvePending: boolean;
+  queuePending: boolean;
+  renderPending: boolean;
+  onApprove: (item: AIImprovementStatusItem, reportItem: AIImprovementItem | null) => void;
+  onReject: (item: AIImprovementStatusItem) => void;
+  onQueueRerun: (action: ApprovedExecutionAction, artifactName: string) => void;
+  onRenderHighlight: (action: AIApprovedAction) => void;
+}) {
+  if (loading) {
+    return (
+      <div className="flex items-center gap-2 text-sm text-muted-foreground">
+        <Loader2 className="h-4 w-4 animate-spin" />
+        {labels.loadingImprovementStatus}
+      </div>
+    );
+  }
+  if (error) {
+    return (
+      <Alert variant="destructive">
+        <AlertCircle className="h-4 w-4" />
+        <AlertDescription>{error instanceof Error ? error.message : labels.improvementStatusFailed}</AlertDescription>
+      </Alert>
+    );
+  }
+  if (!status) {
+    return <p className="rounded-md border border-dashed p-3 text-sm text-muted-foreground">{labels.improvementStatusUnavailable}</p>;
+  }
+
+  const groups = groupAIImprovementStatusItems(status);
+  return (
+    <div className="space-y-4" data-testid="ai-improvement-grouped-status">
+      <FinalManifestSelectionPanel labels={labels} status={status} />
+      <AIImprovementArtifactStatusPanel labels={labels} artifacts={status.artifacts} />
+      {groups.map((group) => (
+        <section key={group.key} className="space-y-2">
+          <div className="flex items-center justify-between gap-3">
+            <h2 className="text-sm font-semibold">{labels.aiStatusGroupLabels[group.key]}</h2>
+            <Badge variant="outline">{group.items.length}</Badge>
+          </div>
+          {group.items.length > 0 ? (
+            <div className="space-y-3">
+              {group.items.map((item, index) => {
+                const key = statusItemKey(item, `${group.key}-${index}`);
+                return (
+                  <AIImprovementStatusItemPanel
+                    key={key}
+                    labels={labels}
+                    item={item}
+                    reportItem={resolveReportItem(item)}
+                    reportSummary={reportSummary}
+                    approvedAction={resolveApprovedAction(item)}
+                    approvalArtifactName={approvalArtifactName}
+                    rejectedIntent={rejectedItems[key] ?? null}
+                    approvePending={approvePending}
+                    queuePending={queuePending}
+                    renderPending={renderPending}
+                    onApprove={onApprove}
+                    onReject={onReject}
+                    onQueueRerun={onQueueRerun}
+                    onRenderHighlight={onRenderHighlight}
+                  />
+                );
+              })}
+            </div>
+          ) : (
+            <p className="rounded-md border border-dashed p-3 text-sm text-muted-foreground">{labels.noStatusItems}</p>
+          )}
+        </section>
+      ))}
+    </div>
+  );
+}
+
+function statusExecutionAction(
+  item: AIImprovementStatusItem,
+  presentation: ReturnType<typeof buildStatusItemPresentation>,
+): ApprovedExecutionAction | null {
+  const approvalId = presentation.approvalIds[0];
+  const approvedAction = presentation.approvedAction;
+  if (!approvalId || !approvedAction) return null;
+  return {
+    approval_id: approvalId,
+    approved_action: approvedAction as ApprovedExecutionAction["approved_action"],
+  };
+}
+
 function ApprovalPanel({
   labels,
   approval,
@@ -491,7 +1030,7 @@ function ApprovalPanel({
   const flags = summaryFlagEntries(approval.summary);
   const artifacts = artifactEntries(approval.summary);
   const hasApprovalId = hasConcreteApprovalId(action);
-  const shouldShowQueueRerun = !!action && EXECUTABLE_RERUN_ACTIONS.has(action.approved_action) && !!artifactName;
+  const shouldShowQueueRerun = !!action && isExecutableApprovedAction(action) && !!artifactName;
   const shouldShowRenderHighlight = !!action && HIGHLIGHT_ACTIONS.has(action.approved_action);
   const canQueueRerun = shouldShowQueueRerun && hasApprovalId;
   const canRenderHighlight = shouldShowRenderHighlight && hasApprovalId;
@@ -570,6 +1109,20 @@ function ApprovalPanel({
         <div>
           <p className="mb-1 text-xs font-medium">{labels.followCamPlanArtifact}</p>
           <JsonBlock value={action.follow_cam_rerender_plan} />
+        </div>
+      )}
+
+      {action?.rerun_scope && (
+        <div>
+          <p className="mb-1 text-xs font-medium">{labels.frameWindow}</p>
+          <JsonBlock value={action.rerun_scope} />
+        </div>
+      )}
+
+      {action?.local_search_roi && (
+        <div>
+          <p className="mb-1 text-xs font-medium">{labels.localSearchRoi}</p>
+          <JsonBlock value={action.local_search_roi} />
         </div>
       )}
 
@@ -873,6 +1426,7 @@ export default function AIAnalysisPage() {
   const [fieldPreview, setFieldPreview] = useState<FieldPreviewResponse | null>(null);
   const [improvementReport, setImprovementReport] = useState<AIImproveResponse | null>(null);
   const [approvalsByImprovementId, setApprovalsByImprovementId] = useState<Record<string, AIImproveApprovalResponse>>({});
+  const [rejectedStatusItems, setRejectedStatusItems] = useState<Record<string, AIImprovementRejectIntent>>({});
 
   const { data: runs, isLoading: runsLoading } = useQuery({
     queryKey: ["runs"],
@@ -932,6 +1486,16 @@ export default function AIAnalysisPage() {
     retry: false,
   });
 
+  const aiImprovementStatus = useQuery({
+    queryKey: ["ai-improvement-status", selectedRunId],
+    queryFn: () => api.getAIImprovementStatus(selectedRunId),
+    enabled: !!selectedRunId,
+    retry: false,
+    refetchInterval: 10_000,
+  });
+  const approvalContextLoading =
+    !!selectedRunId && (aiImprovementStatus.isLoading || (!!existingApprovalActionsArtifact && existingApprovalActions.isLoading));
+
   useEffect(() => {
     if (selectedRun?.config_name) setSelectedConfigName(selectedRun.config_name);
   }, [selectedRun?.config_name]);
@@ -953,16 +1517,11 @@ export default function AIAnalysisPage() {
     if (existingImprovementReport.data) setImprovementReport(existingImprovementReport.data);
   }, [existingImprovementReport.data]);
 
-  const currentImprovementIds = useMemo(
-    () => new Set((improvementReport?.improvements ?? []).map((item) => item.id)),
-    [improvementReport],
-  );
-
   useEffect(() => {
     if (existingApprovalActions.data) {
-      setApprovalsByImprovementId(approvalsByImprovement(existingApprovalActions.data, currentImprovementIds));
+      setApprovalsByImprovementId(approvalsByImprovement(existingApprovalActions.data));
     }
-  }, [currentImprovementIds, existingApprovalActions.data]);
+  }, [existingApprovalActions.data]);
 
   // Reset preview when run changes
   function handleRunChange(id: string) {
@@ -972,6 +1531,7 @@ export default function AIAnalysisPage() {
     setOutputConfigName("");
     setImprovementReport(null);
     setApprovalsByImprovementId({});
+    setRejectedStatusItems({});
   }
 
   const recommend = useMutation({
@@ -995,12 +1555,7 @@ export default function AIAnalysisPage() {
     onSuccess: (data, params) => {
       if (params.runId !== selectedRunId) return;
       setImprovementReport(data);
-      setApprovalsByImprovementId(
-        approvalsByImprovement(
-          existingApprovalActions.data ?? null,
-          new Set(data.improvements.map((item) => item.id)),
-        ),
-      );
+      setApprovalsByImprovementId(approvalsByImprovement(existingApprovalActions.data ?? null));
       toast({ title: t.aiAnalysis.improvementReady });
     },
     onError: (err: Error, params) => {
@@ -1010,15 +1565,21 @@ export default function AIAnalysisPage() {
   });
 
   const approveImprovement = useMutation({
-    mutationFn: (params: { runId: string; improvementIds: string[] }) =>
-      api.approveAIImprovements(params.runId, {
-        improvement_ids: params.improvementIds,
-        approved_by: "operator-ui",
-      }),
+    mutationFn: (params: { runId: string; request: AIImproveApprovalRequest; itemKey?: string }) =>
+      api.approveAIImprovements(params.runId, params.request),
     onSuccess: (data, params) => {
       if (params.runId !== selectedRunId) return;
-      setApprovalsByImprovementId(approvalsByImprovement(data, currentImprovementIds));
+      setApprovalsByImprovementId(approvalsByImprovement(data));
+      if (params.itemKey) {
+        setRejectedStatusItems((current) => {
+          const next = { ...current };
+          delete next[params.itemKey as string];
+          return next;
+        });
+      }
       void queryClient.invalidateQueries({ queryKey: ["runs"] });
+      void queryClient.invalidateQueries({ queryKey: ["artifact-json", params.runId, "ai_improvement_approved_actions.json"] });
+      void queryClient.invalidateQueries({ queryKey: ["ai-improvement-status", params.runId] });
       toast({ title: t.aiAnalysis.approvalReady, description: data.artifact_name });
     },
     onError: (err: Error, params) => {
@@ -1026,15 +1587,11 @@ export default function AIAnalysisPage() {
       toast({ title: t.aiAnalysis.approvalFailed, description: err.message, variant: "destructive" });
     },
   });
+  const approveImprovementBusy = approveImprovement.isPending || approvalContextLoading;
 
   const queueApprovedRerun = useMutation({
-    mutationFn: (params: { runId: string; action: AIApprovedAction; artifactName: string }) =>
-      api.createRun({
-        parent_run_id: params.runId,
-        approved_action_ids: [params.action.approval_id],
-        approved_actions_artifact_name: params.artifactName,
-        notes: `operator-ui queued approved AI improvement action ${params.action.approval_id}`,
-      }),
+    mutationFn: (params: { runId: string; action: Pick<AIApprovedAction, "approval_id" | "approved_action">; artifactName: string }) =>
+      api.createRun(buildApprovedChildRunRequest(params.runId, params.action, params.artifactName)),
     onSuccess: (run, params) => {
       if (params.runId !== selectedRunId) return;
       void queryClient.invalidateQueries({ queryKey: ["runs"] });
@@ -1047,11 +1604,8 @@ export default function AIAnalysisPage() {
   });
 
   const renderApprovedHighlight = useMutation({
-    mutationFn: (params: { runId: string; action: AIApprovedAction }) =>
-      api.createHighlightRender(params.runId, {
-        approved_action_id: params.action.approval_id,
-        notes: `operator-ui rendered approved AI highlight action ${params.action.approval_id}`,
-      }),
+    mutationFn: (params: { runId: string; action: Pick<AIApprovedAction, "approval_id"> }) =>
+      api.createHighlightRender(params.runId, buildApprovedHighlightRenderRequest(params.action)),
     onSuccess: (run, params) => {
       if (params.runId !== selectedRunId) return;
       void queryClient.invalidateQueries({ queryKey: ["runs"] });
@@ -1155,10 +1709,116 @@ export default function AIAnalysisPage() {
     { key: "cameraMotion", label: t.aiAnalysis.groupCameraMotion, items: groupedImprovements.cameraMotion },
     { key: "highlightBoundary", label: t.aiAnalysis.groupHighlightBoundary, items: groupedImprovements.highlightBoundary },
   ];
+  const approvalActions = useMemo(() => {
+    const actions = new Map<string, AIApprovedAction>();
+    collectApprovedActions(existingApprovalActions.data, actions);
+    for (const approval of Object.values(approvalsByImprovementId)) collectApprovedActions(approval, actions);
+    return Array.from(actions.values());
+  }, [approvalsByImprovementId, existingApprovalActions.data]);
+  const approvedStatusImprovementIds = useMemo(() => {
+    const ids: string[] = [];
+    for (const items of Object.values(aiImprovementStatus.data?.items_by_problem_type ?? {})) {
+      for (const item of items) {
+        if (item.approval_status === "approved" && item.improvement_id) ids.push(item.improvement_id);
+      }
+    }
+    return ids;
+  }, [aiImprovementStatus.data]);
   const approvedImprovementIds = useMemo(
-    () => Object.keys(approvalsByImprovementId),
-    [approvalsByImprovementId],
+    () =>
+      Array.from(
+        new Set(
+          [
+            ...approvalActions.map((action) => action.improvement_id),
+            ...approvedStatusImprovementIds,
+          ].filter((id): id is string => typeof id === "string" && id.trim().length > 0),
+        ),
+      ),
+    [approvalActions, approvedStatusImprovementIds],
   );
+  const approvedActionIndex = useMemo(() => {
+    const byImprovementId = new Map<string, AIApprovedAction>();
+    const byCandidateId = new Map<string, AIApprovedAction>();
+    const byApprovalId = new Map<string, AIApprovedAction>();
+    for (const action of approvalActions) {
+      if (action.improvement_id && !byImprovementId.has(action.improvement_id)) byImprovementId.set(action.improvement_id, action);
+      if (action.candidate_id && !byCandidateId.has(action.candidate_id)) byCandidateId.set(action.candidate_id, action);
+      if (action.approval_id && !byApprovalId.has(action.approval_id)) byApprovalId.set(action.approval_id, action);
+    }
+    return { byImprovementId, byCandidateId, byApprovalId };
+  }, [approvalActions]);
+  const approvedActionsArtifactName =
+    existingApprovalActions.data?.summary.artifacts?.approved_actions?.name ??
+    existingApprovalActions.data?.artifact_name ??
+    aiImprovementStatus.data?.artifacts.find(
+      (artifact) => artifact.name === "ai_improvement_approved_actions.json" && artifact.status === "available",
+    )?.name ??
+    null;
+  const reportItemIndex = useMemo(() => {
+    const byImprovementId = new Map<string, AIImprovementItem>();
+    const byCandidateId = new Map<string, AIImprovementItem>();
+    for (const item of improvementReport?.improvements ?? []) {
+      if (item.id) byImprovementId.set(item.id, item);
+      if (item.candidate_id) byCandidateId.set(item.candidate_id, item);
+    }
+    return { byImprovementId, byCandidateId };
+  }, [improvementReport]);
+  const reportSummary = improvementReport?.summary ?? null;
+
+  function resolveReportItemForStatus(item: AIImprovementStatusItem): AIImprovementItem | null {
+    const improvementId = typeof item.improvement_id === "string" ? item.improvement_id : null;
+    if (improvementId) {
+      const byImprovement = reportItemIndex.byImprovementId.get(improvementId);
+      if (byImprovement) return byImprovement;
+    }
+    const candidateId = typeof item.candidate_id === "string" ? item.candidate_id : null;
+    return candidateId ? reportItemIndex.byCandidateId.get(candidateId) ?? null : null;
+  }
+
+  function resolveApprovedActionForStatus(item: AIImprovementStatusItem): AIApprovedAction | null {
+    const improvementId = typeof item.improvement_id === "string" ? item.improvement_id : null;
+    if (improvementId) {
+      const byImprovement = approvedActionIndex.byImprovementId.get(improvementId);
+      if (byImprovement) return byImprovement;
+    }
+    const candidateId = typeof item.candidate_id === "string" ? item.candidate_id : null;
+    if (candidateId) {
+      const byCandidate = approvedActionIndex.byCandidateId.get(candidateId);
+      if (byCandidate) return byCandidate;
+    }
+    for (const approvalId of item.approval_ids ?? []) {
+      const byApproval = approvedActionIndex.byApprovalId.get(approvalId);
+      if (byApproval) return byApproval;
+    }
+    return null;
+  }
+
+  function approveStatusItem(item: AIImprovementStatusItem, reportItem: AIImprovementItem | null): void {
+    if (approvalContextLoading) {
+      toast({ title: t.aiAnalysis.approvalFailed, description: t.aiAnalysis.loadingApprovalContext });
+      return;
+    }
+    try {
+      const request = buildAIImprovementApprovalRequest(item, "operator-ui", reportItem, approvedImprovementIds);
+      approveImprovement.mutate({
+        runId: selectedRunId,
+        request,
+        itemKey: statusItemKey(item),
+      });
+    } catch (err) {
+      toast({
+        title: t.aiAnalysis.approvalFailed,
+        description: err instanceof Error ? err.message : String(err),
+        variant: "destructive",
+      });
+    }
+  }
+
+  function rejectStatusItem(item: AIImprovementStatusItem): void {
+    const intent = buildRejectIntentForStatusItem(item, "operator-ui");
+    setRejectedStatusItems((current) => ({ ...current, [intent.item_key]: intent }));
+    toast({ title: t.aiAnalysis.rejectedIntent, description: t.aiAnalysis.rejectedIntentDesc });
+  }
 
   return (
     <div className="space-y-6">
@@ -1307,6 +1967,31 @@ export default function AIAnalysisPage() {
 
           {selectedRun && <LifecycleSummaryPanel labels={t.aiAnalysis} lifecycle={runLifecycle} />}
 
+          {selectedRunId && (
+            <AIImprovementGroupedStatusPanel
+              labels={t.aiAnalysis}
+              status={aiImprovementStatus.data}
+              loading={aiImprovementStatus.isLoading}
+              error={aiImprovementStatus.error}
+              reportSummary={reportSummary}
+              resolveReportItem={resolveReportItemForStatus}
+              resolveApprovedAction={resolveApprovedActionForStatus}
+              approvalArtifactName={approvedActionsArtifactName}
+              rejectedItems={rejectedStatusItems}
+              approvePending={approveImprovementBusy}
+              queuePending={queueApprovedRerun.isPending}
+              renderPending={renderApprovedHighlight.isPending}
+              onApprove={approveStatusItem}
+              onReject={rejectStatusItem}
+              onQueueRerun={(action, artifactName) =>
+                queueApprovedRerun.mutate({ runId: selectedRunId, action, artifactName })
+              }
+              onRenderHighlight={(action) =>
+                renderApprovedHighlight.mutate({ runId: selectedRunId, action })
+              }
+            />
+          )}
+
           {improvementReport && (
             <div className="space-y-4">
               <div className="rounded-md border bg-muted/30 p-3 space-y-3">
@@ -1365,13 +2050,35 @@ export default function AIAnalysisPage() {
                                 approvedAction={approvedAction}
                                 lifecycleCandidate={lifecycleCandidate}
                                 lifecyclePresentation={lifecyclePresentation}
-                                approvePending={approveImprovement.isPending}
-                                onApprove={(id) =>
-                                  approveImprovement.mutate({
-                                    runId: selectedRunId,
-                                    improvementIds: Array.from(new Set([...approvedImprovementIds, id])),
-                                  })
-                                }
+                                approvePending={approveImprovementBusy}
+                                onApprove={(id) => {
+                                  if (approvalContextLoading) {
+                                    toast({
+                                      title: t.aiAnalysis.approvalFailed,
+                                      description: t.aiAnalysis.loadingApprovalContext,
+                                      variant: "destructive",
+                                    });
+                                    return;
+                                  }
+                                  try {
+                                    approveImprovement.mutate({
+                                      runId: selectedRunId,
+                                      request: buildAIImprovementApprovalRequest(
+                                        { improvement_id: id, recommended_action: item.recommended_action },
+                                        "operator-ui",
+                                        item,
+                                        approvedImprovementIds,
+                                      ),
+                                      itemKey: id,
+                                    });
+                                  } catch (err) {
+                                    toast({
+                                      title: t.aiAnalysis.approvalFailed,
+                                      description: err instanceof Error ? err.message : String(err),
+                                      variant: "destructive",
+                                    });
+                                  }
+                                }}
                                 onQueueRerun={(action, artifactName) =>
                                   queueApprovedRerun.mutate({ runId: selectedRunId, action, artifactName })
                                 }

@@ -295,6 +295,10 @@ export interface AIImproveReportArtifact extends Record<string, unknown> {
   summary: Record<string, unknown>;
   improvements: AIImprovementItem[];
   highlight_adjustments?: AIHighlightAdjustment[];
+  model?: string | null;
+  model_selection?: Record<string, unknown> | null;
+  provider_mode?: string | null;
+  provider_dry_run?: boolean | null;
 }
 
 export type AIRecommendedAction =
@@ -373,6 +377,75 @@ export interface AIImproveApprovalResponse {
     artifacts?: Record<string, AIApprovalArtifactSummary>;
   };
   warnings?: string[];
+}
+
+export type AIImprovementArtifactAvailabilityStatus = "available" | "unavailable" | "error";
+
+export interface AIImprovementArtifactReference {
+  name: string;
+  status: AIImprovementArtifactAvailabilityStatus;
+  path?: string | null;
+  category?: string | null;
+}
+
+export interface AIImprovementArtifactStatus {
+  name: string;
+  category: string;
+  status: AIImprovementArtifactAvailabilityStatus;
+  summary: string;
+  path?: string | null;
+  exists?: boolean;
+  size_bytes?: number | null;
+  content_type?: string | null;
+  problem_type?: string | null;
+  candidate_id?: string | null;
+}
+
+export interface AIImprovementManifestStatus {
+  status: string;
+  artifact_status?: AIImprovementArtifactAvailabilityStatus;
+  summary?: string | null;
+  path?: string | null;
+}
+
+export type AIImprovementStatusComparisonStatus = "pass" | "warn" | "fail" | "unavailable" | "none";
+export type AIImprovementStatusPromotionStatus =
+  | "not_promoted"
+  | "pending_confirmation"
+  | "promoted"
+  | "rejected"
+  | "blocked";
+
+export interface AIImprovementStatusItem extends Record<string, unknown> {
+  id?: string | null;
+  improvement_id?: string | null;
+  candidate_id?: string | null;
+  approval_ids?: string[];
+  frame_window?: AIFrameWindow | null;
+  evidence_ids?: string[];
+  confidence?: number | null;
+  false_positive_class?: string | null;
+  recommended_action?: string | null;
+  approved_action?: string | null;
+  approval_status?: string;
+  consumed_approval_ids?: string[];
+  comparison_status?: AIImprovementStatusComparisonStatus;
+  promotion_status?: AIImprovementStatusPromotionStatus;
+  artifact_references?: AIImprovementArtifactReference[];
+}
+
+export type AIImprovementStatusItemsByProblemType = Record<string, AIImprovementStatusItem[]>;
+export type AIImprovementFinalSelectedArtifact = Record<string, unknown>;
+
+export interface AIImprovementStatusResponse {
+  schema_version?: string;
+  run_id: string;
+  output_dir: string;
+  artifacts: AIImprovementArtifactStatus[];
+  items_by_problem_type: AIImprovementStatusItemsByProblemType;
+  final_manifest_status: AIImprovementManifestStatus;
+  final_selected_artifacts: AIImprovementFinalSelectedArtifact[];
+  final_selected_artifact_candidate_ids: string[];
 }
 
 export interface AIApprovedActionsArtifact extends Record<string, unknown> {
