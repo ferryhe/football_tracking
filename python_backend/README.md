@@ -191,10 +191,20 @@ Review and highlight artifacts add:
 - `ball_audit.json`
 - `ai_review_triggers.json`
 - `camera_motion_audit.json`
-- `player_tracks.json`
+- `player_tracks.json` when player artifacts are produced; this is not yet a promise of stable continuous player tracking.
 - `event_candidates.json`
 - `highlight.mp4`
 - `highlight_report.json`
+
+Stable AI improvement adds candidate and finalization artifacts:
+
+- `ai_improvement_report.json` for advisory AI audit/improvement suggestions.
+- `ai_improvement_approved_actions.json` as an approval source only when explicit approval ids are consumed.
+- `ai_candidate_registry.json` for isolated missing-ball, noise, follow-cam, and highlight candidates.
+- Domain comparisons such as `missing_ball_recovery_comparison.json`, `noise_improvement_comparison.json`, `follow_cam_comparison.json`, and `highlight_comparison.json`.
+- `ai_improvement_quality_gate.json` and `final_ai_improvement_artifact_manifest.json` for final selection. Candidate files or media are not promoted just because they exist.
+
+Use [`../docs/operations/ai-improvement-workflow.md`](../docs/operations/ai-improvement-workflow.md) for the stable workflow and [`../docs/operations/real-video-ai-improvement-validation.md`](../docs/operations/real-video-ai-improvement-validation.md) for the PR8 real-video validation record. Full-video speed should use temporal chunk parallelism by default; broad full-video SAHI is not the default path and belongs only inside explicit bounded recovery approvals.
 
 ### Docs
 
@@ -414,10 +424,20 @@ outputs/runs/<input_slug>/<run_id>/
 - `ball_audit.json`
 - `ai_review_triggers.json`
 - `camera_motion_audit.json`
-- `player_tracks.json`
+- 可用时的 `player_tracks.json`；它是球员产物记录，不等同于已经完成稳定连续追人能力。
 - `event_candidates.json`
 - `highlight.mp4`
 - `highlight_report.json`
+
+稳定 AI improvement 还会增加候选与最终选择产物：
+
+- `ai_improvement_report.json`：AI 审核/改进建议，仍是 advisory。
+- `ai_improvement_approved_actions.json`：只有显式消费 approval id 时才是执行来源。
+- `ai_candidate_registry.json`：记录丢球、噪声、follow-cam、集锦候选。
+- `missing_ball_recovery_comparison.json`、`noise_improvement_comparison.json`、`follow_cam_comparison.json`、`highlight_comparison.json` 等领域比较报告。
+- `ai_improvement_quality_gate.json` 与 `final_ai_improvement_artifact_manifest.json`：用于最终选择；候选文件或视频存在本身不能 promoted。
+
+稳定流程见 [`../docs/operations/ai-improvement-workflow.md`](../docs/operations/ai-improvement-workflow.md)，PR8 真实视频验证记录见 [`../docs/operations/real-video-ai-improvement-validation.md`](../docs/operations/real-video-ai-improvement-validation.md)。整视频提速默认使用 temporal chunk；广义整视频 SAHI 不是默认路径，只能出现在显式批准的有界恢复窗口中。
 
 ### 文档入口
 
