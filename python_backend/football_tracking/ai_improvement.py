@@ -1419,18 +1419,31 @@ def _validate_model_report(
         raise ValueError("Model response highlight_adjustments must be a list.")
     highlight_adjustments = []
     for index, raw in enumerate(raw_highlight_adjustments, start=1):
-        adjustment = _validate_highlight_adjustment(raw, index)
-        _validate_highlight_window_invariants(
-            adjustment["suggested_window"],
-            event_candidate_id=adjustment["candidate_id"],
-            candidates=highlight_candidates,
-            label=f"Highlight adjustment {index} suggested_window",
-        )
+        try:
+            adjustment = _validate_highlight_adjustment(raw, index)
+        except ValueError as exc:
+            warnings.append(_highlight_adjustment_skip_warning(index, exc))
+            continue
+        try:
+            _validate_highlight_window_invariants(
+                adjustment["suggested_window"],
+                event_candidate_id=adjustment["candidate_id"],
+                candidates=highlight_candidates,
+                label=f"Highlight adjustment {index} suggested_window",
+            )
+        except ValueError as exc:
+            if not _is_item_scoped_highlight_invariant_error(str(exc)):
+                raise
+            warnings.append(_highlight_adjustment_skip_warning(index, exc))
+            continue
         highlight_adjustments.append(adjustment)
 
     if status == "ok" and (improvements or highlight_adjustments):
         status = "needs_rerun"
         warnings.append("summary.status normalized from ok to needs_rerun because actions were returned.")
+    if status == "needs_rerun" and not improvements and not highlight_adjustments:
+        status = "ok"
+        warnings.append("summary.status normalized from needs_rerun to ok because no valid actions were returned.")
 
     primary_issue = summary.get("primary_issue")
     return (
@@ -1440,6 +1453,22 @@ def _validate_model_report(
         status,
         primary_issue if isinstance(primary_issue, str) else None,
     )
+
+
+def _highlight_adjustment_skip_warning(index: int, exc: ValueError) -> str:
+    reason = str(exc).strip()
+    prefix = f"Highlight adjustment {index} "
+    if reason.startswith(prefix):
+        reason = reason[len(prefix) :]
+    return f"Highlight adjustment {index} skipped: {reason.rstrip('.')}"
+
+
+def _is_item_scoped_highlight_invariant_error(reason: str) -> bool:
+    if "event_candidates.json has no matching candidates" in reason:
+        return False
+    if "requires event candidate" in reason and "to include core_window" in reason:
+        return False
+    return True
 
 
 def _validate_improvement(
