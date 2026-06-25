@@ -178,6 +178,9 @@ def build_ai_improvement_quality_gate(
             final_manifest_artifact=artifacts["final_artifact_manifest"],
             review_packets_artifact=artifacts["review_packets"],
             ai_visual_localization_artifact=artifacts["ai_visual_localization"],
+            ball_audit_artifact=artifacts["ball_audit"],
+            camera_motion_audit_artifact=artifacts["camera_motion_audit"],
+            event_candidates_artifact=artifacts["event_candidates"],
         ),
     }
     long_gap_check, missing_ball_check = _check_long_lost_gap_coverage(
@@ -1786,6 +1789,22 @@ def _candidate_comparisons_summary(check: dict[str, Any]) -> dict[str, Any]:
 
 
 def _stable_final_outputs_summary(check: dict[str, Any]) -> dict[str, Any]:
+    summary = check.get("summary") if isinstance(check.get("summary"), dict) else {}
+    if summary:
+        return {
+            "status": summary.get("status"),
+            "selected_media_count": summary.get("selected_media_count", 0),
+            "selected_track_count": summary.get("selected_track_count", 0),
+            "selected_video_count": summary.get("selected_video_count", 0),
+            "selected_clip_count": summary.get("selected_clip_count", 0),
+            "track_quality_status": summary.get("track_quality_status"),
+            "camera_motion_status": summary.get("camera_motion_status"),
+            "candidate_comparison_status": summary.get("candidate_comparison_status"),
+            "highlight_coverage_status": summary.get("highlight_coverage_status"),
+            "review_media_status": summary.get("review_media_status"),
+            "media_status": summary.get("media_status"),
+            "reasons": summary.get("reasons", []),
+        }
     return {
         "status": check.get("status"),
         "selected_media_count": check.get("selected_media_count", 0),
