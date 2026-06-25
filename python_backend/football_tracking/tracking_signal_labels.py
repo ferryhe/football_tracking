@@ -53,6 +53,11 @@ INTERFERENCE_SUBTYPES = (
     "motion_blur",
     "lost_gap",
     "large_jump_after_reacquire",
+    "candidate_ambiguity",
+    "high_recall_noise_cluster",
+    "camera_motion_spike",
+    "camera_acceleration_spike",
+    "camera_zoom_jump",
     "roi_empty_turf",
     "empty_turf_roi",
     "candidate_elsewhere",
@@ -103,16 +108,6 @@ _FAIL_CLOSED_VALUES = {
     "candidate_elsewhere",
     "coordinate_mapping_suspect",
 }
-_CLEAR_INTERFERENCE_CATEGORIES = set(INTERFERENCE_CATEGORIES) - {"none", "unknown"}
-_CLEAR_INTERFERENCE_SUBTYPES = set(INTERFERENCE_SUBTYPES) - {
-    "none",
-    "unknown",
-    "roi_empty_turf",
-    "empty_turf_roi",
-    "candidate_elsewhere",
-    "coordinate_mapping_suspect",
-}
-
 
 def normalize_tracking_signal_label(label: dict[str, Any]) -> dict[str, Any]:
     raw = label if isinstance(label, dict) else {}
@@ -140,6 +135,7 @@ def normalize_tracking_signal_label(label: dict[str, Any]) -> dict[str, Any]:
         aliases=INTERFERENCE_SUBTYPE_ALIASES,
     )
     evidence = _evidence_list(raw.get("evidence"), validation_errors)
+    metadata = _metadata_dict(raw, validation_errors)
 
     normalized = {
         "label_id": _optional_string(raw.get("label_id")),
@@ -149,6 +145,8 @@ def normalize_tracking_signal_label(label: dict[str, Any]) -> dict[str, Any]:
         "interference_subtype": interference_subtype,
         "evidence": evidence,
     }
+    if metadata:
+        normalized["metadata"] = metadata
     if validation_errors:
         normalized["validation_errors"] = validation_errors
     return normalized
@@ -244,14 +242,10 @@ def action_eligibility(label: dict[str, Any], action: str) -> dict[str, Any]:
     if not blocking_reasons and action == "localize_ball_roi":
         executable = normalized["match_ball_state"] in {"confirmed_match_ball", "probable_match_ball"}
     elif not blocking_reasons and action == "reject_noise":
-        if normalized["match_ball_state"] in {"confirmed_match_ball", "probable_match_ball"}:
+        if normalized["match_ball_state"] != "not_match_ball":
             blocking_reasons.append("match_ball_not_rejectable")
         else:
-            executable = (
-                normalized["match_ball_state"] == "not_match_ball"
-                or normalized["interference_category"] in _CLEAR_INTERFERENCE_CATEGORIES
-                or normalized["interference_subtype"] in _CLEAR_INTERFERENCE_SUBTYPES
-            )
+            executable = True
 
     if not executable and not blocking_reasons:
         blocking_reasons.append("insufficient_signal")
@@ -343,6 +337,36 @@ def _evidence_list(value: Any, validation_errors: list[str]) -> list[dict[str, A
         else:
             validation_errors.append("evidence: entries must be objects")
     return result
+
+
+def _metadata_dict(raw: dict[str, Any], validation_errors: list[str]) -> dict[str, Any]:
+    known_fields = {
+        "label_id",
+        "candidate_id",
+        "match_ball_state",
+        "interference_category",
+        "interference_subtype",
+        "evidence",
+        "validation_errors",
+        "metadata",
+    }
+    metadata: dict[str, Any] = {}
+    raw_metadata = raw.get("metadata")
+    if isinstance(raw_metadata, dict):
+        for key, value in raw_metadata.items():
+            ready, keep = _json_ready(value, validation_errors, path=f"metadata.{key}")
+            if keep:
+                metadata[str(key)] = ready
+    elif raw_metadata is not None:
+        validation_errors.append("metadata: must be an object")
+
+    for key, value in raw.items():
+        if key in known_fields or key == "action_eligibility":
+            continue
+        ready, keep = _json_ready(value, validation_errors, path=f"metadata.{key}")
+        if keep:
+            metadata[str(key)] = ready
+    return metadata
 
 
 def _label_validation_errors(labels: list[dict[str, Any]]) -> list[str]:

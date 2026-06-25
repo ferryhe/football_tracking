@@ -172,7 +172,7 @@ class TrackingSignalLabelsTests(unittest.TestCase):
                 self.assertTrue(eligibility["executable"])
                 self.assertEqual("execute", eligibility["mode"])
 
-    def test_reject_noise_positive_for_not_match_ball_or_clear_interference(self) -> None:
+    def test_reject_noise_positive_requires_not_match_ball(self) -> None:
         not_match_ball = normalize_tracking_signal_label(
             {
                 "match_ball_state": "not_match_ball",
@@ -297,7 +297,7 @@ class TrackingSignalLabelsTests(unittest.TestCase):
         self.assertEqual("warn", payload["summary"]["status"])
         self.assertEqual(2, payload["summary"]["validation_error_count"])
 
-    def test_reject_noise_clear_interference_positive_without_match_ball_state(self) -> None:
+    def test_reject_noise_clear_interference_without_not_match_ball_fails_closed(self) -> None:
         label = normalize_tracking_signal_label(
             {
                 "match_ball_state": "occluded",
@@ -307,7 +307,25 @@ class TrackingSignalLabelsTests(unittest.TestCase):
             }
         )
 
-        self.assertTrue(action_eligibility(label, "reject_noise")["executable"])
+        eligibility = action_eligibility(label, "reject_noise")
+
+        self.assertFalse(eligibility["executable"])
+        self.assertIn("match_ball_not_rejectable", eligibility["blocking_reasons"])
+
+    def test_not_visible_tracking_dynamics_is_not_noise_rejectable(self) -> None:
+        label = normalize_tracking_signal_label(
+            {
+                "match_ball_state": "not_visible",
+                "interference_category": "tracking_dynamics",
+                "interference_subtype": "lost_gap",
+                "evidence": [{"type": "audit_event"}],
+            }
+        )
+
+        eligibility = action_eligibility(label, "reject_noise")
+
+        self.assertFalse(eligibility["executable"])
+        self.assertIn("match_ball_not_rejectable", eligibility["blocking_reasons"])
 
     def test_fail_closed_subtypes_block_reject_noise_too(self) -> None:
         for subtype in ("roi_empty_turf", "empty_turf_roi", "candidate_elsewhere", "coordinate_mapping_suspect"):
