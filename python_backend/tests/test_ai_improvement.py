@@ -103,6 +103,13 @@ class AiImprovementTests(unittest.TestCase):
         self.assertIn("bounded start_frame/end_frame", instructions)
         self.assertIn("evidence ids", instructions)
 
+    def test_prompt_prefers_structured_action_payload_contract(self) -> None:
+        instructions = _instructions(language="en")
+
+        self.assertIn("structured_action", instructions)
+        self.assertIn("payload", instructions)
+        self.assertIn("top-level explicit fields take precedence", instructions)
+
     def test_context_and_report_record_candidate_intent_and_provider_mode(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:
             output_dir = Path(temp_name)
@@ -230,6 +237,550 @@ class AiImprovementTests(unittest.TestCase):
         self.assertEqual("manual_review", improvement["recommended_action"])
         self.assertFalse(improvement["executable"])
         self.assertTrue(any("missing recommended_action" in warning for warning in report["warnings"]))
+
+    def test_structured_action_without_top_level_action_builds_executable_reject_noise_candidate(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_minimal_artifacts(output_dir)
+            client = _FakeImprovementClient(
+                {
+                    "summary": {"status": "needs_rerun", "primary_issue": "noise"},
+                    "improvements": [
+                        {
+                            "id": "imp_structured_noise",
+                            "priority": "P1",
+                            "area": "tracking",
+                            "failure_tags": ["unknown"],
+                            "root_cause_module": "selection",
+                            "diagnosis": "The candidate is a confirmed extra ball.",
+                            "structured_action": {
+                                "action": "reject_noise",
+                                "problem_type": "noise",
+                                "candidate_id": "noise_candidate_001",
+                                "source_packet_id": "packet_001",
+                                "start_frame": 40,
+                                "end_frame": 52,
+                                "false_positive_class": "extra_ball",
+                                "evidence": [{"source_packet_id": "packet_001"}],
+                                "expected_artifact": {
+                                    "name": "ball_track.cleaned.csv",
+                                    "role": "candidate",
+                                },
+                                "comparison_criteria": {
+                                    "report": "noise_candidate_comparison.json",
+                                },
+                            },
+                            "confidence": 0.74,
+                        }
+                    ],
+                }
+            )
+
+            report = build_ai_improvement_report(
+                output_dir,
+                client=client,
+                candidate_intent="prepare_approved_candidates",
+            )
+
+        improvement = report["improvements"][0]
+        self.assertEqual("reject_noise", improvement["recommended_action"])
+        self.assertEqual("noise", improvement["problem_type"])
+        self.assertEqual("noise_candidate_001", improvement["candidate_id"])
+        self.assertEqual("packet_001", improvement["source_packet_id"])
+        self.assertTrue(improvement["executable"])
+        self.assertEqual("prepare_approved_candidates", improvement["candidate_intent"])
+        self.assertEqual("reject_noise", improvement["candidate_contract"]["approved_action"])
+        self.assertEqual([], improvement["candidate_contract"]["missing_fields"])
+        self.assertEqual("structured_action", improvement["recommended_action_repair"])
+
+    def test_structured_action_nested_payload_builds_rerun_candidate_contract(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_minimal_artifacts(output_dir)
+            client = _FakeImprovementClient(
+                {
+                    "summary": {"status": "needs_rerun", "primary_issue": "tracking"},
+                    "improvements": [
+                        {
+                            "id": "imp_structured_rerun",
+                            "priority": "P1",
+                            "area": "tracking",
+                            "failure_tags": ["ball_lost"],
+                            "root_cause_module": "reacquisition",
+                            "diagnosis": "Re-run a bounded missing-ball window.",
+                            "structured_action": {
+                                "recommended_action": "rerun_ball_window",
+                                "payload": {
+                                    "problem_type": "missing_ball",
+                                    "candidate_id": "missing_ball_candidate_001",
+                                    "source_packet_id": "packet_001",
+                                    "rerun_scope": {"start_frame": 10, "end_frame": 20},
+                                    "likely_ball_region": {
+                                        "description": "not visible",
+                                        "confidence": 0.0,
+                                    },
+                                    "evidence": [{"source_packet_id": "packet_001"}],
+                                    "expected_artifact": {"name": "ball_track.csv"},
+                                    "comparison_criteria": {
+                                        "report": "missing_ball_recovery_comparison.json",
+                                    },
+                                },
+                            },
+                            "confidence": 0.79,
+                        }
+                    ],
+                }
+            )
+
+            report = build_ai_improvement_report(
+                output_dir,
+                client=client,
+                candidate_intent="prepare_approved_candidates",
+            )
+
+        improvement = report["improvements"][0]
+        self.assertEqual("rerun_ball_window", improvement["recommended_action"])
+        self.assertEqual({"start_frame": 10, "end_frame": 20}, improvement["rerun_scope"])
+        self.assertEqual("packet_001", improvement["source_packet_id"])
+        self.assertEqual("missing_ball_candidate_001", improvement["candidate_id"])
+        self.assertEqual("rerun_ball_window", improvement["candidate_contract"]["approved_action"])
+        self.assertTrue(improvement["candidate_contract"]["required_fields_present"])
+        self.assertTrue(improvement["executable"])
+
+    def test_structured_action_accepts_action_payload_alias(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_minimal_artifacts(output_dir)
+            client = _FakeImprovementClient(
+                {
+                    "summary": {"status": "needs_rerun", "primary_issue": "noise"},
+                    "improvements": [
+                        {
+                            "id": "imp_action_payload",
+                            "priority": "P1",
+                            "area": "tracking",
+                            "failure_tags": ["unknown"],
+                            "root_cause_module": "selection",
+                            "diagnosis": "action_payload is accepted as a structured action alias.",
+                            "action_payload": {
+                                "type": "tighten_noise_filter",
+                                "payload": {
+                                    "problem_type": "noise",
+                                    "candidate_id": "noise_candidate_002",
+                                    "source_packet_id": "packet_001",
+                                    "start_frame": 40,
+                                    "end_frame": 52,
+                                    "false_positive_class": "extra_ball",
+                                    "evidence": [{"source_packet_id": "packet_001"}],
+                                    "expected_artifact": {"name": "ball_track.cleaned.csv"},
+                                    "comparison_criteria": {
+                                        "report": "noise_candidate_comparison.json",
+                                    },
+                                },
+                            },
+                            "confidence": 0.73,
+                        }
+                    ],
+                }
+            )
+
+            report = build_ai_improvement_report(
+                output_dir,
+                client=client,
+                candidate_intent="prepare_approved_candidates",
+            )
+
+        improvement = report["improvements"][0]
+        self.assertEqual("tighten_noise_filter", improvement["recommended_action"])
+        self.assertEqual("noise_candidate_002", improvement["candidate_id"])
+        self.assertTrue(improvement["executable"])
+        self.assertEqual("action_payload.type", improvement["recommended_action_repair_key"])
+
+    def test_structured_action_payload_does_not_override_explicit_top_level_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_minimal_artifacts(output_dir)
+            client = _FakeImprovementClient(
+                {
+                    "summary": {"status": "needs_rerun", "primary_issue": "noise"},
+                    "improvements": [
+                        {
+                            "id": "imp_top_level_wins",
+                            "priority": "P1",
+                            "area": "tracking",
+                            "failure_tags": ["unknown"],
+                            "root_cause_module": "selection",
+                            "diagnosis": "The top-level candidate id is operator-selected.",
+                            "recommended_action": "reject_noise",
+                            "candidate_id": "top_level_candidate",
+                            "structured_action": {
+                                "action": "reject_noise",
+                                "payload": {
+                                    "problem_type": "noise",
+                                    "candidate_id": "payload_candidate",
+                                    "source_packet_id": "packet_001",
+                                    "start_frame": 40,
+                                    "end_frame": 52,
+                                    "false_positive_class": "extra_ball",
+                                    "evidence": [{"source_packet_id": "packet_001"}],
+                                    "expected_artifact": {"name": "ball_track.cleaned.csv"},
+                                    "comparison_criteria": {
+                                        "report": "noise_candidate_comparison.json",
+                                    },
+                                },
+                            },
+                            "confidence": 0.71,
+                        }
+                    ],
+                }
+            )
+
+            report = build_ai_improvement_report(
+                output_dir,
+                client=client,
+                candidate_intent="prepare_approved_candidates",
+            )
+
+        improvement = report["improvements"][0]
+        self.assertEqual("top_level_candidate", improvement["candidate_id"])
+        self.assertEqual("reject_noise", improvement["recommended_action"])
+        self.assertTrue(improvement["executable"])
+
+    def test_structured_action_conflicting_action_downgrades_to_manual_review(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_minimal_artifacts(output_dir)
+            client = _FakeImprovementClient(
+                {
+                    "summary": {"status": "needs_rerun", "primary_issue": "tracking"},
+                    "improvements": [
+                        {
+                            "id": "imp_conflict",
+                            "priority": "P1",
+                            "area": "tracking",
+                            "failure_tags": ["unknown"],
+                            "root_cause_module": "selection",
+                            "diagnosis": "Conflicting action channels must fail closed.",
+                            "recommended_action": "reject_noise",
+                            "structured_action": {
+                                "action": "rerun_ball_window",
+                                "payload": {
+                                    "problem_type": "noise",
+                                    "candidate_id": "noise_candidate_001",
+                                    "source_packet_id": "packet_001",
+                                    "start_frame": 40,
+                                    "end_frame": 52,
+                                    "false_positive_class": "extra_ball",
+                                    "evidence": [{"source_packet_id": "packet_001"}],
+                                    "expected_artifact": {"name": "ball_track.cleaned.csv"},
+                                    "comparison_criteria": {
+                                        "report": "noise_candidate_comparison.json",
+                                    },
+                                },
+                            },
+                            "confidence": 0.71,
+                        }
+                    ],
+                }
+            )
+
+            report = build_ai_improvement_report(
+                output_dir,
+                client=client,
+                candidate_intent="prepare_approved_candidates",
+            )
+
+        improvement = report["improvements"][0]
+        self.assertEqual("manual_review", improvement["recommended_action"])
+        self.assertFalse(improvement["executable"])
+        self.assertEqual("action_conflict", improvement["structured_action_contract_gap"])
+        self.assertTrue(any("structured_action action conflict" in warning for warning in report["warnings"]))
+
+    def test_structured_action_payload_without_action_key_downgrades_to_manual_review(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_minimal_artifacts(output_dir)
+            client = _FakeImprovementClient(
+                {
+                    "summary": {"status": "needs_rerun", "primary_issue": "noise"},
+                    "improvements": [
+                        {
+                            "id": "imp_payload_without_action",
+                            "priority": "P1",
+                            "area": "tracking",
+                            "failure_tags": ["unknown"],
+                            "root_cause_module": "selection",
+                            "diagnosis": "Payload-only structured action must not complete an executable action.",
+                            "recommended_action": "reject_noise",
+                            "structured_action": {
+                                "payload": {
+                                    "problem_type": "noise",
+                                    "candidate_id": "noise_candidate_001",
+                                    "source_packet_id": "packet_001",
+                                    "start_frame": 40,
+                                    "end_frame": 52,
+                                    "false_positive_class": "extra_ball",
+                                    "evidence": [{"source_packet_id": "packet_001"}],
+                                    "expected_artifact": {"name": "ball_track.cleaned.csv"},
+                                    "comparison_criteria": {"report": "noise_candidate_comparison.json"},
+                                }
+                            },
+                            "confidence": 0.71,
+                        }
+                    ],
+                }
+            )
+
+            report = build_ai_improvement_report(
+                output_dir,
+                client=client,
+                candidate_intent="prepare_approved_candidates",
+            )
+
+        improvement = report["improvements"][0]
+        self.assertEqual("manual_review", improvement["recommended_action"])
+        self.assertFalse(improvement["executable"])
+        self.assertEqual("missing_action", improvement["structured_action_contract_gap"])
+        self.assertTrue(any("structured_action contract gap" in warning for warning in report["warnings"]))
+
+    def test_structured_action_payload_without_any_action_records_contract_gap(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_minimal_artifacts(output_dir)
+            client = _FakeImprovementClient(
+                {
+                    "summary": {"status": "needs_rerun", "primary_issue": "noise"},
+                    "improvements": [
+                        {
+                            "id": "imp_payload_without_any_action",
+                            "priority": "P1",
+                            "area": "tracking",
+                            "failure_tags": ["unknown"],
+                            "root_cause_module": "selection",
+                            "diagnosis": "No action channel is present.",
+                            "structured_action": {
+                                "payload": {
+                                    "problem_type": "noise",
+                                    "candidate_id": "noise_candidate_001",
+                                    "source_packet_id": "packet_001",
+                                    "start_frame": 40,
+                                    "end_frame": 52,
+                                    "false_positive_class": "extra_ball",
+                                    "evidence": [{"source_packet_id": "packet_001"}],
+                                    "expected_artifact": {"name": "ball_track.cleaned.csv"},
+                                    "comparison_criteria": {"report": "noise_candidate_comparison.json"},
+                                }
+                            },
+                            "confidence": 0.71,
+                        }
+                    ],
+                }
+            )
+
+            report = build_ai_improvement_report(
+                output_dir,
+                client=client,
+                candidate_intent="prepare_approved_candidates",
+            )
+
+        improvement = report["improvements"][0]
+        self.assertEqual("manual_review", improvement["recommended_action"])
+        self.assertFalse(improvement["executable"])
+        self.assertEqual("missing_action", improvement["structured_action_contract_gap"])
+
+    def test_structured_action_multiple_payload_sources_with_conflicting_fields_downgrade(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_minimal_artifacts(output_dir)
+            client = _FakeImprovementClient(
+                {
+                    "summary": {"status": "needs_rerun", "primary_issue": "noise"},
+                    "improvements": [
+                        {
+                            "id": "imp_payload_conflict",
+                            "priority": "P1",
+                            "area": "tracking",
+                            "failure_tags": ["unknown"],
+                            "root_cause_module": "selection",
+                            "diagnosis": "Two structured sources disagree on the candidate.",
+                            "structured_action": {
+                                "action": "reject_noise",
+                                "payload": {
+                                    "problem_type": "noise",
+                                    "candidate_id": "noise_candidate_001",
+                                    "source_packet_id": "packet_001",
+                                    "start_frame": 40,
+                                    "end_frame": 52,
+                                    "false_positive_class": "extra_ball",
+                                    "evidence": [{"source_packet_id": "packet_001"}],
+                                    "expected_artifact": {"name": "ball_track.cleaned.csv"},
+                                    "comparison_criteria": {"report": "noise_candidate_comparison.json"},
+                                },
+                            },
+                            "action_payload": {
+                                "action": "reject_noise",
+                                "payload": {
+                                    "problem_type": "noise",
+                                    "candidate_id": "noise_candidate_002",
+                                    "source_packet_id": "packet_001",
+                                    "start_frame": 40,
+                                    "end_frame": 52,
+                                    "false_positive_class": "extra_ball",
+                                    "evidence": [{"source_packet_id": "packet_001"}],
+                                    "expected_artifact": {"name": "ball_track.cleaned.csv"},
+                                    "comparison_criteria": {"report": "noise_candidate_comparison.json"},
+                                },
+                            },
+                            "confidence": 0.71,
+                        }
+                    ],
+                }
+            )
+
+            report = build_ai_improvement_report(
+                output_dir,
+                client=client,
+                candidate_intent="prepare_approved_candidates",
+            )
+
+        improvement = report["improvements"][0]
+        self.assertEqual("manual_review", improvement["recommended_action"])
+        self.assertFalse(improvement["executable"])
+        self.assertEqual("payload_conflict", improvement["structured_action_contract_gap"])
+
+    def test_structured_action_conflict_stays_manual_review_for_missing_ball_items(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_minimal_artifacts(output_dir)
+            client = _FakeImprovementClient(
+                {
+                    "summary": {"status": "needs_rerun", "primary_issue": "tracking"},
+                    "improvements": [
+                        {
+                            "id": "imp_missing_ball_conflict",
+                            "priority": "P1",
+                            "area": "tracking",
+                            "failure_tags": ["ball_lost"],
+                            "root_cause_module": "reacquisition",
+                            "diagnosis": "Conflicting action channels must not become localization requests.",
+                            "recommended_action": "reject_noise",
+                            "structured_action": {
+                                "action": "rerun_ball_window",
+                                "payload": {
+                                    "problem_type": "missing_ball",
+                                    "candidate_id": "missing_ball_candidate_001",
+                                    "source_packet_id": "packet_001",
+                                    "rerun_scope": {"start_frame": 10, "end_frame": 20},
+                                    "evidence": [{"source_packet_id": "packet_001"}],
+                                    "expected_artifact": {"name": "ball_track.csv"},
+                                    "comparison_criteria": {"report": "missing_ball_recovery_comparison.json"},
+                                },
+                            },
+                            "confidence": 0.71,
+                        }
+                    ],
+                }
+            )
+
+            report = build_ai_improvement_report(
+                output_dir,
+                client=client,
+                candidate_intent="prepare_approved_candidates",
+            )
+
+        improvement = report["improvements"][0]
+        self.assertEqual("manual_review", improvement["recommended_action"])
+        self.assertFalse(improvement["executable"])
+        self.assertEqual("action_conflict", improvement["structured_action_contract_gap"])
+        self.assertNotEqual("request_targeted_localization", improvement["recommended_action"])
+
+    def test_structured_action_payload_ignores_unknown_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_minimal_artifacts(output_dir)
+            client = _FakeImprovementClient(
+                {
+                    "summary": {"status": "needs_rerun", "primary_issue": "noise"},
+                    "improvements": [
+                        {
+                            "id": "imp_unknown_payload_field",
+                            "priority": "P1",
+                            "area": "tracking",
+                            "failure_tags": ["unknown"],
+                            "root_cause_module": "selection",
+                            "diagnosis": "Unknown payload fields must remain ignored.",
+                            "structured_action": {
+                                "action": "reject_noise",
+                                "payload": {
+                                    "problem_type": "noise",
+                                    "candidate_id": "noise_candidate_001",
+                                    "source_packet_id": "packet_001",
+                                    "start_frame": 40,
+                                    "end_frame": 52,
+                                    "false_positive_class": "extra_ball",
+                                    "evidence": [{"source_packet_id": "packet_001"}],
+                                    "expected_artifact": {"name": "ball_track.cleaned.csv"},
+                                    "comparison_criteria": {"report": "noise_candidate_comparison.json"},
+                                    "unreviewed_override": {"unsafe": True},
+                                },
+                            },
+                            "confidence": 0.71,
+                        }
+                    ],
+                }
+            )
+
+            report = build_ai_improvement_report(
+                output_dir,
+                client=client,
+                candidate_intent="prepare_approved_candidates",
+            )
+
+        improvement = report["improvements"][0]
+        self.assertEqual("reject_noise", improvement["recommended_action"])
+        self.assertNotIn("unreviewed_override", improvement)
+
+    def test_model_supplied_internal_structured_action_fields_are_ignored(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_minimal_artifacts(output_dir)
+            client = _FakeImprovementClient(
+                {
+                    "summary": {"status": "needs_rerun", "primary_issue": "tracking"},
+                    "improvements": [
+                        {
+                            "id": "imp_internal_field_injection",
+                            "priority": "P1",
+                            "area": "tracking",
+                            "failure_tags": ["ball_lost"],
+                            "root_cause_module": "reacquisition",
+                            "diagnosis": "Model supplied an internal contract field.",
+                            "recommended_action": "rerun_ball_window",
+                            "problem_type": "missing_ball",
+                            "candidate_id": "missing_ball_candidate_001",
+                            "source_packet_id": "packet_001",
+                            "rerun_scope": {"start_frame": 10, "end_frame": 20},
+                            "expected_artifact": {"name": "ball_track.csv"},
+                            "comparison_criteria": {"report": "missing_ball_recovery_comparison.json"},
+                            "evidence": [{"source_packet_id": "packet_001"}],
+                            "_structured_action_contract_gap": "payload_conflict",
+                            "confidence": 0.71,
+                        }
+                    ],
+                }
+            )
+
+            report = build_ai_improvement_report(
+                output_dir,
+                client=client,
+                candidate_intent="prepare_approved_candidates",
+            )
+
+        improvement = report["improvements"][0]
+        self.assertEqual("request_targeted_localization", improvement["recommended_action"])
+        self.assertFalse(improvement["executable"])
+        self.assertNotIn("structured_action_contract_gap", improvement)
+        self.assertNotIn("_structured_action_contract_gap", improvement)
 
     def test_blank_recommended_action_values_are_downgraded_to_manual_review(self) -> None:
         for blank_value in (None, "", "   \t"):

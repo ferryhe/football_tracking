@@ -93,6 +93,35 @@ _REQUIRED_IMPROVEMENT_FIELDS = (
     "recommended_action",
     "confidence",
 )
+_STRUCTURED_ACTION_FIELDS = frozenset(
+    {
+        "problem_type",
+        "candidate_id",
+        "source_packet_id",
+        "visual_review_id",
+        "visual_localization_id",
+        "event_candidate_id",
+        "source_event_candidate_id",
+        "camera_motion_event_id",
+        "camera_motion_severity",
+        "start_frame",
+        "end_frame",
+        "rerun_scope",
+        "local_search_roi",
+        "likely_ball_region",
+        "false_positive_class",
+        "config_patch",
+        "suggested_window",
+        "clip_action",
+        "follow_cam_rerender_plan",
+        "expected_artifact",
+        "comparison_criteria",
+        "evidence",
+        "evidence_payload",
+        "frame_dimensions",
+    }
+)
+_STRUCTURED_ACTION_SOURCE_KEYS = ("structured_action", "action_payload")
 _STRUCTURED_RECOMMENDED_ACTION_KEYS = ("recommended_action", "action", "name", "type", "value")
 _MISSING_BALL_TAGS = {"ball_lost", "missing_ball", "lost_gap", "ball_not_visible", "missed_ball"}
 _REVIEW_ONLY_FAILURE_TAGS = {"review_only_note"}
@@ -1748,7 +1777,7 @@ def _is_item_scoped_highlight_invariant_error(reason: str) -> bool:
     return True
 
 
-def _structured_recommended_action(raw_action: dict[str, Any]) -> tuple[str | None, str | None]:
+def _structured_action_name(raw_action: dict[str, Any]) -> tuple[str | None, str | None, str | None]:
     seen: list[tuple[str, str]] = []
     for key in _STRUCTURED_RECOMMENDED_ACTION_KEYS:
         value = raw_action.get(key)
@@ -1759,14 +1788,133 @@ def _structured_recommended_action(raw_action: dict[str, Any]) -> tuple[str | No
             continue
         seen.append((key, action))
     if not seen:
-        return None, None
+        return None, None, None
     unique_actions = {action for _key, action in seen}
     if len(unique_actions) != 1:
-        return None, None
+        return None, None, "action_key_conflict"
     action = seen[0][1]
     if action not in AI_RECOMMENDED_ACTIONS:
+        return None, seen[0][0], "unsupported_action"
+    return action, seen[0][0], None
+
+
+def _structured_recommended_action(raw_action: dict[str, Any]) -> tuple[str | None, str | None]:
+    action, key, gap = _structured_action_name(raw_action)
+    if gap is not None:
         return None, None
-    return action, seen[0][0]
+    return action, key
+
+
+def _structured_action_payload_fields(raw_action: dict[str, Any]) -> dict[str, Any]:
+    fields: dict[str, Any] = {}
+    payload = raw_action.get("payload")
+    if isinstance(payload, dict):
+        for key in _STRUCTURED_ACTION_FIELDS:
+            if key in payload:
+                fields[key] = payload[key]
+    for key in _STRUCTURED_ACTION_FIELDS:
+        if key in raw_action:
+            fields[key] = raw_action[key]
+    return fields
+
+
+def _structured_payload_conflict(
+    left: dict[str, Any],
+    right: dict[str, Any],
+) -> str | None:
+    for key in sorted(set(left) & set(right)):
+        if left[key] != right[key]:
+            return key
+    return None
+
+
+def _normalize_structured_action_contract(
+    raw: dict[str, Any],
+    index: int,
+) -> tuple[dict[str, Any], list[str]]:
+    normalized = dict(raw)
+    for key in (
+        "_structured_action_contract_gap",
+        "_structured_action_original_action",
+        "_structured_action_original_recommended_action",
+        "_structured_action_repair",
+        "_structured_action_repair_key",
+    ):
+        normalized.pop(key, None)
+    structured_sources = [
+        (key, value)
+        for key in _STRUCTURED_ACTION_SOURCE_KEYS
+        if isinstance((value := normalized.get(key)), dict)
+    ]
+    if not structured_sources:
+        return normalized, []
+
+    warnings: list[str] = []
+    payload_fields: dict[str, Any] = {}
+    actions: list[tuple[str, str, str | None]] = []
+    gaps: list[str] = []
+    for source_key, raw_action in structured_sources:
+        source_fields = _structured_action_payload_fields(raw_action)
+        conflict_key = _structured_payload_conflict(payload_fields, source_fields)
+        if conflict_key is not None:
+            gaps.append("payload_conflict")
+            warnings.append(
+                f"Improvement {index} {source_key} payload conflict on field {conflict_key}."
+            )
+        for key, value in source_fields.items():
+            payload_fields.setdefault(key, value)
+        action, action_key, gap = _structured_action_name(raw_action)
+        if action is None and gap is None:
+            gap = "missing_action"
+        if gap is not None:
+            gaps.append(gap)
+            warnings.append(f"Improvement {index} {source_key} contract gap: {gap}.")
+            continue
+        if action is not None:
+            actions.append((source_key, action, action_key))
+
+    for key, value in payload_fields.items():
+        if key not in normalized:
+            normalized[key] = value
+
+    unique_actions = {_normalized_approved_action(action) for _source, action, _key in actions}
+    top_action_value = normalized.get("recommended_action")
+    top_action = top_action_value.strip() if isinstance(top_action_value, str) else None
+    if len(unique_actions) > 1:
+        normalized["recommended_action"] = "manual_review"
+        normalized["_structured_action_contract_gap"] = "action_conflict"
+        warnings.append(f"Improvement {index} structured_action action conflict downgraded to manual_review.")
+        return normalized, warnings
+    if gaps:
+        normalized["recommended_action"] = "manual_review"
+        normalized["_structured_action_contract_gap"] = gaps[0]
+        warnings.append(
+            f"Improvement {index} structured_action contract gap downgraded to manual_review: {gaps[0]}."
+        )
+        return normalized, warnings
+    if not actions:
+        return normalized, warnings
+
+    source_key, structured_action, action_key = actions[0]
+    if top_action:
+        if _normalized_approved_action(top_action) != _normalized_approved_action(structured_action):
+            normalized["recommended_action"] = "manual_review"
+            normalized["_structured_action_contract_gap"] = "action_conflict"
+            normalized["_structured_action_original_action"] = structured_action
+            normalized["_structured_action_original_recommended_action"] = top_action
+            warnings.append(
+                f"Improvement {index} structured_action action conflict downgraded to manual_review: "
+                f"recommended_action={top_action}, {source_key}.{action_key}={structured_action}."
+            )
+        return normalized, warnings
+
+    normalized["recommended_action"] = structured_action
+    normalized["_structured_action_repair"] = "structured_action"
+    normalized["_structured_action_repair_key"] = f"{source_key}.{action_key}"
+    warnings.append(
+        f"Improvement {index} structured_action recommended_action repaired from {source_key}.{action_key}."
+    )
+    return normalized, warnings
 
 
 def _validate_improvement(
@@ -1774,8 +1922,8 @@ def _validate_improvement(
 ) -> tuple[dict[str, Any], list[str]]:
     if not isinstance(raw, dict):
         raise ValueError(f"Improvement {index} must be a JSON object.")
+    raw, repair_warnings = _normalize_structured_action_contract(raw, index)
     missing = [field for field in _REQUIRED_IMPROVEMENT_FIELDS if field not in raw]
-    repair_warnings: list[str] = []
     recommended_action_repaired = False
     if missing:
         if missing == ["recommended_action"]:
@@ -1817,8 +1965,17 @@ def _validate_improvement(
     confidence = _confidence(raw.get("confidence"), f"Improvement {index} confidence")
     raw_action_value = raw.get("recommended_action")
     non_string_recommended_action_type: str | None = None
-    recommended_action_repair: str | None = None
-    recommended_action_repair_key: str | None = None
+    recommended_action_repair = (
+        raw["_structured_action_repair"]
+        if isinstance(raw.get("_structured_action_repair"), str) and raw["_structured_action_repair"].strip()
+        else None
+    )
+    recommended_action_repair_key = (
+        raw["_structured_action_repair_key"]
+        if isinstance(raw.get("_structured_action_repair_key"), str)
+        and raw["_structured_action_repair_key"].strip()
+        else None
+    )
     if raw_action_value is None or (isinstance(raw_action_value, str) and not raw_action_value.strip()):
         raw = dict(raw)
         raw["recommended_action"] = "manual_review"
@@ -1918,6 +2075,7 @@ def _validate_improvement(
     downgrade_reason: str | None = None
     if (
         not recommended_action_repaired
+        and not isinstance(raw.get("_structured_action_contract_gap"), str)
         and _is_missing_ball_improvement(normalized_tags, raw)
         and likely_ball_region is None
         and local_search_roi is None
@@ -1967,6 +2125,18 @@ def _validate_improvement(
         item["recommended_action_repair_key"] = recommended_action_repair_key
     if rerun_scope_contract_gap is not None:
         item["rerun_scope_contract_gap"] = rerun_scope_contract_gap
+    if isinstance(raw.get("_structured_action_contract_gap"), str) and raw[
+        "_structured_action_contract_gap"
+    ].strip():
+        item["structured_action_contract_gap"] = raw["_structured_action_contract_gap"].strip()
+    if isinstance(raw.get("_structured_action_original_action"), str) and raw[
+        "_structured_action_original_action"
+    ].strip():
+        item["structured_action_original_action"] = raw["_structured_action_original_action"].strip()
+    if isinstance(raw.get("_structured_action_original_recommended_action"), str) and raw[
+        "_structured_action_original_recommended_action"
+    ].strip():
+        item["original_recommended_action"] = raw["_structured_action_original_recommended_action"].strip()
     if ignored_failure_tags:
         item["ignored_failure_tags"] = ignored_failure_tags
     if failure_tag_contract_gap is not None:
