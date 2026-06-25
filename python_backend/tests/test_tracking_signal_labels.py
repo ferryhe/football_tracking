@@ -155,22 +155,36 @@ class TrackingSignalLabelsTests(unittest.TestCase):
         self.assertFalse(eligibility["executable"])
         self.assertIn("validation_errors", eligibility["blocking_reasons"])
 
-    def test_localize_ball_roi_positive_requires_probable_or_confirmed_match_ball(self) -> None:
-        for state in ("confirmed_match_ball", "probable_match_ball"):
-            with self.subTest(state=state):
-                label = normalize_tracking_signal_label(
-                    {
-                        "match_ball_state": state,
-                        "interference_category": "none",
-                        "interference_subtype": "none",
-                        "evidence": [{"type": "frame"}],
-                    }
-                )
+    def test_localize_ball_roi_positive_requires_confirmed_match_ball(self) -> None:
+        label = normalize_tracking_signal_label(
+            {
+                "match_ball_state": "confirmed_match_ball",
+                "interference_category": "none",
+                "interference_subtype": "none",
+                "evidence": [{"type": "frame"}],
+            }
+        )
 
-                eligibility = action_eligibility(label, "localize_ball_roi")
+        eligibility = action_eligibility(label, "localize_ball_roi")
 
-                self.assertTrue(eligibility["executable"])
-                self.assertEqual("execute", eligibility["mode"])
+        self.assertTrue(eligibility["executable"])
+        self.assertEqual("execute", eligibility["mode"])
+
+    def test_probable_match_ball_cannot_execute_localize_ball_roi(self) -> None:
+        label = normalize_tracking_signal_label(
+            {
+                "match_ball_state": "probable_match_ball",
+                "interference_category": "none",
+                "interference_subtype": "none",
+                "evidence": [{"type": "frame"}],
+            }
+        )
+
+        eligibility = action_eligibility(label, "localize_ball_roi")
+
+        self.assertFalse(eligibility["executable"])
+        self.assertEqual("review_only", eligibility["mode"])
+        self.assertIn("match_ball_not_confirmed", eligibility["blocking_reasons"])
 
     def test_reject_noise_positive_requires_not_match_ball(self) -> None:
         not_match_ball = normalize_tracking_signal_label(
@@ -325,10 +339,10 @@ class TrackingSignalLabelsTests(unittest.TestCase):
         eligibility = action_eligibility(label, "reject_noise")
 
         self.assertFalse(eligibility["executable"])
-        self.assertIn("match_ball_not_rejectable", eligibility["blocking_reasons"])
+        self.assertIn("lost_gap", eligibility["blocking_reasons"])
 
     def test_fail_closed_subtypes_block_reject_noise_too(self) -> None:
-        for subtype in ("roi_empty_turf", "empty_turf_roi", "candidate_elsewhere", "coordinate_mapping_suspect"):
+        for subtype in ("roi_empty_turf", "empty_turf_roi", "candidate_elsewhere", "coordinate_mapping_suspect", "lost_gap"):
             with self.subTest(subtype=subtype):
                 label = normalize_tracking_signal_label(
                     {

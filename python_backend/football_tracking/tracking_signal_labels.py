@@ -107,6 +107,7 @@ _FAIL_CLOSED_VALUES = {
     "empty_turf_roi",
     "candidate_elsewhere",
     "coordinate_mapping_suspect",
+    "lost_gap",
 }
 
 def normalize_tracking_signal_label(label: dict[str, Any]) -> dict[str, Any]:
@@ -240,7 +241,10 @@ def action_eligibility(label: dict[str, Any], action: str) -> dict[str, Any]:
 
     executable = False
     if not blocking_reasons and action == "localize_ball_roi":
-        executable = normalized["match_ball_state"] in {"confirmed_match_ball", "probable_match_ball"}
+        if normalized["match_ball_state"] != "confirmed_match_ball":
+            blocking_reasons.append("match_ball_not_confirmed")
+        else:
+            executable = True
     elif not blocking_reasons and action == "reject_noise":
         if normalized["match_ball_state"] != "not_match_ball":
             blocking_reasons.append("match_ball_not_rejectable")

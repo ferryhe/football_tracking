@@ -29,6 +29,10 @@ from football_tracking.review_packets import (
     MICRO_PACKET_MIN_FRAMES,
     MICRO_PACKET_TARGET_FRAMES,
 )
+from football_tracking.tracking_signal_labels import (
+    TRACKING_SIGNAL_LABELS_REPORT_NAME,
+    action_eligibility,
+)
 from football_tracking.visual_localization_quality import (
     visual_localization_has_clean_executable_evidence as _visual_localization_has_clean_executable_evidence,
 )
@@ -75,6 +79,7 @@ _SOURCE_ARTIFACTS: tuple[tuple[str, str], ...] = (
     ("review_packets", "review_packets.json"),
     ("ai_visual_review", "ai_visual_review.json"),
     ("ai_visual_localization", "ai_visual_localization.json"),
+    ("tracking_signal_labels", TRACKING_SIGNAL_LABELS_REPORT_NAME),
     ("camera_motion_audit", "camera_motion_audit.json"),
     ("event_candidates", "event_candidates.json"),
 )
@@ -797,6 +802,7 @@ def _approved_action_entry(
         if "start_frame" not in action or "end_frame" not in action:
             raise ValueError(f"Approval {approval_id} human_review_camera_motion requires start_frame and end_frame.")
 
+    _apply_tracking_signal_action_gate(action, roi_provenance_context, approval_id)
     _fill_approved_action_contract_defaults(action)
     return action, warnings
 
@@ -887,15 +893,276 @@ def _visual_reviews_by_packet_id(context: dict[str, Any]) -> dict[str, dict[str,
 
 def _roi_provenance_context_from_output_dir(output_dir: Path) -> dict[str, Any]:
     artifacts: dict[str, Any] = {}
+    artifact_statuses: dict[str, str] = {}
+    artifact_warnings: dict[str, str] = {}
     for artifact_key, file_name in (
         ("review_packets", "review_packets.json"),
         ("ai_visual_review", "ai_visual_review.json"),
         ("ai_visual_localization", "ai_visual_localization.json"),
+        ("tracking_signal_labels", TRACKING_SIGNAL_LABELS_REPORT_NAME),
     ):
-        payload, status, _warning = _read_optional_json(output_dir / file_name)
+        payload, status, warning = _read_optional_json(output_dir / file_name)
+        artifact_statuses[artifact_key] = status
+        if warning:
+            artifact_warnings[artifact_key] = warning
         if status == "loaded" and payload is not None:
             artifacts[artifact_key] = payload
-    return {"artifacts": artifacts, "output_dir": str(output_dir)}
+    return {
+        "artifacts": artifacts,
+        "artifact_statuses": artifact_statuses,
+        "artifact_warnings": artifact_warnings,
+        "output_dir": str(output_dir),
+    }
+
+
+def _apply_tracking_signal_action_gate(
+    action: dict[str, Any],
+    context: dict[str, Any] | None,
+    approval_id: str,
+) -> None:
+    approved_action = str(action.get("approved_action") or "")
+    gate_action = _tracking_signal_gate_action(approved_action)
+    if gate_action is None:
+        return
+    labels = _tracking_signal_labels(context)
+    artifact_status = _tracking_signal_label_artifact_status(context)
+    if not labels:
+        if artifact_status in (None, "missing"):
+            return
+        reason = "missing_matching_tracking_signal_label" if artifact_status == "loaded" else "tracking_signal_labels_unavailable"
+        action["tracking_signal_gate"] = {
+            "mode": "review_only",
+            "source_artifact": TRACKING_SIGNAL_LABELS_REPORT_NAME,
+            "matched_label_ids": [],
+            "matched_labels": [],
+            "blocking_reasons": [reason],
+        }
+        if artifact_status not in (None, "loaded", "missing"):
+            action["tracking_signal_gate"]["artifact_status"] = artifact_status
+            artifact_warning = _tracking_signal_label_artifact_warning(context)
+            if artifact_warning is not None:
+                action["tracking_signal_gate"]["artifact_warning"] = artifact_warning
+        raise ValueError(f"Approval {approval_id} {approved_action} blocked by tracking signal gate: {reason}")
+    if artifact_status not in (None, "loaded", "missing"):
+        reason = "tracking_signal_labels_unavailable"
+        action["tracking_signal_gate"] = {
+            "mode": "review_only",
+            "source_artifact": TRACKING_SIGNAL_LABELS_REPORT_NAME,
+            "matched_label_ids": [],
+            "matched_labels": [],
+            "blocking_reasons": [reason],
+            "artifact_status": artifact_status,
+        }
+        artifact_warning = _tracking_signal_label_artifact_warning(context)
+        if artifact_warning is not None:
+            action["tracking_signal_gate"]["artifact_warning"] = artifact_warning
+        raise ValueError(f"Approval {approval_id} {approved_action} blocked by tracking signal gate: {reason}")
+    matching_labels = [label for label in labels if _tracking_signal_label_matches_action(label, action)]
+    gate_payload = {
+        "mode": "review_only",
+        "source_artifact": TRACKING_SIGNAL_LABELS_REPORT_NAME,
+        "matched_label_ids": _tracking_signal_label_ids(matching_labels),
+        "matched_labels": _tracking_signal_gate_label_summaries(matching_labels),
+        "blocking_reasons": [],
+    }
+    if not matching_labels:
+        gate_payload["blocking_reasons"] = ["missing_matching_tracking_signal_label"]
+        raise ValueError(
+            f"Approval {approval_id} {approved_action} blocked by tracking signal gate: "
+            "missing_matching_tracking_signal_label"
+        )
+
+    eligibilities = [action_eligibility(label, gate_action) for label in matching_labels]
+    blocking_reasons = _tracking_signal_deduped(
+        [
+            reason
+            for eligibility in eligibilities
+            for reason in _tracking_signal_string_items(eligibility.get("blocking_reasons"))
+        ]
+    )
+    executable_labels = [
+        label
+        for label, eligibility in zip(matching_labels, eligibilities, strict=False)
+        if bool(eligibility.get("executable"))
+    ]
+    if blocking_reasons or not executable_labels:
+        if not blocking_reasons:
+            blocking_reasons = ["insufficient_tracking_signal_label"]
+        gate_payload["blocking_reasons"] = blocking_reasons
+        action["tracking_signal_gate"] = gate_payload
+        raise ValueError(
+            f"Approval {approval_id} {approved_action} blocked by tracking signal gate: "
+            f"{', '.join(blocking_reasons)}"
+        )
+
+    action["tracking_signal_gate"] = {
+        **gate_payload,
+        "mode": "execute",
+        "matched_label_ids": _tracking_signal_label_ids(executable_labels),
+        "matched_labels": _tracking_signal_gate_label_summaries(executable_labels),
+    }
+
+
+def _tracking_signal_gate_action(approved_action: str) -> str | None:
+    if approved_action == "localize_ball_roi":
+        return "localize_ball_roi"
+    if approved_action in {"reject_noise", "noise_filter_adjustment", "tighten_noise_filter"}:
+        return "reject_noise"
+    return None
+
+
+def _tracking_signal_labels(context: dict[str, Any] | None) -> list[dict[str, Any]]:
+    if not isinstance(context, dict):
+        return []
+    artifacts = context.get("artifacts") if isinstance(context.get("artifacts"), dict) else {}
+    payload = artifacts.get("tracking_signal_labels")
+    labels = payload.get("labels") if isinstance(payload, dict) else None
+    return [label for label in labels if isinstance(label, dict)] if isinstance(labels, list) else []
+
+
+def _tracking_signal_label_artifact_status(context: dict[str, Any] | None) -> str | None:
+    if not isinstance(context, dict):
+        return None
+    statuses = context.get("artifact_statuses")
+    status = statuses.get("tracking_signal_labels") if isinstance(statuses, dict) else None
+    return status if isinstance(status, str) and status else None
+
+
+def _tracking_signal_label_artifact_warning(context: dict[str, Any] | None) -> str | None:
+    if not isinstance(context, dict):
+        return None
+    warnings = context.get("artifact_warnings")
+    warning = warnings.get("tracking_signal_labels") if isinstance(warnings, dict) else None
+    return warning if isinstance(warning, str) and warning else None
+
+
+def _tracking_signal_label_matches_action(label: dict[str, Any], action: dict[str, Any]) -> bool:
+    candidate_id = _tracking_signal_optional_string(action.get("candidate_id"))
+    label_candidate_id = _tracking_signal_optional_string(label.get("candidate_id"))
+    candidate_matches = candidate_id is not None and label_candidate_id == candidate_id
+    action_refs = _tracking_signal_action_refs(action)
+    if _tracking_signal_has_frame_bounds(action):
+        for evidence in _tracking_signal_label_evidence(label):
+            if not _tracking_signal_has_frame_bounds(evidence):
+                continue
+            if not _tracking_signal_frames_overlap(evidence, action):
+                continue
+            evidence_refs = _tracking_signal_evidence_refs(evidence)
+            if candidate_matches or evidence_refs & action_refs:
+                return True
+            if not candidate_id and not action_refs:
+                return True
+        return False
+
+    if candidate_matches:
+        return True
+
+    for evidence in _tracking_signal_label_evidence(label):
+        if _tracking_signal_evidence_refs(evidence) & action_refs:
+            if _tracking_signal_has_frame_bounds(evidence) and _tracking_signal_has_frame_bounds(action):
+                return _tracking_signal_frames_overlap(evidence, action)
+            return True
+        if _tracking_signal_frames_overlap(evidence, action):
+            return True
+    return False
+
+
+def _tracking_signal_action_refs(action: dict[str, Any]) -> set[str]:
+    refs: set[str] = set()
+    for key in ("source_packet_id", "packet_id", "visual_review_id", "visual_localization_id"):
+        value = action.get(key)
+        if isinstance(value, str) and value.strip():
+            refs.add(value.strip())
+    return refs
+
+
+def _tracking_signal_label_evidence(label: dict[str, Any]) -> list[dict[str, Any]]:
+    evidence = label.get("evidence")
+    return [item for item in evidence if isinstance(item, dict)] if isinstance(evidence, list) else []
+
+
+def _tracking_signal_evidence_refs(evidence: dict[str, Any]) -> set[str]:
+    refs: set[str] = set()
+    for key in (
+        "source_id",
+        "source_packet_id",
+        "packet_id",
+        "visual_review_id",
+        "visual_localization_id",
+    ):
+        value = evidence.get(key)
+        if isinstance(value, str) and value.strip():
+            refs.add(value.strip())
+    return refs
+
+
+def _tracking_signal_frames_overlap(evidence: dict[str, Any], action: dict[str, Any]) -> bool:
+    label_start = _optional_int(evidence.get("start_frame"))
+    label_end = _optional_int(evidence.get("end_frame"))
+    action_start = _optional_int(action.get("start_frame"))
+    action_end = _optional_int(action.get("end_frame"))
+    if None in (label_start, label_end, action_start, action_end):
+        return False
+    return max(label_start, action_start) <= min(label_end, action_end)
+
+
+def _tracking_signal_label_ids(labels: list[dict[str, Any]]) -> list[str]:
+    ids = []
+    for index, label in enumerate(labels, start=1):
+        label_id = label.get("label_id")
+        ids.append(label_id.strip() if isinstance(label_id, str) and label_id.strip() else f"label:{index}")
+    return ids
+
+
+def _tracking_signal_gate_label_summaries(labels: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    summaries: list[dict[str, Any]] = []
+    for label in labels:
+        summaries.append(
+            {
+                "label_id": _tracking_signal_optional_string(label.get("label_id")),
+                "candidate_id": _tracking_signal_optional_string(label.get("candidate_id")),
+                "match_ball_state": _tracking_signal_optional_string(label.get("match_ball_state")),
+                "interference_category": _tracking_signal_optional_string(label.get("interference_category")),
+                "interference_subtype": _tracking_signal_optional_string(label.get("interference_subtype")),
+                "evidence_windows": _tracking_signal_evidence_windows(label),
+            }
+        )
+    return summaries
+
+
+def _tracking_signal_evidence_windows(label: dict[str, Any]) -> list[dict[str, int]]:
+    windows: list[dict[str, int]] = []
+    for evidence in _tracking_signal_label_evidence(label):
+        start_frame = _optional_int(evidence.get("start_frame"))
+        end_frame = _optional_int(evidence.get("end_frame"))
+        if start_frame is not None and end_frame is not None:
+            windows.append({"start_frame": start_frame, "end_frame": end_frame})
+    return windows
+
+
+def _tracking_signal_has_frame_bounds(value: dict[str, Any]) -> bool:
+    return _optional_int(value.get("start_frame")) is not None and _optional_int(value.get("end_frame")) is not None
+
+
+def _tracking_signal_optional_string(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    stripped = value.strip()
+    return stripped or None
+
+
+def _tracking_signal_string_items(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [item.strip() for item in value if isinstance(item, str) and item.strip()]
+
+
+def _tracking_signal_deduped(values: list[str]) -> list[str]:
+    result: list[str] = []
+    for value in values:
+        if value not in result:
+            result.append(value)
+    return result
 
 
 def _improvement_source_packet_id(improvement: dict[str, Any]) -> str | None:

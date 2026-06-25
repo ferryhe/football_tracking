@@ -4685,6 +4685,393 @@ class AiImprovementTests(unittest.TestCase):
         self.assertEqual("visual_review:packet_001", action["visual_review_id"])
         self.assertEqual(120.0, action["local_search_roi"]["x"])
 
+    def test_approval_accepts_localize_ball_roi_with_confirmed_tracking_signal_label(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_minimal_artifacts_with_media(output_dir)
+            _write_tracking_signal_labels(
+                output_dir,
+                [
+                    {
+                        "label_id": "label:confirmed",
+                        "candidate_id": "candidate_001",
+                        "match_ball_state": "confirmed_match_ball",
+                        "interference_category": "none",
+                        "interference_subtype": "none",
+                        "evidence": [{"source_packet_id": "packet_001", "start_frame": 10, "end_frame": 20}],
+                    }
+                ],
+            )
+            _write_json(
+                output_dir / "ai_improvement_report.json",
+                {
+                    "schema_version": "1.0",
+                    "generated_at": "2026-06-22T00:00:00+00:00",
+                    "model": "gpt-improve",
+                    "summary": {"status": "needs_rerun"},
+                    "improvements": [
+                        {
+                            "id": "imp_001",
+                            "priority": "P0",
+                            "area": "tracking",
+                            "failure_tags": ["ball_lost"],
+                            "root_cause_module": "reacquisition",
+                            "diagnosis": "Visual review media carries usable evidence.",
+                            "recommended_action": "localize_ball_roi",
+                            "candidate_id": "candidate_001",
+                            "match_ball_confirmed": True,
+                            "start_frame": 10,
+                            "end_frame": 20,
+                            "local_search_roi": {
+                                "coordinate_space": "image",
+                                "frame": 15,
+                                "x": 120,
+                                "y": 40,
+                                "width": 80,
+                                "height": 50,
+                                "confidence": 0.72,
+                            },
+                            "visual_review_id": "visual_review:packet_001",
+                            "confidence": 0.82,
+                        }
+                    ],
+                },
+            )
+
+            artifact = approve_ai_improvement_actions(
+                output_dir,
+                run_id="run_123",
+                improvement_ids=["imp_001"],
+                approved_by="operator-a",
+            )
+
+        action = artifact["approved_actions"][0]
+        self.assertEqual("execute", action["tracking_signal_gate"]["mode"])
+        self.assertEqual(["label:confirmed"], action["tracking_signal_gate"]["matched_label_ids"])
+        self.assertEqual("noise_interference_labels.json", action["tracking_signal_gate"]["source_artifact"])
+        self.assertEqual([], action["tracking_signal_gate"]["blocking_reasons"])
+        matched_label = action["tracking_signal_gate"]["matched_labels"][0]
+        self.assertEqual("confirmed_match_ball", matched_label["match_ball_state"])
+        self.assertEqual("none", matched_label["interference_category"])
+        self.assertEqual("none", matched_label["interference_subtype"])
+        self.assertEqual([{"start_frame": 10, "end_frame": 20}], matched_label["evidence_windows"])
+
+    def test_approval_rejects_localize_ball_roi_with_empty_turf_tracking_signal_label(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_minimal_artifacts_with_media(output_dir)
+            _write_tracking_signal_labels(
+                output_dir,
+                [
+                    {
+                        "label_id": "label:empty-turf",
+                        "candidate_id": "candidate_001",
+                        "match_ball_state": "confirmed_match_ball",
+                        "interference_category": "media_roi",
+                        "interference_subtype": "empty_turf_roi",
+                        "evidence": [{"source_packet_id": "packet_001", "start_frame": 10, "end_frame": 20}],
+                    }
+                ],
+            )
+            _write_json(
+                output_dir / "ai_improvement_report.json",
+                {
+                    "schema_version": "1.0",
+                    "generated_at": "2026-06-22T00:00:00+00:00",
+                    "model": "gpt-improve",
+                    "summary": {"status": "needs_rerun"},
+                    "improvements": [
+                        {
+                            "id": "imp_001",
+                            "priority": "P0",
+                            "area": "tracking",
+                            "failure_tags": ["ball_lost"],
+                            "root_cause_module": "reacquisition",
+                            "diagnosis": "The ROI must be blocked by the tracking signal gate.",
+                            "recommended_action": "localize_ball_roi",
+                            "candidate_id": "candidate_001",
+                            "match_ball_confirmed": True,
+                            "start_frame": 10,
+                            "end_frame": 20,
+                            "local_search_roi": {
+                                "coordinate_space": "image",
+                                "frame": 15,
+                                "x": 120,
+                                "y": 40,
+                                "width": 80,
+                                "height": 50,
+                                "confidence": 0.72,
+                            },
+                            "visual_review_id": "visual_review:packet_001",
+                            "confidence": 0.82,
+                        }
+                    ],
+                },
+            )
+
+            with self.assertRaisesRegex(ValueError, "tracking signal gate"):
+                approve_ai_improvement_actions(output_dir, run_id="run_123", improvement_ids=["imp_001"])
+
+    def test_approval_rejects_label_from_same_packet_when_frame_window_does_not_overlap(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_minimal_artifacts(output_dir)
+            _write_tracking_signal_labels(
+                output_dir,
+                [
+                    {
+                        "label_id": "label:other-window",
+                        "candidate_id": "other_candidate",
+                        "match_ball_state": "not_match_ball",
+                        "interference_category": "extra_ball",
+                        "interference_subtype": "same_pitch_extra_ball",
+                        "evidence": [{"source_packet_id": "packet_001", "start_frame": 1, "end_frame": 3}],
+                    }
+                ],
+            )
+            _write_json(
+                output_dir / "ai_improvement_report.json",
+                {
+                    "schema_version": "1.0",
+                    "generated_at": "2026-06-22T00:00:00+00:00",
+                    "model": "gpt-improve",
+                    "summary": {"status": "needs_rerun"},
+                    "improvements": [
+                        {
+                            "id": "imp_noise",
+                            "priority": "P1",
+                            "area": "tracking",
+                            "failure_tags": ["extra_ball"],
+                            "root_cause_module": "selection",
+                            "start_frame": 40,
+                            "end_frame": 52,
+                            "diagnosis": "Same packet but a different frame window should not match.",
+                            "recommended_action": "reject_noise",
+                            "candidate_id": "noise_candidate_001",
+                            "source_packet_id": "packet_001",
+                            "false_positive_class": "extra_ball",
+                            "evidence": [{"source_packet_id": "packet_001"}],
+                            "confidence": 0.7,
+                        }
+                    ],
+                },
+            )
+
+            with self.assertRaisesRegex(ValueError, "missing_matching_tracking_signal_label"):
+                approve_ai_improvement_actions(output_dir, run_id="run_123", improvement_ids=["imp_noise"])
+
+    def test_approval_rejects_same_candidate_label_when_frame_window_does_not_overlap(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_minimal_artifacts(output_dir)
+            _write_tracking_signal_labels(
+                output_dir,
+                [
+                    {
+                        "label_id": "label:stale-candidate-window",
+                        "candidate_id": "noise_candidate_001",
+                        "match_ball_state": "not_match_ball",
+                        "interference_category": "extra_ball",
+                        "interference_subtype": "same_pitch_extra_ball",
+                        "evidence": [{"source_packet_id": "packet_001", "start_frame": 1, "end_frame": 3}],
+                    }
+                ],
+            )
+            _write_json(
+                output_dir / "ai_improvement_report.json",
+                {
+                    "schema_version": "1.0",
+                    "generated_at": "2026-06-22T00:00:00+00:00",
+                    "model": "gpt-improve",
+                    "summary": {"status": "needs_rerun"},
+                    "improvements": [
+                        {
+                            "id": "imp_noise",
+                            "priority": "P1",
+                            "area": "tracking",
+                            "failure_tags": ["extra_ball"],
+                            "root_cause_module": "selection",
+                            "start_frame": 40,
+                            "end_frame": 52,
+                            "diagnosis": "A stale label for the same candidate must not approve a later window.",
+                            "recommended_action": "reject_noise",
+                            "candidate_id": "noise_candidate_001",
+                            "source_packet_id": "packet_001",
+                            "false_positive_class": "extra_ball",
+                            "evidence": [{"source_packet_id": "packet_001"}],
+                            "confidence": 0.7,
+                        }
+                    ],
+                },
+            )
+
+            with self.assertRaisesRegex(ValueError, "missing_matching_tracking_signal_label"):
+                approve_ai_improvement_actions(output_dir, run_id="run_123", improvement_ids=["imp_noise"])
+
+    def test_approval_rejects_empty_tracking_signal_label_artifact(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_minimal_artifacts(output_dir)
+            _write_tracking_signal_labels(output_dir, [])
+            _write_json(
+                output_dir / "ai_improvement_report.json",
+                {
+                    "schema_version": "1.0",
+                    "generated_at": "2026-06-22T00:00:00+00:00",
+                    "model": "gpt-improve",
+                    "summary": {"status": "needs_rerun"},
+                    "improvements": [
+                        {
+                            "id": "imp_noise",
+                            "priority": "P1",
+                            "area": "tracking",
+                            "failure_tags": ["extra_ball"],
+                            "root_cause_module": "selection",
+                            "start_frame": 40,
+                            "end_frame": 52,
+                            "diagnosis": "Existing label artifact with no usable labels must fail closed.",
+                            "recommended_action": "reject_noise",
+                            "candidate_id": "noise_candidate_001",
+                            "source_packet_id": "packet_001",
+                            "false_positive_class": "extra_ball",
+                            "confidence": 0.7,
+                        }
+                    ],
+                },
+            )
+
+            with self.assertRaisesRegex(ValueError, "missing_matching_tracking_signal_label"):
+                approve_ai_improvement_actions(output_dir, run_id="run_123", improvement_ids=["imp_noise"])
+
+    def test_approval_rejects_corrupt_tracking_signal_label_artifact(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_minimal_artifacts(output_dir)
+            (output_dir / "noise_interference_labels.json").write_text("{", encoding="utf-8")
+            _write_json(
+                output_dir / "ai_improvement_report.json",
+                {
+                    "schema_version": "1.0",
+                    "generated_at": "2026-06-22T00:00:00+00:00",
+                    "model": "gpt-improve",
+                    "summary": {"status": "needs_rerun"},
+                    "improvements": [
+                        {
+                            "id": "imp_noise",
+                            "priority": "P1",
+                            "area": "tracking",
+                            "failure_tags": ["extra_ball"],
+                            "root_cause_module": "selection",
+                            "start_frame": 40,
+                            "end_frame": 52,
+                            "diagnosis": "Existing corrupt label artifact must fail closed.",
+                            "recommended_action": "reject_noise",
+                            "candidate_id": "noise_candidate_001",
+                            "source_packet_id": "packet_001",
+                            "false_positive_class": "extra_ball",
+                            "confidence": 0.7,
+                        }
+                    ],
+                },
+            )
+
+            with self.assertRaisesRegex(ValueError, "tracking_signal_labels_unavailable"):
+                approve_ai_improvement_actions(output_dir, run_id="run_123", improvement_ids=["imp_noise"])
+
+    def test_approval_rejects_same_candidate_label_without_frame_bounds_for_bounded_action(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_minimal_artifacts(output_dir)
+            _write_tracking_signal_labels(
+                output_dir,
+                [
+                    {
+                        "label_id": "label:unbounded-candidate",
+                        "candidate_id": "noise_candidate_001",
+                        "match_ball_state": "not_match_ball",
+                        "interference_category": "extra_ball",
+                        "interference_subtype": "same_pitch_extra_ball",
+                        "evidence": [{"source_packet_id": "packet_001"}],
+                    }
+                ],
+            )
+            _write_json(
+                output_dir / "ai_improvement_report.json",
+                {
+                    "schema_version": "1.0",
+                    "generated_at": "2026-06-22T00:00:00+00:00",
+                    "model": "gpt-improve",
+                    "summary": {"status": "needs_rerun"},
+                    "improvements": [
+                        {
+                            "id": "imp_noise",
+                            "priority": "P1",
+                            "area": "tracking",
+                            "failure_tags": ["extra_ball"],
+                            "root_cause_module": "selection",
+                            "start_frame": 40,
+                            "end_frame": 52,
+                            "diagnosis": "Bounded action requires bounded matching evidence.",
+                            "recommended_action": "reject_noise",
+                            "candidate_id": "noise_candidate_001",
+                            "source_packet_id": "packet_001",
+                            "false_positive_class": "extra_ball",
+                            "confidence": 0.7,
+                        }
+                    ],
+                },
+            )
+
+            with self.assertRaisesRegex(ValueError, "missing_matching_tracking_signal_label"):
+                approve_ai_improvement_actions(output_dir, run_id="run_123", improvement_ids=["imp_noise"])
+
+    def test_approval_rejects_same_source_label_without_frame_bounds_for_bounded_action(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_minimal_artifacts(output_dir)
+            _write_tracking_signal_labels(
+                output_dir,
+                [
+                    {
+                        "label_id": "label:unbounded-source",
+                        "candidate_id": "other_candidate",
+                        "match_ball_state": "not_match_ball",
+                        "interference_category": "extra_ball",
+                        "interference_subtype": "same_pitch_extra_ball",
+                        "evidence": [{"source_packet_id": "packet_001"}],
+                    }
+                ],
+            )
+            _write_json(
+                output_dir / "ai_improvement_report.json",
+                {
+                    "schema_version": "1.0",
+                    "generated_at": "2026-06-22T00:00:00+00:00",
+                    "model": "gpt-improve",
+                    "summary": {"status": "needs_rerun"},
+                    "improvements": [
+                        {
+                            "id": "imp_noise",
+                            "priority": "P1",
+                            "area": "tracking",
+                            "failure_tags": ["extra_ball"],
+                            "root_cause_module": "selection",
+                            "start_frame": 40,
+                            "end_frame": 52,
+                            "diagnosis": "Bounded action requires a bounded source evidence window.",
+                            "recommended_action": "reject_noise",
+                            "candidate_id": "noise_candidate_001",
+                            "source_packet_id": "packet_001",
+                            "false_positive_class": "extra_ball",
+                            "confidence": 0.7,
+                        }
+                    ],
+                },
+            )
+
+            with self.assertRaisesRegex(ValueError, "missing_matching_tracking_signal_label"):
+                approve_ai_improvement_actions(output_dir, run_id="run_123", improvement_ids=["imp_noise"])
+
     def test_approval_accepts_localize_ball_roi_with_visual_localization_provenance(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:
             output_dir = Path(temp_name)
@@ -5050,6 +5437,159 @@ class AiImprovementTests(unittest.TestCase):
         self.assertEqual({"selection": {"min_accept_score": 0.6}}, patch_artifact["merged_config_patch"])
         self.assertTrue(any("detector.confidence_threshold" in warning for warning in artifact["warnings"]))
         self.assertTrue(any("tracking.max_lost_frames" in warning for warning in artifact["warnings"]))
+
+    def test_approval_accepts_reject_noise_with_not_match_ball_tracking_signal_label(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_minimal_artifacts(output_dir)
+            _write_tracking_signal_labels(
+                output_dir,
+                [
+                    {
+                        "label_id": "label:spare-ball",
+                        "candidate_id": "noise_candidate_001",
+                        "match_ball_state": "not_match_ball",
+                        "interference_category": "extra_ball",
+                        "interference_subtype": "same_pitch_extra_ball",
+                        "evidence": [{"source_packet_id": "packet_001", "start_frame": 40, "end_frame": 52}],
+                    }
+                ],
+            )
+            _write_json(
+                output_dir / "ai_improvement_report.json",
+                {
+                    "schema_version": "1.0",
+                    "generated_at": "2026-06-22T00:00:00+00:00",
+                    "model": "gpt-improve",
+                    "summary": {"status": "needs_rerun"},
+                    "improvements": [
+                        {
+                            "id": "imp_noise",
+                            "priority": "P1",
+                            "area": "tracking",
+                            "failure_tags": ["extra_ball"],
+                            "root_cause_module": "selection",
+                            "start_frame": 40,
+                            "end_frame": 52,
+                            "diagnosis": "Reject a confirmed spare ball.",
+                            "recommended_action": "reject_noise",
+                            "candidate_id": "noise_candidate_001",
+                            "source_packet_id": "packet_001",
+                            "false_positive_class": "extra_ball",
+                            "evidence": [{"source_packet_id": "packet_001"}],
+                            "confidence": 0.7,
+                        }
+                    ],
+                },
+            )
+
+            artifact = approve_ai_improvement_actions(output_dir, run_id="run_123", improvement_ids=["imp_noise"])
+
+        action = artifact["approved_actions"][0]
+        self.assertEqual("reject_noise", action["approved_action"])
+        self.assertEqual("execute", action["tracking_signal_gate"]["mode"])
+        self.assertEqual(["label:spare-ball"], action["tracking_signal_gate"]["matched_label_ids"])
+        matched_label = action["tracking_signal_gate"]["matched_labels"][0]
+        self.assertEqual("not_match_ball", matched_label["match_ball_state"])
+        self.assertEqual("extra_ball", matched_label["interference_category"])
+        self.assertEqual("same_pitch_extra_ball", matched_label["interference_subtype"])
+        self.assertEqual([{"start_frame": 40, "end_frame": 52}], matched_label["evidence_windows"])
+
+    def test_approval_rejects_reject_noise_when_tracking_signal_says_not_visible(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_minimal_artifacts(output_dir)
+            _write_tracking_signal_labels(
+                output_dir,
+                [
+                    {
+                        "label_id": "label:lost-gap",
+                        "candidate_id": "noise_candidate_001",
+                        "match_ball_state": "not_visible",
+                        "interference_category": "tracking_dynamics",
+                        "interference_subtype": "lost_gap",
+                        "evidence": [{"source_packet_id": "packet_001", "start_frame": 40, "end_frame": 52}],
+                    }
+                ],
+            )
+            _write_json(
+                output_dir / "ai_improvement_report.json",
+                {
+                    "schema_version": "1.0",
+                    "generated_at": "2026-06-22T00:00:00+00:00",
+                    "model": "gpt-improve",
+                    "summary": {"status": "needs_rerun"},
+                    "improvements": [
+                        {
+                            "id": "imp_noise",
+                            "priority": "P1",
+                            "area": "tracking",
+                            "failure_tags": ["extra_ball"],
+                            "root_cause_module": "selection",
+                            "start_frame": 40,
+                            "end_frame": 52,
+                            "diagnosis": "Lost windows must not become noise rejection.",
+                            "recommended_action": "reject_noise",
+                            "candidate_id": "noise_candidate_001",
+                            "source_packet_id": "packet_001",
+                            "false_positive_class": "extra_ball",
+                            "evidence": [{"source_packet_id": "packet_001"}],
+                            "confidence": 0.7,
+                        }
+                    ],
+                },
+            )
+
+            with self.assertRaisesRegex(ValueError, "tracking signal gate"):
+                approve_ai_improvement_actions(output_dir, run_id="run_123", improvement_ids=["imp_noise"])
+
+    def test_approval_rejects_reject_noise_when_tracking_signal_lost_gap_even_if_not_match_ball(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_minimal_artifacts(output_dir)
+            _write_tracking_signal_labels(
+                output_dir,
+                [
+                    {
+                        "label_id": "label:contradictory-lost-gap",
+                        "candidate_id": "noise_candidate_001",
+                        "match_ball_state": "not_match_ball",
+                        "interference_category": "tracking_dynamics",
+                        "interference_subtype": "lost_gap",
+                        "evidence": [{"source_packet_id": "packet_001", "start_frame": 40, "end_frame": 52}],
+                    }
+                ],
+            )
+            _write_json(
+                output_dir / "ai_improvement_report.json",
+                {
+                    "schema_version": "1.0",
+                    "generated_at": "2026-06-22T00:00:00+00:00",
+                    "model": "gpt-improve",
+                    "summary": {"status": "needs_rerun"},
+                    "improvements": [
+                        {
+                            "id": "imp_noise",
+                            "priority": "P1",
+                            "area": "tracking",
+                            "failure_tags": ["extra_ball"],
+                            "root_cause_module": "selection",
+                            "start_frame": 40,
+                            "end_frame": 52,
+                            "diagnosis": "Lost-gap evidence must not become reject-noise.",
+                            "recommended_action": "reject_noise",
+                            "candidate_id": "noise_candidate_001",
+                            "source_packet_id": "packet_001",
+                            "false_positive_class": "extra_ball",
+                            "evidence": [{"source_packet_id": "packet_001"}],
+                            "confidence": 0.7,
+                        }
+                    ],
+                },
+            )
+
+            with self.assertRaisesRegex(ValueError, "lost_gap"):
+                approve_ai_improvement_actions(output_dir, run_id="run_123", improvement_ids=["imp_noise"])
 
     def test_approving_adjust_follow_cam_writes_follow_cam_rerender_plan(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:
@@ -5804,6 +6344,19 @@ def _write_minimal_artifacts(output_dir: Path) -> None:
         },
     )
     _write_camera_motion_event(output_dir, frame=40, severity="warn", max_step_px=110.0)
+
+
+def _write_tracking_signal_labels(output_dir: Path, labels: list[dict[str, object]]) -> None:
+    _write_json(
+        output_dir / "noise_interference_labels.json",
+        {
+            "schema_version": "1.0",
+            "generated_at": "2026-06-22T00:00:00+00:00",
+            "summary": {"status": "ok", "label_count": len(labels)},
+            "labels": labels,
+            "validation_errors": [],
+        },
+    )
 
 
 def _write_long_lost_gap_review_inputs(output_dir: Path, *, start: int, end: int, total_frames: int) -> None:
