@@ -1055,12 +1055,18 @@ class AiImprovementQualityGateTests(unittest.TestCase):
                 output_dir / "review_packets.json",
                 {"media_integrity": {"status": "ok", "image_count": 1, "low_information_image_count": 0}},
             )
+            _write_json(output_dir / "ball_audit.json", {"summary": {"review_event_count": 0, "lost_gap_count": 0}, "review_events": []})
+            _write_json(output_dir / "camera_motion_audit.json", {"summary": {"status": "ok", "review_event_count": 0}, "review_events": []})
+            _write_json(output_dir / "event_candidates.json", {"summary": {"candidate_count": 0}, "candidates": []})
             _write_json(
                 output_dir / "final_ai_improvement_artifact_manifest.json",
                 {
                     "final_selected_artifacts": [
                         {"candidate_id": "candidate-good", "type": "video", "path": "final/selected.mp4"}
-                    ]
+                    ],
+                    "comparison_reports": [
+                        {"candidate_id": "candidate-good", "problem_type": "follow_cam", "status": "pass"}
+                    ],
                 },
             )
 
