@@ -168,6 +168,19 @@ MODEL_POLICY_TEXT = (
     "review-only summaries; they must not manufacture executable approvals or candidate artifacts."
 )
 
+STRUCTURED_ACTION_CONTRACT_TEXT = (
+    "Prefer structured_action for every executable improvement. structured_action must be a JSON object with one "
+    "action name key recommended_action, action, name, type, or value, plus payload constraints. Put action-specific "
+    "fields directly on structured_action or inside structured_action.payload; payload may include only "
+    "problem_type, candidate_id, source_packet_id, visual_review_id, visual_localization_id, event_candidate_id, "
+    "source_event_candidate_id, camera_motion_event_id, camera_motion_severity, start_frame, end_frame, "
+    "rerun_scope, local_search_roi, likely_ball_region, false_positive_class, config_patch, suggested_window, "
+    "clip_action, follow_cam_rerender_plan, expected_artifact, comparison_criteria, evidence, evidence_payload, "
+    "and frame_dimensions. top-level explicit fields take precedence over structured_action payload fields. "
+    "If recommended_action is also present at top level, it must match the structured_action action exactly "
+    "after legacy alias normalization; conflicting action channels are contract gaps and become manual_review."
+)
+
 LANE_PROMPT_CONTRACTS: Mapping[str, str] = MappingProxyType(
     {
         "missing_ball": (
@@ -232,7 +245,7 @@ def build_prompt_contract_text() -> str:
         "local_search_roi is still missing; it must not be treated as an executable approved_action. "
         "Use rerun_ball_window for executable missing-ball reruns; legacy targeted_rerun may appear in older "
         "artifacts but should be treated as rerun_ball_window and is not part of the public executable set. "
-        f"{schema_hints} {lanes} {MODEL_POLICY_TEXT} "
+        f"{STRUCTURED_ACTION_CONTRACT_TEXT} {schema_hints} {lanes} {MODEL_POLICY_TEXT} "
         "config_patch is advisory only and may only suggest known fields under follow_cam, postprocess, "
         "scene_bias.dynamic_air_recovery, selection, or tracking. "
         "Do not include image base64 or claim files that are not present in the supplied context."
