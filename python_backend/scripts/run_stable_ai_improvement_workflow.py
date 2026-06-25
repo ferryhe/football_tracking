@@ -282,6 +282,12 @@ def run_workflow(
         final_manifest=final_manifest,
         quality_gate_summary=quality_gate["summary"],
     )
+    acceptance_summary = _acceptance_summary(
+        workflow_summary=workflow_summary,
+        final_manifest=final_manifest,
+        quality_gate_summary=quality_gate["summary"],
+        quality_gate_checks=quality_gate.get("checks", {}),
+    )
     produced_artifacts = _produced_artifacts(output_dir, extra_names=[report_name])
     report = {
         "schema_version": SCHEMA_VERSION,
@@ -308,6 +314,7 @@ def run_workflow(
             total_elapsed_seconds=perf_counter() - workflow_timer,
         ),
         "workflow_summary": workflow_summary,
+        "acceptance_summary": acceptance_summary,
         "produced_artifacts": produced_artifacts,
         "quality_gate": {
             "mode": gate_mode,
@@ -1899,6 +1906,312 @@ def _output_roles_by_problem_type() -> dict[str, str]:
         if isinstance(problem_type, str) and problem_type in WORKFLOW_PROBLEM_TYPES:
             roles[problem_type] = role
     return {problem_type: roles[problem_type] for problem_type in WORKFLOW_PROBLEM_TYPES if problem_type in roles}
+
+
+def _acceptance_summary(
+    *,
+    workflow_summary: dict[str, Any],
+    final_manifest: dict[str, Any],
+    quality_gate_summary: dict[str, Any],
+    quality_gate_checks: dict[str, Any],
+) -> dict[str, Any]:
+    stable_summary = _stable_final_outputs_summary_from_gate(quality_gate_summary, quality_gate_checks)
+    quality_gate_status = _normalized_acceptance_status(quality_gate_summary.get("status"))
+    stable_status = _normalized_acceptance_status(stable_summary.get("status"))
+    reasons = _acceptance_reasons(stable_summary)
+    final_outputs = _acceptance_final_outputs(final_manifest)
+    lanes = _acceptance_ai_lanes(workflow_summary)
+    manifest_status = "pass" if final_outputs["selected_artifact_count"] > 0 else "unavailable"
+    lane_status = _acceptance_lane_status(lanes)
+    status = _worst_acceptance_status([quality_gate_status, stable_status, manifest_status, lane_status])
+    blockers = _acceptance_blockers(
+        quality_gate_status=quality_gate_status,
+        quality_gate_summary=quality_gate_summary,
+        stable_summary=stable_summary,
+        final_outputs=final_outputs,
+        lanes=lanes,
+        reasons=reasons,
+    )
+    status = _worst_acceptance_status([status, *[blocker.get("status", "unavailable") for blocker in blockers]])
+    recommended_actions = _acceptance_recommended_actions(
+        status=status,
+        blockers=blockers,
+        lanes=lanes,
+        final_outputs=final_outputs,
+    )
+    return {
+        "status": status,
+        "deliverable": status == "pass",
+        "quality_gate": {
+            "status": quality_gate_status,
+            "passed": quality_gate_status == "pass",
+        },
+        "stable_final_outputs": stable_summary,
+        "final_outputs": final_outputs,
+        "blockers": blockers,
+        "reasons": reasons,
+        "ai_lanes": lanes,
+        "recommended_actions": recommended_actions,
+    }
+
+
+def _stable_final_outputs_summary_from_gate(
+    quality_gate_summary: dict[str, Any],
+    quality_gate_checks: dict[str, Any],
+) -> dict[str, Any]:
+    summary = quality_gate_summary.get("stable_final_outputs")
+    if isinstance(summary, dict):
+        return dict(summary)
+    check = quality_gate_checks.get("stable_final_outputs") if isinstance(quality_gate_checks, dict) else {}
+    if isinstance(check, dict):
+        check_summary = check.get("summary")
+        if isinstance(check_summary, dict):
+            return dict(check_summary)
+        return {"status": check.get("status"), "reasons": [check.get("reason")] if isinstance(check.get("reason"), str) else []}
+    return {"status": "unavailable", "reasons": ["stable_final_outputs evidence unavailable"]}
+
+
+def _acceptance_final_outputs(final_manifest: dict[str, Any]) -> dict[str, Any]:
+    selected = _dict_list(final_manifest.get("final_selected_artifacts"))
+    tracks = [item for item in selected if _acceptance_artifact_type(item) == "track"]
+    highlights = [
+        item
+        for item in selected
+        if _acceptance_artifact_type(item) == "clip"
+        or _first_string(item, ("problem_type",)) == "highlight"
+        or _first_string(item, ("output_role",)) == "highlight_clip"
+    ]
+    highlight_ids = {id(item) for item in highlights}
+    videos = [item for item in selected if _acceptance_artifact_type(item) == "video" and id(item) not in highlight_ids]
+    return {
+        "selected_artifact_count": len(selected),
+        "selected_media_count": len(videos) + len(highlights),
+        "selected_track_count": len(tracks),
+        "selected_video_count": len(videos),
+        "selected_highlight_count": len(highlights),
+        "selected_paths": _acceptance_paths(selected),
+        "track_paths": _acceptance_paths(tracks),
+        "video_paths": _acceptance_paths(videos),
+        "highlight_paths": _acceptance_paths(highlights),
+    }
+
+
+def _acceptance_ai_lanes(workflow_summary: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    requirements = workflow_summary.get("finalization_requirements")
+    if not isinstance(requirements, dict):
+        requirements = {}
+    counts_by_problem = requirements.get("by_problem_type") if isinstance(requirements.get("by_problem_type"), dict) else {}
+    pending = _dict_list(requirements.get("pending_finalization"))
+    pending_by_problem: dict[str, list[str]] = {problem_type: [] for problem_type in WORKFLOW_PROBLEM_TYPES}
+    for item in pending:
+        problem_type = _first_string(item, ("problem_type",))
+        candidate_id = _first_string(item, ("candidate_id", "id"))
+        if problem_type in pending_by_problem and candidate_id is not None:
+            pending_by_problem[problem_type].append(candidate_id)
+    lanes: dict[str, dict[str, Any]] = {}
+    for problem_type in WORKFLOW_PROBLEM_TYPES:
+        counts = counts_by_problem.get(problem_type) if isinstance(counts_by_problem.get(problem_type), dict) else {}
+        selected_count = _int_value(counts.get("selected_approval_count"))
+        consumed_count = _int_value(counts.get("consumed_approval_count"))
+        pending_count = _int_value(counts.get("pending_finalization_count"))
+        lanes[problem_type] = {
+            "needs_approval": selected_count > consumed_count,
+            "needs_finalization": pending_count > 0,
+            "selected_approval_count": selected_count,
+            "consumed_approval_count": consumed_count,
+            "candidate_output_count": _int_value(counts.get("candidate_output_count")),
+            "comparison_report_count": _int_value(counts.get("comparison_report_count")),
+            "pending_finalization_count": pending_count,
+            "pending_candidate_ids": pending_by_problem[problem_type],
+        }
+    return lanes
+
+
+def _acceptance_blockers(
+    *,
+    quality_gate_status: str,
+    quality_gate_summary: dict[str, Any],
+    stable_summary: dict[str, Any],
+    final_outputs: dict[str, Any],
+    lanes: dict[str, dict[str, Any]],
+    reasons: list[str],
+) -> list[dict[str, str]]:
+    blockers: list[dict[str, str]] = []
+    if final_outputs["selected_artifact_count"] == 0:
+        blockers.append(
+            {
+                "area": "final_outputs",
+                "status": "unavailable",
+                "reason": _reason_for_area(reasons, "final") or "final_selected_artifacts is missing or empty",
+            }
+        )
+    for status_key, area, token in (
+        ("track_quality_status", "ball_tracking", "track"),
+        ("camera_motion_status", "camera_stability", "camera"),
+        ("highlight_coverage_status", "highlight_coverage", "highlight"),
+        ("candidate_comparison_status", "stability", "candidate"),
+        ("media_status", "final_outputs", "final_media"),
+        ("review_media_status", "stability", "review_media"),
+    ):
+        check_status = _normalized_acceptance_status(stable_summary.get(status_key))
+        if check_status == "pass":
+            continue
+        reason = _reason_for_final_media(reasons) if token == "final_media" else _reason_for_area(reasons, token)
+        blockers.append(
+            {
+                "area": area,
+                "status": check_status,
+                "reason": reason or f"{status_key.removesuffix('_status')} {check_status}",
+            }
+        )
+    for problem_type, lane in lanes.items():
+        if lane["needs_approval"]:
+            blockers.append(
+                {
+                    "area": problem_type,
+                    "status": "unavailable",
+                    "reason": f"{problem_type} approval is selected but not consumed",
+                }
+            )
+        if lane["needs_finalization"]:
+            blockers.append(
+                {
+                    "area": problem_type,
+                    "status": "unavailable",
+                    "reason": f"{problem_type} candidate requires finalization",
+                }
+            )
+    if quality_gate_status != "pass":
+        blockers.append(
+            {
+                "area": "quality_gate",
+                "status": quality_gate_status,
+                "reason": _quality_gate_acceptance_reason(quality_gate_summary, quality_gate_status),
+            }
+        )
+    return _unique_blockers(blockers)
+
+
+def _acceptance_recommended_actions(
+    *,
+    status: str,
+    blockers: list[dict[str, str]],
+    lanes: dict[str, dict[str, Any]],
+    final_outputs: dict[str, Any],
+) -> list[str]:
+    actions: list[str] = []
+    if lanes["missing_ball"]["needs_approval"]:
+        _append_unique(actions, "approve_missing_ball_candidate")
+    if any(lane["needs_finalization"] for lane in lanes.values()):
+        _append_unique(actions, "finalize_candidates")
+    for blocker in blockers:
+        area = blocker.get("area")
+        blocker_status = blocker.get("status")
+        if area == "camera_stability" and blocker_status in {"warn", "fail", "unavailable"}:
+            _append_unique(actions, "review_camera_motion")
+        if area == "highlight_coverage" and blocker_status in {"warn", "fail", "unavailable"}:
+            _append_unique(actions, "render_highlight_candidate")
+    if final_outputs["selected_artifact_count"] == 0 and not actions:
+        _append_unique(actions, "rerun_with_provider")
+    if status != "pass" and not actions:
+        _append_unique(actions, "rerun_with_provider")
+    return actions
+
+
+def _acceptance_reasons(stable_summary: dict[str, Any]) -> list[str]:
+    reasons = _string_values(stable_summary.get("reasons"))
+    if not reasons and _normalized_acceptance_status(stable_summary.get("status")) != "pass":
+        reasons.append(f"stable_final_outputs {stable_summary.get('status') or 'unavailable'}")
+    return reasons
+
+
+def _acceptance_artifact_type(item: dict[str, Any]) -> str | None:
+    artifact_type = _first_string(item, ("type", "media_type"))
+    if artifact_type in {"track", "video", "clip"}:
+        return artifact_type
+    output_role = _first_string(item, ("output_role",))
+    role_spec = FINALIZATION_OUTPUT_ROLES.get(output_role or "")
+    role_type = role_spec.get("type") if isinstance(role_spec, dict) else None
+    return role_type if isinstance(role_type, str) else None
+
+
+def _acceptance_paths(items: list[dict[str, Any]]) -> list[str]:
+    return [path for item in items if (path := _first_string(item, ("path", "artifact_path", "output_path")))]
+
+
+def _reason_for_area(reasons: list[str], token: str) -> str | None:
+    normalized_token = token.casefold()
+    for reason in reasons:
+        if normalized_token in reason.casefold():
+            return reason
+    return None
+
+
+def _reason_for_final_media(reasons: list[str]) -> str | None:
+    for token in ("video", "clip", "final_outputs", "final"):
+        reason = _reason_for_area(reasons, token)
+        if reason is not None:
+            return reason
+    for reason in reasons:
+        if "review_media" not in reason.casefold() and "media" in reason.casefold():
+            return reason
+    return None
+
+
+def _quality_gate_acceptance_reason(summary: dict[str, Any], status: str) -> str:
+    failed_count = _int_value(summary.get("failed_check_count"))
+    warning_count = _int_value(summary.get("warning_count"))
+    if failed_count:
+        return f"quality gate failed {failed_count} check(s)"
+    if warning_count:
+        return f"quality gate has {warning_count} warning/unavailable check(s)"
+    return f"quality gate {status}"
+
+
+def _acceptance_lane_status(lanes: dict[str, dict[str, Any]]) -> str:
+    for lane in lanes.values():
+        if lane.get("needs_approval") or lane.get("needs_finalization"):
+            return "unavailable"
+    return "pass"
+
+
+def _normalized_acceptance_status(value: Any) -> str:
+    if isinstance(value, str) and value in {"pass", "warn", "fail", "unavailable"}:
+        return value
+    return "unavailable"
+
+
+def _worst_acceptance_status(statuses: list[str]) -> str:
+    rank = {"pass": 0, "warn": 1, "unavailable": 2, "fail": 3}
+    valid = [status for status in statuses if status in rank]
+    if not valid:
+        return "unavailable"
+    return max(valid, key=lambda status: rank[status])
+
+
+def _unique_blockers(blockers: list[dict[str, str]]) -> list[dict[str, str]]:
+    result: list[dict[str, str]] = []
+    seen: set[tuple[str, str, str]] = set()
+    for blocker in blockers:
+        key = (blocker["area"], blocker["status"], blocker["reason"])
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(blocker)
+    return result
+
+
+def _append_unique(items: list[str], value: str) -> None:
+    if value not in items:
+        items.append(value)
+
+
+def _int_value(value: Any) -> int:
+    if isinstance(value, bool):
+        return 0
+    if isinstance(value, int):
+        return value
+    return 0
 
 
 def _action_problem_type(action: dict[str, Any]) -> str:

@@ -10,6 +10,7 @@ from unittest.mock import patch
 
 from football_tracking.ai_candidate_lifecycle import AI_CANDIDATE_LIFECYCLE_REPORT_NAME, build_ai_candidate_lifecycle
 from scripts.run_stable_ai_improvement_workflow import (
+    _acceptance_summary,
     _approved_child_rerun_stage,
     _final_artifact_manifest_stage,
     _load_selected_approved_actions,
@@ -1963,6 +1964,258 @@ class StableAiImprovementWorkflowTests(unittest.TestCase):
         self.assertEqual(lifecycle["summary"], report["ai_candidate_lifecycle"]["summary"])
         self.assertEqual(lifecycle_written["summary"], report["ai_candidate_lifecycle"]["summary"])
         self.assertEqual(report["ai_candidate_lifecycle"], written["ai_candidate_lifecycle"])
+        self.assertIn("acceptance_summary", report)
+        self.assertEqual(report["acceptance_summary"], written["acceptance_summary"])
+
+    def test_acceptance_summary_marks_empty_final_selection_unavailable_with_blocker(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_tracks(output_dir)
+
+            report = run_workflow(output_dir=output_dir, dry_run=True)
+
+        acceptance = report["acceptance_summary"]
+        self.assertEqual("unavailable", acceptance["status"])
+        self.assertFalse(acceptance["deliverable"])
+        self.assertEqual(0, acceptance["final_outputs"]["selected_artifact_count"])
+        self.assertEqual(0, acceptance["final_outputs"]["selected_track_count"])
+        self.assertEqual(0, acceptance["final_outputs"]["selected_video_count"])
+        self.assertEqual(0, acceptance["final_outputs"]["selected_highlight_count"])
+        self.assertIn("final_selected_artifacts is missing or empty", acceptance["reasons"])
+        self.assertIn(
+            {"area": "final_outputs", "status": "unavailable", "reason": "final_selected_artifacts is missing or empty"},
+            acceptance["blockers"],
+        )
+
+    def test_acceptance_summary_passes_clean_stable_final_outputs(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_tracks(output_dir)
+            _write_finalized_manifest(
+                output_dir,
+                [
+                    ("missing_ball", "missing-candidate-1", "missing_1", "missing_ball_track", "track", "ai_candidates/missing_ball/missing-candidate-1/ball_track.csv"),
+                    ("follow_cam", "follow-cam-1", "camera_1", "follow_cam_video", "video", "ai_candidates/follow_cam/follow-cam-1/follow_cam.mp4"),
+                    ("highlight", "highlight-candidate-1", "highlight_1", "highlight_clip", "video", "ai_candidates/highlight/highlight-candidate-1/highlight.mp4"),
+                ],
+            )
+
+            with patch(
+                "scripts.run_stable_ai_improvement_workflow.write_ai_improvement_quality_gate",
+                return_value=_fake_quality_gate(status="pass", stable_status="pass"),
+            ):
+                report = run_workflow(output_dir=output_dir, dry_run=False)
+
+        acceptance = report["acceptance_summary"]
+        self.assertEqual("pass", acceptance["status"])
+        self.assertTrue(acceptance["deliverable"])
+        self.assertEqual({"status": "pass", "passed": True}, acceptance["quality_gate"])
+        self.assertEqual(3, acceptance["final_outputs"]["selected_artifact_count"])
+        self.assertEqual(1, acceptance["final_outputs"]["selected_track_count"])
+        self.assertEqual(1, acceptance["final_outputs"]["selected_video_count"])
+        self.assertEqual(1, acceptance["final_outputs"]["selected_highlight_count"])
+        self.assertEqual(
+            [
+                "ai_candidates/missing_ball/missing-candidate-1/ball_track.csv",
+                "ai_candidates/follow_cam/follow-cam-1/follow_cam.mp4",
+                "ai_candidates/highlight/highlight-candidate-1/highlight.mp4",
+            ],
+            acceptance["final_outputs"]["selected_paths"],
+        )
+        self.assertEqual([], acceptance["blockers"])
+        self.assertEqual([], acceptance["recommended_actions"])
+
+    def test_acceptance_summary_reports_camera_motion_blocker_and_action(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_tracks(output_dir)
+            _write_finalized_manifest(
+                output_dir,
+                [
+                    ("follow_cam", "follow-cam-1", "camera_1", "follow_cam_video", "video", "ai_candidates/follow_cam/follow-cam-1/follow_cam.mp4"),
+                ],
+            )
+
+            with patch(
+                "scripts.run_stable_ai_improvement_workflow.write_ai_improvement_quality_gate",
+                return_value=_fake_quality_gate(
+                    status="warn",
+                    stable_status="warn",
+                    camera_motion_status="warn",
+                    reasons=["camera_motion warn"],
+                ),
+            ):
+                report = run_workflow(output_dir=output_dir, dry_run=False)
+
+        acceptance = report["acceptance_summary"]
+        self.assertEqual("warn", acceptance["status"])
+        self.assertIn(
+            {"area": "camera_stability", "status": "warn", "reason": "camera_motion warn"},
+            acceptance["blockers"],
+        )
+        self.assertIn("review_camera_motion", acceptance["recommended_actions"])
+
+    def test_acceptance_summary_reports_camera_motion_fail_blocker_and_action(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_tracks(output_dir)
+            _write_finalized_manifest(
+                output_dir,
+                [
+                    ("follow_cam", "follow-cam-1", "camera_1", "follow_cam_video", "video", "ai_candidates/follow_cam/follow-cam-1/follow_cam.mp4"),
+                ],
+            )
+
+            with patch(
+                "scripts.run_stable_ai_improvement_workflow.write_ai_improvement_quality_gate",
+                return_value=_fake_quality_gate(
+                    status="fail",
+                    stable_status="fail",
+                    camera_motion_status="fail",
+                    reasons=["camera_motion fail"],
+                ),
+            ):
+                report = run_workflow(output_dir=output_dir, dry_run=False)
+
+        acceptance = report["acceptance_summary"]
+        self.assertEqual("fail", acceptance["status"])
+        self.assertIn(
+            {"area": "camera_stability", "status": "fail", "reason": "camera_motion fail"},
+            acceptance["blockers"],
+        )
+        self.assertIn("review_camera_motion", acceptance["recommended_actions"])
+
+    def test_acceptance_summary_blocks_pending_finalization_even_when_gate_passes(self) -> None:
+        stable_summary = _stable_pass_summary()
+
+        acceptance = _acceptance_summary(
+            workflow_summary={
+                "finalization_requirements": {
+                    "by_problem_type": {
+                        "missing_ball": {
+                            "selected_approval_count": 1,
+                            "consumed_approval_count": 1,
+                            "candidate_output_count": 1,
+                            "comparison_report_count": 1,
+                            "pending_finalization_count": 1,
+                        }
+                    },
+                    "pending_finalization": [
+                        {"problem_type": "missing_ball", "candidate_id": "missing-candidate-1"}
+                    ],
+                }
+            },
+            final_manifest={
+                "final_selected_artifacts": [
+                    {"candidate_id": "follow-cam-1", "type": "video", "path": "final/follow_cam.mp4"}
+                ]
+            },
+            quality_gate_summary={"status": "pass", "stable_final_outputs": stable_summary},
+            quality_gate_checks={"stable_final_outputs": {"status": "pass", "summary": stable_summary}},
+        )
+
+        self.assertEqual("unavailable", acceptance["status"])
+        self.assertFalse(acceptance["deliverable"])
+        self.assertIn(
+            {"area": "missing_ball", "status": "unavailable", "reason": "missing_ball candidate requires finalization"},
+            acceptance["blockers"],
+        )
+        self.assertIn("finalize_candidates", acceptance["recommended_actions"])
+
+    def test_acceptance_summary_downgrades_malformed_stable_pass_with_missing_area_statuses(self) -> None:
+        acceptance = _acceptance_summary(
+            workflow_summary={"finalization_requirements": {"by_problem_type": {}}},
+            final_manifest={
+                "final_selected_artifacts": [
+                    {"candidate_id": "follow-cam-1", "type": "video", "path": "final/follow_cam.mp4"}
+                ]
+            },
+            quality_gate_summary={"status": "pass", "stable_final_outputs": {"status": "pass"}},
+            quality_gate_checks={"stable_final_outputs": {"status": "pass", "summary": {"status": "pass"}}},
+        )
+
+        self.assertEqual("unavailable", acceptance["status"])
+        self.assertFalse(acceptance["deliverable"])
+        self.assertTrue(acceptance["blockers"])
+        self.assertTrue(acceptance["recommended_actions"])
+
+    def test_acceptance_summary_explains_quality_gate_warning_without_stable_blocker(self) -> None:
+        stable_summary = _stable_pass_summary()
+
+        acceptance = _acceptance_summary(
+            workflow_summary={"finalization_requirements": {"by_problem_type": {}}},
+            final_manifest={
+                "final_selected_artifacts": [
+                    {"candidate_id": "follow-cam-1", "type": "video", "path": "final/follow_cam.mp4"}
+                ]
+            },
+            quality_gate_summary={"status": "warn", "warning_count": 1, "stable_final_outputs": stable_summary},
+            quality_gate_checks={"stable_final_outputs": {"status": "pass", "summary": stable_summary}},
+        )
+
+        self.assertEqual("warn", acceptance["status"])
+        self.assertFalse(acceptance["deliverable"])
+        self.assertIn(
+            {"area": "quality_gate", "status": "warn", "reason": "quality gate has 1 warning/unavailable check(s)"},
+            acceptance["blockers"],
+        )
+        self.assertIn("rerun_with_provider", acceptance["recommended_actions"])
+
+    def test_acceptance_summary_reports_pending_finalization_per_lane(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            root = Path(temp_name)
+            output_dir = root / "outputs" / "baseline"
+            _write_tracks(output_dir)
+            input_video = root / "data" / "input.mp4"
+            config_path = _write_recovery_config(root, output_dir)
+            _write_json(
+                output_dir / "run_manifest.json",
+                {"config_path": str(config_path), "input_video": str(input_video)},
+            )
+            approved_path = output_dir / "approved_actions.json"
+            _write_json(
+                approved_path,
+                {
+                    "approved_actions": [
+                        _approval("missing_1", start=10, end=20),
+                        _noise_approval("noise_1", start=30, end=40),
+                        _adjust_follow_cam_approval("camera_1"),
+                        _highlight_approval("highlight_1", start=90, end=120),
+                    ]
+                },
+            )
+
+            with (
+                patch(
+                    "scripts.run_stable_ai_improvement_workflow.execute_missing_ball_candidate",
+                    return_value=_lane_comparison_report("missing_ball", "missing-candidate-1", "missing_1"),
+                ),
+                patch(
+                    "scripts.run_stable_ai_improvement_workflow.execute_noise_cleanup_candidate",
+                    return_value=_lane_comparison_report("noise", "noise-candidate-1", "noise_1"),
+                ),
+                patch(
+                    "scripts.run_stable_ai_improvement_workflow.execute_follow_cam_candidate",
+                    return_value=_lane_comparison_report("follow_cam", "follow-cam-1", "camera_1"),
+                ),
+                patch(
+                    "scripts.run_stable_ai_improvement_workflow.execute_highlight_candidate",
+                    return_value=_highlight_comparison_report(),
+                ),
+            ):
+                report = run_workflow(
+                    output_dir=output_dir,
+                    input_video=input_video,
+                    dry_run=False,
+                    approved_actions_path=approved_path,
+                    approval_ids=["missing_1", "noise_1", "camera_1", "highlight_1"],
+                )
+
+        lanes = report["acceptance_summary"]["ai_lanes"]
+        for lane in ("missing_ball", "noise", "follow_cam", "highlight"):
+            self.assertTrue(lanes[lane]["needs_finalization"])
+            self.assertEqual(1, lanes[lane]["pending_finalization_count"])
+        self.assertIn("finalize_candidates", report["acceptance_summary"]["recommended_actions"])
 
     def test_workflow_report_summarizes_all_lane_candidates_and_finalization_requirements(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:
@@ -2407,6 +2660,123 @@ def _highlight_comparison_report(status: str = "pass") -> dict[str, object]:
         },
         "checks": [{"name": "fixture", "status": status}],
     }
+
+
+def _fake_quality_gate(
+    *,
+    status: str,
+    stable_status: str,
+    camera_motion_status: str = "pass",
+    reasons: list[str] | None = None,
+) -> dict[str, object]:
+    stable_summary = {
+        "status": stable_status,
+        "selected_media_count": 2,
+        "selected_track_count": 1,
+        "selected_video_count": 1,
+        "selected_clip_count": 1,
+        "track_quality_status": "pass",
+        "camera_motion_status": camera_motion_status,
+        "candidate_comparison_status": "pass",
+        "highlight_coverage_status": "pass",
+        "review_media_status": "pass",
+        "media_status": "pass" if stable_status == "pass" else stable_status,
+        "reasons": list(reasons or []),
+    }
+    return {
+        "summary": {
+            "status": status,
+            "workflow_status": "succeeded",
+            "stable_final_outputs": stable_summary,
+        },
+        "checks": {
+            "stable_final_outputs": {"status": stable_status, "summary": stable_summary},
+            "camera_regression": {
+                "status": camera_motion_status,
+                "reason": "camera_motion warn" if camera_motion_status != "pass" else "camera motion ok",
+            },
+        },
+    }
+
+
+def _stable_pass_summary() -> dict[str, object]:
+    return {
+        "status": "pass",
+        "selected_media_count": 1,
+        "selected_track_count": 0,
+        "selected_video_count": 1,
+        "selected_clip_count": 0,
+        "track_quality_status": "pass",
+        "camera_motion_status": "pass",
+        "candidate_comparison_status": "pass",
+        "highlight_coverage_status": "pass",
+        "review_media_status": "pass",
+        "media_status": "pass",
+        "reasons": [],
+    }
+
+
+def _write_finalized_manifest(output_dir: Path, final_artifacts: list[tuple[str, str, str, str, str, str]]) -> None:
+    candidate_outputs = []
+    selected = []
+    consumed_approvals = []
+    comparison_reports = []
+    for problem_type, candidate_id, approval_id, output_role, artifact_type, path in final_artifacts:
+        candidate_outputs.append(
+            {
+                "candidate_id": candidate_id,
+                "id": candidate_id,
+                "problem_type": problem_type,
+                "path": path,
+                "type": artifact_type,
+            }
+        )
+        selected.append(
+            {
+                "candidate_id": candidate_id,
+                "approval_id": approval_id,
+                "problem_type": problem_type,
+                "output_role": output_role,
+                "path": path,
+                "type": artifact_type,
+                "operator_decision": {
+                    "decision": "promote",
+                    "candidate_id": candidate_id,
+                    "approval_id": approval_id,
+                },
+            }
+        )
+        consumed_approvals.append({"approval_id": approval_id, "candidate_id": candidate_id, "status": "consumed"})
+        if problem_type == "highlight":
+            comparison_reports.append(_highlight_comparison_report())
+        else:
+            comparison_reports.append(_lane_comparison_report(problem_type, candidate_id, approval_id))
+    _write_json(
+        output_dir / "final_ai_improvement_artifact_manifest.json",
+        {
+            "schema_version": "1.0",
+            "baseline_output": {"path": str(output_dir), "status": "baseline"},
+            "candidate_outputs": candidate_outputs,
+            "final_selected_artifacts": selected,
+            "consumed_approvals": consumed_approvals,
+            "comparison_reports": comparison_reports,
+            "quality_gate_status": {"status": "pass"},
+            "rejected_candidates": [],
+            "pending_candidates": [],
+            "unsupported_candidates": [],
+            "resolved_noop_candidates": [],
+            "warnings": [],
+            "summary": {
+                "candidate_output_count": len(candidate_outputs),
+                "final_artifact_count": len(selected),
+                "rejected_candidate_count": 0,
+                "pending_candidate_count": 0,
+                "unsupported_candidate_count": 0,
+                "resolved_noop_candidate_count": 0,
+                "warning_count": 0,
+            },
+        },
+    )
 
 
 def _write_json(path: Path, payload: object) -> None:
