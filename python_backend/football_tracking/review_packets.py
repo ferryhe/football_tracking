@@ -14,6 +14,7 @@ from football_tracking.media_integrity import (
     review_source_provenance,
     summarize_media_integrity,
 )
+from football_tracking.tracking_signal_prelabels import write_tracking_signal_prelabels
 
 SCHEMA_VERSION = "1.0"
 DEFAULT_PRE_ROLL_FRAMES = 30
@@ -27,6 +28,8 @@ MICRO_PACKET_TARGET_FRAMES = 64
 MICRO_PACKET_MAX_FRAMES = 96
 FRAME_SAMPLES_PER_PACKET = 5
 CONTACT_SHEET_SEEK_PREROLL_FRAMES = 120
+MAX_CONTEXT_DETECTOR_CANDIDATES_PER_FRAME = 5
+NEARBY_REJECTED_CANDIDATE_MAX_DISTANCE_PX = 64.0
 
 PRIORITY_RANK = {"none": 0, "low": 1, "medium": 2, "high": 3}
 TRIGGER_TYPE_RANK = {
@@ -49,15 +52,16 @@ def build_review_packet_report(
     output_dir = Path(output_dir)
     track_rows = _read_track_rows(_preferred_track_path(output_dir))
     frame_bounds = _frame_bounds(track_rows)
-    sources = _packet_sources(output_dir, max_packets=max_packets)
+    selected_sources = _packet_sources(output_dir, max_packets=max_packets)[: max(0, max_packets)]
+    windows = [_expanded_window(source, frame_bounds) for source in selected_sources]
+    debug_candidates = _read_debug_candidate_scores(output_dir / "debug.jsonl", windows=windows)
     review_source_input = input_video
     input_video = _resolve_input_video(output_dir, input_video)
     follow_cam_video = _resolve_follow_cam_video(output_dir, follow_cam_video)
 
     packets: list[dict[str, Any]] = []
     packet_root = output_dir / "review_packets"
-    for index, source in enumerate(sources[: max(0, max_packets)], start=1):
-        window = _expanded_window(source, frame_bounds)
+    for index, (source, window) in enumerate(zip(selected_sources, windows, strict=False), start=1):
         track_summary = _track_summary(track_rows, window["start_frame"], window["end_frame"])
         decision = _decision_for_source(source, track_summary)
         packet_id = _packet_id(index, source)
@@ -80,6 +84,12 @@ def build_review_packet_report(
             "source": source,
             "window": window,
             "track_summary": track_summary,
+            "candidate_context": _candidate_context(
+                track_rows,
+                debug_candidates,
+                window["start_frame"],
+                window["end_frame"],
+            ),
             "decision": decision,
             **_packet_diagnosis(source, track_summary),
             "media": media,
@@ -133,6 +143,7 @@ def write_review_packet_report(
         packet_dir.mkdir(parents=True, exist_ok=True)
         _write_json(packet_dir / "manifest.json", packet)
     _write_json(output_dir / "review_packets.json", report)
+    write_tracking_signal_prelabels(output_dir)
     return report
 
 
@@ -1072,6 +1083,101 @@ def _track_summary(rows: list[dict[str, Any]], start_frame: int, end_frame: int)
     }
 
 
+def _candidate_context(
+    track_rows: list[dict[str, Any]],
+    debug_candidates: dict[int, list[dict[str, Any]]],
+    start_frame: int,
+    end_frame: int,
+) -> dict[str, Any]:
+    selected_by_frame = {row["frame"]: row for row in track_rows if start_frame <= row["frame"] <= end_frame}
+    selected_samples = _selected_track_samples(selected_by_frame, start_frame, end_frame)
+    detector_candidates = _detector_candidates_for_window(debug_candidates, selected_by_frame, start_frame, end_frame)
+    nearby_rejected = [
+        item
+        for item in detector_candidates
+        if _is_nearby_rejected_candidate(item)
+    ]
+    return {
+        "coordinate_space": "image_px",
+        "selected_track_samples": selected_samples,
+        "top_detector_candidates": detector_candidates,
+        "nearby_rejected_candidates": nearby_rejected,
+    }
+
+
+def _selected_track_samples(
+    selected_by_frame: dict[int, dict[str, Any]],
+    start_frame: int,
+    end_frame: int,
+) -> list[dict[str, Any]]:
+    samples: list[dict[str, Any]] = []
+    for frame in _sample_frames(start_frame, end_frame, FRAME_SAMPLES_PER_PACKET):
+        row = selected_by_frame.get(frame)
+        if row is None:
+            continue
+        point = row.get("point")
+        samples.append(
+            {
+                "frame": frame,
+                "center": _point_dict(point),
+                "confidence": _round_or_none(row.get("confidence"), 4),
+                "status": row.get("status") or "",
+            }
+        )
+    return samples
+
+
+def _detector_candidates_for_window(
+    debug_candidates: dict[int, list[dict[str, Any]]],
+    selected_by_frame: dict[int, dict[str, Any]],
+    start_frame: int,
+    end_frame: int,
+) -> list[dict[str, Any]]:
+    result: list[dict[str, Any]] = []
+    for frame in sorted(frame for frame in debug_candidates if start_frame <= frame <= end_frame):
+        selected_point = selected_by_frame.get(frame, {}).get("point")
+        for rank, candidate in enumerate(debug_candidates[frame][:MAX_CONTEXT_DETECTOR_CANDIDATES_PER_FRAME], start=1):
+            context_item = {
+                "frame": frame,
+                "center": candidate["center"],
+                "score": candidate["score"],
+                "rank": rank,
+                "distance_to_selected_px": _distance_to_selected(candidate["center"], selected_point),
+            }
+            for key in ("confidence", "label", "source"):
+                if key in candidate:
+                    context_item[key] = candidate[key]
+            result.append(context_item)
+    return result
+
+
+def _is_nearby_rejected_candidate(item: dict[str, Any]) -> bool:
+    distance = _parse_float(item.get("distance_to_selected_px"))
+    if distance is None:
+        return False
+    return 1.0 < distance <= NEARBY_REJECTED_CANDIDATE_MAX_DISTANCE_PX
+
+
+def _distance_to_selected(center: dict[str, float], selected_point: Any) -> float | None:
+    if selected_point is None:
+        return None
+    try:
+        distance = math.dist((float(center["x"]), float(center["y"])), selected_point)
+    except (KeyError, TypeError, ValueError):
+        return None
+    return round(distance, 2)
+
+
+def _point_dict(point: Any) -> dict[str, float] | None:
+    if point is None:
+        return None
+    try:
+        x, y = point
+    except (TypeError, ValueError):
+        return None
+    return {"x": round(float(x), 2), "y": round(float(y), 2)}
+
+
 def _decision_for_source(source: dict[str, Any], track_summary: dict[str, Any]) -> dict[str, Any]:
     source_kind = str(source.get("kind") or "")
     source_type = str(source.get("type") or "")
@@ -1432,6 +1538,64 @@ def _read_track_rows(csv_path: Path) -> list[dict[str, Any]]:
     return sorted(rows, key=lambda item: item["frame"])
 
 
+def _read_debug_candidate_scores(debug_path: Path, *, windows: list[dict[str, int]]) -> dict[int, list[dict[str, Any]]]:
+    if not debug_path.exists():
+        return {}
+    if not windows:
+        return {}
+    by_frame: dict[int, list[dict[str, Any]]] = {}
+    with debug_path.open("r", encoding="utf-8") as handle:
+        for line in handle:
+            if not line.strip():
+                continue
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(row, dict):
+                continue
+            frame = _parse_int(row.get("frame"))
+            raw_scores = row.get("candidate_scores")
+            if frame is None or not isinstance(raw_scores, list):
+                continue
+            if not _frame_in_windows(frame, windows):
+                continue
+            candidates = [_debug_candidate(item) for item in raw_scores if isinstance(item, dict)]
+            candidates = [item for item in candidates if item is not None]
+            if candidates:
+                by_frame[frame] = sorted(candidates, key=lambda item: float(item.get("score") or 0.0), reverse=True)[
+                    :MAX_CONTEXT_DETECTOR_CANDIDATES_PER_FRAME
+                ]
+    return by_frame
+
+
+def _frame_in_windows(frame: int, windows: list[dict[str, int]]) -> bool:
+    return any(
+        int(window.get("start_frame", 0)) <= frame <= int(window.get("end_frame", 0))
+        for window in windows
+    )
+
+
+def _debug_candidate(item: dict[str, Any]) -> dict[str, Any] | None:
+    center = _candidate_center(item.get("candidate_center"))
+    score = _parse_float(item.get("total_score"))
+    if score is None:
+        score = _parse_float(item.get("score"))
+    if center is None or score is None:
+        return None
+    candidate: dict[str, Any] = {
+        "center": center,
+        "score": round(score, 4),
+    }
+    confidence = _parse_float(item.get("confidence"))
+    if confidence is not None:
+        candidate["confidence"] = round(confidence, 4)
+    for key in ("label", "source"):
+        if isinstance(item.get(key), str) and item[key].strip():
+            candidate[key] = item[key].strip()
+    return candidate
+
+
 def _resolve_input_video(output_dir: Path, input_video: Path | None) -> Path | None:
     if input_video is not None:
         return input_video if input_video.exists() else None
@@ -1488,6 +1652,20 @@ def _parse_point(x_value: Any, y_value: Any) -> tuple[float, float] | None:
     return x, y
 
 
+def _candidate_center(value: Any) -> dict[str, float] | None:
+    if isinstance(value, dict):
+        x = _parse_float(value.get("x"))
+        y = _parse_float(value.get("y"))
+    elif isinstance(value, (list, tuple)) and len(value) >= 2:
+        x = _parse_float(value[0])
+        y = _parse_float(value[1])
+    else:
+        return None
+    if x is None or y is None:
+        return None
+    return {"x": round(x, 2), "y": round(y, 2)}
+
+
 def _parse_int(value: Any) -> int | None:
     if value in (None, ""):
         return None
@@ -1504,9 +1682,10 @@ def _parse_float(value: Any) -> float | None:
     if value in (None, ""):
         return None
     try:
-        return float(value)
+        parsed = float(value)
     except (TypeError, ValueError):
         return None
+    return parsed if math.isfinite(parsed) else None
 
 
 def _frame_count(start_frame: int, end_frame: int) -> int:

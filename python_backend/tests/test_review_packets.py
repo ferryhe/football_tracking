@@ -1502,6 +1502,226 @@ class ReviewPacketTests(unittest.TestCase):
             manifest = json.loads((packet_dir / "manifest.json").read_text(encoding="utf-8"))
             self.assertEqual(report["packets"][0]["decision"], manifest["decision"])
 
+    def test_build_review_packet_report_includes_candidate_context_without_media(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            output_dir = Path(temp)
+            (output_dir / "ball_track.cleaned.csv").write_text(
+                "\n".join(
+                    [
+                        "Frame,X,Y,Confidence,Status",
+                        "10,100,100,0.90,Detected",
+                        "11,102,100,0.88,Detected",
+                        "12,104,100,0.87,Detected",
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            (output_dir / "debug.jsonl").write_text(
+                json.dumps(
+                    {
+                        "frame": 11,
+                        "candidate_scores": [
+                            {"candidate_center": [102, 100], "total_score": 0.91, "confidence": 0.8},
+                            {"candidate_center": [112, 100], "total_score": 0.89, "confidence": 0.7},
+                        ],
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            (output_dir / "ai_review_triggers.json").write_text(
+                json.dumps(
+                    {
+                        "triggers": [
+                            {
+                                "id": "event:1:candidate_ambiguity:11-11",
+                                "type": "candidate_ambiguity",
+                                "priority": "medium",
+                                "start_frame": 11,
+                                "end_frame": 11,
+                                "reason": "ambiguous candidates",
+                                "evidence": {"score_delta": 0.02},
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            report = build_review_packet_report(output_dir, max_packets=1, include_media=False)
+
+        context = report["packets"][0]["candidate_context"]
+        self.assertEqual("image_px", context["coordinate_space"])
+        selected_frame_11 = next(item for item in context["selected_track_samples"] if item["frame"] == 11)
+        self.assertEqual(
+            {"frame": 11, "center": {"x": 102.0, "y": 100.0}, "confidence": 0.88, "status": "Detected"},
+            selected_frame_11,
+        )
+        self.assertEqual([1, 2], [item["rank"] for item in context["top_detector_candidates"]])
+        self.assertEqual([0.91, 0.89], [item["score"] for item in context["top_detector_candidates"]])
+        self.assertEqual(0.0, context["top_detector_candidates"][0]["distance_to_selected_px"])
+        self.assertEqual(10.0, context["top_detector_candidates"][1]["distance_to_selected_px"])
+        self.assertEqual([2], [item["rank"] for item in context["nearby_rejected_candidates"]])
+        self.assertEqual({}, report["packets"][0]["media"])
+
+    def test_candidate_context_handles_missing_selected_point_and_non_finite_debug_values(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            output_dir = Path(temp)
+            (output_dir / "ball_track.cleaned.csv").write_text(
+                "\n".join(
+                    [
+                        "Frame,X,Y,Confidence,Status",
+                        "10,,,0.00,Lost",
+                        "11,,,0.00,Lost",
+                        "12,104,100,0.87,Detected",
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            (output_dir / "debug.jsonl").write_text(
+                "\n".join(
+                    [
+                        json.dumps(
+                            {
+                                "frame": 11,
+                                "candidate_scores": [
+                                    {"candidate_center": [112, 100], "total_score": 0.89, "confidence": float("nan")},
+                                    {"candidate_center": [float("nan"), 100], "total_score": 0.95},
+                                    {"candidate_center": [120, 100], "total_score": float("inf")},
+                                ],
+                            }
+                        ),
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            (output_dir / "ai_review_triggers.json").write_text(
+                json.dumps(
+                    {
+                        "triggers": [
+                            {
+                                "id": "event:1:lost_gap:10-11",
+                                "type": "lost_gap",
+                                "priority": "medium",
+                                "start_frame": 10,
+                                "end_frame": 11,
+                                "reason": "lost",
+                                "evidence": {},
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            report = build_review_packet_report(output_dir, max_packets=1, include_media=False)
+            encoded = json.dumps(report, allow_nan=False)
+
+        self.assertIn("candidate_context", encoded)
+        context = report["packets"][0]["candidate_context"]
+        self.assertEqual(1, len(context["top_detector_candidates"]))
+        self.assertIsNone(context["top_detector_candidates"][0]["distance_to_selected_px"])
+        self.assertEqual([], context["nearby_rejected_candidates"])
+
+    def test_candidate_context_caps_debug_candidates_per_frame(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            output_dir = Path(temp)
+            (output_dir / "ball_track.cleaned.csv").write_text(
+                "Frame,X,Y,Confidence,Status\n11,100,100,0.90,Detected\n",
+                encoding="utf-8",
+            )
+            (output_dir / "debug.jsonl").write_text(
+                json.dumps(
+                    {
+                        "frame": 11,
+                        "candidate_scores": [
+                            {"candidate_center": [100 + index, 100], "total_score": 1.0 - index * 0.01}
+                            for index in range(12)
+                        ],
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            (output_dir / "ai_review_triggers.json").write_text(
+                json.dumps(
+                    {
+                        "triggers": [
+                            {
+                                "id": "event:1:candidate_ambiguity:11-11",
+                                "type": "candidate_ambiguity",
+                                "priority": "medium",
+                                "start_frame": 11,
+                                "end_frame": 11,
+                                "reason": "ambiguous",
+                                "evidence": {},
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            report = build_review_packet_report(output_dir, max_packets=1, include_media=False)
+
+        candidates = report["packets"][0]["candidate_context"]["top_detector_candidates"]
+        self.assertEqual(5, len(candidates))
+        self.assertEqual([1, 2, 3, 4, 5], [item["rank"] for item in candidates])
+
+    def test_write_review_packet_report_also_writes_tracking_signal_prelabels(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            output_dir = Path(temp)
+            track_path = output_dir / "ball_track.cleaned.csv"
+            track_csv = "Frame,X,Y,Confidence,Status\n1,10,10,0.9,Detected\n2,250,10,0.8,Detected\n"
+            track_path.write_text(track_csv, encoding="utf-8")
+            (output_dir / "ball_audit.json").write_text(
+                json.dumps(
+                    {
+                        "review_events": [
+                            {
+                                "id": "event:1:large_jump:1-2",
+                                "type": "large_jump",
+                                "start_frame": 1,
+                                "end_frame": 2,
+                                "reason": "large jump",
+                                "evidence": {"max_step_px": 240},
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (output_dir / "ai_review_triggers.json").write_text(
+                json.dumps(
+                    {
+                        "triggers": [
+                            {
+                                "id": "event:1:large_jump:1-2",
+                                "type": "large_jump",
+                                "priority": "high",
+                                "start_frame": 1,
+                                "end_frame": 2,
+                                "reason": "large jump",
+                                "evidence": {"max_step_px": 240},
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            write_review_packet_report(output_dir, max_packets=1, include_media=False)
+
+            labels = json.loads((output_dir / "noise_interference_labels.json").read_text(encoding="utf-8"))
+            rewritten_track_csv = track_path.read_text(encoding="utf-8")
+
+        self.assertEqual("ok", labels["summary"]["status"])
+        self.assertTrue(any(label["interference_subtype"] == "large_jump_after_reacquire" for label in labels["labels"]))
+        self.assertEqual(track_csv, rewritten_track_csv)
+
     def test_compact_review_packet_summary_tolerates_malformed_counts(self) -> None:
         summary = compact_review_packet_summary(
                     {
