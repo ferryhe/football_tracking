@@ -264,8 +264,8 @@ def build_ai_improvement_report(
             )
         )
         improvements, visual_warnings = _merge_visual_review_localization(improvements, context)
-        _validate_executable_visual_contracts(improvements, context)
-        validation_warnings.extend(visual_warnings)
+        visual_contract_warnings = _validate_executable_visual_contracts(improvements, context)
+        validation_warnings.extend([*visual_warnings, *visual_contract_warnings])
     except Exception as exc:
         return _report(
             output_dir=output_dir,
@@ -704,6 +704,14 @@ def _approved_action_entry(
                 f"Approval {approval_id} {approved_action} requires traceable packet or visual review provenance, "
                 "or visual localization provenance."
             )
+        if approved_action == "localize_ball_roi" and not _has_usable_visual_evidence(
+            provenance_item, roi_provenance_context
+        ):
+            raise ValueError(
+                f"Approval {approval_id} localize_ball_roi requires usable visual evidence "
+                "from ai_visual_review, equivalent vision-reviewed wide/crop evidence, "
+                "or clean ai_visual_localization evidence."
+            )
     if approved_action in {"noise_filter_adjustment", "tighten_noise_filter", "reject_noise"}:
         candidate_id = action.get("candidate_id") or improvement.get("candidate_id")
         action["candidate_id"] = _safe_candidate_id(
@@ -887,7 +895,7 @@ def _roi_provenance_context_from_output_dir(output_dir: Path) -> dict[str, Any]:
         payload, status, _warning = _read_optional_json(output_dir / file_name)
         if status == "loaded" and payload is not None:
             artifacts[artifact_key] = payload
-    return {"artifacts": artifacts}
+    return {"artifacts": artifacts, "output_dir": str(output_dir)}
 
 
 def _improvement_source_packet_id(improvement: dict[str, Any]) -> str | None:
@@ -2852,20 +2860,26 @@ def _optional_clip_action(value: Any, index: int) -> dict[str, str]:
     return {"clip_action": action}
 
 
-def _validate_executable_visual_contracts(improvements: list[dict[str, Any]], context: dict[str, Any]) -> None:
-    if context.get("candidate_intent") == "review_only":
-        return
+def _validate_executable_visual_contracts(improvements: list[dict[str, Any]], context: dict[str, Any]) -> list[str]:
+    warnings: list[str] = []
     for index, item in enumerate(improvements, start=1):
         if item.get("recommended_action") != "localize_ball_roi":
             continue
         if _candidate_contract_missing_fields(item):
             continue
         if not _has_usable_visual_evidence(item, context):
-            raise ValueError(
-                f"Improvement {index} localize_ball_roi requires usable visual evidence "
+            item.setdefault("legacy_recommended_action", "localize_ball_roi")
+            item["recommended_action"] = "request_targeted_localization"
+            item["requested_action"] = "localize_ball_roi"
+            item.pop("local_search_roi", None)
+            item["visual_evidence_contract_gap"] = "insufficient_usable_visual_evidence"
+            warnings.append(
+                f"Improvement {item.get('id') or index} normalized from localize_ball_roi "
+                "to request_targeted_localization because usable visual evidence is missing "
                 "from ai_visual_review, equivalent vision-reviewed wide/crop evidence, "
                 "or clean ai_visual_localization evidence."
             )
+    return warnings
 
 
 def _has_usable_visual_evidence(item: dict[str, Any], context: dict[str, Any] | None) -> bool:

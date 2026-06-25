@@ -45,6 +45,28 @@ class _FakeImprovementClient:
 
 
 class AiImprovementTests(unittest.TestCase):
+    def assertLocalizeBallRoiDowngradedToTargetedLocalization(self, report: dict[str, object]) -> None:
+        self.assertEqual("needs_rerun", report["summary"]["status"])
+        self.assertNotIn("error", report)
+        improvement = report["improvements"][0]
+        self.assertEqual("request_targeted_localization", improvement["recommended_action"])
+        self.assertEqual("localize_ball_roi", improvement["legacy_recommended_action"])
+        self.assertEqual("localize_ball_roi", improvement["requested_action"])
+        self.assertEqual("insufficient_usable_visual_evidence", improvement["visual_evidence_contract_gap"])
+        self.assertNotIn("local_search_roi", improvement)
+        self.assertFalse(improvement["executable"])
+        self.assertEqual("review_only", improvement["candidate_intent"])
+        self.assertEqual(0, report["summary"]["executable_candidate_count"])
+        self.assertEqual("localize_ball_roi", improvement["candidate_contract"]["approved_action"])
+        self.assertEqual(["local_search_roi"], improvement["candidate_contract"]["missing_fields"])
+        self.assertTrue(
+            any(
+                "normalized from localize_ball_roi to request_targeted_localization" in warning
+                and "usable visual evidence" in warning
+                for warning in report["warnings"]
+            )
+        )
+
     def test_improvement_prompt_describes_pr2_contract_and_model_routing(self) -> None:
         instructions = _instructions(language="en")
 
@@ -1110,8 +1132,7 @@ class AiImprovementTests(unittest.TestCase):
 
             report = build_ai_improvement_report(output_dir, client=client)
 
-        self.assertEqual("error", report["summary"]["status"])
-        self.assertIn("clean ai_visual_localization evidence", report["error"])
+        self.assertLocalizeBallRoiDowngradedToTargetedLocalization(report)
 
     def test_nested_corrupt_visual_localization_media_cannot_back_executable_localize_ball_roi(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:
@@ -1169,8 +1190,7 @@ class AiImprovementTests(unittest.TestCase):
 
             report = build_ai_improvement_report(output_dir, client=client)
 
-        self.assertEqual("error", report["summary"]["status"])
-        self.assertIn("clean ai_visual_localization evidence", report["error"])
+        self.assertLocalizeBallRoiDowngradedToTargetedLocalization(report)
 
     def test_status_only_visual_localization_cannot_back_executable_localize_ball_roi(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:
@@ -1227,8 +1247,7 @@ class AiImprovementTests(unittest.TestCase):
 
             report = build_ai_improvement_report(output_dir, client=client)
 
-        self.assertEqual("error", report["summary"]["status"])
-        self.assertIn("usable visual evidence", report["error"])
+        self.assertLocalizeBallRoiDowngradedToTargetedLocalization(report)
 
     def test_legacy_targeted_rerun_input_is_canonicalized_for_public_executable_output(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:
@@ -2390,7 +2409,9 @@ class AiImprovementTests(unittest.TestCase):
             "ai_visual_review", report["improvements"][0]["evidence_payload"]["local_search_roi_provenance"]["source"]
         )
 
-    def test_localize_ball_roi_with_packet_but_no_usable_visual_evidence_becomes_error_report(self) -> None:
+    def test_localize_ball_roi_with_packet_but_no_usable_visual_evidence_requests_targeted_localization(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as temp_name:
             output_dir = Path(temp_name)
             _write_minimal_artifacts(output_dir)
@@ -2431,8 +2452,7 @@ class AiImprovementTests(unittest.TestCase):
 
             report = build_ai_improvement_report(output_dir, client=client)
 
-        self.assertEqual("error", report["summary"]["status"])
-        self.assertIn("usable visual evidence", report["error"])
+        self.assertLocalizeBallRoiDowngradedToTargetedLocalization(report)
 
     def test_review_only_localize_ball_roi_without_visual_evidence_is_non_executable(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:
@@ -2470,9 +2490,7 @@ class AiImprovementTests(unittest.TestCase):
 
             report = build_ai_improvement_report(output_dir, client=client, candidate_intent="review_only")
 
-        self.assertEqual("needs_rerun", report["summary"]["status"])
-        self.assertFalse(report["improvements"][0]["executable"])
-        self.assertEqual("review_only", report["improvements"][0]["candidate_intent"])
+        self.assertLocalizeBallRoiDowngradedToTargetedLocalization(report)
 
     def test_invalid_visual_review_roi_does_not_satisfy_executable_localize(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:
@@ -2534,8 +2552,7 @@ class AiImprovementTests(unittest.TestCase):
 
             report = build_ai_improvement_report(output_dir, client=client)
 
-        self.assertEqual("error", report["summary"]["status"])
-        self.assertIn("usable visual evidence", report["error"])
+        self.assertLocalizeBallRoiDowngradedToTargetedLocalization(report)
 
     def test_visual_review_roi_without_frame_dimensions_is_not_usable_evidence(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:
@@ -2596,8 +2613,7 @@ class AiImprovementTests(unittest.TestCase):
 
             report = build_ai_improvement_report(output_dir, client=client)
 
-        self.assertEqual("error", report["summary"]["status"])
-        self.assertIn("usable visual evidence", report["error"])
+        self.assertLocalizeBallRoiDowngradedToTargetedLocalization(report)
 
     def test_external_visual_review_media_path_is_not_usable_evidence(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name, tempfile.TemporaryDirectory() as external_temp:
@@ -2652,8 +2668,7 @@ class AiImprovementTests(unittest.TestCase):
 
             report = build_ai_improvement_report(output_dir, client=client)
 
-        self.assertEqual("error", report["summary"]["status"])
-        self.assertIn("usable visual evidence", report["error"])
+        self.assertLocalizeBallRoiDowngradedToTargetedLocalization(report)
 
     def test_parent_relative_visual_review_media_path_is_not_usable_evidence(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:
@@ -2709,8 +2724,7 @@ class AiImprovementTests(unittest.TestCase):
 
             report = build_ai_improvement_report(output_dir, client=client)
 
-        self.assertEqual("error", report["summary"]["status"])
-        self.assertIn("usable visual evidence", report["error"])
+        self.assertLocalizeBallRoiDowngradedToTargetedLocalization(report)
 
     def test_non_webp_riff_media_is_not_usable_visual_evidence(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:
@@ -2767,8 +2781,7 @@ class AiImprovementTests(unittest.TestCase):
 
             report = build_ai_improvement_report(output_dir, client=client)
 
-        self.assertEqual("error", report["summary"]["status"])
-        self.assertIn("usable visual evidence", report["error"])
+        self.assertLocalizeBallRoiDowngradedToTargetedLocalization(report)
 
     def test_localize_ball_roi_without_candidate_id_is_non_executable_contract_gap(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:
@@ -4572,7 +4585,7 @@ class AiImprovementTests(unittest.TestCase):
                     approved_by="operator-a",
                 )
 
-    def test_approval_accepts_localize_ball_roi_with_evidence_list_provenance(self) -> None:
+    def test_approval_rejects_localize_ball_roi_with_packet_only_evidence_list_provenance(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:
             output_dir = Path(temp_name)
             _write_minimal_artifacts(output_dir)
@@ -4612,28 +4625,65 @@ class AiImprovementTests(unittest.TestCase):
                 },
             )
 
+            with self.assertRaisesRegex(ValueError, "requires usable visual evidence"):
+                approve_ai_improvement_actions(
+                    output_dir,
+                    run_id="run_123",
+                    improvement_ids=["imp_001"],
+                    approved_by="operator-a",
+                )
+
+    def test_approval_accepts_localize_ball_roi_with_visual_review_media_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_minimal_artifacts_with_media(output_dir)
+            _write_json(
+                output_dir / "ai_improvement_report.json",
+                {
+                    "schema_version": "1.0",
+                    "generated_at": "2026-06-22T00:00:00+00:00",
+                    "model": "gpt-improve",
+                    "summary": {"status": "needs_rerun"},
+                    "improvements": [
+                        {
+                            "id": "imp_001",
+                            "priority": "P0",
+                            "area": "tracking",
+                            "failure_tags": ["ball_lost"],
+                            "root_cause_module": "reacquisition",
+                            "diagnosis": "Visual review media carries usable evidence.",
+                            "recommended_action": "localize_ball_roi",
+                            "candidate_id": "candidate_001",
+                            "match_ball_confirmed": True,
+                            "start_frame": 10,
+                            "end_frame": 20,
+                            "local_search_roi": {
+                                "coordinate_space": "image",
+                                "frame": 15,
+                                "x": 120,
+                                "y": 40,
+                                "width": 80,
+                                "height": 50,
+                                "confidence": 0.72,
+                            },
+                            "visual_review_id": "visual_review:packet_001",
+                            "confidence": 0.82,
+                        }
+                    ],
+                },
+            )
+
             artifact = approve_ai_improvement_actions(
                 output_dir,
                 run_id="run_123",
                 improvement_ids=["imp_001"],
                 approved_by="operator-a",
             )
-            rerun_report = build_high_recall_windows(
-                output_dir,
-                approved_actions_path=output_dir / "ai_improvement_approved_actions.json",
-                approved_only=True,
-                total_frames=100,
-            )
 
         action = artifact["approved_actions"][0]
         self.assertEqual("localize_ball_roi", action["approved_action"])
-        self.assertEqual("packet_001", action["source_packet_id"])
-        self.assertEqual(10, action["start_frame"])
-        self.assertEqual(20, action["end_frame"])
-        self.assertIs(True, action["match_ball_confirmed"])
+        self.assertEqual("visual_review:packet_001", action["visual_review_id"])
         self.assertEqual(120.0, action["local_search_roi"]["x"])
-        self.assertEqual(1, rerun_report["summary"]["selected_window_count"])
-        self.assertEqual("packet_001", rerun_report["windows"][0]["source_packet_id"])
 
     def test_approval_accepts_localize_ball_roi_with_visual_localization_provenance(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:
@@ -4714,6 +4764,66 @@ class AiImprovementTests(unittest.TestCase):
         action = artifact["approved_actions"][0]
         self.assertEqual("visual_localization:packet_001", action["visual_localization_id"])
         self.assertEqual("visual_localization:packet_001", rerun_report["windows"][0]["visual_localization_id"])
+
+    def test_approval_rejects_localize_ball_roi_with_dirty_visual_localization_provenance(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            _write_minimal_artifacts(output_dir)
+            local_roi = {
+                "coordinate_space": "image",
+                "frame": 15,
+                "x": 120,
+                "y": 40,
+                "width": 80,
+                "height": 50,
+                "confidence": 0.72,
+            }
+            dirty_request = _clean_visual_localization_request(
+                "visual_localization:packet_001",
+                source_packet_id="packet_001",
+                local_search_roi=local_roi,
+            )
+            dirty_request["media_warnings"] = ["crop_sheet_low_information"]
+            dirty_request["media_integrity"] = {"status": "warn", "low_information_image_count": 1}
+            _write_json(output_dir / "ai_visual_localization.json", {"requests": [dirty_request]})
+            _write_json(
+                output_dir / "ai_improvement_report.json",
+                {
+                    "schema_version": "1.0",
+                    "generated_at": "2026-06-22T00:00:00+00:00",
+                    "model": "gpt-improve",
+                    "summary": {"status": "needs_rerun"},
+                    "improvements": [
+                        {
+                            "id": "imp_dirty_visual_localized",
+                            "priority": "P0",
+                            "area": "tracking",
+                            "failure_tags": ["ball_lost"],
+                            "root_cause_module": "reacquisition",
+                            "diagnosis": "Dirty visual localization must not be approvable.",
+                            "recommended_action": "localize_ball_roi",
+                            "candidate_id": "candidate_001",
+                            "problem_type": "missing_ball",
+                            "match_ball_confirmed": True,
+                            "start_frame": 10,
+                            "end_frame": 20,
+                            "visual_localization_id": "visual_localization:packet_001",
+                            "local_search_roi": local_roi,
+                            "expected_artifact": {"name": "ball_track.csv"},
+                            "comparison_criteria": {"report": "missing_ball_recovery_comparison.json"},
+                            "confidence": 0.82,
+                        }
+                    ],
+                },
+            )
+
+            with self.assertRaisesRegex(ValueError, "requires clean ai_visual_localization evidence"):
+                approve_ai_improvement_actions(
+                    output_dir,
+                    run_id="run_123",
+                    improvement_ids=["imp_dirty_visual_localized"],
+                    approved_by="operator-a",
+                )
 
     def test_approval_rejects_request_targeted_localization(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:
