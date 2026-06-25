@@ -80,6 +80,7 @@ def run_workflow(
     report_name: str = DEFAULT_REPORT_NAME,
 ) -> dict[str, Any]:
     output_dir = Path(output_dir)
+    input_video = _resolve_explicit_input_video(input_video)
     if not output_dir.exists() or not output_dir.is_dir():
         raise ValueError("output_dir must be an existing directory")
     if parallel_mode not in {"temporal", "none"}:
@@ -2482,11 +2483,20 @@ def _resolve_run_manifest_path(value: str | Path, *, output_dir: Path, must_exis
     path = Path(value)
     if path.is_absolute():
         return path if not must_exist or path.exists() else None
-    candidates = [Path(output_dir) / path, REPO_ROOT / path]
+    candidates = [(Path(output_dir) / path).resolve(), (REPO_ROOT / path).resolve()]
     for candidate in candidates:
         if candidate.exists():
             return candidate
     return None if must_exist else candidates[0]
+
+
+def _resolve_explicit_input_video(input_video: Path | None) -> Path | None:
+    if input_video is None:
+        return None
+    path = Path(input_video)
+    if path.is_absolute():
+        return path
+    return path.resolve()
 
 
 def _source_total_frames(output_dir: Path) -> int | None:
