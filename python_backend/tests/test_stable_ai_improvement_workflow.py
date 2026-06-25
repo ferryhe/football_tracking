@@ -777,6 +777,95 @@ class StableAiImprovementWorkflowTests(unittest.TestCase):
 
         self.assertEqual("succeeded", _stage(report, "selected_approval_dispatcher")["missing_ball_execution_path"]["status"])
 
+    def test_missing_ball_fallback_input_video_is_absolute_with_relative_output_dir(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            root = Path(temp_name)
+            output_dir = root / "outputs" / "baseline"
+            output_dir.mkdir(parents=True)
+            config_path = _write_recovery_config(root, output_dir)
+            _write_lost_tracks(output_dir, start=2049, end=2109)
+            _write_packet(output_dir, packet_id="packet_2049", start=2049, end=2109)
+            expected_input_video = output_dir / "data" / "input.mp4"
+            expected_input_video.parent.mkdir(parents=True)
+            expected_input_video.write_text("fake review video", encoding="utf-8")
+            _write_json(
+                output_dir / "run_manifest.json",
+                {"config_path": str(config_path), "input_video": "data/input.mp4"},
+            )
+            approved_path = output_dir / "approved_actions.json"
+            approval = {**_approval("approval_2049", start=2049, end=2109), "candidate_id": "candidate_2049"}
+            approval["source_packet_id"] = "packet_2049"
+            _write_json(approved_path, {"approved_actions": [approval]})
+
+            with (
+                contextlib.chdir(root),
+                patch(
+                    "scripts.run_stable_ai_improvement_workflow.execute_missing_ball_candidate",
+                    return_value=_lane_comparison_report("missing_ball", "candidate_2049", "approval_2049"),
+                ) as execute_missing,
+            ):
+                report = run_workflow(
+                    output_dir=Path("outputs") / "baseline",
+                    dry_run=False,
+                    approved_actions_path=approved_path,
+                    approval_ids=["approval_2049"],
+                )
+
+        execute_missing.assert_called_once()
+        passed_input_video = execute_missing.call_args.kwargs["input_video"]
+        self.assertTrue(passed_input_video.is_absolute())
+        self.assertEqual(expected_input_video.resolve(), passed_input_video)
+        self.assertEqual("succeeded", _stage(report, "selected_approval_dispatcher")["missing_ball_execution_path"]["status"])
+
+    def test_selected_missing_ball_dispatcher_resolves_relative_input_video_before_candidate_execution(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            root = Path(temp_name)
+            output_dir = root / "outputs" / "baseline"
+            output_dir.mkdir(parents=True)
+            config_path = _write_recovery_config(root, output_dir)
+            _write_lost_tracks(output_dir, start=2049, end=2109)
+            _write_packet(output_dir, packet_id="packet_2049", start=2049, end=2109)
+            _write_json(
+                output_dir / "run_manifest.json",
+                {"config_path": str(config_path), "input_video": str(root / "data" / "input.mp4")},
+            )
+            approved_path = output_dir / "approved_actions.json"
+            approval = {**_approval("approval_2049", start=2049, end=2109), "candidate_id": "candidate_2049"}
+            approval["approved_action"] = "localize_ball_roi"
+            approval["source_packet_id"] = "packet_2049"
+            _write_json(approved_path, {"approved_actions": [approval]})
+            relative_input_video = Path("data/input.mp4")
+            expected_input_video = (root / relative_input_video).resolve()
+            review_packet_inputs: list[object] = []
+
+            def fake_review_packets(path: Path, **kwargs: object) -> dict[str, object]:
+                review_packet_inputs.append(kwargs.get("input_video"))
+                _write_packet(path, packet_id="packet_2049", start=2049, end=2109)
+                return {"summary": {"packet_count": 1}}
+
+            with (
+                contextlib.chdir(root),
+                patch("scripts.run_stable_ai_improvement_workflow.write_review_packet_report", side_effect=fake_review_packets),
+                patch(
+                    "scripts.run_stable_ai_improvement_workflow.execute_missing_ball_candidate",
+                    return_value=_lane_comparison_report("missing_ball", "candidate_2049", "approval_2049"),
+                ) as execute_missing,
+            ):
+                report = run_workflow(
+                    output_dir=output_dir,
+                    input_video=relative_input_video,
+                    dry_run=False,
+                    approved_actions_path=approved_path,
+                    approval_ids=["approval_2049"],
+                )
+
+        execute_missing.assert_called_once()
+        passed_input_video = execute_missing.call_args.kwargs["input_video"]
+        self.assertEqual([expected_input_video], review_packet_inputs)
+        self.assertTrue(passed_input_video.is_absolute())
+        self.assertEqual(expected_input_video, passed_input_video)
+        self.assertEqual(str(expected_input_video), report["inputs"]["input_video"])
+
     def test_selected_noise_approval_missing_candidate_id_fails_without_candidate_artifacts(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:
             output_dir = Path(temp_name)
