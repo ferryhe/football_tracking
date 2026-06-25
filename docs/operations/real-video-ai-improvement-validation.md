@@ -43,10 +43,13 @@ Every real-video validation update must record evidence, not just artifact prese
 
 - Exact command, source video, output directory, branch or build identifier, workflow mode, model/provider, approval source, consumed approval ids, and exit code.
 - `stable_ai_improvement_workflow_report.json` `stage_timing` rows for each executed, skipped, or failed stage, including final manifest and quality-gate refresh stages.
+- `stable_ai_improvement_workflow_report.json` `acceptance_summary`: status, `deliverable`, quality-gate status, selected final track/video/highlight counts and paths, blockers, `ai_lanes` finalization/approval needs, and recommended operator actions.
 - `final_ai_improvement_artifact_manifest.json` summary, final selected artifacts, rejected candidates, comparison reports, and final tracking/follow-cam/highlight paths.
 - Final tracking, follow-cam, and highlight playback checks. A file path is insufficient; record whether each final output opens, has sampled frames, and is the artifact selected by the final manifest.
 - Highlight validation from `highlight_candidate_comparison.json`, `highlight_report.json`, or `candidate_manifest.json`: `core_window`, `render_window`, `core_window_preserved`, `required_tail_frames`, `actual_tail_frames`, `tail_status`, and `source_end_clamp`. Passing highlight evidence must show the core action and required post-event tail are preserved, or that the source video end limited the available tail.
 - Baseline/candidate visual evidence from review packets, overlay sheets, crop/contact sheets, media sheets, or decoded video samples. Do not mark missing-ball, dense-noise, follow-cam, or highlight checks as pass by checking only that JSON or media files exist.
+
+Interpret `acceptance_summary` conservatively. `pass` means the final selected artifacts are supported by the quality gate and `stable_final_outputs`; `warn`, `fail`, and `unavailable` require recording the listed blockers and following the recommended action before treating the run as deliverable.
 
 ## Command
 
