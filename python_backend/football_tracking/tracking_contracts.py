@@ -188,7 +188,7 @@ def load_legacy_track_csv(path: Path) -> dict[str, Any]:
                 if mapped_status is None:
                     validation_errors.append(f"rows[{index}].Status: unknown legacy status {status!r}")
                     continue
-                candidate = {
+                frame_payload = {
                     "frame_index": row.get("Frame"),
                     "status": mapped_status,
                     "x": row.get("X"),
@@ -198,7 +198,7 @@ def load_legacy_track_csv(path: Path) -> dict[str, Any]:
                     "legacy_status": status,
                     "legacy_row": dict(row),
                 }
-                normalized, errors = _normalize_frame(candidate)
+                normalized, errors = _normalize_frame(frame_payload)
                 validation_errors.extend(f"rows[{index}].{error}" for error in errors)
                 if normalized is not None:
                     frames.append(normalized)
@@ -327,6 +327,15 @@ def _normalize_frame(raw: dict[str, Any]) -> tuple[dict[str, Any] | None, list[s
     legacy_row = raw.get("legacy_row")
     if legacy_row is not None and not isinstance(legacy_row, dict):
         errors.append("legacy_row: must be an object")
+    optional_text: dict[str, str] = {}
+    for key in ("source", "reason"):
+        if key not in raw:
+            continue
+        value = _optional_string(raw[key])
+        if value is None:
+            errors.append(f"{key}: must be a non-empty string")
+        else:
+            optional_text[key] = value
     if errors:
         return None, errors
 
@@ -335,10 +344,7 @@ def _normalize_frame(raw: dict[str, Any]) -> tuple[dict[str, Any] | None, list[s
         result.update({"x": x, "y": y})
     if confidence is not None:
         result["confidence"] = confidence
-    for key in ("source", "reason"):
-        value = _optional_string(raw.get(key))
-        if value is not None:
-            result[key] = value
+    result.update(optional_text)
     if legacy_status is not None:
         result["legacy_status"] = legacy_status
     if legacy_row is not None:

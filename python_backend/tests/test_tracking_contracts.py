@@ -81,6 +81,21 @@ class TrackingContractsTests(unittest.TestCase):
         self.assertEqual([], payload["candidates"])
         self.assertEqual([], payload["decisions"])
 
+    def test_rejects_present_source_or_reason_that_is_not_a_non_empty_string(self) -> None:
+        payload = build_tracking_contract(
+            frames=[
+                {"frame_index": 0, "status": "unknown", "source": None},
+                {"frame_index": 1, "status": "unknown", "source": ""},
+                {"frame_index": 2, "status": "unknown", "reason": 123},
+                {"frame_index": 3, "status": "unknown", "reason": "   "},
+            ]
+        )
+
+        self.assertEqual("invalid", payload["summary"]["status"])
+        self.assertEqual([], payload["frames"])
+        self.assertEqual(2, sum("source: must be a non-empty string" in error for error in payload["validation_errors"]))
+        self.assertEqual(2, sum("reason: must be a non-empty string" in error for error in payload["validation_errors"]))
+
     def test_rejects_duplicate_frames_candidates_and_dangling_references(self) -> None:
         payload = build_tracking_contract(
             frames=[
