@@ -4606,7 +4606,7 @@ class ApiService:
         points = cv2.findNonZero(band)
         if points is None:
             return None
-        xs = points[:, 0, 0]
+        xs = points.reshape(-1, 2)[:, 0]
         return (x1 + int(xs.min()), x1 + int(xs.max()), int(round((y1 + y2) / 2.0)))
 
     def _default_field_polygon(self, content_bounds: tuple[int, int, int, int]) -> list[tuple[int, int]]:
