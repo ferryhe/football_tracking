@@ -4562,8 +4562,9 @@ class ApiService:
             if band_points is None:
                 return None
 
-            ys = band_points[:, 0, 1]
-            xs = band_points[:, 0, 0]
+            normalized_points = band_points.reshape(-1, 2)
+            ys = normalized_points[:, 1]
+            xs = normalized_points[:, 0]
             percentile = 8 if index in {0, point_count - 1} else 12
             point_y = content_y1 + int(round(float(np.percentile(ys, percentile))))
             if index == 0:
