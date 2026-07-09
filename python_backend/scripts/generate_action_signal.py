@@ -7,7 +7,6 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from football_tracking.action_signal import (
-    ACTION_SIGNAL_REPORT_NAME,
     ACTION_SIGNAL_SUCCESS_STATUSES,
     ActionSignalSettings,
     generate_action_track,
@@ -86,7 +85,6 @@ def main(argv: Sequence[str] | None = None) -> int:
             file=sys.stderr,
         )
         return 1
-    print(f"report={(args.output_dir.resolve() / ACTION_SIGNAL_REPORT_NAME)}", flush=True)
     return 0
 
 

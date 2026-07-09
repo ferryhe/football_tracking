@@ -491,8 +491,8 @@ def generate_action_track(
             source_height=source_height,
             total_source_frames=total_source_frames,
         )
-        if total_source_frames is not None and start_frame > total_source_frames:
-            raise ValueError(f"start_frame {start_frame} exceeds source frame count {total_source_frames}")
+        if total_source_frames is not None and start_frame >= total_source_frames:
+            raise ValueError(f"start_frame {start_frame} must be less than source frame count {total_source_frames}")
         expected_frame_count = _expected_frames(total_source_frames, start_frame, max_frames)
         seek_mode = "not_required"
         if expected_frame_count != 0:

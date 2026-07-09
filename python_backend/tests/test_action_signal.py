@@ -306,6 +306,7 @@ class ActionSignalCoreTests(unittest.TestCase):
 
 class ActionSignalCliTests(unittest.TestCase):
     def test_cli_writes_track_and_versioned_diagnostics(self) -> None:
+        stdout = io.StringIO()
         with tempfile.TemporaryDirectory() as temp_name:
             root = Path(temp_name)
             video_path = root / "input.avi"
@@ -325,26 +326,27 @@ class ActionSignalCliTests(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            exit_code = action_signal_main(
-                [
-                    "--input-video",
-                    str(video_path),
-                    "--calibration",
-                    str(calibration_path),
-                    "--output-dir",
-                    str(output_dir),
-                    "--process-width",
-                    "64",
-                    "--warmup-frames",
-                    "2",
-                    "--min-area",
-                    "2",
-                    "--max-area",
-                    "500",
-                    "--hold-frames",
-                    "1",
-                ]
-            )
+            with redirect_stdout(stdout):
+                exit_code = action_signal_main(
+                    [
+                        "--input-video",
+                        str(video_path),
+                        "--calibration",
+                        str(calibration_path),
+                        "--output-dir",
+                        str(output_dir),
+                        "--process-width",
+                        "64",
+                        "--warmup-frames",
+                        "2",
+                        "--min-area",
+                        "2",
+                        "--max-area",
+                        "500",
+                        "--hold-frames",
+                        "1",
+                    ]
+                )
 
             with (output_dir / ACTION_TRACK_NAME).open(encoding="utf-8-sig", newline="") as handle:
                 rows = list(csv.DictReader(handle))
@@ -362,6 +364,11 @@ class ActionSignalCliTests(unittest.TestCase):
         self.assertEqual(ACTION_TRACK_NAME, report["artifacts"]["track"])
         self.assertEqual(5, len(diagnostics))
         self.assertTrue(all(item["schema_version"] == ACTION_SIGNAL_SCHEMA_VERSION for item in diagnostics))
+        output_events = [json.loads(line) for line in stdout.getvalue().splitlines()]
+        completed_events = [event for event in output_events if event["event"] == "completed"]
+        self.assertEqual(1, len(completed_events))
+        self.assertEqual("complete", completed_events[0]["status"])
+        self.assertEqual(str(output_dir / ACTION_SIGNAL_REPORT_NAME), completed_events[0]["report"])
 
     def test_cli_reports_errors_without_a_traceback(self) -> None:
         stderr = io.StringIO()
@@ -463,6 +470,29 @@ class ActionSignalGenerationTests(unittest.TestCase):
         self.assertEqual("sequential_fallback", report["seek_mode"])
         self.assertEqual("started", progress[0]["event"])
         self.assertEqual("completed", progress[-1]["event"])
+
+    def test_start_frame_equal_to_known_source_count_is_rejected(self) -> None:
+        capture = _FakeCapture([np.zeros((32, 64, 3), dtype=np.uint8) for _ in range(5)])
+        with (
+            tempfile.TemporaryDirectory() as temp_name,
+            patch(
+                "football_tracking.action_signal.cv2.VideoCapture",
+                return_value=capture,
+            ),
+        ):
+            output_dir = Path(temp_name)
+            with self.assertRaisesRegex(ValueError, "start_frame.*source frame count"):
+                generate_action_track(
+                    input_video=output_dir / "input.avi",
+                    calibration=self.make_calibration(),
+                    output_dir=output_dir,
+                    start_frame=5,
+                    settings=ActionSignalSettings(process_width=64, warmup_frames=0),
+                )
+
+            self.assertFalse((output_dir / ACTION_SIGNAL_REPORT_NAME).exists())
+
+        self.assertTrue(capture.released)
 
     def test_premature_read_is_published_as_truncated_not_complete(self) -> None:
         frames = [np.zeros((32, 64, 3), dtype=np.uint8) for _ in range(3)]
