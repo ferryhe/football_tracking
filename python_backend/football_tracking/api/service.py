@@ -4562,8 +4562,9 @@ class ApiService:
             if band_points is None:
                 return None
 
-            ys = band_points[:, 0, 1]
-            xs = band_points[:, 0, 0]
+            normalized_points = band_points.reshape(-1, 2)
+            ys = normalized_points[:, 1]
+            xs = normalized_points[:, 0]
             percentile = 8 if index in {0, point_count - 1} else 12
             point_y = content_y1 + int(round(float(np.percentile(ys, percentile))))
             if index == 0:
@@ -4606,7 +4607,7 @@ class ApiService:
         points = cv2.findNonZero(band)
         if points is None:
             return None
-        xs = points[:, 0, 0]
+        xs = points.reshape(-1, 2)[:, 0]
         return (x1 + int(xs.min()), x1 + int(xs.max()), int(round((y1 + y2) / 2.0)))
 
     def _default_field_polygon(self, content_bounds: tuple[int, int, int, int]) -> list[tuple[int, int]]:

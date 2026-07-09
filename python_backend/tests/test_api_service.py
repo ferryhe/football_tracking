@@ -585,6 +585,24 @@ class ApiServiceSmokeTests(unittest.TestCase):
         self.assertEqual("estimated" if suggestion["confidence"] == "detected" else "low", calibration["confidence"])
         self.assertEqual(list(suggestion["field_polygon"][0]), calibration["image_points"][0])
 
+    def test_mask_row_span_accepts_opencv_n_by_two_find_non_zero_shape(self) -> None:
+        mask = np.ones((8, 12), dtype=np.uint8)
+        points = np.array([[1, 0], [4, 1], [3, 2]], dtype=np.int32)
+
+        with mock.patch("football_tracking.api.service.cv2.findNonZero", return_value=points):
+            span = self.service._mask_row_span(mask, 2, 8, y_center=3, band_height=2)
+
+        self.assertEqual((3, 6, 3), span)
+
+    def test_estimate_upper_field_contour_accepts_opencv_n_by_two_find_non_zero_shape(self) -> None:
+        mask = np.ones((100, 200), dtype=np.uint8)
+        points = np.array([[1, 5], [4, 10], [3, 15]], dtype=np.int32)
+
+        with mock.patch("football_tracking.api.service.cv2.findNonZero", return_value=points):
+            contour = self.service._estimate_upper_field_contour(mask, (10, 20, 190, 90), point_count=3)
+
+        self.assertEqual([(11, 26), (100, 26), (176, 26)], contour)
+
     def test_capture_field_preview_returns_fixed_preview_frame(self) -> None:
         video_path = self.write_video("data/preview_only.avi")
 
