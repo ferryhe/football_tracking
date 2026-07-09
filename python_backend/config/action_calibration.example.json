@@ -1,0 +1,12 @@
+{
+  "schema_version": "1.0",
+  "source_resolution": [5120, 1440],
+  "confirmed_sample_frames": [0, 52399, 104799],
+  "field_polygon": [
+    [0, 0],
+    [5120, 0],
+    [5120, 1440],
+    [0, 1440]
+  ],
+  "exclusion_polygons": []
+}
