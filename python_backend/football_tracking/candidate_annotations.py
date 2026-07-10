@@ -33,6 +33,11 @@ EVIDENCE_HASH_POLICY = "candidate-tight-context-montage-hashes-v1"
 _VOTE_STAGES = frozenset({"primary", "adjudication"})
 _REVIEWER_TYPES = frozenset({"ai", "human"})
 _EVIDENCE_ARTIFACTS = ("tight_tensor", "context_tensor", "review_montage")
+_ANNOTATION_ARTIFACT_ORDER = (
+    ANNOTATION_RESOLUTION_NAME,
+    ADJUDICATION_QUEUE_NAME,
+    TRACKING_CONTRACT_REPORT_NAME,
+)
 
 
 @dataclass(frozen=True)
@@ -747,24 +752,33 @@ def _publish_reports(
     *,
     preencoded: dict[str, bytes] | None = None,
 ) -> None:
+    names = [name for name, _ in reports]
+    duplicates = sorted(name for name, count in Counter(names).items() if count > 1)
+    if duplicates:
+        raise ValueError(f"annotation artifact set contains duplicate names: {duplicates}")
+    expected_names = set(_ANNOTATION_ARTIFACT_ORDER)
+    actual_names = set(names)
+    missing = sorted(expected_names - actual_names)
+    unexpected = sorted(actual_names - expected_names)
+    if missing or unexpected:
+        raise ValueError(f"annotation artifact set has missing={missing}, unexpected={unexpected}")
+    if preencoded is not None and not set(preencoded).issubset(expected_names):
+        raise ValueError("preencoded annotation artifacts contain an unexpected name")
+
     output_dir.mkdir(parents=True, exist_ok=True)
     payloads = dict(reports)
-    stage_names = [
-        TRACKING_CONTRACT_REPORT_NAME,
-        *(name for name, _ in reports if name != TRACKING_CONTRACT_REPORT_NAME),
-    ]
     staged_by_name: dict[str, tuple[Path, Path]] = {}
     try:
-        for name in stage_names:
+        for name in _ANNOTATION_ARTIFACT_ORDER:
             payload = payloads[name]
             final_path = output_dir / name
             descriptor, raw_path = tempfile.mkstemp(prefix=f".{name}.", suffix=".tmp", dir=output_dir)
             temporary_path = Path(raw_path)
             staged_by_name[name] = (temporary_path, final_path)
             os.close(descriptor)
-            encoded = (preencoded or {}).get(name, _json_bytes(payload))
+            encoded = preencoded[name] if preencoded is not None and name in preencoded else _json_bytes(payload)
             temporary_path.write_bytes(encoded)
-        staged = [staged_by_name[name] for name, _ in reports]
+        staged = [staged_by_name[name] for name in _ANNOTATION_ARTIFACT_ORDER]
         _publish_artifact_set(staged)
     finally:
         for temporary_path, _ in staged_by_name.values():

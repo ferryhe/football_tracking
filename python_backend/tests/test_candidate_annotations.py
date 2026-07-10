@@ -918,6 +918,62 @@ class CandidateAnnotationTests(unittest.TestCase):
         self.assertEqual("complete", success["status"])
         self.assertEqual(TRACKING_CONTRACT_REPORT_NAME, replace_targets[-1])
 
+    def test_publish_reports_uses_internal_order_for_scrambled_input_and_rejects_invalid_sets(self) -> None:
+        from football_tracking import candidate_annotations
+
+        resolution = {"artifact": "resolution"}
+        queue = {"artifact": "queue"}
+        contract = {"artifact": "contract"}
+        exact_contract_bytes = b'{"artifact":"contract","exact":true}\n'
+        scrambled = (
+            (TRACKING_CONTRACT_REPORT_NAME, contract),
+            (ADJUDICATION_QUEUE_NAME, queue),
+            (ANNOTATION_RESOLUTION_NAME, resolution),
+        )
+        with tempfile.TemporaryDirectory() as temp_name:
+            root = Path(temp_name)
+            output_dir = root / "ordered"
+            real_replace = candidate_annotations.os.replace
+            publish_targets: list[str] = []
+
+            def record_replace(source: str | Path, destination: str | Path) -> None:
+                if Path(source).suffix == ".tmp":
+                    publish_targets.append(Path(destination).name)
+                real_replace(source, destination)
+
+            with patch.object(candidate_annotations.os, "replace", side_effect=record_replace):
+                candidate_annotations._publish_reports(
+                    output_dir,
+                    scrambled,
+                    preencoded={TRACKING_CONTRACT_REPORT_NAME: exact_contract_bytes},
+                )
+
+            contract_bytes = (output_dir / TRACKING_CONTRACT_REPORT_NAME).read_bytes()
+            with self.assertRaisesRegex(ValueError, "duplicate"):
+                candidate_annotations._publish_reports(
+                    root / "duplicate",
+                    (
+                        (ANNOTATION_RESOLUTION_NAME, resolution),
+                        (ANNOTATION_RESOLUTION_NAME, resolution),
+                        (ADJUDICATION_QUEUE_NAME, queue),
+                        (TRACKING_CONTRACT_REPORT_NAME, contract),
+                    ),
+                )
+            with self.assertRaisesRegex(ValueError, "missing"):
+                candidate_annotations._publish_reports(
+                    root / "missing",
+                    (
+                        (ANNOTATION_RESOLUTION_NAME, resolution),
+                        (ADJUDICATION_QUEUE_NAME, queue),
+                    ),
+                )
+
+        self.assertEqual(
+            [ANNOTATION_RESOLUTION_NAME, ADJUDICATION_QUEUE_NAME, TRACKING_CONTRACT_REPORT_NAME],
+            publish_targets,
+        )
+        self.assertEqual(exact_contract_bytes, contract_bytes)
+
 
 if __name__ == "__main__":
     unittest.main()
