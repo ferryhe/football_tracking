@@ -157,6 +157,118 @@ Run backend only:
 .\.venv\Scripts\python.exe -m uvicorn football_tracking.api.app:app --reload
 ```
 
+### Official Candidate AI Classification Workflow
+
+This P1 workflow classifies detector candidates as the match ball or noise. It is CPU-only, uses no downloaded
+pretrained model, and never changes the live detector hot path. Prerequisite: the current tracking pipeline does not
+yet emit a candidate-populated V2 contract, and its runtime `Candidate` has no stable deterministic ID. Supply an
+externally prepared `data\candidate_contract.v2.json` with deterministic, source-scoped candidate IDs. PR5 owns wiring
+detector candidates into this contract and the normal tracking run. Once that prerequisite exists, run these commands
+from the repository root:
+
+```powershell
+$env:PYTHONPATH='python_backend'
+$sourceContract = 'data\candidate_contract.v2.json'
+
+.\.venv\Scripts\python.exe python_backend\scripts\build_candidate_dataset.py `
+  --contract $sourceContract `
+  --source-map data\candidate_source_map.v1.json `
+  --output-dir data\candidate_dataset_v1
+
+.\.venv\Scripts\python.exe python_backend\scripts\resolve_candidate_annotations.py `
+  --contract $sourceContract `
+  --ledger data\candidate_votes.v1.jsonl `
+  --dataset-manifest data\candidate_dataset_v1\candidate_dataset_manifest.json `
+  --output-dir data\candidate_resolution_v1 `
+  --min-confidence 0.8
+
+.\.venv\Scripts\python.exe python_backend\scripts\train_candidate_classifier.py `
+  --dataset-manifest data\candidate_dataset_v1\candidate_dataset_manifest.json `
+  --annotation-resolution data\candidate_resolution_v1\annotation_resolution.v1.json `
+  --contract data\candidate_resolution_v1\tracking_contract.v2.json `
+  --output-dir weights\candidate_classifier_v1 `
+  --epochs 3 --batch-size 8 --seed 1337
+
+.\.venv\Scripts\python.exe python_backend\scripts\classify_candidates.py `
+  --package weights\candidate_classifier_v1 `
+  --dataset-manifest data\candidate_dataset_v1\candidate_dataset_manifest.json `
+  --contract $sourceContract `
+  --output-dir outputs\candidate_inference_v1 `
+  --batch-size 32
+```
+
+The source map is schema `1.0`. Each candidate must be bound exactly once to a real video; `candidate.source` remains
+detector provenance and is not a video identifier. Video paths are relative to and contained by the source-map
+directory. `video_sha256`, dimensions, and frame count must match the file. Use `sequential` for the safest HEVC
+decode; `preroll` and verified `direct` are also supported.
+
+```json
+{
+  "schema_version": "1.0",
+  "sources": [
+    {
+      "variant_id": "match-main",
+      "video_path": "match.mp4",
+      "video_sha256": "<64 lowercase hex characters>",
+      "decode_mode": "sequential",
+      "width": 5120,
+      "height": 1440,
+      "frame_count": 5194,
+      "group_id": "match-001",
+      "temporal_group": "match-001-block-000",
+      "split_group": "match-001",
+      "candidate_ids": ["candidate-000001", "candidate-000002"]
+    }
+  ]
+}
+```
+
+The vote ledger is finite JSONL. Its first row binds the exact contract and visual evidence. Every visual vote, human
+or AI and whether primary or adjudication, binds one unique sample and the canonical tight/context/review-montage
+evidence hash; these values must come from the dataset/annotation tooling, not be invented manually. Only a ledger with
+no votes may omit the dataset manifest and its dataset/evidence fields.
+
+```json
+{"schema_version":"1.0","record_type":"ledger_header","contract_sha256":"<contract sha256>","dataset_version":"<dataset version>","evidence_manifest_sha256":"<manifest sha256>"}
+{"schema_version":"1.0","record_type":"vote","vote_id":"vote-001","candidate_id":"candidate-000001","stage":"primary","reviewer_type":"ai","annotator_id":"model-a","fingerprint":"model-a-build-1","label":"match_ball","confidence":0.97,"blind":true,"created_at":"2026-07-09T12:00:00Z","dataset_version":"<dataset version>","sample_id":"000000-candidate-000001","evidence_sha256":"<canonical sample evidence sha256>"}
+```
+
+The seven labels are `match_ball`, `player_body_or_shoe`, `field_line_or_mark`, `sideline_or_spare_ball`,
+`equipment_or_background`, `lighting_shadow_or_blur`, and `unknown`. Confirmation requires two blind primary votes
+of the same reviewer type with distinct `annotator_id` and `fingerprint`, the same non-unknown label, and confidence at
+or above the configured minimum. Consistent AI votes produce `ai_confirmed`; consistent human votes produce
+`human_confirmed`. Unknown, disagreement, duplicate identity, non-blind, low-confidence, or incomplete voting stays
+`unknown` and enters the adjudication queue. One independent human `adjudication` vote may finalize any of the seven
+labels, including `human_confirmed` unknown. Existing confirmed rows are never overwritten; conflicting confirmed rows
+remain non-training-eligible. Only explicitly `training_eligible` `ai_confirmed`/`human_confirmed` resolutions train the
+model; prelabels, single votes, and unresolved candidates are excluded.
+
+Artifacts are published atomically:
+
+```text
+data/candidate_dataset_v1/
+  candidate_dataset_manifest.json
+  samples/<sample_id>/{tight.npy,context.npy,review_montage.png}
+data/candidate_resolution_v1/
+  annotation_resolution.v1.json
+  annotation_adjudication_queue.v1.json
+  tracking_contract.v2.json
+weights/candidate_classifier_v1/
+  model.pt
+  model_manifest.v1.json
+  training_report.v1.json
+outputs/candidate_inference_v1/
+  candidate_predictions.v1.json
+  tracking_contract.v2.json
+```
+
+Inference probabilities and labels are prelabels only: they do not create `ai_confirmed` labels or
+accept/reject/abstain decisions, and existing confirmed or unknown history is retained. Calibrated selective thresholds
+and the human-review loop belong to PR4. `data/`, `weights/`, and `outputs/` are ignored by Git; keep videos, tensors,
+review media, and checkpoints there rather than committing them. Every CLI fails closed: validation or argument errors
+produce concise JSON on stderr with a non-zero exit code, and no partial artifact set is promoted. Dataset, model, and
+inference output directories must be new paths.
+
 ### Main Outputs
 
 Raw tracking usually writes:
@@ -389,6 +501,79 @@ outputs/runs/<input_slug>/<run_id>/
 ```powershell
 .\.venv\Scripts\python.exe -m uvicorn football_tracking.api.app:app --reload
 ```
+
+### 候选球 AI 分类官方流程
+
+这套 P1 流程在 CPU 上把检测候选分成比赛用球或噪点，不下载预训练模型，也不接入实时 detector 热路径。
+前置条件：当前跟踪主流程还不会自动生成带候选的 V2 契约，运行时 `Candidate` 也没有稳定的确定性 ID。
+需要先从外部准备 `data\candidate_contract.v2.json`，其中候选 ID 必须稳定且带来源作用域。把 detector
+候选接入该契约和常规跟踪 run 属于 PR5。满足前置条件后，在仓库根目录依次执行：
+
+```powershell
+$env:PYTHONPATH='python_backend'
+$sourceContract = 'data\candidate_contract.v2.json'
+
+.\.venv\Scripts\python.exe python_backend\scripts\build_candidate_dataset.py `
+  --contract $sourceContract `
+  --source-map data\candidate_source_map.v1.json `
+  --output-dir data\candidate_dataset_v1
+
+.\.venv\Scripts\python.exe python_backend\scripts\resolve_candidate_annotations.py `
+  --contract $sourceContract `
+  --ledger data\candidate_votes.v1.jsonl `
+  --dataset-manifest data\candidate_dataset_v1\candidate_dataset_manifest.json `
+  --output-dir data\candidate_resolution_v1 `
+  --min-confidence 0.8
+
+.\.venv\Scripts\python.exe python_backend\scripts\train_candidate_classifier.py `
+  --dataset-manifest data\candidate_dataset_v1\candidate_dataset_manifest.json `
+  --annotation-resolution data\candidate_resolution_v1\annotation_resolution.v1.json `
+  --contract data\candidate_resolution_v1\tracking_contract.v2.json `
+  --output-dir weights\candidate_classifier_v1 `
+  --epochs 3 --batch-size 8 --seed 1337
+
+.\.venv\Scripts\python.exe python_backend\scripts\classify_candidates.py `
+  --package weights\candidate_classifier_v1 `
+  --dataset-manifest data\candidate_dataset_v1\candidate_dataset_manifest.json `
+  --contract $sourceContract `
+  --output-dir outputs\candidate_inference_v1 `
+  --batch-size 32
+```
+
+`candidate_source_map.v1.json` 使用 schema `1.0`。每个 `sources[]` 必须给出
+`variant_id`、受 source-map 目录约束的相对 `video_path`、`video_sha256`、`decode_mode`、`width`、`height`、
+`frame_count`、`group_id`、`temporal_group`、`split_group` 和非空 `candidate_ids`。每个候选必须且只能绑定
+一个视频；V2 候选里的 `source` 仍表示 detector 来源，不是视频 ID。同一场比赛的不同编码应使用相同
+`group_id`/`split_group`，相邻五帧窗口应归入同一时间组。HEVC 优先使用 `sequential`，也支持
+`preroll` 和经过验证的 `direct`。
+
+投票账本是有限 JSONL。第一行必须绑定原始契约和数据集证据；每张人工或 AI 的主票/裁决票都必须绑定
+唯一 sample 及 tight/context/review-montage 三类产物的规范聚合哈希。只有完全没有投票的空账本可以省略
+dataset manifest 及其 dataset/evidence 字段：
+
+```json
+{"schema_version":"1.0","record_type":"ledger_header","contract_sha256":"<contract sha256>","dataset_version":"<dataset version>","evidence_manifest_sha256":"<manifest sha256>"}
+{"schema_version":"1.0","record_type":"vote","vote_id":"vote-001","candidate_id":"candidate-000001","stage":"primary","reviewer_type":"ai","annotator_id":"model-a","fingerprint":"model-a-build-1","label":"match_ball","confidence":0.97,"blind":true,"created_at":"2026-07-09T12:00:00Z","dataset_version":"<dataset version>","sample_id":"000000-candidate-000001","evidence_sha256":"<canonical sample evidence sha256>"}
+```
+
+合法标签固定为 `match_ball`、`player_body_or_shoe`、`field_line_or_mark`、`sideline_or_spare_ball`、
+`equipment_or_background`、`lighting_shadow_or_blur`、`unknown`。确认需要两张同类型、相互盲审的主票：
+`annotator_id` 与 `fingerprint` 都不同、标签相同且不是 unknown、置信度不低于阈值。两张 AI 票生成
+`ai_confirmed`，两张人工票生成 `human_confirmed`。unknown、分歧、重复身份、非盲审、低置信度或票数不足
+都保留为 unknown 并进入人工裁决队列；一个身份独立的人工 `adjudication` 票可最终确认任意七类，包括
+`human_confirmed` unknown。既有 confirmed 行不会被覆盖；既有 confirmed 冲突会保留且禁止训练。只有明确
+标记 `training_eligible` 的 `ai_confirmed`/`human_confirmed` 结果可训练，prelabel、单票和未决项全部排除。
+
+数据集输出 `candidate_dataset_manifest.json` 与每个 sample 的 `tight.npy`、`context.npy`、
+`review_montage.png`；解析输出 `annotation_resolution.v1.json`、
+`annotation_adjudication_queue.v1.json` 和派生 `tracking_contract.v2.json`；模型包输出 `model.pt`、
+`model_manifest.v1.json`、`training_report.v1.json`；推理输出 `candidate_predictions.v1.json` 和派生
+`tracking_contract.v2.json`。推理结果永远只是 prelabel，不会自动生成 `ai_confirmed`，也不会生成
+accept/reject/abstain；既有 confirmed 与 unknown 历史继续保留。校准后的选择性阈值和人工复核闭环属于 PR4。
+
+`.gitignore` 已忽略 `data/`、`weights/`、`outputs/`，视频、tensor、复核图片和权重必须留在这些目录，
+不要提交到 Git。所有 CLI 都失败关闭：参数或完整性校验失败时向 stderr 输出简短 JSON、返回非零退出码，
+并且不会发布半套产物；数据集、模型和推理的 `--output-dir` 必须是尚不存在的新目录。
 
 ### 主要输出文件
 
