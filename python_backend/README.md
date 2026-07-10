@@ -160,42 +160,124 @@ Run backend only:
 ### Official Candidate AI Classification Workflow
 
 This P1 workflow classifies detector candidates as the match ball or noise. It is CPU-only, uses no downloaded
-pretrained model, and never changes the live detector hot path. Prerequisite: the current tracking pipeline does not
-yet emit a candidate-populated V2 contract, and its runtime `Candidate` has no stable deterministic ID. Supply an
-externally prepared `data\candidate_contract.v2.json` with deterministic, source-scoped candidate IDs. PR5 owns wiring
-detector candidates into this contract and the normal tracking run. Once that prerequisite exists, run these commands
-from the repository root:
+pretrained model, and never changes the live detector hot path. The calibrated selective policy and bounded human
+review loop are implemented and fail closed. Prerequisite: the current tracking pipeline does not yet emit a
+candidate-populated V2 contract, and its runtime `Candidate` has no stable deterministic ID. Supply externally prepared
+training and policy V2 contracts with deterministic, source-scoped candidate IDs. PR5 owns wiring detector candidates
+into these contracts and the normal tracking run. Once that prerequisite exists, prepare two evidence-disjoint
+candidate populations and run these commands from the repository root. The training population is used only to
+train/calibrate/test the classifier. The separate policy population supplies human-confirmed binary evaluation
+holdouts plus application candidates. Candidate, video, group, split, temporal, and source evidence must not overlap
+between those populations; the policy-role builder rejects any such leakage.
 
 ```powershell
 $env:PYTHONPATH='python_backend'
-$sourceContract = 'data\candidate_contract.v2.json'
+$trainingSourceContract = 'data\candidate_training_contract.v2.json'
+$policySourceContract = 'data\candidate_policy_contract.v2.json'
 
 .\.venv\Scripts\python.exe python_backend\scripts\build_candidate_dataset.py `
-  --contract $sourceContract `
-  --source-map data\candidate_source_map.v1.json `
-  --output-dir data\candidate_dataset_v1
+  --contract $trainingSourceContract `
+  --source-map data\candidate_training_source_map.v1.json `
+  --output-dir data\candidate_training_dataset_v1
 
 .\.venv\Scripts\python.exe python_backend\scripts\resolve_candidate_annotations.py `
-  --contract $sourceContract `
-  --ledger data\candidate_votes.v1.jsonl `
-  --dataset-manifest data\candidate_dataset_v1\candidate_dataset_manifest.json `
-  --output-dir data\candidate_resolution_v1 `
+  --contract $trainingSourceContract `
+  --ledger data\candidate_training_votes.v1.jsonl `
+  --dataset-manifest data\candidate_training_dataset_v1\candidate_dataset_manifest.json `
+  --output-dir data\candidate_training_resolution_v1 `
   --min-confidence 0.8
 
 .\.venv\Scripts\python.exe python_backend\scripts\train_candidate_classifier.py `
-  --dataset-manifest data\candidate_dataset_v1\candidate_dataset_manifest.json `
-  --annotation-resolution data\candidate_resolution_v1\annotation_resolution.v1.json `
-  --contract data\candidate_resolution_v1\tracking_contract.v2.json `
+  --dataset-manifest data\candidate_training_dataset_v1\candidate_dataset_manifest.json `
+  --annotation-resolution data\candidate_training_resolution_v1\annotation_resolution.v1.json `
+  --contract data\candidate_training_resolution_v1\tracking_contract.v2.json `
   --output-dir weights\candidate_classifier_v1 `
   --epochs 3 --batch-size 8 --seed 1337
 
+.\.venv\Scripts\python.exe python_backend\scripts\build_candidate_dataset.py `
+  --contract $policySourceContract `
+  --source-map data\candidate_policy_source_map.v1.json `
+  --output-dir data\candidate_policy_dataset_v1
+
+.\.venv\Scripts\python.exe python_backend\scripts\resolve_candidate_annotations.py `
+  --contract $policySourceContract `
+  --ledger data\candidate_policy_votes.v1.jsonl `
+  --dataset-manifest data\candidate_policy_dataset_v1\candidate_dataset_manifest.json `
+  --output-dir data\candidate_policy_resolution_v1 `
+  --min-confidence 0.8
+
 .\.venv\Scripts\python.exe python_backend\scripts\classify_candidates.py `
   --package weights\candidate_classifier_v1 `
-  --dataset-manifest data\candidate_dataset_v1\candidate_dataset_manifest.json `
-  --contract $sourceContract `
-  --output-dir outputs\candidate_inference_v1 `
+  --dataset-manifest data\candidate_policy_dataset_v1\candidate_dataset_manifest.json `
+  --contract $policySourceContract `
+  --output-dir outputs\candidate_policy_inference_v1 `
   --batch-size 32
+
+$datasetManifest = 'data\candidate_policy_dataset_v1\candidate_dataset_manifest.json'
+$annotationResolution = 'data\candidate_policy_resolution_v1\annotation_resolution.v1.json'
+$resolvedContract = 'data\candidate_policy_resolution_v1\tracking_contract.v2.json'
+$modelManifest = 'weights\candidate_classifier_v1\model_manifest.v1.json'
+$trainingReport = 'weights\candidate_classifier_v1\training_report.v1.json'
+$predictions = 'outputs\candidate_policy_inference_v1\candidate_predictions.v1.json'
+
+.\.venv\Scripts\python.exe python_backend\scripts\build_selective_policy_roles.py `
+  --predictions $predictions `
+  --dataset-manifest $datasetManifest `
+  --annotation-resolution $annotationResolution `
+  --resolved-contract $resolvedContract `
+  --model-manifest $modelManifest `
+  --training-report $trainingReport `
+  --output-dir outputs\candidate_policy_roles_v1
+
+.\.venv\Scripts\python.exe python_backend\scripts\fit_selective_policy.py `
+  --predictions $predictions `
+  --dataset-manifest $datasetManifest `
+  --annotation-resolution $annotationResolution `
+  --resolved-contract $resolvedContract `
+  --model-manifest $modelManifest `
+  --training-report $trainingReport `
+  --policy-roles outputs\candidate_policy_roles_v1\selective_policy_roles.v1.json `
+  --output-dir outputs\candidate_selective_policy_v1
+
+.\.venv\Scripts\python.exe python_backend\scripts\build_selective_review_queue.py `
+  --dataset-manifest $datasetManifest `
+  --predictions $predictions `
+  --policy outputs\candidate_selective_policy_v1\selective_policy.v1.json `
+  --decisions outputs\candidate_selective_policy_v1\selective_decisions.v1.json `
+  --model-manifest $modelManifest `
+  --contract $policySourceContract `
+  --annotation-resolution $annotationResolution `
+  --resolved-contract $resolvedContract `
+  --policy-roles outputs\candidate_policy_roles_v1\selective_policy_roles.v1.json `
+  --output-dir outputs\candidate_selective_review_queue_v1 `
+  --window-seconds 7.5 `
+  --max-windows 30
+
+$actions = 'data\candidate_selective_review_actions_v1.json'
+# Use a review client to read selective_review_queue.v1.json and export a bound
+# selective_review_actions envelope to $actions. Do not type or invent hashes.
+
+.\.venv\Scripts\python.exe python_backend\scripts\materialize_selective_review_actions.py `
+  --queue outputs\candidate_selective_review_queue_v1\selective_review_queue.v1.json `
+  --actions $actions `
+  --dataset-manifest $datasetManifest `
+  --predictions $predictions `
+  --policy outputs\candidate_selective_policy_v1\selective_policy.v1.json `
+  --decisions outputs\candidate_selective_policy_v1\selective_decisions.v1.json `
+  --model-manifest $modelManifest `
+  --contract $policySourceContract `
+  --annotation-resolution $annotationResolution `
+  --resolved-contract $resolvedContract `
+  --policy-roles outputs\candidate_policy_roles_v1\selective_policy_roles.v1.json `
+  --output-dir outputs\candidate_selective_review_round_v1
 ```
+
+If a dataset source has no FPS, repeat `--fps-override <variant_id>=<fps>` on
+`build_selective_review_queue.py`; unknown variants or non-positive values fail closed. Review windows may be set only
+between 5 and 10 seconds, and `--max-windows` may not exceed 30.
+Both review commands re-open the annotation resolution, resolved contract, and deterministic role manifest bound by
+the policy lineage. They recompute human-confirmed evaluation cohorts, calibration, audit, and decisions before any
+queue or materialization output is published; a self-resealed policy/decision pair cannot replace those inputs.
 
 The source map is schema `1.0`. Each candidate must be bound exactly once to a real video; `candidate.source` remains
 detector provenance and is not a video identifier. Video paths are relative to and contained by the source-map
@@ -246,10 +328,17 @@ model; prelabels, single votes, and unresolved candidates are excluded.
 Artifacts are published atomically:
 
 ```text
-data/candidate_dataset_v1/
+data/candidate_training_dataset_v1/
   candidate_dataset_manifest.json
   samples/<sample_id>/{tight.npy,context.npy,review_montage.png}
-data/candidate_resolution_v1/
+data/candidate_training_resolution_v1/
+  annotation_resolution.v1.json
+  annotation_adjudication_queue.v1.json
+  tracking_contract.v2.json
+data/candidate_policy_dataset_v1/
+  candidate_dataset_manifest.json
+  samples/<sample_id>/{tight.npy,context.npy,review_montage.png}
+data/candidate_policy_resolution_v1/
   annotation_resolution.v1.json
   annotation_adjudication_queue.v1.json
   tracking_contract.v2.json
@@ -257,17 +346,73 @@ weights/candidate_classifier_v1/
   model.pt
   model_manifest.v1.json
   training_report.v1.json
-outputs/candidate_inference_v1/
+outputs/candidate_policy_inference_v1/
   candidate_predictions.v1.json
   tracking_contract.v2.json
+outputs/candidate_policy_roles_v1/
+  selective_policy_roles.v1.json
+outputs/candidate_selective_policy_v1/
+  selective_policy.v1.json
+  selective_acceptance_report.v1.json
+  selective_decisions.v1.json
+  tracking_contract.v2.json
+outputs/candidate_selective_review_queue_v1/
+  review_timing.v1.json
+  selective_review_queue.v1.json
+outputs/candidate_selective_review_round_v1/
+  human_adjudication_votes.v1.jsonl
+  trajectory_corrections.v1.json
+  active_learning_round.v1.json
+  selective_review_materialization.v1.json
+  annotations/{annotation_resolution.v1.json,annotation_adjudication_queue.v1.json,tracking_contract.v2.json}
 ```
 
 Inference probabilities and labels are prelabels only: they do not create `ai_confirmed` labels or
-accept/reject/abstain decisions, and existing confirmed or unknown history is retained. Calibrated selective thresholds
-and the human-review loop belong to PR4. `data/`, `weights/`, and `outputs/` are ignored by Git; keep videos, tensors,
-review media, and checkpoints there rather than committing them. Every CLI fails closed: validation or argument errors
-produce concise JSON on stderr with a non-zero exit code, and no partial artifact set is promoted. Dataset, model, and
-inference output directories must be new paths.
+accept/reject/abstain decisions, and existing confirmed or unknown history is retained. The policy-role builder uses
+only `human_confirmed` binary truth (`match_ball` versus the concrete noise labels). A connected evidence component,
+formed by shared variant, video, group, split, or temporal evidence, is the independent inferential unit. The builder
+requires an exact one-to-one `candidate_id`/component mapping: every calibration or audit component must contain exactly
+one human-confirmed evaluation candidate. Repeated frames or candidates from the same source therefore add zero sample
+size and fail closed instead of increasing statistical power. Complete components are partitioned deterministically
+into `policy_calibration` and `policy_audit`; overlap between those roles or any model train/calibration/test evidence
+also fails closed. Policy qualification requires both calibration certification and an untouched audit pass. Its fixed
+safety targets are at least 98% precision among auto-accepted candidates and at most 1% false rejection of true balls,
+with family-wise error control. Per-variant/video/group/split/temporal tables are diagnostic only, carry no per-cluster
+statistical guarantee, and never veto aggregate qualification. Insufficient or failed aggregate evidence produces a
+review-only policy and abstentions instead of weakening those targets.
+
+Calibration and audit candidates are `evaluation_holdout`: they are recorded in `selective_decisions.v1.json` with
+`decision_scope="evaluation_only"`, forced to abstain, and never written back into the derived contract. Application
+decisions are kept in that independent decisions artifact; the review queue requires it through `--decisions` rather
+than reconstructing decisions from `tracking_contract.v2.json`.
+
+The review queue gives uncertainty and conflict windows mandatory priority. Remaining capacity is filled by stable,
+deterministic sampling across accept/reject and video-variant strata. A queue contains at most 30 windows; if mandatory
+windows alone exceed the limit, narrow the input scope. `selection.coverage_complete=true` means every eligible
+candidate was included. Otherwise `requires_additional_round=true` and `dropped_candidate_ids` identify work that must
+be covered by another narrowed round.
+
+A review client must generate the schema `1.0`, `artifact_type="selective_review_actions"` envelope from the exact
+queue items and candidates. The four actions are `confirm_ball`, `reject_noise` with a concrete V2 `noise_subtype`,
+`mark_unknown`, and `correct_trajectory` with ordered, in-window keypoints. In addition to action/reviewer/timestamp and
+queue item/candidate IDs, every action must carry queue-derived `bindings`: `queue_sha256`, `timing_sha256`,
+`policy_sha256`, `decisions_sha256`, `model_sha256`, `training_report_sha256`, `model_weights_sha256`, `dataset_sha256`,
+`predictions_sha256`, `contract_sha256`, `annotation_resolution_sha256`,
+`resolved_tracking_contract_sha256`, `policy_roles_sha256`, `evidence_sha256`, and `candidate_fingerprint`. Do not
+type, copy between rounds, or invent these values. Materialization rejects stale or conflicting bindings, validates
+every source snapshot again, and leaves the source contract unchanged.
+
+`materialize_selective_review_actions.py` never trains a model; its reports explicitly set `training_invoked=false`.
+Retraining is a separate operator decision. The materialized annotations and derived contract become training-only
+evidence for the next model package. After training that package, build and annotate a fresh policy population from
+evidence-disjoint candidates, videos, sources, groups, splits, and time ranges; classify it into a new inference
+directory, then build policy roles and fit the new policy/version. Never reuse the new model's training population as
+its policy evaluation or application population.
+`model_manifest.v1.json`, `training_report.v1.json`, and `model.pt` form one hash-bound model package; the queue also
+binds the independent `selective_decisions.v1.json`. Every command above that accepts `--output-dir` requires a new path
+and publishes by atomic staging/rename. Validation, binding, or argument failures return non-zero and publish no partial
+directory. `data/`, `weights/`, and `outputs/` are ignored by Git; keep videos, tensors, review media, and checkpoints
+there rather than committing them.
 
 ### Main Outputs
 
@@ -504,41 +649,122 @@ outputs/runs/<input_slug>/<run_id>/
 
 ### 候选球 AI 分类官方流程
 
-这套 P1 流程在 CPU 上把检测候选分成比赛用球或噪点，不下载预训练模型，也不接入实时 detector 热路径。
-前置条件：当前跟踪主流程还不会自动生成带候选的 V2 契约，运行时 `Candidate` 也没有稳定的确定性 ID。
-需要先从外部准备 `data\candidate_contract.v2.json`，其中候选 ID 必须稳定且带来源作用域。把 detector
-候选接入该契约和常规跟踪 run 属于 PR5。满足前置条件后，在仓库根目录依次执行：
+这套 P1 流程在 CPU 上把检测候选分成比赛用球或噪点，不下载预训练模型，也不接入实时 detector 热路径；
+校准后的选择性策略和有上限的人工复核闭环已经实现，并采用失败关闭。前置条件：当前跟踪主流程还不会
+自动生成带候选的 V2 契约，运行时 `Candidate` 也没有稳定的确定性 ID。需要先从外部准备
+两套 V2 契约，其中候选 ID 必须稳定且带来源作用域。把 detector 候选接入这些契约和常规跟踪 run 仍属于
+PR5。训练数据只允许用于分类器的 train/calibration/test；另一套证据完全独立的策略数据提供
+`human_confirmed` 二元评估留出候选和应用候选。两套数据的 candidate、video、group、split、temporal 和
+source 证据都不得重叠，否则策略角色生成器会失败关闭。准备好后，在仓库根目录依次执行：
 
 ```powershell
 $env:PYTHONPATH='python_backend'
-$sourceContract = 'data\candidate_contract.v2.json'
+$trainingSourceContract = 'data\candidate_training_contract.v2.json'
+$policySourceContract = 'data\candidate_policy_contract.v2.json'
 
 .\.venv\Scripts\python.exe python_backend\scripts\build_candidate_dataset.py `
-  --contract $sourceContract `
-  --source-map data\candidate_source_map.v1.json `
-  --output-dir data\candidate_dataset_v1
+  --contract $trainingSourceContract `
+  --source-map data\candidate_training_source_map.v1.json `
+  --output-dir data\candidate_training_dataset_v1
 
 .\.venv\Scripts\python.exe python_backend\scripts\resolve_candidate_annotations.py `
-  --contract $sourceContract `
-  --ledger data\candidate_votes.v1.jsonl `
-  --dataset-manifest data\candidate_dataset_v1\candidate_dataset_manifest.json `
-  --output-dir data\candidate_resolution_v1 `
+  --contract $trainingSourceContract `
+  --ledger data\candidate_training_votes.v1.jsonl `
+  --dataset-manifest data\candidate_training_dataset_v1\candidate_dataset_manifest.json `
+  --output-dir data\candidate_training_resolution_v1 `
   --min-confidence 0.8
 
 .\.venv\Scripts\python.exe python_backend\scripts\train_candidate_classifier.py `
-  --dataset-manifest data\candidate_dataset_v1\candidate_dataset_manifest.json `
-  --annotation-resolution data\candidate_resolution_v1\annotation_resolution.v1.json `
-  --contract data\candidate_resolution_v1\tracking_contract.v2.json `
+  --dataset-manifest data\candidate_training_dataset_v1\candidate_dataset_manifest.json `
+  --annotation-resolution data\candidate_training_resolution_v1\annotation_resolution.v1.json `
+  --contract data\candidate_training_resolution_v1\tracking_contract.v2.json `
   --output-dir weights\candidate_classifier_v1 `
   --epochs 3 --batch-size 8 --seed 1337
 
+.\.venv\Scripts\python.exe python_backend\scripts\build_candidate_dataset.py `
+  --contract $policySourceContract `
+  --source-map data\candidate_policy_source_map.v1.json `
+  --output-dir data\candidate_policy_dataset_v1
+
+.\.venv\Scripts\python.exe python_backend\scripts\resolve_candidate_annotations.py `
+  --contract $policySourceContract `
+  --ledger data\candidate_policy_votes.v1.jsonl `
+  --dataset-manifest data\candidate_policy_dataset_v1\candidate_dataset_manifest.json `
+  --output-dir data\candidate_policy_resolution_v1 `
+  --min-confidence 0.8
+
 .\.venv\Scripts\python.exe python_backend\scripts\classify_candidates.py `
   --package weights\candidate_classifier_v1 `
-  --dataset-manifest data\candidate_dataset_v1\candidate_dataset_manifest.json `
-  --contract $sourceContract `
-  --output-dir outputs\candidate_inference_v1 `
+  --dataset-manifest data\candidate_policy_dataset_v1\candidate_dataset_manifest.json `
+  --contract $policySourceContract `
+  --output-dir outputs\candidate_policy_inference_v1 `
   --batch-size 32
+
+$datasetManifest = 'data\candidate_policy_dataset_v1\candidate_dataset_manifest.json'
+$annotationResolution = 'data\candidate_policy_resolution_v1\annotation_resolution.v1.json'
+$resolvedContract = 'data\candidate_policy_resolution_v1\tracking_contract.v2.json'
+$modelManifest = 'weights\candidate_classifier_v1\model_manifest.v1.json'
+$trainingReport = 'weights\candidate_classifier_v1\training_report.v1.json'
+$predictions = 'outputs\candidate_policy_inference_v1\candidate_predictions.v1.json'
+
+.\.venv\Scripts\python.exe python_backend\scripts\build_selective_policy_roles.py `
+  --predictions $predictions `
+  --dataset-manifest $datasetManifest `
+  --annotation-resolution $annotationResolution `
+  --resolved-contract $resolvedContract `
+  --model-manifest $modelManifest `
+  --training-report $trainingReport `
+  --output-dir outputs\candidate_policy_roles_v1
+
+.\.venv\Scripts\python.exe python_backend\scripts\fit_selective_policy.py `
+  --predictions $predictions `
+  --dataset-manifest $datasetManifest `
+  --annotation-resolution $annotationResolution `
+  --resolved-contract $resolvedContract `
+  --model-manifest $modelManifest `
+  --training-report $trainingReport `
+  --policy-roles outputs\candidate_policy_roles_v1\selective_policy_roles.v1.json `
+  --output-dir outputs\candidate_selective_policy_v1
+
+.\.venv\Scripts\python.exe python_backend\scripts\build_selective_review_queue.py `
+  --dataset-manifest $datasetManifest `
+  --predictions $predictions `
+  --policy outputs\candidate_selective_policy_v1\selective_policy.v1.json `
+  --decisions outputs\candidate_selective_policy_v1\selective_decisions.v1.json `
+  --model-manifest $modelManifest `
+  --contract $policySourceContract `
+  --annotation-resolution $annotationResolution `
+  --resolved-contract $resolvedContract `
+  --policy-roles outputs\candidate_policy_roles_v1\selective_policy_roles.v1.json `
+  --output-dir outputs\candidate_selective_review_queue_v1 `
+  --window-seconds 7.5 `
+  --max-windows 30
+
+$actions = 'data\candidate_selective_review_actions_v1.json'
+# 复核客户端必须读取 selective_review_queue.v1.json，再把带完整绑定的
+# selective_review_actions envelope 导出到 $actions；不要手填或猜测任何哈希。
+
+.\.venv\Scripts\python.exe python_backend\scripts\materialize_selective_review_actions.py `
+  --queue outputs\candidate_selective_review_queue_v1\selective_review_queue.v1.json `
+  --actions $actions `
+  --dataset-manifest $datasetManifest `
+  --predictions $predictions `
+  --policy outputs\candidate_selective_policy_v1\selective_policy.v1.json `
+  --decisions outputs\candidate_selective_policy_v1\selective_decisions.v1.json `
+  --model-manifest $modelManifest `
+  --contract $policySourceContract `
+  --annotation-resolution $annotationResolution `
+  --resolved-contract $resolvedContract `
+  --policy-roles outputs\candidate_policy_roles_v1\selective_policy_roles.v1.json `
+  --output-dir outputs\candidate_selective_review_round_v1
 ```
+
+如果数据集中的某个 source 没有 FPS，应在 `build_selective_review_queue.py` 上为它重复添加
+`--fps-override <variant_id>=<fps>`；未知 variant 或非正数会失败关闭。复核窗口只能设为 5 到 10 秒，
+`--max-windows` 不能超过 30。
+两个复核命令都会重新打开 policy lineage 绑定的标注裁决、resolved contract 和确定性角色清单，并在发布
+队列或物化结果前重新计算 human-confirmed 评估队列、校准、审计与决策。因此，仅重封口 policy/decisions
+无法把未确认的 application 候选替换成 calibration/audit 候选。
 
 `candidate_source_map.v1.json` 使用 schema `1.0`。每个 `sources[]` 必须给出
 `variant_id`、受 source-map 目录约束的相对 `video_path`、`video_sha256`、`decode_mode`、`width`、`height`、
@@ -564,16 +790,87 @@ dataset manifest 及其 dataset/evidence 字段：
 `human_confirmed` unknown。既有 confirmed 行不会被覆盖；既有 confirmed 冲突会保留且禁止训练。只有明确
 标记 `training_eligible` 的 `ai_confirmed`/`human_confirmed` 结果可训练，prelabel、单票和未决项全部排除。
 
-数据集输出 `candidate_dataset_manifest.json` 与每个 sample 的 `tight.npy`、`context.npy`、
-`review_montage.png`；解析输出 `annotation_resolution.v1.json`、
-`annotation_adjudication_queue.v1.json` 和派生 `tracking_contract.v2.json`；模型包输出 `model.pt`、
-`model_manifest.v1.json`、`training_report.v1.json`；推理输出 `candidate_predictions.v1.json` 和派生
-`tracking_contract.v2.json`。推理结果永远只是 prelabel，不会自动生成 `ai_confirmed`，也不会生成
-accept/reject/abstain；既有 confirmed 与 unknown 历史继续保留。校准后的选择性阈值和人工复核闭环属于 PR4。
+所有产物按下面的边界原子发布：
 
-`.gitignore` 已忽略 `data/`、`weights/`、`outputs/`，视频、tensor、复核图片和权重必须留在这些目录，
-不要提交到 Git。所有 CLI 都失败关闭：参数或完整性校验失败时向 stderr 输出简短 JSON、返回非零退出码，
-并且不会发布半套产物；数据集、模型和推理的 `--output-dir` 必须是尚不存在的新目录。
+```text
+data/candidate_training_dataset_v1/
+  candidate_dataset_manifest.json
+  samples/<sample_id>/{tight.npy,context.npy,review_montage.png}
+data/candidate_training_resolution_v1/
+  annotation_resolution.v1.json
+  annotation_adjudication_queue.v1.json
+  tracking_contract.v2.json
+data/candidate_policy_dataset_v1/
+  candidate_dataset_manifest.json
+  samples/<sample_id>/{tight.npy,context.npy,review_montage.png}
+data/candidate_policy_resolution_v1/
+  annotation_resolution.v1.json
+  annotation_adjudication_queue.v1.json
+  tracking_contract.v2.json
+weights/candidate_classifier_v1/
+  model.pt
+  model_manifest.v1.json
+  training_report.v1.json
+outputs/candidate_policy_inference_v1/
+  candidate_predictions.v1.json
+  tracking_contract.v2.json
+outputs/candidate_policy_roles_v1/
+  selective_policy_roles.v1.json
+outputs/candidate_selective_policy_v1/
+  selective_policy.v1.json
+  selective_acceptance_report.v1.json
+  selective_decisions.v1.json
+  tracking_contract.v2.json
+outputs/candidate_selective_review_queue_v1/
+  review_timing.v1.json
+  selective_review_queue.v1.json
+outputs/candidate_selective_review_round_v1/
+  human_adjudication_votes.v1.jsonl
+  trajectory_corrections.v1.json
+  active_learning_round.v1.json
+  selective_review_materialization.v1.json
+  annotations/{annotation_resolution.v1.json,annotation_adjudication_queue.v1.json,tracking_contract.v2.json}
+```
+
+推理概率和标签永远只是 prelabel，不会自动生成 `ai_confirmed`，也不会自行产生
+accept/reject/abstain；既有 confirmed 与 unknown 历史继续保留。策略角色生成器只使用
+`human_confirmed` 的二元真值（`match_ball` 与所有具体噪点标签）。由共享 variant、video、group、split 或
+temporal 证据形成的连通组件才是独立推断单位；生成器要求 `candidate_id` 与组件严格一一对应，每个 calibration
+或 audit 组件必须恰好包含一个人工确认评估候选。同一来源的重复帧或重复候选不会增加样本量，而会在统计检验
+前失败关闭。完整组件再被确定性地划分为 `policy_calibration` 和 `policy_audit`；两组之间，或与模型的
+train/calibration/test 证据之间只要有重叠，也会失败关闭。策略只有在校准认证和独立 audit 都通过后才
+qualified；固定安全目标是自动 accept 的 precision 至少 98%，真球 false reject 不超过 1%，并进行族错误率
+控制。按 variant/video/group/split/temporal 展示的表格仅用于诊断，不提供单组统计保证，也不会否决聚合资格。
+聚合证据不足或未通过时，系统只生成 review-only 策略并 abstain，不会降低门槛。
+
+校准和 audit 候选都是 `evaluation_holdout`：它们在 `selective_decisions.v1.json` 中记录为
+`decision_scope="evaluation_only"`，强制 abstain，也不会回写派生契约。应用侧 decisions 保存在这份独立
+产物中；复核队列必须通过 `--decisions` 明确绑定它，不能从 `tracking_contract.v2.json` 反推 decisions。
+
+复核队列优先完整纳入 uncertainty/conflict 窗口；剩余容量按 accept/reject 与视频 variant 分层，进行稳定、
+确定性的轮转抽样。每个队列最多 30 个窗口；如果仅必审窗口就超限，必须先缩小输入范围。
+`selection.coverage_complete=true` 表示所有 eligible 候选已覆盖；否则
+`requires_additional_round=true`，并由 `dropped_candidate_ids` 指出需要在下一轮缩小范围后继续复核的候选。
+
+复核客户端必须从精确的 queue item 和 candidate 生成 schema `1.0`、
+`artifact_type="selective_review_actions"` 的 envelope。四类 action 是 `confirm_ball`、带具体 V2
+`noise_subtype` 的 `reject_noise`、`mark_unknown`，以及带窗口内有序关键点的 `correct_trajectory`。除 action、
+reviewer、时间戳及 queue item/candidate ID 外，每条 action 还必须携带由 queue 生成的 `bindings`：
+`queue_sha256`、`timing_sha256`、`policy_sha256`、`decisions_sha256`、`model_sha256`、
+`training_report_sha256`、`model_weights_sha256`、`dataset_sha256`、`predictions_sha256`、`contract_sha256`、
+`annotation_resolution_sha256`、`resolved_tracking_contract_sha256`、`policy_roles_sha256`、`evidence_sha256`
+和 `candidate_fingerprint`。不要手填、跨轮复制或猜测这些值。物化阶段会再次验证全部绑定和输入快照；
+过期、篡改或冲突的 action 都会失败关闭，原始 source contract 保持不变。
+
+`materialize_selective_review_actions.py` 永远不会训练模型，报告会明确写入 `training_invoked=false`。是否
+再训练必须由操作员显式决定。本轮物化出的 annotations 和派生 contract 在下一轮只能作为训练侧证据，用它们
+在新的模型包目录训练出新 model/version 后，还必须从候选、视频、source、group、split 和时间范围都不重叠的
+证据重新构建并标注一套策略数据，再写入新的 inference 目录，然后生成 policy roles 并拟合新 policy/version。
+禁止把新模型的训练数据同时作为它的策略评估或应用数据。
+`model_manifest.v1.json`、`training_report.v1.json`、`model.pt` 是哈希绑定的模型包三件套；queue 还会绑定
+独立的 `selective_decisions.v1.json`。以上所有带 `--output-dir` 的命令都要求目标路径尚不存在，并通过
+staging/rename 原子发布；参数、完整性或绑定校验失败会返回非零，且不会留下半套目录。`.gitignore` 已忽略
+`data/`、`weights/`、`outputs/`，视频、tensor、复核图片和权重应留在这些目录，不要提交到 Git。
 
 ### 主要输出文件
 

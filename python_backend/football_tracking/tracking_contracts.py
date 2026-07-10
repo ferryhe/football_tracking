@@ -122,6 +122,13 @@ def load_tracking_contract(path_or_dir: Path) -> dict[str, Any]:
         raw = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         return _invalid_payload(path, f"artifact: {exc}")
+    return normalize_tracking_contract_payload(raw, path=path)
+
+
+def normalize_tracking_contract_payload(raw: Any, *, path: Path) -> dict[str, Any]:
+    """Validate and normalize an already captured tracking-contract payload."""
+
+    path = Path(path)
     if not isinstance(raw, dict):
         return _invalid_payload(path, "artifact payload must be an object")
 
