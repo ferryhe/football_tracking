@@ -7,7 +7,15 @@ from pathlib import Path
 import cv2
 
 from football_tracking.config import LoggingConfig, OutputConfig
+from football_tracking.detector_candidate_contract import (
+    RuntimeTrackingContractWriter,
+    remove_runtime_tracking_contract,
+)
 from football_tracking.types import TrackResult
+
+
+class TrackingContractWriteError(RuntimeError):
+    """Fatal per-frame contract capture failure."""
 
 
 class TrackingExporter:
@@ -20,12 +28,14 @@ class TrackingExporter:
         logging_config: LoggingConfig,
         frame_size: tuple[int, int],
         fps: float,
+        candidate_source_sha256: str,
     ) -> None:
         self.output_dir = output_dir
         self.config = config
         self.logging_config = logging_config
         self.frame_size = frame_size
         self.fps = fps
+        self.candidate_source_sha256 = candidate_source_sha256
         self.frames_dir = self.output_dir / self.config.frame_dir
         self.csv_path = self.output_dir / self.config.csv_name
         self.debug_path = self.output_dir / self.config.debug_jsonl_name
@@ -34,9 +44,21 @@ class TrackingExporter:
         self.csv_file = None
         self.csv_writer = None
         self.debug_file = None
+        self.contract_writer: RuntimeTrackingContractWriter | None = None
+        self._closed = False
 
         self._prepare_output_dirs()
+        remove_runtime_tracking_contract(self.output_dir)
         self._init_writers()
+        try:
+            if self.config.save_tracking_contract:
+                self.contract_writer = RuntimeTrackingContractWriter(
+                    self.output_dir,
+                    self.candidate_source_sha256,
+                )
+        except BaseException:
+            self.close(publish_tracking_contract=False)
+            raise
 
     def _prepare_output_dirs(self) -> None:
         self.output_dir.mkdir(parents=True, exist_ok=True)
@@ -65,6 +87,14 @@ class TrackingExporter:
 
     def write(self, annotated_frame, track_result: TrackResult) -> None:
         """写出当前帧所有结果。"""
+        if self.contract_writer is not None:
+            try:
+                self.contract_writer.write(track_result)
+            except Exception as exc:
+                raise TrackingContractWriteError(
+                    f"tracking contract capture failed at frame {track_result.frame_index}"
+                ) from exc
+
         if self.video_writer is not None:
             self.video_writer.write(annotated_frame)
 
@@ -103,11 +133,45 @@ class TrackingExporter:
             return
         self.debug_file.write(json.dumps(track_result.to_debug_dict(), ensure_ascii=False) + "\n")
 
-    def close(self) -> None:
+    def close(self, *, publish_tracking_contract: bool = True) -> None:
         """释放所有文件句柄。"""
+        if self._closed:
+            return
+        self._closed = True
+
+        failure: BaseException | None = None
         if self.video_writer is not None:
-            self.video_writer.release()
+            try:
+                self.video_writer.release()
+            except BaseException as exc:
+                failure = exc
+            finally:
+                self.video_writer = None
         if self.csv_file is not None:
-            self.csv_file.close()
+            try:
+                self.csv_file.close()
+            except BaseException as exc:
+                if failure is None:
+                    failure = exc
+            finally:
+                self.csv_file = None
+                self.csv_writer = None
         if self.debug_file is not None:
-            self.debug_file.close()
+            try:
+                self.debug_file.close()
+            except BaseException as exc:
+                if failure is None:
+                    failure = exc
+            finally:
+                self.debug_file = None
+        if self.contract_writer is not None:
+            try:
+                self.contract_writer.close(publish=publish_tracking_contract and failure is None)
+            except BaseException as exc:
+                if failure is None:
+                    failure = exc
+            finally:
+                self.contract_writer = None
+
+        if failure is not None:
+            raise failure

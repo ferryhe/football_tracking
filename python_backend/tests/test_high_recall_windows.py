@@ -1499,11 +1499,20 @@ class HighRecallChunkRunnerHookTests(unittest.TestCase):
     def test_runner_executes_only_selected_windows_and_reconciles_results(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:
             output_dir = Path(temp_name)
+            input_video = output_dir / "input.mp4"
+            input_video.write_bytes(b"high-recall-test-video")
             config = SimpleNamespace(
+                input_video=input_video,
                 output_dir=output_dir,
                 output=SimpleNamespace(csv_name="ball_track.csv", debug_jsonl_name="debug.jsonl"),
                 detector=SimpleNamespace(inference_mode="direct_full_frame"),
-                runtime=SimpleNamespace(start_frame=0, max_frames=None),
+                runtime=SimpleNamespace(
+                    start_frame=0,
+                    max_frames=None,
+                    candidate_source_sha256=None,
+                    candidate_source_stat_token=None,
+                ),
+                mock=SimpleNamespace(enabled=False),
                 high_recall_windows=SimpleNamespace(
                     enabled=True,
                     margin_frames=0,

@@ -171,6 +171,7 @@ output:
   save_frames: false
   save_csv: true
   save_debug_jsonl: true
+  save_tracking_contract: true
   draw_radius: 18
   draw_thickness: 4
   frame_text_scale: 1.0

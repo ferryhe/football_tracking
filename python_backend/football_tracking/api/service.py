@@ -72,6 +72,7 @@ from football_tracking.player_tracks import compact_player_tracks_summary
 from football_tracking.quality import assess_video_quality
 from football_tracking.recovery_stitcher import REPORT_NAME as RECOVERY_STITCH_REPORT_NAME
 from football_tracking.recovery_stitcher import stitch_recovery_window
+from football_tracking.tracking_contracts import TRACKING_CONTRACT_REPORT_NAME
 
 _WINDOWS_RESERVED_NAMES = {
     "CON",
@@ -214,6 +215,7 @@ _CONFIG_EXPLAIN_DESCRIPTIONS_EN: dict[str, str] = {
     "output.debug_jsonl_name": "Per-frame debug JSONL file name.",
     "output.save_video": "Whether to render annotated output video.",
     "output.save_csv": "Whether to save track CSV.",
+    "output.save_tracking_contract": "Whether to save the candidate-populated V2 tracking contract.",
     "output.draw_radius": "Radius of the drawn ball marker.",
     "runtime.use_gpu_if_available": "Whether to prefer GPU when available.",
     "runtime.start_frame": "First frame to process.",
@@ -867,6 +869,14 @@ class ApiService:
             raise FileNotFoundError(artifact_name)
         if output_dir not in candidate.parents and candidate != output_dir:
             raise FileNotFoundError(artifact_name)
+        if candidate.name == TRACKING_CONTRACT_REPORT_NAME and candidate.parent != output_dir:
+            allowed_nested_contracts = {
+                path.resolve()
+                for path in self._iter_artifact_paths(output_dir)
+                if path.name == TRACKING_CONTRACT_REPORT_NAME and path.parent != output_dir
+            }
+            if candidate not in allowed_nested_contracts:
+                raise FileNotFoundError(artifact_name)
         return candidate
 
     def get_cleanup_report(self, run_id: str) -> dict[str, Any]:
@@ -5011,50 +5021,109 @@ class ApiService:
 
     def _iter_artifact_paths(self, output_dir: Path) -> list[Path]:
         artifact_paths = [item for item in output_dir.iterdir() if item.is_file()]
-        for chunk_root in self._temporal_chunk_artifact_roots(output_dir):
+        chunk_names = self._temporal_chunk_names(output_dir)
+        chunk_roots, allow_nested_contracts = self._temporal_chunk_artifact_roots(output_dir)
+        for chunk_root in chunk_roots:
             artifact_paths.extend(
                 item
-                for chunk_dir in sorted((item for item in chunk_root.iterdir() if item.is_dir()), key=lambda item: item.name)
+                for chunk_dir in sorted(
+                    (
+                        item
+                        for item in chunk_root.iterdir()
+                        if item.is_dir()
+                        and item.name in chunk_names
+                        and item.resolve().parent == chunk_root.resolve()
+                    ),
+                    key=lambda item: item.name,
+                )
                 for item in chunk_dir.iterdir()
-                if self._is_temporal_chunk_artifact(chunk_root, item)
+                if self._is_temporal_chunk_artifact(
+                    chunk_root,
+                    item,
+                    allow_tracking_contract=allow_nested_contracts,
+                )
             )
         return sorted(artifact_paths, key=lambda item: item.relative_to(output_dir).as_posix())
 
-    def _temporal_chunk_artifact_roots(self, output_dir: Path) -> list[Path]:
-        roots: list[Path] = []
-        default_chunks_dir = output_dir / "chunks"
-        if default_chunks_dir.exists() and default_chunks_dir.is_dir():
-            roots.append(default_chunks_dir)
+    def _temporal_chunk_artifact_roots(self, output_dir: Path) -> tuple[list[Path], bool]:
+        report = self._read_optional_json(output_dir / "temporal_chunks_report.json")
+        if report is None:
+            return [], False
+        if "chunks_root_name" not in report:
+            return self._legacy_temporal_chunk_artifact_roots(output_dir), False
+        root_name = report.get("chunks_root_name")
+        if (
+            not isinstance(root_name, str)
+            or not root_name
+            or root_name in {".", ".."}
+            or "/" in root_name
+            or "\\" in root_name
+            or Path(root_name).name != root_name
+        ):
+            return [], False
+        resolved_output_dir = output_dir.resolve()
+        root = (output_dir / root_name).resolve()
+        if root.parent != resolved_output_dir or not root.is_dir():
+            return [], False
+        stitch = report.get("stitch")
+        allow_nested_contracts = isinstance(stitch, dict) and stitch.get("status") == "succeeded"
+        return [root], allow_nested_contracts
 
+    def _legacy_temporal_chunk_artifact_roots(self, output_dir: Path) -> list[Path]:
+        resolved_output_dir = output_dir.resolve()
         chunk_names = self._temporal_chunk_names(output_dir)
-        if chunk_names:
-            for candidate_root in output_dir.iterdir():
-                if not candidate_root.is_dir() or candidate_root == default_chunks_dir:
-                    continue
-                if any((candidate_root / chunk_name).is_dir() for chunk_name in chunk_names):
-                    roots.append(candidate_root)
-
-        deduped: dict[Path, Path] = {}
-        for root in roots:
-            deduped[root.resolve()] = root
-        return sorted(deduped.values(), key=lambda item: item.relative_to(output_dir).as_posix())
+        if not chunk_names:
+            return []
+        roots: dict[Path, Path] = {}
+        for candidate_root in output_dir.iterdir():
+            if not candidate_root.is_dir():
+                continue
+            resolved_root = candidate_root.resolve()
+            if resolved_root.parent != resolved_output_dir:
+                continue
+            if any(
+                (candidate_root / chunk_name).is_dir()
+                and (candidate_root / chunk_name).resolve().parent == resolved_root
+                for chunk_name in chunk_names
+            ):
+                roots[resolved_root] = candidate_root
+        return sorted(roots.values(), key=lambda item: item.relative_to(output_dir).as_posix())
 
     def _temporal_chunk_names(self, output_dir: Path) -> set[str]:
         report = self._read_optional_json(output_dir / "temporal_chunks_report.json")
         if report is None:
             return set()
         names: set[str] = set()
+
+        def add_name(value: Any) -> None:
+            if (
+                isinstance(value, str)
+                and value.startswith("chunk_")
+                and value not in {".", ".."}
+                and "/" not in value
+                and "\\" not in value
+                and Path(value).name == value
+            ):
+                names.add(value)
+
         chunks = report.get("chunks")
         if isinstance(chunks, list):
             for chunk in chunks:
-                if isinstance(chunk, dict) and isinstance(chunk.get("name"), str):
-                    names.add(chunk["name"])
+                if isinstance(chunk, dict):
+                    add_name(chunk.get("name"))
         source_chunk_names = report.get("source_chunk_names")
         if isinstance(source_chunk_names, list):
-            names.update(name for name in source_chunk_names if isinstance(name, str))
+            for name in source_chunk_names:
+                add_name(name)
         return names
 
-    def _is_temporal_chunk_artifact(self, chunk_root: Path, artifact_path: Path) -> bool:
+    def _is_temporal_chunk_artifact(
+        self,
+        chunk_root: Path,
+        artifact_path: Path,
+        *,
+        allow_tracking_contract: bool,
+    ) -> bool:
         if not artifact_path.is_file():
             return False
         try:
@@ -5066,9 +5135,19 @@ class ApiService:
         chunk_name = relative.parts[0]
         if not chunk_name.startswith("chunk_"):
             return False
+        resolved_chunk_root = chunk_root.resolve()
+        resolved_chunk_dir = (chunk_root / chunk_name).resolve()
+        if resolved_chunk_dir.parent != resolved_chunk_root or artifact_path.resolve().parent != resolved_chunk_dir:
+            return False
         if artifact_path.suffix.lower() in {".csv", ".jsonl"}:
             return True
-        return artifact_path.name in {"chunk_config.yaml", "worker.stdout.log", "worker.stderr.log"}
+        if artifact_path.name == TRACKING_CONTRACT_REPORT_NAME:
+            return allow_tracking_contract
+        return artifact_path.name in {
+            "chunk_config.yaml",
+            "worker.stdout.log",
+            "worker.stderr.log",
+        }
 
     def _artifact_kind(self, artifact_path: Path) -> str:
         suffix = artifact_path.suffix.lower()

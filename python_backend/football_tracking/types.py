@@ -34,6 +34,7 @@ class Candidate:
     confidence: float
     label: str = "ball"
     source: str = "detector"
+    candidate_id: str | None = None
 
     @property
     def width(self) -> float:
@@ -93,6 +94,7 @@ class CandidateScore:
 
     def to_debug_dict(self) -> dict[str, Any]:
         return {
+            "candidate_id": self.candidate.candidate_id,
             "candidate_center": [round(self.candidate.center[0], 2), round(self.candidate.center[1], 2)],
             "candidate_bbox": [
                 round(self.candidate.x1, 2),
@@ -170,6 +172,7 @@ class TrackResult:
     lost_frames: int
     raw_candidate_count: int
     filtered_candidate_count: int
+    raw_candidates: list[Candidate] = field(default_factory=list)
     selected_score: float = 0.0
     selected_candidate_scores: list[CandidateScore] = field(default_factory=list)
     filter_rejection_counts: dict[str, int] = field(default_factory=dict)

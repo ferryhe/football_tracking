@@ -19,10 +19,103 @@ from football_tracking.candidate_dataset import (
     build_candidate_dataset,
     main,
 )
+from football_tracking.detector_candidate_contract import RuntimeTrackingContractWriter, assign_candidate_ids
 from football_tracking.tracking_contracts import TRACKING_CONTRACT_REPORT_NAME, write_tracking_contract
+from football_tracking.types import Candidate, OutputStatus, TrackResult, TrackState
 
 
 class CandidateDatasetTests(unittest.TestCase):
+    def test_runtime_contract_is_directly_compatible_with_operator_source_map(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            root = Path(temp_name)
+            video_path = root / "source.bin"
+            video_path.write_bytes(b"synthetic-video")
+            candidate = Candidate(
+                frame_index=2,
+                x1=2.0,
+                y1=1.0,
+                x2=6.0,
+                y2=5.0,
+                confidence=0.75,
+                source="yolo_sahi",
+            )
+            assign_candidate_ids([candidate], _sha256(video_path))
+            writer = RuntimeTrackingContractWriter(root / "runtime", _sha256(video_path))
+            writer.write(
+                TrackResult(
+                    frame_index=2,
+                    output_status=OutputStatus.LOST,
+                    state=TrackState.LOST,
+                    point=None,
+                    confidence=0.0,
+                    reason="no_candidate_selected",
+                    lost_frames=1,
+                    raw_candidate_count=1,
+                    filtered_candidate_count=0,
+                    raw_candidates=[candidate],
+                )
+            )
+            writer.close(publish=True)
+            assert candidate.candidate_id is not None
+            source_map_path, mapped_video_path = _write_source_map(
+                root,
+                frame_count=5,
+                candidate_ids=[candidate.candidate_id],
+            )
+            factory = CaptureFactory(
+                {str(mapped_video_path.resolve()): CaptureSpec(_solid_frames(5, width=8, height=6))}
+            )
+
+            with patch("football_tracking.candidate_dataset.cv2.VideoCapture", side_effect=factory):
+                manifest = build_candidate_dataset(
+                    root / "runtime" / TRACKING_CONTRACT_REPORT_NAME,
+                    source_map_path,
+                    root / "dataset",
+                )
+
+        self.assertEqual([candidate.candidate_id], [sample["candidate_id"] for sample in manifest["samples"]])
+
+    def test_runtime_candidate_ids_reject_tampered_evidence_or_wrong_video_binding(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            root = Path(temp_name)
+            video_path = root / "source.bin"
+            video_path.write_bytes(b"synthetic-video")
+            candidate = Candidate(
+                frame_index=2,
+                x1=2.0,
+                y1=1.0,
+                x2=6.0,
+                y2=5.0,
+                confidence=0.75,
+                source="detector",
+            )
+            assign_candidate_ids([candidate], _sha256(video_path))
+            assert candidate.candidate_id is not None
+            source_map_path, mapped_video_path = _write_source_map(
+                root,
+                frame_count=5,
+                candidate_ids=[candidate.candidate_id],
+            )
+            tampered_contract = _write_contract(
+                root / "tampered-contract",
+                [_candidate(candidate.candidate_id, frame_index=2, bbox=[2, 1, 7, 5])],
+            )
+
+            with self.assertRaisesRegex(CandidateDatasetError, "source-scoped candidate ID"):
+                build_candidate_dataset(tampered_contract, source_map_path, root / "tampered-dataset")
+
+            valid_contract = _write_contract(
+                root / "valid-contract",
+                [_candidate(candidate.candidate_id, frame_index=2, bbox=[2, 1, 6, 5])],
+            )
+            mapped_video_path.write_bytes(b"different-video")
+            source_map = json.loads(source_map_path.read_text(encoding="utf-8"))
+            source_map["sources"][0]["video_sha256"] = _sha256(mapped_video_path)
+            source_map_path.write_text(json.dumps(source_map), encoding="utf-8")
+
+            with self.assertRaisesRegex(CandidateDatasetError, "source-scoped candidate ID"):
+                build_candidate_dataset(valid_contract, source_map_path, root / "wrong-video-dataset")
+
     def test_builds_ordered_rgb_tensors_without_markup_and_relative_manifest_paths(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:
             root = Path(temp_name)

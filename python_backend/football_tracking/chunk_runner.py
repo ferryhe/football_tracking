@@ -11,7 +11,7 @@ from concurrent.futures import CancelledError
 from copy import deepcopy
 from dataclasses import asdict, dataclass, is_dataclass
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Iterable
 
 import cv2
 import yaml
@@ -20,6 +20,13 @@ from football_tracking.ai_review_triggers import write_ai_review_trigger_report
 from football_tracking.ball_audit import write_ball_audit_report
 from football_tracking.chunk_stitcher import stitch_chunk_outputs
 from football_tracking.config import AppConfig, load_config
+from football_tracking.detector_candidate_contract import (
+    CandidateSourceChangedError,
+    CandidateSourceSnapshot,
+    capture_candidate_source_snapshot,
+    remove_runtime_tracking_contract,
+    verify_candidate_source_snapshot,
+)
 from football_tracking.events import write_event_candidate_report
 from football_tracking.follow_cam import FollowCamGenerator
 from football_tracking.high_recall_reconcile import reconcile_high_recall_outputs
@@ -177,8 +184,15 @@ def run_high_recall_chunk(
 ) -> int:
     """Run one high-recall window while preserving the configured detector mode."""
     try:
+        remove_runtime_tracking_contract(config_path.parent)
         config = enforce_high_recall_chunk_config(load_config(config_path))
-        BallTrackingPipeline(config).run(progress_callback=progress_callback, should_cancel=should_cancel)
+        remove_runtime_tracking_contract(config.output_dir)
+        BallTrackingPipeline(
+            config,
+            candidate_source_sha256=config.runtime.candidate_source_sha256,
+            candidate_source_stat_token=config.runtime.candidate_source_stat_token,
+            verify_candidate_source_content=config.runtime.candidate_source_sha256 is None,
+        ).run(progress_callback=progress_callback, should_cancel=should_cancel)
         return 0
     except CancelledError:
         raise
@@ -225,8 +239,15 @@ def run_chunk(
 ) -> int:
     """Run one chunk config through the normal pipeline."""
     try:
+        remove_runtime_tracking_contract(config_path.parent)
         config = enforce_raw_chunk_config(load_config(config_path))
-        BallTrackingPipeline(config).run(progress_callback=progress_callback, should_cancel=should_cancel)
+        remove_runtime_tracking_contract(config.output_dir)
+        BallTrackingPipeline(
+            config,
+            candidate_source_sha256=config.runtime.candidate_source_sha256,
+            candidate_source_stat_token=config.runtime.candidate_source_stat_token,
+            verify_candidate_source_content=config.runtime.candidate_source_sha256 is None,
+        ).run(progress_callback=progress_callback, should_cancel=should_cancel)
         return 0
     except CancelledError:
         raise
@@ -239,6 +260,7 @@ def run_high_recall_windows(
     config: AppConfig,
     *,
     source_total_frames: int | None = None,
+    candidate_source_snapshot: CandidateSourceSnapshot | None = None,
     progress_callback: Callable[[dict[str, Any]], None] | None = None,
     should_cancel: Callable[[], bool] | None = None,
 ) -> dict[str, Any]:
@@ -298,6 +320,12 @@ def run_high_recall_windows(
         _write_high_recall_report(high_recall_root, report)
         return report
 
+    if candidate_source_snapshot is None:
+        candidate_source_snapshot = capture_candidate_source_snapshot(config)
+    else:
+        verify_candidate_source_snapshot(config, candidate_source_snapshot, verify_content=False)
+    config.runtime.candidate_source_sha256 = candidate_source_snapshot.sha256
+    config.runtime.candidate_source_stat_token = candidate_source_snapshot.stat_token
     results: list[dict[str, Any]] = []
     try:
         for index, window in enumerate(executable_windows):
@@ -348,6 +376,21 @@ def run_high_recall_windows(
         }
         _write_high_recall_report(high_recall_root, report)
         raise
+    except Exception:
+        try:
+            verify_candidate_source_snapshot(config, candidate_source_snapshot, verify_content=True)
+        except CandidateSourceChangedError as source_exc:
+            _remove_tracking_contracts(
+                child for child in high_recall_root.iterdir() if child.is_dir() and child.name.startswith("window_")
+            )
+            report["execution"] = {
+                "status": "failed",
+                "error": f"Candidate source changed during high-recall execution: {source_exc}",
+                "results": results,
+            }
+            _write_high_recall_report(high_recall_root, report)
+            raise CandidateSourceChangedError("candidate source changed during high-recall execution") from source_exc
+        raise
 
     execution = {"status": "succeeded", "results": results}
     report["execution"] = execution
@@ -365,6 +408,19 @@ def run_high_recall_windows(
         _write_high_recall_report(high_recall_root, report)
         raise
     report["reconcile"] = reconcile_report
+    try:
+        verify_candidate_source_snapshot(config, candidate_source_snapshot, verify_content=True)
+    except CandidateSourceChangedError as exc:
+        _remove_tracking_contracts(
+            child for child in high_recall_root.iterdir() if child.is_dir() and child.name.startswith("window_")
+        )
+        report["execution"] = {
+            **execution,
+            "status": "failed",
+            "error": f"Candidate source changed during high-recall execution: {exc}",
+        }
+        _write_high_recall_report(high_recall_root, report)
+        raise CandidateSourceChangedError("candidate source changed during high-recall execution") from exc
     _write_high_recall_report(high_recall_root, report)
     return report
 
@@ -375,6 +431,12 @@ def run_temporal_chunks(
     should_cancel: Callable[[], bool] | None = None,
 ) -> None:
     """Run temporal chunks, stitch raw outputs, then run global outputs."""
+    chunks_root = config.output_dir / config.temporal_chunks.output_dir_name
+    _remove_temporal_tracking_contracts(config.output_dir, chunks_root)
+    chunks_root.mkdir(parents=True, exist_ok=True)
+    candidate_source_snapshot = capture_candidate_source_snapshot(config)
+    config.runtime.candidate_source_sha256 = candidate_source_snapshot.sha256
+    config.runtime.candidate_source_stat_token = candidate_source_snapshot.stat_token
     _ensure_temporal_raw_outputs(config)
     _reset_temporal_chunks_report(config.output_dir)
     source_total_frames = _source_total_frames(config)
@@ -388,9 +450,6 @@ def run_temporal_chunks(
     )
     if not chunks:
         raise RuntimeError("Temporal chunk planning produced no chunks.")
-    chunks_root = config.output_dir / config.temporal_chunks.output_dir_name
-    chunks_root.mkdir(parents=True, exist_ok=True)
-
     total_chunks = len(chunks)
     requested_workers = config.temporal_chunks.max_workers
     worker_count = effective_worker_count(
@@ -401,65 +460,118 @@ def run_temporal_chunks(
     )
     jobs = _prepare_chunk_jobs(config, chunks, chunks_root)
 
-    if worker_count == 1:
-        execution = _run_chunk_jobs_in_process(
-            jobs,
-            output_dir=config.output_dir,
-            requested_workers=requested_workers,
-            effective_workers=worker_count,
-            devices=config.temporal_chunks.devices,
-            allow_gpu_oversubscription=config.temporal_chunks.allow_gpu_oversubscription,
-            source_total_frames=source_total_frames,
-            total_chunks=total_chunks,
-            progress_callback=progress_callback,
-            should_cancel=should_cancel,
-        )
-    else:
-        execution = _run_chunk_jobs_subprocess(
-            jobs,
-            output_dir=config.output_dir,
-            requested_workers=requested_workers,
-            effective_workers=worker_count,
-            devices=config.temporal_chunks.devices,
-            allow_gpu_oversubscription=config.temporal_chunks.allow_gpu_oversubscription,
-            source_total_frames=source_total_frames,
-            total_chunks=total_chunks,
-            progress_callback=progress_callback,
-            should_cancel=should_cancel,
-        )
+    try:
+        if worker_count == 1:
+            execution = _run_chunk_jobs_in_process(
+                jobs,
+                output_dir=config.output_dir,
+                requested_workers=requested_workers,
+                effective_workers=worker_count,
+                devices=config.temporal_chunks.devices,
+                allow_gpu_oversubscription=config.temporal_chunks.allow_gpu_oversubscription,
+                source_total_frames=source_total_frames,
+                total_chunks=total_chunks,
+                progress_callback=progress_callback,
+                should_cancel=should_cancel,
+            )
+        else:
+            execution = _run_chunk_jobs_subprocess(
+                jobs,
+                output_dir=config.output_dir,
+                requested_workers=requested_workers,
+                effective_workers=worker_count,
+                devices=config.temporal_chunks.devices,
+                allow_gpu_oversubscription=config.temporal_chunks.allow_gpu_oversubscription,
+                source_total_frames=source_total_frames,
+                total_chunks=total_chunks,
+                progress_callback=progress_callback,
+                should_cancel=should_cancel,
+            )
+    except BaseException:
+        _remove_temporal_tracking_contracts(config.output_dir, chunks_root)
+        raise
 
     _write_execution_report(config.output_dir, execution)
-    _raise_if_cancelled(should_cancel)
+    try:
+        _raise_if_cancelled(should_cancel)
+    except CancelledError:
+        _remove_temporal_tracking_contracts(config.output_dir, chunks_root)
+        raise
+    try:
+        verify_candidate_source_snapshot(config, candidate_source_snapshot, verify_content=True)
+    except CandidateSourceChangedError as exc:
+        _remove_temporal_tracking_contracts(config.output_dir, chunks_root)
+        _write_stitch_report(config.output_dir, status="failed", error=str(exc))
+        raise
     _emit_progress(progress_callback, {"stage": "stitch", "chunk_count": total_chunks})
     try:
-        stitch_chunk_outputs(chunks, [job.chunk_dir for job in jobs], config.output_dir, output_config=config.output)
+        stitch_chunk_outputs(
+            chunks,
+            [job.chunk_dir for job in jobs],
+            config.output_dir,
+            output_config=config.output,
+            candidate_source_sha256=candidate_source_snapshot.sha256,
+            chunks_root_name=config.temporal_chunks.output_dir_name,
+        )
     except Exception as exc:
         _write_stitch_report(config.output_dir, status="failed", error=str(exc))
         raise
     _write_stitch_report(config.output_dir, status="succeeded")
     _write_execution_report(config.output_dir, execution)
+    try:
+        verify_candidate_source_snapshot(config, candidate_source_snapshot, verify_content=True)
+    except CandidateSourceChangedError as exc:
+        _remove_temporal_tracking_contracts(config.output_dir, chunks_root)
+        _write_stitch_report(config.output_dir, status="failed", error=str(exc))
+        raise
 
     if config.mock.enabled:
         return
 
     if _high_recall_settings(config).enabled:
         _raise_if_cancelled(should_cancel)
-        run_high_recall_windows(
-            config,
-            source_total_frames=source_total_frames,
-            progress_callback=progress_callback,
-            should_cancel=should_cancel,
-        )
+        try:
+            run_high_recall_windows(
+                config,
+                source_total_frames=source_total_frames,
+                candidate_source_snapshot=candidate_source_snapshot,
+                progress_callback=progress_callback,
+                should_cancel=should_cancel,
+            )
+        except CandidateSourceChangedError:
+            _remove_temporal_tracking_contracts(config.output_dir, chunks_root)
+            raise
 
-    if config.postprocess.enabled:
-        _raise_if_cancelled(should_cancel)
-        _emit_progress(progress_callback, {"stage": "postprocess", "current_frame": 0, "total_frames": 1})
-        TrackPostprocessor(config).run()
-        _emit_progress(progress_callback, {"stage": "postprocess", "current_frame": 1, "total_frames": 1})
-    if config.follow_cam.enabled:
-        _raise_if_cancelled(should_cancel)
-        _emit_progress(progress_callback, {"stage": "follow_cam"})
-        FollowCamGenerator(config).run(progress_callback=progress_callback, should_cancel=should_cancel)
+    try:
+        if config.postprocess.enabled:
+            _raise_if_cancelled(should_cancel)
+            _emit_progress(progress_callback, {"stage": "postprocess", "current_frame": 0, "total_frames": 1})
+            TrackPostprocessor(config).run()
+            _emit_progress(progress_callback, {"stage": "postprocess", "current_frame": 1, "total_frames": 1})
+        if config.follow_cam.enabled:
+            _raise_if_cancelled(should_cancel)
+            _emit_progress(progress_callback, {"stage": "follow_cam"})
+            FollowCamGenerator(config).run(progress_callback=progress_callback, should_cancel=should_cancel)
+    finally:
+        try:
+            verify_candidate_source_snapshot(config, candidate_source_snapshot, verify_content=True)
+        except CandidateSourceChangedError:
+            contract_dirs = _temporal_tracking_contract_dirs(config.output_dir, chunks_root)
+            high_recall_root = config.output_dir / _high_recall_settings(config).output_dir_name
+            resolved_high_recall_root = high_recall_root.resolve()
+            if (
+                high_recall_root.is_dir()
+                and resolved_high_recall_root.parent == config.output_dir.resolve()
+            ):
+                contract_dirs.extend(
+                    child
+                    for child in high_recall_root.iterdir()
+                    if child.is_dir()
+                    and child.name.startswith("window_")
+                    and child.resolve().parent == resolved_high_recall_root
+                )
+            _remove_tracking_contracts(contract_dirs)
+            raise
 
 
 def _ensure_temporal_raw_outputs(config: AppConfig) -> None:
@@ -473,6 +585,48 @@ def _reset_temporal_chunks_report(output_dir: Path) -> None:
     report_path = output_dir / "temporal_chunks_report.json"
     if report_path.exists():
         report_path.unlink()
+
+
+def _remove_tracking_contracts(output_dirs: Iterable[Path]) -> None:
+    for output_dir in output_dirs:
+        remove_runtime_tracking_contract(Path(output_dir))
+
+
+def _temporal_tracking_contract_dirs(output_dir: Path, chunks_root: Path) -> list[Path]:
+    contract_dirs = [output_dir]
+    resolved_output_dir = output_dir.resolve()
+    resolved_chunks_root = chunks_root.resolve()
+    if resolved_chunks_root.parent != resolved_output_dir:
+        raise ValueError("temporal chunk root must be a direct child of output_dir")
+    candidate_roots = {resolved_chunks_root: chunks_root}
+    if output_dir.is_dir():
+        for child in output_dir.iterdir():
+            if not child.is_dir():
+                continue
+            resolved_child = child.resolve()
+            if resolved_child.parent == resolved_output_dir:
+                candidate_roots[resolved_child] = child
+    for root in sorted(candidate_roots.values(), key=lambda path: path.name):
+        if not root.is_dir():
+            continue
+        resolved_root = root.resolve()
+        contract_dirs.extend(
+            sorted(
+                child
+                for child in root.iterdir()
+                if child.is_dir()
+                and child.name.startswith("chunk_")
+                and child.resolve().parent == resolved_root
+            )
+        )
+    return contract_dirs
+
+
+def _remove_temporal_tracking_contracts(output_dir: Path, chunks_root: Path) -> None:
+    remove_runtime_tracking_contract(output_dir)
+    _remove_tracking_contracts(
+        path for path in _temporal_tracking_contract_dirs(output_dir, chunks_root) if path != output_dir
+    )
 
 
 def _prepare_chunk_jobs(config: AppConfig, chunks: list[TemporalChunk], chunks_root: Path) -> list[_ChunkJob]:

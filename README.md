@@ -68,6 +68,7 @@ Highlights of the new Baseline page:
 Review, improvement, and highlight outputs:
 
 - **Run metrics and manifest** — each run writes reproducible summaries for raw/cleaned tracks, audit reports, AI review triggers, player-track artifacts when available, event candidates, and generated renders. `player_tracks.json` is an artifact, not a guarantee that stable continuous player tracking is fully productized.
+- **Detector candidate contract** — normal runs write `tracking_contract.v2.json` with content-scoped deterministic IDs for every pre-filter detector candidate. Temporal runs expose only stitched core frames at the top level; offline classification and selective review remain evidence-bound batch workflows.
 - **Camera motion audit** — follow-cam renders also write `camera_motion_audit.json`, a standalone review report for abrupt pan, acceleration, or zoom changes in the final camera path.
 - **Event candidates** — completed runs can expose `event_candidates.json` with shot and goal candidates. These are review candidates, not confirmed football events.
 - **Highlight clips** — the Deliverable page can render a short `highlight.mp4` from a selected event candidate; the child run writes `highlight_report.json` and appears in History as a highlight job.

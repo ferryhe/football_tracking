@@ -459,6 +459,7 @@ class ApiServiceSmokeTests(unittest.TestCase):
             {
                 "chunk_count": 2,
                 "frame_count": 3,
+                "chunks_root_name": "chunks",
                 "chunks": [
                     {
                         "index": 0,
@@ -501,6 +502,19 @@ class ApiServiceSmokeTests(unittest.TestCase):
         self.write_text(
             f"outputs/{folder_name}/chunks/chunk_0000/worker.stdout.log",
             "chunk complete\n",
+        )
+        self.write_json(
+            f"outputs/{folder_name}/chunks/chunk_0000/tracking_contract.v2.json",
+            {
+                "schema_version": "2.0",
+                "generated_at": "2026-01-01T00:00:00+00:00",
+                "summary": {},
+                "frames": [],
+                "candidates": [],
+                "classifications": [],
+                "decisions": [],
+                "validation_errors": [],
+            },
         )
         self.write_text(
             f"outputs/{folder_name}/chunks/chunk_0000/frames/frame_000001.jpg",
@@ -1552,6 +1566,21 @@ class ApiServiceSmokeTests(unittest.TestCase):
 
     def test_list_runs_collects_metrics_artifacts_and_stats(self) -> None:
         output_dir = self.create_output_bundle("kept_baseline")
+        (output_dir / "tracking_contract.v2.json").write_text(
+            json.dumps(
+                {
+                    "schema_version": "2.0",
+                    "generated_at": "2026-01-01T00:00:00+00:00",
+                    "summary": {},
+                    "frames": [],
+                    "candidates": [],
+                    "classifications": [],
+                    "decisions": [],
+                    "validation_errors": [],
+                }
+            ),
+            encoding="utf-8",
+        )
         write_run_artifacts(
             output_dir=output_dir,
             run={
@@ -1590,6 +1619,14 @@ class ApiServiceSmokeTests(unittest.TestCase):
         self.assertEqual("cleaned", run["stats"]["event_candidates"]["source_name"])
         self.assertIn("player_tracks.json", artifact_names)
         self.assertEqual(1, run["stats"]["player_tracks"]["track_count"])
+        contract_artifact = next(
+            artifact for artifact in run["artifacts"] if artifact["name"] == "tracking_contract.v2.json"
+        )
+        self.assertEqual("json", contract_artifact["kind"])
+        self.assertEqual(
+            (output_dir / "tracking_contract.v2.json").resolve(),
+            self.service.get_artifact_path(run["run_id"], "tracking_contract.v2.json"),
+        )
 
     def test_list_runs_exposes_temporal_chunk_report_and_nested_artifacts(self) -> None:
         output_dir = self.create_output_bundle("chunked_baseline")
@@ -1618,6 +1655,7 @@ class ApiServiceSmokeTests(unittest.TestCase):
         self.assertEqual("json", artifact_by_name["temporal_chunks_report.json"]["kind"])
         self.assertEqual("csv", artifact_by_name["chunks/chunk_0000/ball_track.csv"]["kind"])
         self.assertEqual("jsonl", artifact_by_name["chunks/chunk_0000/debug.jsonl"]["kind"])
+        self.assertEqual("json", artifact_by_name["chunks/chunk_0000/tracking_contract.v2.json"]["kind"])
         self.assertEqual("file", artifact_by_name["chunks/chunk_0000/worker.stdout.log"]["kind"])
         self.assertNotIn("chunks/chunk_0000/frames/frame_000001.jpg", artifact_by_name)
         self.assertEqual(2, run["stats"]["temporal_chunks"]["chunk_count"])
@@ -1662,6 +1700,7 @@ class ApiServiceSmokeTests(unittest.TestCase):
             {
                 "chunk_count": 1,
                 "frame_count": 2,
+                "chunks_root_name": "segments",
                 "chunks": [{"index": 0, "name": "chunk_0000"}],
                 "execution": {"status": "succeeded", "effective_workers": 1},
                 "stitch": {"status": "succeeded"},
@@ -1673,6 +1712,28 @@ class ApiServiceSmokeTests(unittest.TestCase):
                 {"Frame": 0, "X": 10, "Y": 20, "Confidence": "0.9000", "Status": "Detected"},
                 {"Frame": 1, "X": 11, "Y": 20, "Confidence": "0.9000", "Status": "Detected"},
             ],
+        )
+        stale_contract = {
+            "schema_version": "2.0",
+            "generated_at": "2026-01-01T00:00:00+00:00",
+            "summary": {},
+            "frames": [],
+            "candidates": [],
+            "classifications": [],
+            "decisions": [],
+            "validation_errors": [],
+        }
+        self.write_json(
+            "outputs/custom_chunk_root/segments/chunk_0000/tracking_contract.v2.json",
+            stale_contract,
+        )
+        self.write_json(
+            "outputs/custom_chunk_root/chunks/chunk_0000/tracking_contract.v2.json",
+            stale_contract,
+        )
+        self.write_json(
+            "outputs/custom_chunk_root/older_parts/chunk_0000/tracking_contract.v2.json",
+            stale_contract,
         )
         write_run_artifacts(
             output_dir=output_dir,
@@ -1693,6 +1754,63 @@ class ApiServiceSmokeTests(unittest.TestCase):
 
         artifact_names = {artifact["name"] for artifact in run["artifacts"]}
         self.assertIn("segments/chunk_0000/ball_track.csv", artifact_names)
+        self.assertIn("segments/chunk_0000/tracking_contract.v2.json", artifact_names)
+        self.assertNotIn("chunks/chunk_0000/tracking_contract.v2.json", artifact_names)
+        self.assertNotIn("older_parts/chunk_0000/tracking_contract.v2.json", artifact_names)
+        with self.assertRaises(FileNotFoundError):
+            self.service.get_artifact_path(run["run_id"], "chunks/chunk_0000/tracking_contract.v2.json")
+        self.assertEqual(
+            (output_dir / "segments" / "chunk_0000" / "tracking_contract.v2.json").resolve(),
+            self.service.get_artifact_path(run["run_id"], "segments/chunk_0000/tracking_contract.v2.json"),
+        )
+
+    def test_temporal_nested_contracts_fail_closed_without_valid_authoritative_root(self) -> None:
+        for case_name, root_name, stitch_status in (
+            ("missing", None, None),
+            ("traversal", "../chunks", "succeeded"),
+            ("failed", "chunks", "failed"),
+        ):
+            with self.subTest(case=case_name):
+                folder_name = f"invalid_chunk_root_{case_name}"
+                output_dir = self.create_output_bundle(folder_name)
+                self.write_temporal_chunk_artifacts(folder_name)
+                report = {
+                    "chunk_count": 1,
+                    "frame_count": 1,
+                    "chunks": [{"index": 0, "name": "chunk_0000"}],
+                    "source_chunk_names": ["chunk_0000"],
+                }
+                if root_name is not None:
+                    report["chunks_root_name"] = root_name
+                if stitch_status is not None:
+                    report["stitch"] = {"status": stitch_status}
+                self.write_json(f"outputs/{folder_name}/temporal_chunks_report.json", report)
+                run_id = f"scan_{folder_name}"
+                write_run_artifacts(
+                    output_dir=output_dir,
+                    run={
+                        "run_id": run_id,
+                        "source": "scan",
+                        "status": "completed",
+                        "created_at": "2026-01-01T00:00:00+00:00",
+                        "config_name": "default.yaml",
+                        "config_path": str((self.repo_root / "config" / "default.yaml").resolve()),
+                        "input_video": str((self.repo_root / "data" / "input.mp4").resolve()),
+                        "output_dir": str(output_dir),
+                        "modules_enabled": {"temporal_chunks": True},
+                    },
+                )
+
+                run = self.service.get_run(run_id)
+                artifact_names = {artifact["name"] for artifact in run["artifacts"]}
+
+                self.assertNotIn("chunks/chunk_0000/tracking_contract.v2.json", artifact_names)
+                if case_name in {"missing", "failed"}:
+                    self.assertIn("chunks/chunk_0000/ball_track.csv", artifact_names)
+                else:
+                    self.assertNotIn("chunks/chunk_0000/ball_track.csv", artifact_names)
+                with self.assertRaises(FileNotFoundError):
+                    self.service.get_artifact_path(run_id, "chunks/chunk_0000/tracking_contract.v2.json")
 
     def test_get_ball_audit_report_loads_json_artifact(self) -> None:
         self.create_output_bundle("kept_baseline")
@@ -4118,6 +4236,7 @@ class ApiServiceSmokeTests(unittest.TestCase):
                     {
                         "chunk_count": 2,
                         "frame_count": 1,
+                        "chunks_root_name": app_config.temporal_chunks.output_dir_name,
                         "chunks": [{"index": 0, "name": "chunk_0000"}],
                         "boundary_events": [],
                         "execution": {"status": "succeeded", "mode": "in_process", "effective_workers": 1},

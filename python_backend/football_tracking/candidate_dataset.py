@@ -15,6 +15,7 @@ from typing import Any
 import cv2
 import numpy as np
 
+from football_tracking.detector_candidate_contract import validate_versioned_candidate_records
 from football_tracking.tracking_contracts import SCHEMA_VERSION as TRACKING_CONTRACT_SCHEMA_VERSION
 from football_tracking.tracking_contracts import load_tracking_contract
 
@@ -74,6 +75,7 @@ def build_candidate_dataset(contract_path: Path, source_map_path: Path, output_d
             )
 
     source_descriptors = _source_descriptors(source_entries)
+    _validate_versioned_candidate_bindings(candidates, candidate_bindings, source_descriptors)
     output_dir.parent.mkdir(parents=True, exist_ok=True)
     staging_dir = Path(tempfile.mkdtemp(prefix=f".{output_dir.name}.staging-", dir=output_dir.parent))
     try:
@@ -277,6 +279,24 @@ def _source_descriptors(entries: dict[str, dict[str, Any]]) -> dict[str, dict[st
             "candidate_ids": sorted(entry["candidate_ids"]),
         }
     return result
+
+
+def _validate_versioned_candidate_bindings(
+    candidates: list[dict[str, Any]],
+    bindings: dict[str, dict[str, Any]],
+    source_descriptors: dict[str, dict[str, Any]],
+) -> None:
+    candidates_by_video_sha256: dict[str, list[dict[str, Any]]] = {}
+    for candidate in candidates:
+        entry = bindings[candidate["candidate_id"]]
+        video_sha256 = source_descriptors[entry["variant_id"]]["sha256"]
+        candidates_by_video_sha256.setdefault(video_sha256, []).append(candidate)
+
+    for video_sha256, source_candidates in candidates_by_video_sha256.items():
+        try:
+            validate_versioned_candidate_records(source_candidates, video_sha256)
+        except ValueError as exc:
+            raise CandidateDatasetError(f"source-scoped candidate ID validation failed: {exc}") from exc
 
 
 def _dataset_version(

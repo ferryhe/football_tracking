@@ -13,13 +13,14 @@ from unittest.mock import Mock, patch
 import yaml
 
 from football_tracking.chunk_runner import (
-    build_high_recall_window_config,
     build_chunk_config,
+    build_high_recall_window_config,
     effective_worker_count,
     enforce_raw_chunk_config,
     run_chunk,
-    run_temporal_chunks,
+    run_high_recall_chunk,
     run_high_recall_windows,
+    run_temporal_chunks,
     write_chunk_config,
     write_high_recall_window_config,
 )
@@ -40,7 +41,15 @@ from football_tracking.config import (
     TrackingConfig,
     load_config,
 )
+from football_tracking.detector_candidate_contract import (
+    CandidateSourceChangedError,
+    assign_candidate_ids,
+    candidate_to_contract_record,
+    capture_candidate_source_snapshot,
+)
 from football_tracking.temporal_chunks import TemporalChunk
+from football_tracking.tracking_contracts import write_tracking_contract
+from football_tracking.types import Candidate
 
 
 def load_backend_main_module():
@@ -54,8 +63,11 @@ def load_backend_main_module():
 
 
 def make_app_config(base_dir: Path) -> AppConfig:
+    input_video = base_dir / "data" / "input.mp4"
+    input_video.parent.mkdir(parents=True, exist_ok=True)
+    input_video.write_bytes(b"chunk-runner-test-video")
     return AppConfig(
-        input_video=base_dir / "data" / "input.mp4",
+        input_video=input_video,
         output_dir=base_dir / "outputs" / "source",
         logging=LoggingConfig(level="DEBUG", save_debug_jsonl=True),
         detector=DetectorConfig(
@@ -126,6 +138,7 @@ def write_raw_outputs_for_chunk_config(config_path: Path) -> None:
     output_dir = Path(payload["output_dir"])
     start_frame = int(payload["runtime"]["start_frame"])
     max_frames = int(payload["runtime"]["max_frames"])
+    candidate_source_sha256 = payload["runtime"]["candidate_source_sha256"]
     output_dir.mkdir(parents=True, exist_ok=True)
     with (output_dir / "ball_track.csv").open("w", newline="", encoding="utf-8-sig") as csv_file:
         writer = csv.writer(csv_file)
@@ -135,6 +148,37 @@ def write_raw_outputs_for_chunk_config(config_path: Path) -> None:
     with (output_dir / "debug.jsonl").open("w", encoding="utf-8") as debug_file:
         for frame in range(start_frame, start_frame + max_frames):
             debug_file.write(json.dumps({"frame": frame, "source": output_dir.name}) + "\n")
+    write_tracking_contract(
+        output_dir,
+        frames=[
+            {
+                "frame_index": frame,
+                "status": "detected",
+                "x": frame + 1,
+                "y": frame + 2,
+                "confidence": 0.9,
+            }
+            for frame in range(start_frame, start_frame + max_frames)
+        ],
+        candidates=[
+            candidate_to_contract_record(candidate)
+            for frame in range(start_frame, start_frame + max_frames)
+            for candidate in assign_candidate_ids(
+                [
+                    Candidate(
+                        frame_index=frame,
+                        x1=frame + 1,
+                        y1=frame + 2,
+                        x2=frame + 2,
+                        y2=frame + 3,
+                        confidence=0.9,
+                        source="test_detector",
+                    )
+                ],
+                candidate_source_sha256,
+            )
+        ],
+    )
 
 
 class SuccessfulChunkPopen:
@@ -649,6 +693,9 @@ class ChunkRunnerConfigTests(unittest.TestCase):
             base_dir = Path(temp_name)
             config = make_app_config(base_dir)
             config.output_dir = base_dir / "outputs" / "source"
+            config.output_dir.mkdir(parents=True, exist_ok=True)
+            baseline_contract = config.output_dir / "tracking_contract.v2.json"
+            baseline_contract.write_bytes(b"baseline-contract")
             config.filtering.roi = (300, 300, 360, 360)
             config.high_recall_windows.enabled = True
             config.high_recall_windows.mode = "sahi"
@@ -694,6 +741,7 @@ class ChunkRunnerConfigTests(unittest.TestCase):
                 ) as reconcile,
             ):
                 report = run_high_recall_windows(config, source_total_frames=100)
+            baseline_contract_bytes = baseline_contract.read_bytes()
 
         write_config.assert_called_once()
         self.assertEqual(0, write_config.call_args.args[2])
@@ -701,6 +749,49 @@ class ChunkRunnerConfigTests(unittest.TestCase):
         self.assertEqual(1, len(reconcile.call_args.args[1]))
         self.assertEqual(0, reconcile.call_args.args[1][0]["execution_window_index"])
         self.assertEqual(1, reconcile.call_args.args[1][0]["source_window_index"])
+        self.assertEqual(b"baseline-contract", baseline_contract_bytes)
+
+    def test_high_recall_source_change_removes_window_contracts(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            base_dir = Path(temp_name)
+            config = make_app_config(base_dir)
+            config.high_recall_windows.enabled = True
+            window_report = {
+                "windows": [
+                    {
+                        "start_frame": 10,
+                        "end_frame": 12,
+                        "approved_action": "targeted_rerun",
+                        "approved_roi": [10, 10, 30, 30],
+                        "mode": "sahi",
+                    }
+                ],
+                "summary": {"selected_window_count": 1},
+            }
+
+            def mutate_source(config_path: Path, **kwargs: object) -> int:
+                (config_path.parent / "tracking_contract.v2.json").write_text("stale", encoding="utf-8")
+                config.mock.background_color += 1
+                return 0
+
+            with (
+                patch("football_tracking.chunk_runner.write_ball_audit_report", return_value={}),
+                patch("football_tracking.chunk_runner.write_ai_review_trigger_report", return_value={}),
+                patch("football_tracking.chunk_runner.write_event_candidate_report", return_value={}),
+                patch("football_tracking.chunk_runner.write_high_recall_window_report", return_value=window_report),
+                patch("football_tracking.chunk_runner.run_high_recall_chunk", side_effect=mutate_source),
+                patch(
+                    "football_tracking.chunk_runner.reconcile_high_recall_outputs",
+                    return_value={"summary": {"accepted_count": 0}},
+                ),
+            ):
+                with self.assertRaises(CandidateSourceChangedError):
+                    run_high_recall_windows(config, source_total_frames=100)
+
+            window_contract = (
+                config.output_dir / config.high_recall_windows.output_dir_name / "window_000" / "tracking_contract.v2.json"
+            )
+            self.assertFalse(window_contract.exists())
 
     def test_approved_no_roi_window_uses_direct_full_frame_policy_instead_of_whole_frame_sahi(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:
@@ -820,6 +911,26 @@ class ChunkRunnerExecutionTests(unittest.TestCase):
         self.assertTrue(called_config.logging.save_debug_jsonl)
         pipeline.run.assert_called_once_with(progress_callback=None, should_cancel=None)
 
+    def test_persisted_chunk_config_rejects_changed_source_and_removes_stale_contract(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            base_dir = Path(temp_name)
+            config = make_app_config(base_dir)
+            config.mock.enabled = False
+            snapshot = capture_candidate_source_snapshot(config)
+            config.runtime.candidate_source_sha256 = snapshot.sha256
+            config.runtime.candidate_source_stat_token = snapshot.stat_token
+            chunks_root = config.output_dir / "chunks"
+            config_path = write_chunk_config(config, make_chunk(), chunks_root)
+            chunk_output_dir = chunks_root / "chunk_0001"
+            stale_contract = chunk_output_dir / "tracking_contract.v2.json"
+            stale_contract.write_text("stale", encoding="utf-8")
+            config.input_video.write_bytes(b"changed-video")
+
+            exit_code = run_chunk(config_path)
+
+            self.assertNotEqual(0, exit_code)
+            self.assertFalse(stale_contract.exists())
+
     def test_run_chunk_enforces_raw_only_when_given_non_chunk_config(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:
             base_dir = Path(temp_name)
@@ -904,6 +1015,8 @@ class ChunkRunnerExecutionTests(unittest.TestCase):
     def test_run_chunk_returns_nonzero_when_config_cannot_load(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:
             missing_config = Path(temp_name) / "missing.yaml"
+            stale_contract = missing_config.parent / "tracking_contract.v2.json"
+            stale_contract.write_text("stale", encoding="utf-8")
 
             with (
                 patch("football_tracking.chunk_runner.BallTrackingPipeline") as pipeline_cls,
@@ -911,8 +1024,22 @@ class ChunkRunnerExecutionTests(unittest.TestCase):
             ):
                 exit_code = run_chunk(missing_config)
 
+            self.assertFalse(stale_contract.exists())
         self.assertNotEqual(0, exit_code)
         pipeline_cls.assert_not_called()
+        log_exception.assert_called_once()
+
+    def test_high_recall_chunk_clears_stale_contract_before_config_load_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            missing_config = Path(temp_name) / "missing.yaml"
+            stale_contract = missing_config.parent / "tracking_contract.v2.json"
+            stale_contract.write_text("stale", encoding="utf-8")
+
+            with patch("football_tracking.chunk_runner.logger.exception") as log_exception:
+                exit_code = run_high_recall_chunk(missing_config)
+
+            self.assertFalse(stale_contract.exists())
+        self.assertNotEqual(0, exit_code)
         log_exception.assert_called_once()
 
     def test_run_chunk_returns_nonzero_when_pipeline_fails(self) -> None:
@@ -938,6 +1065,220 @@ class ChunkRunnerExecutionTests(unittest.TestCase):
 
 
 class TemporalChunkSequentialRunnerTests(unittest.TestCase):
+    def test_temporal_run_removes_contracts_from_unplanned_stale_chunks(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            base_dir = Path(temp_name)
+            config = make_app_config(base_dir)
+            config.mock.frame_count = 4
+            config.runtime.start_frame = 0
+            config.runtime.max_frames = 4
+            stale_root_contract = config.output_dir / "tracking_contract.v2.json"
+            stale_chunk_contract = config.output_dir / "chunks" / "chunk_9999" / "tracking_contract.v2.json"
+            stale_root_contract.parent.mkdir(parents=True, exist_ok=True)
+            stale_chunk_contract.parent.mkdir(parents=True, exist_ok=True)
+            stale_root_contract.write_text("old-root", encoding="utf-8")
+            stale_chunk_contract.write_text("old-child", encoding="utf-8")
+            chunk = TemporalChunk(0, 0, 0, 3, 0, 3, "chunk_0000")
+
+            with (
+                patch("football_tracking.chunk_runner.plan_temporal_chunks", return_value=[chunk]),
+                patch("football_tracking.chunk_runner.run_chunk", return_value=0),
+                patch("football_tracking.chunk_runner.stitch_chunk_outputs"),
+            ):
+                run_temporal_chunks(config)
+
+            self.assertFalse(stale_root_contract.exists())
+            self.assertFalse(stale_chunk_contract.exists())
+
+    def test_temporal_run_clears_stale_contracts_before_source_capture(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            base_dir = Path(temp_name)
+            config = make_app_config(base_dir)
+            config.mock.enabled = False
+            config.temporal_chunks.output_dir_name = "new_parts"
+            stale_root_contract = config.output_dir / "tracking_contract.v2.json"
+            stale_contracts = [
+                stale_root_contract,
+                config.output_dir / "chunks" / "chunk_0000" / "tracking_contract.v2.json",
+                config.output_dir / "old_parts" / "chunk_0001" / "tracking_contract.v2.json",
+                config.output_dir / "new_parts" / "chunk_0000" / "tracking_contract.v2.json",
+            ]
+            sentinel_contract = config.output_dir / "old_parts" / "not_a_chunk" / "tracking_contract.v2.json"
+            for path in [*stale_contracts, sentinel_contract]:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("old", encoding="utf-8")
+            config.input_video.unlink()
+
+            with self.assertRaises(FileNotFoundError):
+                run_temporal_chunks(config)
+
+            self.assertTrue(all(not path.exists() for path in stale_contracts))
+            self.assertTrue(sentinel_contract.exists())
+
+    def test_temporal_run_clears_stale_root_contract_before_chunk_root_creation(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            base_dir = Path(temp_name)
+            config = make_app_config(base_dir)
+            stale_root_contract = config.output_dir / "tracking_contract.v2.json"
+            stale_root_contract.parent.mkdir(parents=True, exist_ok=True)
+            stale_root_contract.write_text("old-root", encoding="utf-8")
+            stale_nested_contract = (
+                config.output_dir / "old_parts" / "chunk_0000" / "tracking_contract.v2.json"
+            )
+            stale_nested_contract.parent.mkdir(parents=True, exist_ok=True)
+            stale_nested_contract.write_text("old-child", encoding="utf-8")
+            (config.output_dir / "temporal_chunks_report.json").write_text(
+                json.dumps(
+                    {
+                        "chunks_root_name": "old_parts",
+                        "chunks": [{"name": "chunk_0000"}],
+                        "stitch": {"status": "succeeded"},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            chunks_root = config.output_dir / config.temporal_chunks.output_dir_name
+            chunks_root.write_text("not-a-directory", encoding="utf-8")
+
+            with self.assertRaises(FileExistsError):
+                run_temporal_chunks(config)
+
+            self.assertFalse(stale_root_contract.exists())
+            self.assertFalse(stale_nested_contract.exists())
+
+    def test_temporal_source_change_before_stitch_removes_chunk_contracts(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            base_dir = Path(temp_name)
+            config = make_app_config(base_dir)
+            config.mock.frame_count = 4
+            config.runtime.start_frame = 0
+            config.runtime.max_frames = 4
+            chunk = TemporalChunk(0, 0, 0, 3, 0, 3, "chunk_0000")
+
+            def mutate_source_after_chunk(config_path: Path, **kwargs: object) -> int:
+                payload = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+                chunk_output_dir = Path(payload["output_dir"])
+                chunk_output_dir.mkdir(parents=True, exist_ok=True)
+                (chunk_output_dir / "tracking_contract.v2.json").write_text("stale", encoding="utf-8")
+                config.mock.background_color += 1
+                return 0
+
+            with (
+                patch("football_tracking.chunk_runner.plan_temporal_chunks", return_value=[chunk]),
+                patch("football_tracking.chunk_runner.run_chunk", side_effect=mutate_source_after_chunk),
+                patch("football_tracking.chunk_runner.stitch_chunk_outputs") as stitch,
+            ):
+                with self.assertRaises(CandidateSourceChangedError):
+                    run_temporal_chunks(config)
+
+            chunk_contract = config.output_dir / "chunks" / "chunk_0000" / "tracking_contract.v2.json"
+            self.assertFalse(chunk_contract.exists())
+            self.assertFalse((config.output_dir / "tracking_contract.v2.json").exists())
+            stitch.assert_not_called()
+
+    def test_postprocess_source_change_and_failure_removes_temporal_contracts(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            base_dir = Path(temp_name)
+            config = make_app_config(base_dir)
+            config.mock.enabled = False
+            config.runtime.start_frame = 0
+            config.runtime.max_frames = 3
+            config.follow_cam.enabled = False
+            chunk = TemporalChunk(0, 0, 0, 2, 0, 2, "chunk_0000")
+
+            def write_chunk(config_path: Path, **kwargs: object) -> int:
+                write_raw_outputs_for_chunk_config(config_path)
+                return 0
+
+            def mutate_source_and_fail() -> None:
+                config.input_video.write_bytes(b"source-mutated-by-postprocess")
+                raise RuntimeError("postprocess failed")
+
+            with (
+                patch("football_tracking.chunk_runner.plan_temporal_chunks", return_value=[chunk]),
+                patch("football_tracking.chunk_runner._source_total_frames", return_value=3),
+                patch("football_tracking.chunk_runner.run_chunk", side_effect=write_chunk),
+                patch("football_tracking.chunk_runner.TrackPostprocessor") as postprocessor_cls,
+            ):
+                postprocessor_cls.return_value.run.side_effect = mutate_source_and_fail
+                with self.assertRaises(CandidateSourceChangedError):
+                    run_temporal_chunks(config)
+
+            self.assertFalse((config.output_dir / "tracking_contract.v2.json").exists())
+            self.assertFalse(
+                (config.output_dir / "chunks" / "chunk_0000" / "tracking_contract.v2.json").exists()
+            )
+
+    def test_temporal_worker_failure_removes_contract_from_prior_successful_worker(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            base_dir = Path(temp_name)
+            config = make_app_config(base_dir)
+            config.mock.frame_count = 8
+            config.runtime.start_frame = 0
+            config.runtime.max_frames = 8
+            chunks = [
+                TemporalChunk(0, 0, 0, 3, 0, 3, "chunk_0000"),
+                TemporalChunk(1, 4, 4, 7, 4, 7, "chunk_0001"),
+            ]
+
+            def fail_second_worker(config_path: Path, **kwargs: object) -> int:
+                payload = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+                chunk_output_dir = Path(payload["output_dir"])
+                chunk_output_dir.mkdir(parents=True, exist_ok=True)
+                if chunk_output_dir.name == "chunk_0000":
+                    (chunk_output_dir / "tracking_contract.v2.json").write_text("first", encoding="utf-8")
+                    return 0
+                config.mock.background_color += 1
+                return 1
+
+            with (
+                patch("football_tracking.chunk_runner.plan_temporal_chunks", return_value=chunks),
+                patch("football_tracking.chunk_runner.run_chunk", side_effect=fail_second_worker),
+                patch("football_tracking.chunk_runner.stitch_chunk_outputs") as stitch,
+            ):
+                with self.assertRaisesRegex(RuntimeError, "chunk_0001 failed"):
+                    run_temporal_chunks(config)
+
+            first_contract = config.output_dir / "chunks" / "chunk_0000" / "tracking_contract.v2.json"
+            self.assertFalse(first_contract.exists())
+            stitch.assert_not_called()
+
+    def test_post_worker_cancellation_removes_unstitched_chunk_contracts(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            base_dir = Path(temp_name)
+            config = make_app_config(base_dir)
+            config.mock.frame_count = 8
+            config.runtime.start_frame = 0
+            config.runtime.max_frames = 8
+            chunks = [
+                TemporalChunk(0, 0, 0, 3, 0, 3, "chunk_0000"),
+                TemporalChunk(1, 4, 4, 7, 4, 7, "chunk_0001"),
+            ]
+
+            def write_chunk(config_path: Path, **kwargs: object) -> int:
+                write_raw_outputs_for_chunk_config(config_path)
+                return 0
+
+            chunk_contracts = [
+                config.output_dir / "chunks" / chunk.output_dir_name / "tracking_contract.v2.json"
+                for chunk in chunks
+            ]
+
+            with (
+                patch("football_tracking.chunk_runner.plan_temporal_chunks", return_value=chunks),
+                patch("football_tracking.chunk_runner.run_chunk", side_effect=write_chunk),
+                patch("football_tracking.chunk_runner.stitch_chunk_outputs") as stitch,
+            ):
+                with self.assertRaises(CancelledError):
+                    run_temporal_chunks(
+                        config,
+                        should_cancel=lambda: all(path.exists() for path in chunk_contracts),
+                    )
+
+            self.assertTrue(all(not path.exists() for path in chunk_contracts))
+            self.assertFalse((config.output_dir / "tracking_contract.v2.json").exists())
+            stitch.assert_not_called()
+
     def test_run_temporal_chunks_plans_writes_runs_stitches_and_runs_global_outputs(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:
             base_dir = Path(temp_name)
@@ -1003,6 +1344,24 @@ class TemporalChunkSequentialRunnerTests(unittest.TestCase):
             self.assertTrue(config.output.save_csv)
             self.assertTrue(config.output.save_debug_jsonl)
             self.assertTrue(config.logging.save_debug_jsonl)
+            self.assertIsNotNone(config.runtime.candidate_source_sha256)
+            self.assertIsNotNone(config.runtime.candidate_source_stat_token)
+            self.assertEqual(
+                {config.runtime.candidate_source_sha256},
+                {
+                    yaml.safe_load(call.args[0].read_text(encoding="utf-8"))["runtime"]["candidate_source_sha256"]
+                    for call in run_chunk_mock.call_args_list
+                },
+            )
+            self.assertEqual(
+                {config.runtime.candidate_source_stat_token},
+                {
+                    yaml.safe_load(call.args[0].read_text(encoding="utf-8"))["runtime"][
+                        "candidate_source_stat_token"
+                    ]
+                    for call in run_chunk_mock.call_args_list
+                },
+            )
             for call_item in run_chunk_mock.call_args_list:
                 self.assertIs(progress_callback, call_item.kwargs["progress_callback"])
                 self.assertIs(should_cancel, call_item.kwargs["should_cancel"])
@@ -1011,6 +1370,8 @@ class TemporalChunkSequentialRunnerTests(unittest.TestCase):
                 [chunks_root / "chunk_0000", chunks_root / "chunk_0001"],
                 config.output_dir,
                 output_config=config.output,
+                candidate_source_sha256=config.runtime.candidate_source_sha256,
+                chunks_root_name=config.temporal_chunks.output_dir_name,
             )
             postprocessor_cls.assert_called_once_with(config)
             postprocessor_cls.return_value.run.assert_called_once_with()
