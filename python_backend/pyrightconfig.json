@@ -1,9 +1,12 @@
 {
-  "venvPath": ".",
+  "venvPath": "..",
   "venv": ".venv",
   "include": [
     "football_tracking/api/ai_provider.py",
     "football_tracking/api/schemas.py",
+    "football_tracking/broadcast_acceptance.py",
+    "scripts/project.py",
+    "scripts/validate_broadcast_run.py",
     "scripts/start_ui.py"
   ],
   "exclude": [

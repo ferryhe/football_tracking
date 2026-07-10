@@ -1,319 +1,160 @@
-# 足球跟踪操作指南
+# 足球追踪 P3 操作与验收指南
 
-这份文档是给本地 workspace 使用者的实际操作手册。
+这份文档是本仓库的中文权威操作手册。所有路径和命令都以**仓库根目录**为起点；不要先进入 `python_backend/`，也不要手工设置 `PYTHONPATH`。
 
 ## 1. 开始前准备
 
-先确认这些条件都满足：
+- 根目录 `.venv` 已创建，并安装 `python_backend/requirements.txt`
+- Node.js、pnpm 和根目录 `node_modules` 可用
+- 原视频位于 `python_backend/data/`
+- 配置位于 `python_backend/config/`
+- 配置引用的检测权重存在；默认是 `python_backend/weights/football_ball_yolo.pt`
 
-- `.venv` 已创建并安装依赖
-- `frontend/node_modules` 已安装
-- 原视频已经放在 `data/` 下
-- 权重文件可用
-- `config/` 下至少有一个基线配置
-
-最简单的本地启动方式：
+先运行统一检查：
 
 ```powershell
-.\start_ui.cmd
+pnpm check
 ```
 
-如果你想让 Windows 下的启动更稳：
+检查失败时先修复输出中的缺项。它必须返回成功，才能启动界面。
+
+## 2. 唯一正式命令
 
 ```powershell
-.\start_ui.cmd --no-reload
+# 启动本地界面；打开命令最终打印的浏览器地址
+pnpm start
+
+# 查看或停止由本入口托管的进程
+pnpm status
+pnpm stop
+
+# 后端、OpenAPI、广播页、类型检查和生产构建
+pnpm test
+
+# 训练候选球分类器；参数与 --help 由正式入口透传
+pnpm train -- --help
+
+# 验收一个已进入 ready 的整视频 P3 run
+pnpm validate:full-video -- --run-dir python_backend/outputs/runs/<视频>/<run-id> --resume
 ```
 
-### 检测权重要求
+入口会自行选择根 `.venv`、把 `python_backend` 放到导入路径最前面并固定工作目录。`python_backend/start_ui.cmd` 和底层 Python 脚本只保留兼容性，不是另一套正式操作方式。
 
-默认配置期望这个文件存在：
+## 3. 页面分工
 
-- `weights/football_ball_yolo.pt`
+- **广播成片 `/broadcast`**：P3 全场交付的推荐入口，包含设置、证据复核、重算、渲染和交付。
+- **跑基线 `/baseline`**：旧的局部试跑或基线调参入口，可以限制帧范围，不代表完成 P3 交付。
+- **AI 分析 `/ai`**：解释既有 run 并给出调参建议。
+- **成品任务 `/deliverable`**：旧 follow-cam 与候选集锦流程，不替代 P3 的证据绑定广播成片。
+- **历史 `/history`**：查看和管理历史任务。
 
-关键点：
+## 4. 广播成片三步流程
 
-- 仓库里的 YAML 默认都写的是 `detector.model_path: "./weights/football_ball_yolo.pt"`
-- 这个相对路径按仓库根目录解析
-- 这个 `.pt` 应该是 Ultralytics YOLO 的 detect 权重
-- 如果你的模型输出类别名不是 `sports ball` 或 `ball`，要同步修改 `detector.allowed_labels`
-- 如果只用 CPU，建议改成 `detector.device: "cpu"` 和 `detector.use_half: false`
+### 第一步：设置并启动全场追踪
 
-如果权重文件不存在，基线任务会在检测开始前直接失败。
+1. 选择原视频和配置。
+2. 在三个**不同的真实帧**上完成确认；三帧分辨率必须一致。
+3. 确认球场多边形至少三个点、面积非零且全部在画面内；排除区也必须合法。
+4. 选择 1–30 的复核窗口上限。
+5. 启动任务，并保存地址栏中的 `/broadcast?run=<run-id>`。
 
-## 2. 各个标签分别做什么
+P3 只接受整视频：`start_frame=0`，`max_frames` 必须为空或覆盖完整源视频。切换视频或配置会使旧校准失效，必须重新确认。
 
-### 概览
-
-这个标签用于查看后端健康状态、近期任务和可用配置。
-
-### 跑基线
-
-这个标签用于准备原视频并启动第一轮任务。
-
-主流程：
-
-1. 选择原视频
-2. 选择基线配置
-3. 截取预览帧
-4. 生成球场设置
-5. 启动基线任务
-
-### AI 分析
-
-这个标签用于分析当前原视频已经完成的 run。
-
-主流程：
-
-1. 选择一个已完成 run
-2. 点击 `解释已选结果`
-3. 查看 AI 解释和建议配置
-4. 如果方向合理，直接启动下一次任务
-
-### 成品任务
-
-这个标签用于基于已有 run 导出干净的 `16:9` 成品，或从事件候选生成短集锦。
-
-主流程：
-
-1. 选择原视频和调参配置，启动全量成品任务
-2. 选择成品开关
-3. 启动全量或跟随裁剪渲染
-4. 选择一个包含事件候选的已完成 run
-5. 从候选渲染集锦短片
-
-### 历史
-
-这个标签用于查看历史任务并管理资源。
-
-主流程：
-
-1. 按 `baseline / deliverable / highlight / failed` 过滤
-2. 按原视频展开资产分组
-3. 管理原视频、配置文件和输出目录
-
-## 3. 跑基线标签操作流程
-
-### 第一步：选择原视频
-
-要运行的视频必须先放到 `data/` 目录下。
-
-如果列表里没有看到视频：
-
-- 确认文件已经放进 `data/`
-- 刷新页面
-- 确认扩展名受支持
-
-### 第二步：选择基线配置
-
-配置列表按时间倒序排列。建议优先从这些开始：
-
-- `real_first_run.yaml`
-  - 适合短探测
-- `real_best_full.yaml`
-  - 适合全量原始跟踪
-- `real_v24_full_postclean.yaml`
-  - 适合清洗后交付
-
-悬浮说明会解释：
-
-- `Scope`
-- `Cleanup`
-- `Follow-cam`
-
-### 第三步：完成球场设置
-
-在已选视频下面会看到球场设置模块。
-
-建议顺序：
-
-1. 点击 `截图预览`
-2. 如果 YAML 已经带有合适的球场设置，就点 `读配置`
-3. 否则点 `AI 生成建议`
-4. 查看 Field 和 Expanded 两个区域
-5. 必要时用快捷调节或手动点位输入修正
-6. 点击 `接受`
-
-说明：
-
-- 预览会保持原始画面比例
-- 再次点击截图会切换到另一张代表帧
-- 手动输入格式是 `x,y | x,y | ...`
-
-### 第四步：启动基线任务
-
-接受球场设置后，点击 `开始跑基线`。
-
-新的输出目录会写到：
+常见状态顺序：
 
 ```text
-outputs/runs/<input_slug>/<run_id>/
+setup → tracking → needs_review → recomputing → trajectory_ready → rendering → ready
 ```
 
-## 4. AI 分析标签操作流程
+页面刷新、复制 URL 到新窗口或返回任务时，会从服务器状态恢复当前父任务和活动子任务。
 
-这个标签只显示当前原视频关联的 run。
+### 第二步：完整复核并重算
 
-建议顺序：
+每个候选必须恰好选择一次：
 
-1. 选择你要分析的 run
-2. 点击 `解释已选结果`
-3. 阅读 AI 解释
-4. 查看建议的新配置
-5. 如果需要，可以修改目标再更新建议
-6. 点击 `运行建议配置`
+- `confirm_ball`：确认是比赛用球
+- `reject_noise`：确认是噪点；必须选择具体噪声子类型
+- `mark_unknown`：证据不足，保留未知
 
-重要行为：
+非空队列必须填写复核人，且所有候选完成后才能提交。零候选不是自动跳过：必须明确点击“无需复核继续”。蒙太奇缺失、证据 URL 未通过校验或队列过期时不要猜测，刷新当前 run 后重新读取证据。
 
-- AI 解释是手动触发的，目的是避免不必要的 token 消耗
-- AI 提示词和返回语言会跟随当前界面语言
-- AI 派生的新配置会写到 `config/generated/`
+提交后页面会启动轨迹重算。若决策已经写入但子任务排队失败，使用“重试重算”；不要重复创建或手改 `review_decisions.json`。HTTP 409 表示证据已经变化，应刷新并从当前证据重新开始。
 
-## 5. 成品任务标签操作流程
+### 第三步：渲染与交付
 
-当你已经认可轨迹，想导出最终视频或短集锦时，使用这个标签。
+轨迹进入 `trajectory_ready` 后再渲染。默认使用 1920×1080；允许范围是宽 320–7680、高 180–4320。页面显示 `ready` 以后，下载链接仍必须通过当前不可变 generation 的校验。
 
-### 全量跟随裁剪输出
+交付集合必须**恰好包含**以下 8 项：
 
-建议顺序：
+1. `broadcast.mp4`
+2. `broadcast_quality_report.json`
+3. `camera_target.csv`
+4. `ball_track.v2.csv`
+5. `review_decisions.json`
+6. `action_track.csv`
+7. `candidate_classifications.jsonl`
+8. `ball_candidates.jsonl`
 
-1. 选择源视频
-2. 选择调参后的配置
-3. 除非明确需要叠加层，否则保持默认开关
-4. 点击 `启动全量 + 渲染`
+存在 blocking reason、`metadata_conflict`、`missing_after_ready_commit`、缺少产物或状态 generation 不一致时，都不能称为完成。
 
-开关说明：
+## 5. 整视频媒体验收
 
-- `优先使用清洗后的轨迹`
-  - 有 `ball_track.cleaned.csv` 时优先使用它
-- `显示球点标记`
-  - 会把球点叠加到最终视频上
-- `显示文字标注`
-  - 会把状态文字和帧标注叠加到最终视频上
-
-默认建议：
-
-- 球点标记关闭
-- 文字标注关闭
-- 优先使用清洗轨迹开启
-
-每次 follow-cam 渲染还会写出：
-
-- `camera_path.csv`
-- `camera_motion_audit.json`
-- `follow_cam_report.json`
-
-`camera_motion_audit.json` 审核的是最终镜头路径，不是球轨迹本身。它会把输出画面中的突然平移、速度突变或裁剪高度突变标记为 AI / 人工复核点。
-
-### 候选集锦短片
-
-有轨迹数据的已完成任务会写出 `event_candidates.json`。里面的候选只是射门或进球的复核线索，不代表已经确认事件。
-
-建议顺序：
-
-1. 在「候选集锦」里选择一个已完成来源 run
-2. 查看候选类型、评分和帧范围
-3. 点击 `渲染短片`
-4. 到「历史」页按 `Highlight` 过滤查看结果
-
-集锦子任务会写出：
-
-- `highlight.mp4`
-- `highlight_report.json`
-- 用于追溯的源轨迹文件副本
-
-## 6. 历史和资源管理
-
-### 历史列表
-
-上半区是历史 run 列表，可以按以下三类筛选：
-
-- `Baseline`
-- `Deliverable`
-- `Highlight`
-- `Failed`
-
-### 资产分组
-
-下半区按原视频进行分组。
-
-每个分组头部会显示：
-
-- 原视频名
-- 最近活动时间
-- runs / configs / outputs 数量
-- 一条轻量摘要，概括最近的 baseline、deliverable、failed 情况
-
-分组展开后分成三块：
-
-- `Source`
-- `Configs`
-- `Outputs`
-
-默认都是折叠的。
-
-### 删除操作
-
-删除必须经过输入确认：
-
-1. 展开资产项
-2. 点击 `Delete`
-3. 输入 `DELETE`
-4. 再确认删除
-
-适用于：
-
-- 原视频
-- 配置文件
-- 输出目录
-
-## 7. 存储和兼容说明
-
-当前逻辑模型是：
-
-- 一个原视频可以对应多个 run
-- 一个配置可以被多个 run 复用
-- 一个 run 对应一个输出目录
-- deliverable run 可以通过 `parent_run_id` 关联到 baseline run
-- highlight run 也会通过 `parent_run_id` 关联到来源 run
-
-历史页仍然会扫描旧输出目录，所以以前的实验结果仍然会显示出来。
-
-## 8. 关闭界面
-
-停止托管 UI 进程：
+`ready` 证明公开产物、哈希和血缘完整；它不等同于媒体和视觉验收。对 ready run 运行：
 
 ```powershell
-.\stop_ui.cmd
+pnpm validate:full-video -- --run-dir python_backend/outputs/runs/<视频>/<run-id> --resume
 ```
 
-## 9. 常见问题
+正式验收会：
 
-### UI 启动不稳定
+- 重新验证 quality report 与最终 generation 的血缘
+- 探测源视频和成片的视频/音频流与时长
+- 分段完整解码成片，并检查首帧、中帧、尾帧和各段中心帧
+- 即使复用了验收进度，也会在发布 `pass` 前用 FFmpeg 严格独立完整解码并复核帧数
+- 原子写入 `broadcast_acceptance_report.v1.json`
+- 用 `broadcast_acceptance_progress.v1.json` 记录可恢复的验收分段
 
-先尝试：
+`--resume` 只把工具版本、quality report、源视频、成片和抽样计划全部相同的已完成分段作为调度缓存；任一身份变化都会使旧进度失效。缓存不能绕过最终严格全片解码。这是**验收扫描**的断点续做，不表示初始追踪或渲染支持逐帧 checkpoint。
+
+最终 FFmpeg 严格解码是独立终局门禁，不读取可写 checkpoint；因此每次 `--resume` 都会从头完整解码一次最终 1080p 成片，耗时大致等于一次全片解码。CLI 会把该阶段的开始/结束 JSON 写到 stderr；若此时中断，不会发布新的 `pass`，下次必须重跑这一终局门禁。
+
+报告状态含义：
+
+- `pass`：血缘、媒体、时长和分段检查通过
+- `fail`：发现确定的契约或媒体错误
+- `unavailable`：缺少可信探测器等原因，无法完成检查；同样不能交付
+
+当前正式质量契约明确声明 `source_audio_not_preserved`。源视频有音频而成片无音频时，验收报告会记录 `known_limitation`，不会伪装成已保留音频；如果报告能力声明与实际流不一致，则验收失败。
+
+最后还要人工抽查：复核蒙太奇是否对应真实球、球轨迹是否有明显大跳或假阳性、镜头是否频繁甩向边线/观众、开头/中段/结尾是否正常。只有机器报告和视觉检查都通过，才可称为可交付。
+
+## 6. 恢复、取消和重启
+
+- 保存 `/broadcast?run=<父或子 run-id>`；刷新后由服务器选择权威父任务和最新活动子任务。
+- 活动任务可以在页面取消；重算和渲染取消的是对应子任务。
+- 服务重启后，已经原子提交的重算/渲染 generation 会通过 operation report 对账；未安全提交的操作会失败或重新排队，不能手工改注册表冒充完成。
+- **初始全场追踪没有逐帧服务重启续跑**。如果服务在该阶段中断，run 会标记失败，必须创建新任务。
+- 不要直接修改或删除 ready generation；新结果必须产生新的不可变 generation。
+
+## 7. 常见故障
+
+| 现象 | 处理方式 |
+| --- | --- |
+| `pnpm check` 报 Python、pnpm、依赖或目录缺失 | 按输出补齐根 `.venv`、依赖、输入、配置或权重，再重新检查 |
+| 端口被占用 | 启动器会选择可用端口并打印最终地址；不要自行复用未知进程 |
+| 浏览器 `/api` 404、502 或后端 health 失败 | 先 `pnpm status`，再 `pnpm stop`、`pnpm check`、`pnpm start`；查看启动器打印的日志路径 |
+| 旧进程无法停止 | 入口只会终止状态文件中根 PID 与创建身份仍匹配的受管进程；`status` 还会确认当前端口监听者仍属于该进程树，不会杀无关进程 |
+| 校准提交失败 | 确认三个不同帧、合法球场/排除区、1–30 复核上限以及整视频范围 |
+| 复核证据过期或返回 409 | 刷新当前 run，丢弃旧哈希和旧 action，再按当前证据复核 |
+| 已提交复核但未开始重算 | 使用页面“重试重算”，不要重复写决策文件 |
+| 重启后初始追踪失败 | 新建 P3 run；当前只支持重算/渲染的安全 generation 对账 |
+| `ready` 但验收失败 | 以验收报告中的失败检查为准；不要仅凭文件存在或页面状态交付 |
+
+## 8. 关闭与清理
 
 ```powershell
-.\start_ui.cmd --no-reload
+pnpm stop
+pnpm status
 ```
 
-如果还不行，再执行：
-
-```powershell
-.\.venv\Scripts\python.exe scripts\start_ui.py --check
-```
-
-### 后端提示端口被占用
-
-托管启动器会自动寻找新的可用端口，并打印最终使用的地址。
-
-### 球场截图预览不合适
-
-再次点击 `截图预览`，切换到另一张代表帧，再重新执行 `读配置` 或 `AI 生成建议`。
-
-### AI 解释太耗 token
-
-这就是为什么第二步改成了手动触发，不会对每个 run 自动解释。
-
-### 历史里还能看到旧输出
-
-这是预期行为。为了兼容历史实验结果，系统仍会扫描旧目录结构。
+重复停止是幂等操作。托管入口只清理自己记录且根 PID/创建身份仍匹配的进程；状态检查还要求监听者属于该根进程树，不会终止占用同一端口的无关程序。

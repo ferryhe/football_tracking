@@ -14,13 +14,14 @@ This repository tracks a single in-play football from high-resolution fisheye-st
 
 - Python tracking pipeline for raw tracking, cleanup, and follow-cam rendering
 - Local FastAPI backend for configs, runs, artifacts, AI suggestions, and asset management
-- Local React/Vite workspace UI with 5 main tabs:
+- Local React/Vite workspace UI with 6 main tabs:
   - `Dashboard`
   - `Baseline`
   - `AI analysis`
+  - `Broadcast`
   - `Deliverable task`
   - `History`
-- Managed Windows launcher scripts for one-click local startup
+- Cross-platform repository entrypoint for managed local startup, testing, training, and acceptance
 
 ### Recommended Starting Configs
 
@@ -37,7 +38,7 @@ This repository tracks a single in-play football from high-resolution fisheye-st
 - Python 3.10 or 3.11
 - NVIDIA GPU recommended
 - CUDA and cuDNN installed correctly
-- Node.js and `npm` available in PATH
+- Node.js and `pnpm` available in PATH
 
 ### Detector Weights
 
@@ -61,36 +62,20 @@ If the weight file is missing, the baseline run will fail before detection start
 
 ### Quick Start
 
-1. Create and activate a virtual environment.
-2. Install Python dependencies.
-3. Install frontend dependencies.
-4. Start the managed local UI.
+Run these commands from the repository root. The pnpm entrypoint is the only supported operator interface; it owns the virtual-environment selection, backend import path, and working directory.
 
 ```powershell
 python -m venv .venv
 .\.venv\Scripts\activate
 python -m pip install --upgrade pip
 pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124
-pip install -r requirements.txt
-
-cd frontend
-npm install
-cd ..
-
-.\start_ui.cmd
+pip install -r python_backend/requirements.txt
+pnpm install --frozen-lockfile
+pnpm check
+pnpm start
 ```
 
-If you want the steadiest backend startup on Windows:
-
-```powershell
-.\start_ui.cmd --no-reload
-```
-
-To stop managed UI processes:
-
-```powershell
-.\stop_ui.cmd
-```
+Use `pnpm status` and `pnpm stop` for the managed UI. Use `pnpm test`, `pnpm train -- --help`, and `pnpm validate:full-video -- --run-dir <ready-run-dir> --resume` for the official test, training, and full-video acceptance flows. See [docs/operation-guide.en.md](docs/operation-guide.en.md).
 
 ### Workspace Flow
 
@@ -133,29 +118,7 @@ outputs/runs/<input_slug>/<run_id>/
 
 ### Common Commands
 
-Short probe run:
-
-```powershell
-.\.venv\Scripts\python.exe main.py --config config/real_first_run.yaml
-```
-
-Full raw run:
-
-```powershell
-.\.venv\Scripts\python.exe main.py --config config/real_best_full.yaml
-```
-
-Full cleaned delivery run:
-
-```powershell
-.\.venv\Scripts\python.exe main.py --config config/real_v24_full_postclean.yaml
-```
-
-Run backend only:
-
-```powershell
-.\.venv\Scripts\python.exe -m uvicorn football_tracking.api.app:app --reload
-```
+Use `pnpm start` and the Broadcast page for the supported P3 run flow. Low-level pipeline scripts remain available for engineering and historical reproduction, but are not alternate operator startup commands.
 
 ### Official Candidate AI Classification Workflow
 
@@ -177,7 +140,6 @@ split, temporal, and source evidence must not overlap between those populations;
 such leakage.
 
 ```powershell
-$env:PYTHONPATH='python_backend'
 $trainingSourceContract = 'outputs\candidate_training_run\tracking_contract.v2.json'
 $policySourceContract = 'outputs\candidate_policy_run\tracking_contract.v2.json'
 
@@ -193,7 +155,7 @@ $policySourceContract = 'outputs\candidate_policy_run\tracking_contract.v2.json'
   --output-dir data\candidate_training_resolution_v1 `
   --min-confidence 0.8
 
-.\.venv\Scripts\python.exe python_backend\scripts\train_candidate_classifier.py `
+pnpm train -- `
   --dataset-manifest data\candidate_training_dataset_v1\candidate_dataset_manifest.json `
   --annotation-resolution data\candidate_training_resolution_v1\annotation_resolution.v1.json `
   --contract data\candidate_training_resolution_v1\tracking_contract.v2.json `
@@ -481,24 +443,13 @@ Use [`../docs/operations/ai-improvement-workflow.md`](../docs/operations/ai-impr
 
 ### Verification
 
-Frontend:
+Run the single official gate from the repository root:
 
 ```powershell
-cd frontend
-npm run lint
-npm run typecheck
-npm test
-npm run build
+pnpm test
 ```
 
-Backend:
-
-```powershell
-.\.venv\Scripts\python.exe -m pip install -r requirements-dev.txt
-.\.venv\Scripts\python.exe -m ruff check .
-.\.venv\Scripts\python.exe -m pyright
-.\.venv\Scripts\python.exe -m unittest discover -s tests -p "test_*.py"
-```
+It runs the full backend suite, OpenAPI check, broadcast UI tests, workspace type-check, and production build without a caller-managed `PYTHONPATH`. Full-match media stays outside ordinary CI; validate a ready P3 run with `pnpm validate:full-video -- --run-dir <run-directory> --resume`.
 
 Type-check scope note / 类型检查范围说明：`pyright` 当前先覆盖 `pyrightconfig.json` 里配置的稳定入口面：API schema/provider 和本地启动脚本。依赖 OpenCV 的跟踪主流水线还没有完成全量类型化。
 
@@ -512,13 +463,14 @@ Type-check scope note / 类型检查范围说明：`pyright` 当前先覆盖 `py
 
 - Python 跟踪主流程：原始跟踪、清洗、跟随裁剪
 - 本地 FastAPI 后端：配置、任务、产物、AI 建议、资源管理
-- 本地 React/Vite workspace 界面，当前有 5 个主标签：
+- 本地 React/Vite workspace 界面，当前有 6 个主标签：
   - `概览`
   - `跑基线`
   - `AI 分析`
+  - `广播成片`
   - `成品任务`
   - `历史`
-- Windows 一键启动脚本，负责本地 UI 的托管启动和停止
+- 跨平台仓库入口，统一托管本地启动、测试、训练和整视频验收
 
 ### 建议优先使用的配置
 
@@ -535,7 +487,7 @@ Type-check scope note / 类型检查范围说明：`pyright` 当前先覆盖 `py
 - Python 3.10 或 3.11
 - 建议使用 NVIDIA GPU
 - 正确安装 CUDA 和 cuDNN
-- PATH 中可用 `npm`
+- PATH 中可用 `pnpm`
 
 ### 检测权重
 
@@ -559,36 +511,20 @@ Type-check scope note / 类型检查范围说明：`pyright` 当前先覆盖 `py
 
 ### 快速开始
 
-1. 创建并激活虚拟环境
-2. 安装 Python 依赖
-3. 安装前端依赖
-4. 启动本地托管 UI
+以下命令全部从仓库根目录执行。pnpm 入口是唯一正式操作入口，会统一选择虚拟环境、设置后端导入路径并固定工作目录。
 
 ```powershell
 python -m venv .venv
 .\.venv\Scripts\activate
 python -m pip install --upgrade pip
 pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124
-pip install -r requirements.txt
-
-cd frontend
-npm install
-cd ..
-
-.\start_ui.cmd
+pip install -r python_backend/requirements.txt
+pnpm install --frozen-lockfile
+pnpm check
+pnpm start
 ```
 
-如果你想要更稳的后端启动方式：
-
-```powershell
-.\start_ui.cmd --no-reload
-```
-
-停止托管的 UI 进程：
-
-```powershell
-.\stop_ui.cmd
-```
+托管界面使用 `pnpm status` 和 `pnpm stop`；正式测试、训练和整视频验收分别使用 `pnpm test`、`pnpm train -- --help` 和 `pnpm validate:full-video -- --run-dir <ready-run 目录> --resume`。完整操作见[中文指南](docs/operation-guide.zh.md)。
 
 ### 当前 Workspace 流程
 
@@ -631,29 +567,7 @@ outputs/runs/<input_slug>/<run_id>/
 
 ### 常用命令
 
-短探测运行：
-
-```powershell
-.\.venv\Scripts\python.exe main.py --config config/real_first_run.yaml
-```
-
-全量原始跟踪：
-
-```powershell
-.\.venv\Scripts\python.exe main.py --config config/real_best_full.yaml
-```
-
-全量清洗交付：
-
-```powershell
-.\.venv\Scripts\python.exe main.py --config config/real_v24_full_postclean.yaml
-```
-
-只启动后端：
-
-```powershell
-.\.venv\Scripts\python.exe -m uvicorn football_tracking.api.app:app --reload
-```
+正式 P3 运行统一使用 `pnpm start` 后进入「广播成片」。底层流水线脚本仍用于工程调试和历史复现，但不是另一套操作启动入口。
 
 ### 候选球 AI 分类官方流程
 
@@ -672,7 +586,6 @@ source snapshot，根运行也会在 stitch 和 high-recall 前后复验。初�
 source 证据都不得重叠，否则策略角色生成器会失败关闭。准备好后，在仓库根目录依次执行：
 
 ```powershell
-$env:PYTHONPATH='python_backend'
 $trainingSourceContract = 'outputs\candidate_training_run\tracking_contract.v2.json'
 $policySourceContract = 'outputs\candidate_policy_run\tracking_contract.v2.json'
 
@@ -688,7 +601,7 @@ $policySourceContract = 'outputs\candidate_policy_run\tracking_contract.v2.json'
   --output-dir data\candidate_training_resolution_v1 `
   --min-confidence 0.8
 
-.\.venv\Scripts\python.exe python_backend\scripts\train_candidate_classifier.py `
+pnpm train -- `
   --dataset-manifest data\candidate_training_dataset_v1\candidate_dataset_manifest.json `
   --annotation-resolution data\candidate_training_resolution_v1\annotation_resolution.v1.json `
   --contract data\candidate_training_resolution_v1\tracking_contract.v2.json `
@@ -1034,21 +947,10 @@ the path without changing track states.
 
 ### 验证命令
 
-前端：
+从仓库根目录运行唯一正式检查：
 
 ```powershell
-cd frontend
-npm run lint
-npm run typecheck
-npm test
-npm run build
+pnpm test
 ```
 
-后端：
-
-```powershell
-.\.venv\Scripts\python.exe -m pip install -r requirements-dev.txt
-.\.venv\Scripts\python.exe -m ruff check .
-.\.venv\Scripts\python.exe -m pyright
-.\.venv\Scripts\python.exe -m unittest discover -s tests -p "test_*.py"
-```
+它会统一执行后端全量测试、OpenAPI、广播页测试、类型检查和生产构建，无需手工设置 `PYTHONPATH`。整视频媒体不进入普通 CI；对 ready P3 run 使用 `pnpm validate:full-video -- --run-dir <run 目录> --resume`。

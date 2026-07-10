@@ -9,3 +9,4 @@ ultralytics>=8.3.0
 fastapi>=0.115.0
 uvicorn>=0.30.6
 ijson>=3.3.0
+imageio-ffmpeg>=0.6.0,<0.7.0

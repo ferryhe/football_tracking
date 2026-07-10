@@ -57,8 +57,6 @@ jobs:
   python:
     name: Python
     runs-on: ubuntu-latest
-    env:
-      PYTHONPATH: python_backend
 
     steps:
       - name: Check out repository
@@ -74,11 +72,11 @@ jobs:
             python_backend/requirements-dev.txt
             scripts/ci-python-constraints.txt
 
+      - name: Create project virtual environment
+        run: python -m venv .venv
+
       - name: Install dependencies
-        run: python -m pip install -r python_backend/requirements-dev.txt -c scripts/ci-python-constraints.txt
+        run: .venv/bin/python -m pip install -r python_backend/requirements-dev.txt -c scripts/ci-python-constraints.txt
 
-      - name: Check OpenAPI contract
-        run: python python_backend/scripts/export_openapi.py --check
-
-      - name: Run backend tests
-        run: python -m unittest discover -s python_backend/tests -p "test_*.py"
+      - name: Run official Python verification route
+        run: .venv/bin/python python_backend/scripts/project.py test --python-only
