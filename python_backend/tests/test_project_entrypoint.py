@@ -88,32 +88,27 @@ class ProjectEntrypointTests(unittest.TestCase):
         self.assertEqual(0, completed.returncode, completed.stderr)
         self.assertEqual([7, 130, 143, 1], json.loads(completed.stdout))
 
-    def test_node_bootstrap_does_not_require_system_python_on_path(self) -> None:
+    def test_node_bootstrap_does_not_require_system_python_or_pnpm_on_path(self) -> None:
         node = shutil.which("node")
         if node is None:
             self.skipTest("Node.js is unavailable")
-        env = dict(os.environ)
-        tool_directories = [str(Path(node).parent)]
-        for command in ("pnpm", "corepack"):
-            executable = shutil.which(command)
-            if executable is not None:
-                directory = str(Path(executable).parent)
-                if directory not in tool_directories:
-                    tool_directories.append(directory)
-        env["PATH"] = os.pathsep.join(tool_directories)
-        self.assertIsNone(shutil.which("python", path=env["PATH"]))
+        with tempfile.TemporaryDirectory() as empty_path:
+            env = dict(os.environ)
+            env["PATH"] = empty_path
+            self.assertIsNone(shutil.which("python", path=env["PATH"]))
+            self.assertIsNone(shutil.which("pnpm", path=env["PATH"]))
 
-        completed = subprocess.run(
-            [node, str(project.repo_root() / "scripts" / "project.mjs"), "check"],
-            cwd=project.repo_root(),
-            env=env,
-            capture_output=True,
-            text=True,
-            check=False,
-        )
+            completed = subprocess.run(
+                [node, str(project.repo_root() / "scripts" / "project.mjs"), "train", "--", "--help"],
+                cwd=project.repo_root(),
+                env=env,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
 
         self.assertEqual(0, completed.returncode, completed.stderr)
-        self.assertIn("ROOT_VIRTUALENV=OK", completed.stdout)
+        self.assertIn("Train the CPU candidate classifier.", completed.stdout)
 
     def test_node_pnpm_launcher_supports_pnpm_only_and_corepack_only_paths(self) -> None:
         node = shutil.which("node")
