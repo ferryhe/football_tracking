@@ -130,6 +130,22 @@ These are stored as Replit Secrets. **Do not** create `.env` files for them.
 - Frame-range partial-clip runs (`start_frame` / `max_frames`) were added to the baseline UI; the backend already accepted these fields.
 - The backend now writes review artifacts (`ball_audit.json`, `ai_review_triggers.json`, `camera_motion_audit.json`, `event_candidates.json`, and player artifacts such as `player_tracks.json` when available) and supports child render jobs for follow-cam deliverables and highlight clips.
 
+### Offline global ball trajectory (P2)
+
+After a detector run and candidate-classifier inference, solve an evidence-bound full-video trajectory in a dedicated output directory:
+
+```powershell
+python python_backend/scripts/solve_global_ball_trajectory.py `
+  --source-video python_backend/data/match.mp4 `
+  --contract python_backend/outputs/run/tracking_contract.v2.json `
+  --predictions python_backend/outputs/candidate_inference/candidate_predictions.v1.json `
+  --output-dir python_backend/outputs/global_ball_trajectory_v1
+```
+
+The solver independently rebinds the source-video SHA-256, video metadata, candidate-v1 identities, the exact contract snapshot, and the full classifier probability population. It streams JSON into a temporary SQLite index and uses a bounded second-order candidate graph. If candidate or beam limits prune the graph, the report says `beam_approximation`; it never claims an exact unconstrained optimum. Optional `--pitch-report` and `--player-tracks` priors are used only when they carry matching source-video lineage. Otherwise they degrade to a neutral, audited prior.
+
+The generation contains `ball_track.v2.csv`, `global_ball_trajectory_decisions.v1.jsonl`, and `global_ball_trajectory_report.v1.json`. The report is the atomic commit marker and appears only after final source verification; readers must treat a directory without it as incomplete. Short evidence-bounded gaps may be `interpolated`; longer gaps are `unknown`. `out_of_view` requires explicit upstream evidence. The target directory must not already exist: each run commits a new immutable generation by atomically publishing that report marker, so failures cannot overwrite an earlier generation.
+
 ---
 
 ## 中文
@@ -256,3 +272,19 @@ curl -s -X POST -H "Content-Type: application/json" \
 - 前端新增了：5 个页面 + 侧边栏、概览页、暗黑/明亮主题、中英切换、移动端响应式布局。
 - 「跑基线」UI 增加了 `start_frame` / `max_frames` 帧范围（后端早已支持，只是 UI 没暴露）。
 - 后端新增审核产物（`ball_audit.json`、`ai_review_triggers.json`、`camera_motion_audit.json`、`event_candidates.json`，以及可用时的 `player_tracks.json` 等球员产物），并支持跟随镜头成品和集锦短片两类子渲染任务。
+
+### P2 离线全局球轨迹
+
+检测器运行并完成候选分类后，可在独立目录求解整段视频的证据绑定轨迹：
+
+```powershell
+python python_backend/scripts/solve_global_ball_trajectory.py `
+  --source-video python_backend/data/match.mp4 `
+  --contract python_backend/outputs/run/tracking_contract.v2.json `
+  --predictions python_backend/outputs/candidate_inference/candidate_predictions.v1.json `
+  --output-dir python_backend/outputs/global_ball_trajectory_v1
+```
+
+求解器会重新校验视频完整 SHA-256、FPS/尺寸/帧数、candidate-v1 身份、精确契约快照和完整分类概率集合；大 JSON 会流式落入临时 SQLite，再以有界二阶候选图求解。候选上限或 beam 发生剪枝时，报告会明确标记 `beam_approximation`，不会宣称得到无约束精确最优解。`--pitch-report` 与 `--player-tracks` 只有携带匹配的视频血缘时才参与成本，否则以中性先验降级并留下审计原因。
+
+输出目录固定包含 `ball_track.v2.csv`、`global_ball_trajectory_decisions.v1.jsonl` 和 `global_ball_trajectory_report.v1.json`。报告是原子提交标记，仅在最终来源复验通过后出现；读取方必须把缺少报告的目录视为未完成。短且有两端证据的缺口可标记为 `interpolated`；超过上限必须为 `unknown`；只有明确的上游离场证据才可标记 `out_of_view`。目标目录必须尚不存在；每次运行都通过原子发布报告标记来提交新的不可变 generation，因此绑定失败、取消或写盘失败不可能覆盖历史成功目录。

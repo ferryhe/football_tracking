@@ -139,6 +139,7 @@ class BallTrackingPipeline:
             )
         self.candidate_source_sha256 = self.candidate_source_snapshot.sha256
         capture, width, height, fps = self._open_frame_source()
+        source_frame_count = self._source_frame_count(capture)
         total_frames = self._estimate_total_frames(capture)
 
         def cancel_requested() -> bool:
@@ -155,6 +156,7 @@ class BallTrackingPipeline:
             frame_size=(width, height),
             fps=fps,
             candidate_source_sha256=self.candidate_source_sha256,
+            source_frame_count=source_frame_count,
         )
 
         if self.config.mock.enabled:
@@ -289,6 +291,13 @@ class BallTrackingPipeline:
         if total_frames is None or total_frames <= 0:
             return None
         return total_frames
+
+    def _source_frame_count(self, capture) -> int | None:
+        if self.config.mock.enabled:
+            frame_count = int(getattr(capture, "frame_count", self.config.mock.frame_count))
+        else:
+            frame_count = int(capture.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+        return frame_count if frame_count > 0 else None
 
     def _open_frame_source(self):
         """统一打开真实视频源或 mock 假帧源。"""

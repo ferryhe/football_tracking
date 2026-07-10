@@ -150,6 +150,7 @@ def write_raw_outputs_for_chunk_config(config_path: Path) -> None:
             debug_file.write(json.dumps({"frame": frame, "source": output_dir.name}) + "\n")
     write_tracking_contract(
         output_dir,
+        source={"video_sha256": candidate_source_sha256},
         frames=[
             {
                 "frame_index": frame,

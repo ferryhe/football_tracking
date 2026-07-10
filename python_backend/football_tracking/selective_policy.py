@@ -3193,6 +3193,7 @@ def _apply_policy(
                 }
             )
     derived = build_tracking_contract(
+        source=contract.get("source"),
         frames=contract["frames"],
         candidates=contract["candidates"],
         classifications=contract["classifications"],
