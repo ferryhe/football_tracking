@@ -117,6 +117,7 @@ class CandidateClassifierTests(unittest.TestCase):
             self.assertEqual(predictions["model_version"], row["model_version"])
 
         self.assertEqual(source["classifications"], derived["classifications"][: len(source["classifications"])])
+        self.assertEqual(source["source"], derived["source"])
         confirmed = [row for row in derived["classifications"] if row["label_origin"] != "prelabel"]
         self.assertTrue(any(row["candidate_id"] == "g0-unknown" and row["label"] == "unknown" for row in confirmed))
         self.assertEqual(2, sum(row["candidate_id"] == "conflict" for row in confirmed))
@@ -955,6 +956,13 @@ def _write_sample(
 
 def _write_inference_contract(root: Path, candidates: list[dict[str, object]]) -> Path:
     contract = build_tracking_contract(
+        source={
+            "video_sha256": "b" * 64,
+            "fps": 20.0,
+            "width": 1280,
+            "height": 720,
+            "frame_count": 200,
+        },
         candidates=candidates,
         classifications=[
             _classification("g0-unknown", "unknown", "human_confirmed"),

@@ -15,6 +15,7 @@ from uuid import uuid4
 from football_tracking.config import AppConfig
 from football_tracking.tracking_contracts import (
     SCHEMA_VERSION,
+    SOURCE_LINEAGE_FIELDS,
     TRACKING_CONTRACT_REPORT_NAME,
     build_tracking_contract,
 )
@@ -225,9 +226,16 @@ def track_result_to_contract_frame(track_result: TrackResult) -> dict[str, Any]:
 class RuntimeTrackingContractWriter:
     """Bounded-memory, fail-closed writer for a normal detector run."""
 
-    def __init__(self, output_dir: Path, source_sha256: str) -> None:
+    def __init__(
+        self,
+        output_dir: Path,
+        source_sha256: str,
+        *,
+        source_metadata: dict[str, Any] | None = None,
+    ) -> None:
         self.output_dir = Path(output_dir)
         self.source_sha256 = validate_candidate_source_sha256(source_sha256)
+        self.source = _runtime_contract_source(self.source_sha256, source_metadata)
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.final_path = self.output_dir / TRACKING_CONTRACT_REPORT_NAME
         token = uuid4().hex
@@ -393,6 +401,7 @@ class RuntimeTrackingContractWriter:
             handle.write(f'  "schema_version": {json.dumps(SCHEMA_VERSION)},\n')
             generated_at = datetime.now(timezone.utc).isoformat()
             handle.write(f'  "generated_at": {json.dumps(generated_at)},\n')
+            handle.write(f'  "source": {json.dumps(self.source, separators=(",", ":"))},\n')
             handle.write(f'  "summary": {json.dumps(summary, separators=(",", ":"))},\n')
             handle.write('  "frames": [\n')
             _copy_jsonl_as_array(self.frames_path, handle)
@@ -407,6 +416,34 @@ class RuntimeTrackingContractWriter:
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(self.publish_path, self.final_path)
+
+
+def _runtime_contract_source(source_sha256: str, metadata: dict[str, Any] | None) -> dict[str, Any]:
+    source: dict[str, Any] = {"video_sha256": source_sha256}
+    if metadata is None:
+        return source
+    unexpected = sorted(set(metadata) - (SOURCE_LINEAGE_FIELDS - {"video_sha256"}), key=str)
+    if unexpected:
+        raise ValueError(f"candidate source metadata contains unexpected fields: {unexpected}")
+    for name in ("width", "height", "frame_count"):
+        value = metadata.get(name)
+        if value is None:
+            continue
+        if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            raise ValueError(f"candidate source {name} must be a positive integer")
+        source[name] = value
+    if metadata.get("fps") is not None:
+        fps = metadata["fps"]
+        if isinstance(fps, bool):
+            raise ValueError("candidate source fps must be positive and finite")
+        try:
+            parsed_fps = float(fps)
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise ValueError("candidate source fps must be positive and finite") from exc
+        if not math.isfinite(parsed_fps) or parsed_fps <= 0.0:
+            raise ValueError("candidate source fps must be positive and finite")
+        source["fps"] = parsed_fps
+    return source
 
 
 def remove_runtime_tracking_contract(output_dir: Path) -> None:

@@ -18,6 +18,13 @@ from football_tracking.tracking_contracts import (
 class TrackingContractsTests(unittest.TestCase):
     def test_builds_versioned_contract_and_distinguishes_prelabels_from_confirmed_labels(self) -> None:
         payload = build_tracking_contract(
+            source={
+                "video_sha256": "a" * 64,
+                "fps": 20.0,
+                "width": 1280,
+                "height": 720,
+                "frame_count": 3,
+            },
             frames=[
                 {"frame_index": 0, "status": "detected", "x": 12.0, "y": 8.0, "confidence": 0.9},
                 {"frame_index": 1, "status": "unknown"},
@@ -57,6 +64,7 @@ class TrackingContractsTests(unittest.TestCase):
         )
 
         self.assertEqual("2.0", payload["schema_version"])
+        self.assertEqual("a" * 64, payload["source"]["video_sha256"])
         self.assertEqual("ok", payload["summary"]["status"])
         self.assertEqual([], payload["validation_errors"])
         self.assertFalse(payload["classifications"][0]["confirmed"])
@@ -80,6 +88,26 @@ class TrackingContractsTests(unittest.TestCase):
         self.assertEqual([], payload["frames"])
         self.assertEqual([], payload["candidates"])
         self.assertEqual([], payload["decisions"])
+
+    def test_invalid_source_lineage_fails_closed(self) -> None:
+        payload = build_tracking_contract(
+            source={"video_sha256": "not-a-sha", "fps": 0.0, "width": -1},
+            frames=[{"frame_index": 0, "status": "unknown"}],
+        )
+
+        self.assertEqual("invalid", payload["summary"]["status"])
+        self.assertIsNone(payload["source"])
+        self.assertTrue(any("source.video_sha256" in error for error in payload["validation_errors"]))
+
+    def test_unknown_source_lineage_fields_fail_closed_instead_of_being_dropped(self) -> None:
+        payload = build_tracking_contract(
+            source={"video_sha256": "a" * 64, "fps": 20.0, "opaque_lineage": "must-not-be-washed"},
+            frames=[{"frame_index": 0, "status": "unknown"}],
+        )
+
+        self.assertEqual("invalid", payload["summary"]["status"])
+        self.assertIsNone(payload["source"])
+        self.assertTrue(any("unexpected fields" in error for error in payload["validation_errors"]))
 
     def test_rejects_present_source_or_reason_that_is_not_a_non_empty_string(self) -> None:
         payload = build_tracking_contract(

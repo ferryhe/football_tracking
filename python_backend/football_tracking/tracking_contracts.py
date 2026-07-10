@@ -4,12 +4,14 @@ import csv
 import json
 import math
 import os
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
 SCHEMA_VERSION = "2.0"
+SOURCE_LINEAGE_FIELDS = frozenset({"video_sha256", "fps", "width", "height", "frame_count"})
 TRACKING_CONTRACT_REPORT_NAME = "tracking_contract.v2.json"
 
 FRAME_STATUSES = ("detected", "interpolated", "unknown", "out_of_view")
@@ -31,16 +33,19 @@ LABEL_ORIGINS = ("prelabel", "ai_confirmed", "human_confirmed")
 CONFIRMED_LABEL_ORIGINS = frozenset({"ai_confirmed", "human_confirmed"})
 SELECTIVE_DECISIONS = ("accept", "reject", "abstain")
 _REQUIRED_LEGACY_COLUMNS = ("Frame", "X", "Y", "Confidence", "Status")
+_SHA256_PATTERN = re.compile(r"[0-9a-f]{64}")
 
 
 def build_tracking_contract(
     *,
+    source: dict[str, Any] | None = None,
     frames: list[dict[str, Any]] | None = None,
     candidates: list[dict[str, Any]] | None = None,
     classifications: list[dict[str, Any]] | None = None,
     decisions: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     validation_errors: list[str] = []
+    normalized_source = _normalize_source(source, validation_errors)
     normalized_frames = _normalize_records(frames, "frames", _normalize_frame, validation_errors)
     normalized_candidates = _normalize_records(candidates, "candidates", _normalize_candidate, validation_errors)
     normalized_frames = _dedupe_records(
@@ -79,6 +84,7 @@ def build_tracking_contract(
     return {
         "schema_version": SCHEMA_VERSION,
         "generated_at": _utc_now_iso(),
+        "source": normalized_source,
         "summary": _summary(
             normalized_frames,
             normalized_candidates,
@@ -97,6 +103,7 @@ def build_tracking_contract(
 def write_tracking_contract(
     output_dir: Path,
     *,
+    source: dict[str, Any] | None = None,
     frames: list[dict[str, Any]] | None = None,
     candidates: list[dict[str, Any]] | None = None,
     classifications: list[dict[str, Any]] | None = None,
@@ -104,6 +111,7 @@ def write_tracking_contract(
 ) -> dict[str, Any]:
     output_dir = Path(output_dir)
     payload = build_tracking_contract(
+        source=source,
         frames=frames,
         candidates=candidates,
         classifications=classifications,
@@ -145,7 +153,7 @@ def normalize_tracking_contract_payload(raw: Any, *, path: Path) -> dict[str, An
             collection_errors.append(f"{name}: must be a list")
             value = []
         collections[name] = value
-    payload = build_tracking_contract(**collections)
+    payload = build_tracking_contract(source=raw.get("source"), **collections)
     if raw.get("schema_version") != SCHEMA_VERSION:
         collection_errors.insert(0, f"schema_version: expected {SCHEMA_VERSION}")
     for error in _string_list(raw.get("validation_errors")):
@@ -258,6 +266,38 @@ def _normalize_records(
         if normalized is not None:
             result.append(normalized)
     return result
+
+
+def _normalize_source(value: Any, validation_errors: list[str]) -> dict[str, Any] | None:
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        validation_errors.append("source: must be an object or null")
+        return None
+    unexpected = sorted(set(value) - SOURCE_LINEAGE_FIELDS, key=str)
+    if unexpected:
+        validation_errors.append(f"source: unexpected fields {unexpected}")
+    video_sha256 = value.get("video_sha256")
+    if not isinstance(video_sha256, str) or _SHA256_PATTERN.fullmatch(video_sha256) is None:
+        validation_errors.append("source.video_sha256: must be a lowercase SHA-256")
+        return None
+    normalized: dict[str, Any] = {"video_sha256": video_sha256}
+    for name in ("width", "height", "frame_count"):
+        if name not in value:
+            continue
+        parsed = value[name]
+        if isinstance(parsed, bool) or not isinstance(parsed, int) or parsed <= 0:
+            validation_errors.append(f"source.{name}: must be a positive integer")
+            continue
+        normalized[name] = parsed
+    if "fps" in value:
+        fps = _finite_float(value["fps"], "source.fps", validation_errors)
+        if fps is None or fps <= 0.0:
+            if fps is not None:
+                validation_errors.append("source.fps: must be positive")
+        else:
+            normalized["fps"] = fps
+    return None if unexpected else normalized
 
 
 def _envelope_errors(raw: dict[str, Any]) -> list[str]:

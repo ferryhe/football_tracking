@@ -5,3 +5,4 @@
 # the Python dependency set is fully lockfile-driven in CI.
 fastapi==0.136.1
 starlette==1.0.0
+ijson==3.5.1

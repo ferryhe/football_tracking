@@ -887,6 +887,52 @@ reviewer、时间戳及 queue item/candidate ID 外，每条 action 还必须携
 staging/rename 原子发布；参数、完整性或绑定校验失败会返回非零，且不会留下半套目录。`.gitignore` 已忽略
 `data/`、`weights/`、`outputs/`，视频、tensor、复核图片和权重应留在这些目录，不要提交到 Git。
 
+### P2：离线全局球轨迹
+
+候选契约与分类器完整概率产物准备好后，运行：
+
+```powershell
+python scripts\solve_global_ball_trajectory.py `
+  --source-video data\match.mp4 `
+  --contract outputs\run\tracking_contract.v2.json `
+  --predictions outputs\candidate_inference\candidate_predictions.v1.json `
+  --output-dir outputs\global_ball_trajectory_v1 `
+  --max-interpolation-gap 6 `
+  --candidate-cap-per-frame 24 `
+  --beam-width 64
+```
+
+必需输入是原始视频、含 candidate-v1 的 V2 contract，以及与该 contract 精确哈希绑定的
+`candidate_predictions.v1.json`。`--pitch-report` 和 `--player-tracks` 可选，但只有在各自产物的 `lineage`
+中同时绑定匹配的 `source_video_sha256`、`fps`、`width`、`height` 和 `frame_count` 时才参与成本；旧的未绑定
+`player_tracks.json` 会安全降级为中性先验。contract 中的裸 accept/reject/abstain 没有独立策略证据，求解器
+只审计为 `unvalidated_selective_decision`，不会把它当硬选择。
+
+求解过程不会整载全片 contract 或 predictions：输入先生成不可变快照，再流式写入临时 SQLite；二阶状态成本
+显式记录 match-ball 概率、检测置信度、球场/脚点先验，以及速度、加速度、方向和时间缺口。候选 cap 或 beam
+造成剪枝时，报告的 `algorithm.optimality` 为 `beam_approximation`。三件套输出是：
+
+```text
+outputs/global_ball_trajectory_v1/
+  ball_track.v2.csv
+  global_ball_trajectory_decisions.v1.jsonl
+  global_ball_trajectory_report.v1.json
+```
+
+`detected` 必须绑定当帧 candidate；短缺口才允许有界 Kalman `interpolated`；证据不足或超过预测上限时为
+`unknown`；`out_of_view` 只接受明确上游证据且不写伪坐标。目标目录使用跨进程锁和 staging/rename 发布；输入
+突变、取消、验证或写盘失败不会留下可提交的目标目录，也不会触碰其他历史 generation；目标 `--output-dir`
+必须尚不存在。`global_ball_trajectory_report.v1.json` 是原子提交标记，只在最终来源复验通过后写入；消费方必须
+把缺少该报告的目录视为未完成。
+
+### P2 offline global ball trajectory
+
+The same command accepts `--source-video`, `--contract`, `--predictions`, and a dedicated `--output-dir`.
+It revalidates the source SHA-256 and video metadata, exact candidate-v1 population, candidate fingerprints, model version,
+and normalized seven-class probabilities. Large arrays are streamed into a disk-backed index. Optional pitch/player priors
+must carry matching source lineage. The report discloses capacity pruning, and long or unsupported gaps remain `unknown`
+instead of being extended as successful predictions.
+
 ### 主要输出文件
 
 原始跟踪通常会输出：

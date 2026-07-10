@@ -139,6 +139,7 @@ class RuntimeTrackingContractWriterTests(unittest.TestCase):
             contract = load_tracking_contract(output_dir)
 
         self.assertEqual("loaded", contract["artifact_status"])
+        self.assertEqual({"video_sha256": source_sha256}, contract["source"])
         self.assertEqual([], contract["validation_errors"])
         self.assertEqual([3], [frame["frame_index"] for frame in contract["frames"]])
         self.assertEqual(

@@ -47,8 +47,23 @@ def stitch_chunk_outputs(
         raise ValueError("chunks_root_name must be a safe single directory name")
 
     output_dir.mkdir(parents=True, exist_ok=True)
+    first_contract_records = None
+    expected_contract_source = None
+    if save_tracking_contract:
+        first_contract_records = _read_runtime_contract(chunk_dirs[0])
+        expected_contract_source = first_contract_records[2]
+        if expected_contract_source.get("video_sha256") != candidate_source_sha256:
+            raise ValueError("chunk tracking contract source does not match candidate_source_sha256")
     contract_writer = (
-        RuntimeTrackingContractWriter(output_dir, candidate_source_sha256)
+        RuntimeTrackingContractWriter(
+            output_dir,
+            candidate_source_sha256,
+            source_metadata={
+                key: value
+                for key, value in (expected_contract_source or {}).items()
+                if key != "video_sha256"
+            },
+        )
         if save_tracking_contract and candidate_source_sha256 is not None
         else None
     )
@@ -61,7 +76,13 @@ def stitch_chunk_outputs(
             contract_frames: dict[int, dict[str, Any]] = {}
             contract_candidates: dict[int, list[dict[str, Any]]] = {}
             if contract_writer is not None:
-                contract_frames, contract_candidates = _read_runtime_contract(chunk_dir)
+                if chunk_position == 0:
+                    assert first_contract_records is not None
+                    contract_frames, contract_candidates, contract_source = first_contract_records
+                else:
+                    contract_frames, contract_candidates, contract_source = _read_runtime_contract(chunk_dir)
+                if contract_source != expected_contract_source:
+                    raise ValueError(f"Chunk tracking contract source mismatch: {chunk_dir}")
             core_end_frame = chunk.core_end_frame
             if chunk_position == final_chunk_position:
                 core_end_frame = _select_final_core_end_frame(chunk, csv_rows, debug_items, boundary_events)
@@ -107,7 +128,9 @@ def stitch_chunk_outputs(
     return report
 
 
-def _read_runtime_contract(chunk_dir: Path) -> tuple[dict[int, dict[str, Any]], dict[int, list[dict[str, Any]]]]:
+def _read_runtime_contract(
+    chunk_dir: Path,
+) -> tuple[dict[int, dict[str, Any]], dict[int, list[dict[str, Any]]], dict[str, Any]]:
     contract = load_tracking_contract(chunk_dir)
     if contract.get("artifact_status") != "loaded" or contract.get("validation_errors"):
         raise ValueError(
@@ -116,6 +139,9 @@ def _read_runtime_contract(chunk_dir: Path) -> tuple[dict[int, dict[str, Any]], 
         )
     if contract["classifications"] or contract["decisions"]:
         raise ValueError(f"Chunk tracking contract must contain raw detector records only: {chunk_dir}")
+    source = contract.get("source")
+    if not isinstance(source, dict) or not isinstance(source.get("video_sha256"), str):
+        raise ValueError(f"Chunk tracking contract source is missing: {chunk_dir}")
 
     frames: dict[int, dict[str, Any]] = {}
     for frame in contract["frames"]:
@@ -133,7 +159,7 @@ def _read_runtime_contract(chunk_dir: Path) -> tuple[dict[int, dict[str, Any]], 
         candidates.setdefault(candidate["frame_index"], []).append(candidate)
     for frame_candidates in candidates.values():
         frame_candidates.sort(key=lambda item: item["candidate_id"])
-    return frames, candidates
+    return frames, candidates, source
 
 
 def _read_csv_rows(path: Path) -> dict[int, list[str]]:

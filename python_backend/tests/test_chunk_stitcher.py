@@ -66,6 +66,7 @@ def write_chunk_outputs(
     missing_csv_frames: set[int] | None = None,
     missing_debug_frames: set[int] | None = None,
     output_config: OutputConfig | None = None,
+    source: dict[str, object] | None = None,
 ) -> None:
     output_config = output_config or OutputConfig()
     missing_csv_frames = missing_csv_frames or set()
@@ -85,6 +86,15 @@ def write_chunk_outputs(
             debug_file.write(json.dumps({"frame": frame, "source_chunk": chunk_dir.name}) + "\n")
     write_tracking_contract(
         chunk_dir,
+        source=source
+        if source is not None
+        else {
+            "video_sha256": TEST_SOURCE_SHA256,
+            "fps": 20.0,
+            "width": 1920,
+            "height": 1080,
+            "frame_count": 250,
+        },
         frames=[
             {
                 "frame_index": frame,
@@ -156,6 +166,16 @@ class ChunkStitcherTests(unittest.TestCase):
 
             contract = load_tracking_contract(output_dir)
             self.assertEqual("loaded", contract["artifact_status"])
+            self.assertEqual(
+                {
+                    "video_sha256": TEST_SOURCE_SHA256,
+                    "fps": 20.0,
+                    "width": 1920,
+                    "height": 1080,
+                    "frame_count": 250,
+                },
+                contract["source"],
+            )
             self.assertEqual(list(range(250)), [frame["frame_index"] for frame in contract["frames"]])
             self.assertEqual(
                 [candidate_record(frame)["candidate_id"] for frame in range(250)],
@@ -200,6 +220,70 @@ class ChunkStitcherTests(unittest.TestCase):
                 ],
                 report["chunks"],
             )
+
+    def test_stitch_chunk_outputs_rejects_any_source_lineage_mismatch(self) -> None:
+        mutations = {
+            "sha": {
+                "video_sha256": "b" * 64,
+                "fps": 20.0,
+                "width": 1920,
+                "height": 1080,
+                "frame_count": 250,
+            },
+            "fps": {
+                "video_sha256": TEST_SOURCE_SHA256,
+                "fps": 21.0,
+                "width": 1920,
+                "height": 1080,
+                "frame_count": 250,
+            },
+            "width": {
+                "video_sha256": TEST_SOURCE_SHA256,
+                "fps": 20.0,
+                "width": 1280,
+                "height": 1080,
+                "frame_count": 250,
+            },
+            "height": {
+                "video_sha256": TEST_SOURCE_SHA256,
+                "fps": 20.0,
+                "width": 1920,
+                "height": 720,
+                "frame_count": 250,
+            },
+            "frame count": {
+                "video_sha256": TEST_SOURCE_SHA256,
+                "fps": 20.0,
+                "width": 1920,
+                "height": 1080,
+                "frame_count": 251,
+            },
+        }
+        for label, mismatched_source in mutations.items():
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as temp_name:
+                temp_dir = Path(temp_name)
+                chunks = [
+                    make_chunk(0, decode_start_frame=0, start_frame=0, end_frame=0, core_start_frame=0, core_end_frame=0),
+                    make_chunk(1, decode_start_frame=1, start_frame=1, end_frame=1, core_start_frame=1, core_end_frame=1),
+                ]
+                chunk_dirs = [temp_dir / chunk.output_dir_name for chunk in chunks]
+                write_chunk_outputs(chunk_dirs[0], frame_start=0, frame_end=0)
+                write_chunk_outputs(
+                    chunk_dirs[1],
+                    frame_start=1,
+                    frame_end=1,
+                    source=mismatched_source,
+                )
+                output = temp_dir / "merged"
+
+                with self.assertRaisesRegex(ValueError, "source mismatch|does not match"):
+                    stitch_chunk_outputs(
+                        chunks,
+                        chunk_dirs,
+                        output,
+                        candidate_source_sha256=TEST_SOURCE_SHA256,
+                    )
+                self.assertFalse((output / "tracking_contract.v2.json").exists())
 
     def test_stitched_contract_validation_never_builds_a_full_video_payload(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:
@@ -328,6 +412,12 @@ class ChunkStitcherTests(unittest.TestCase):
             write_chunk_outputs(chunk_dir, frame_start=0, frame_end=0)
             write_tracking_contract(
                 chunk_dir,
+                source={
+                    "video_sha256": TEST_SOURCE_SHA256,
+                    "fps": 20.0,
+                    "width": 1920,
+                    "height": 1080,
+                },
                 frames=[{"frame_index": 0, "status": "unknown"}],
                 candidates=[
                     {

@@ -178,6 +178,7 @@ def resolve_candidate_annotations(
             )
 
     derived_contract = build_tracking_contract(
+        source=contract.get("source"),
         frames=contract["frames"],
         candidates=contract["candidates"],
         classifications=[*classifications, *additions],
@@ -276,7 +277,7 @@ def _load_tracking_contract_snapshot(path: Path) -> tuple[dict[str, Any], _FileS
             errors.append(f"{name}: required list")
             value = []
         collections[name] = value
-    contract = build_tracking_contract(**collections)
+    contract = build_tracking_contract(source=raw.get("source"), **collections)
     errors.extend(str(error) for error in source_errors if error)
     errors.extend(str(error) for error in contract["validation_errors"])
     if errors:

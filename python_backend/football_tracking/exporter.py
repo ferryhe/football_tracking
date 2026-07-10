@@ -29,6 +29,7 @@ class TrackingExporter:
         frame_size: tuple[int, int],
         fps: float,
         candidate_source_sha256: str,
+        source_frame_count: int | None = None,
     ) -> None:
         self.output_dir = output_dir
         self.config = config
@@ -55,6 +56,12 @@ class TrackingExporter:
                 self.contract_writer = RuntimeTrackingContractWriter(
                     self.output_dir,
                     self.candidate_source_sha256,
+                    source_metadata={
+                        "fps": self.fps,
+                        "width": self.frame_size[0],
+                        "height": self.frame_size[1],
+                        "frame_count": source_frame_count,
+                    },
                 )
         except BaseException:
             self.close(publish_tracking_contract=False)

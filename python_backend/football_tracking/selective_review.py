@@ -903,7 +903,7 @@ def _load_source_bundle(
         if not isinstance(collection, list):
             raise SelectiveReviewError(f"tracking contract {collection_name} must be a list")
         collections[collection_name] = collection
-    normalized_contract = build_tracking_contract(**collections)
+    normalized_contract = build_tracking_contract(source=contract.get("source"), **collections)
     if normalized_contract["validation_errors"] or any(
         normalized_contract[name] != contract[name] for name in collections
     ):

@@ -409,6 +409,7 @@ def classify_candidates(
         if prediction["candidate_id"] not in confirmed_ids
     ]
     derived_contract = build_tracking_contract(
+        source=contract.get("source"),
         frames=contract["frames"],
         candidates=contract["candidates"],
         classifications=[*contract["classifications"], *additions],

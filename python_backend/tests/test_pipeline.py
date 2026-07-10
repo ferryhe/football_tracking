@@ -263,6 +263,16 @@ class BallTrackingPipelinePriorTests(unittest.TestCase):
 
         self.assertEqual("loaded", contract["artifact_status"])
         self.assertEqual([], contract["validation_errors"])
+        self.assertEqual(
+            {
+                "video_sha256": compute_candidate_source_sha256(config, use_precomputed=False),
+                "fps": config.mock.fps,
+                "width": config.mock.frame_width,
+                "height": config.mock.frame_height,
+                "frame_count": config.mock.frame_count,
+            },
+            contract["source"],
+        )
         self.assertEqual([0, 1, 2], [frame["frame_index"] for frame in contract["frames"]])
         self.assertEqual(3, len(contract["candidates"]))
         self.assertTrue(all(candidate["candidate_id"] for candidate in contract["candidates"]))
