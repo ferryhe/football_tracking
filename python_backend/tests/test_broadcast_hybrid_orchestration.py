@@ -768,7 +768,26 @@ class BroadcastHybridOrchestrationTests(unittest.TestCase):
 
         materialize.assert_not_called()
         self.assertEqual([], list(external.iterdir()))
-        self.assertFalse((self.fixture.run_dir / "broadcast_generations").exists())
+        self.assertTrue(generation_root.is_symlink())
+        self.assertEqual(external.resolve(), generation_root.resolve())
+
+    def test_dangling_generation_root_symlink_is_rejected_before_external_writes(self) -> None:
+        external = Path(self.temp_dir.name) / "missing-external-generations"
+        generation_root = self.fixture.run_dir / "broadcast_generations"
+        try:
+            generation_root.symlink_to(external, target_is_directory=True)
+        except OSError as exc:
+            self.skipTest(f"directory symlinks are unavailable: {exc}")
+
+        with (
+            mock.patch.object(orchestration, "materialize_selective_review_actions") as materialize,
+            self.assertRaisesRegex(orchestration.BroadcastHybridOrchestrationError, "generation root"),
+        ):
+            orchestration.recompute_reviewed_trajectory(self.fixture.run_dir)
+
+        materialize.assert_not_called()
+        self.assertTrue(generation_root.is_symlink())
+        self.assertFalse(external.exists())
 
     def test_run_and_generation_directory_reparse_points_are_rejected(self) -> None:
         external_run = Path(self.temp_dir.name) / "external-run"

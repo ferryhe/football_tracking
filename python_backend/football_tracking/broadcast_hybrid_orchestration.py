@@ -1958,6 +1958,8 @@ def _contained_generation(run_dir: Path, generation_id: str) -> Path:
 
 def _generation_root(run_dir: Path, *, create: bool) -> Path:
     raw_root = run_dir / "broadcast_generations"
+    if _is_link_or_reparse(raw_root):
+        raise BroadcastHybridOrchestrationError("broadcast generation root must be a direct non-reparse directory")
     if not raw_root.exists():
         if not create:
             raise BroadcastHybridOrchestrationError("broadcast generation root is unavailable")
