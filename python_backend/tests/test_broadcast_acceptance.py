@@ -476,6 +476,50 @@ class BroadcastAcceptanceTests(unittest.TestCase):
         )
         self.assertIn("video_duration_mismatch", {error["code"] for error in bad_duration["errors"]})
 
+    def test_copy_probe_allows_missing_ffmpeg_frame_progress_but_full_decode_requires_it(self) -> None:
+        completed = subprocess.CompletedProcess(
+            args=["ffmpeg"],
+            returncode=0,
+            stdout="out_time_us=1000000\nprogress=end\n",
+            stderr="",
+        )
+        with patch.object(acceptance.subprocess, "run", return_value=completed):
+            copied = acceptance._probe_stream(
+                self.output,
+                "ffmpeg",
+                stream="video",
+                required=True,
+                copy_stream=True,
+            )
+            with self.assertRaisesRegex(acceptance.BroadcastAcceptanceError, "frame count is unavailable"):
+                acceptance._probe_stream(
+                    self.output,
+                    "ffmpeg",
+                    stream="video",
+                    required=True,
+                    copy_stream=False,
+                )
+
+        self.assertIsNone(copied["frame_count"])
+
+    def test_media_probe_uses_decoder_frame_count_when_copy_progress_omits_it(self) -> None:
+        with (
+            patch.object(
+                acceptance,
+                "_probe_stream",
+                side_effect=[
+                    {"present": True, "duration_seconds": 1.95, "frame_count": None},
+                    {"present": False, "duration_seconds": None, "frame_count": None},
+                ],
+            ),
+            patch.object(acceptance, "_video_metadata", return_value=(40, 20.0, 160, 90)),
+        ):
+            probe = acceptance._probe_media(self.output, "ffmpeg")
+
+        self.assertEqual(40, probe["video"]["frame_count"])
+        self.assertIsNone(probe["video"]["ffmpeg_progress_frame_count"])
+        self.assertEqual(2.0, probe["video"]["duration_seconds"])
+
     def test_real_ffmpeg_video_duration_uses_full_frame_extent(self) -> None:
         executable = acceptance._resolve_ffmpeg(None)
         ffmpeg_identity = self.real_ffmpeg_identity(executable)

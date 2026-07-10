@@ -124,11 +124,6 @@ def _validate_broadcast_run_locked(
         source_probe = _probe_media(context["source_video"], executable)
         output_probe = _probe_media(context["output_video"], executable)
         frame_count, fps, width, height = _video_metadata(context["output_video"])
-        probed_frames = output_probe["video"].get("frame_count")
-        if probed_frames != frame_count:
-            raise BroadcastAcceptanceError(
-                f"output frame count differs between ffmpeg ({probed_frames}) and decoder ({frame_count})"
-            )
 
         plan = _build_segment_plan(frame_count, segment_frames)
         plan_sha256 = _canonical_sha256(
@@ -436,13 +431,16 @@ def _opencv_decoder_identity(path: Path) -> dict[str, str]:
 def _probe_media(path: Path, executable: str) -> dict[str, Any]:
     video = _probe_stream(path, executable, stream="video", required=True)
     frame_count, fps, width, height = _video_metadata(path)
-    if video.get("frame_count") != frame_count:
+    progress_frame_count = video.get("frame_count")
+    if progress_frame_count is not None and progress_frame_count != frame_count:
         raise BroadcastAcceptanceError(
-            f"video frame count differs between ffmpeg ({video.get('frame_count')}) and OpenCV ({frame_count})"
+            f"video frame count differs between ffmpeg progress ({progress_frame_count}) and OpenCV ({frame_count})"
         )
     last_packet_timestamp = video.get("duration_seconds")
     video.update(
         {
+            "frame_count": frame_count,
+            "ffmpeg_progress_frame_count": progress_frame_count,
             "duration_seconds": round(frame_count / fps, 6),
             "last_packet_timestamp_seconds": last_packet_timestamp,
             "fps": fps,
@@ -525,7 +523,9 @@ def _probe_stream(
             frame_count = int(raw_frames) if raw_frames is not None else None
         except ValueError as exc:
             raise BroadcastAcceptanceError("ffmpeg video frame count is invalid") from exc
-        if frame_count is None or frame_count <= 0:
+        if frame_count is not None and frame_count <= 0:
+            frame_count = None
+        if not copy_stream and frame_count is None:
             raise BroadcastAcceptanceError("ffmpeg video frame count is unavailable")
     return {
         "present": True,

@@ -67,7 +67,15 @@ class ProjectEntrypointTests(unittest.TestCase):
         if node is None:
             self.skipTest("Node.js is unavailable")
         env = dict(os.environ)
-        env["PATH"] = str(Path(node).parent)
+        tool_directories = [str(Path(node).parent)]
+        for command in ("pnpm", "corepack"):
+            executable = shutil.which(command)
+            if executable is not None:
+                directory = str(Path(executable).parent)
+                if directory not in tool_directories:
+                    tool_directories.append(directory)
+        env["PATH"] = os.pathsep.join(tool_directories)
+        self.assertIsNone(shutil.which("python", path=env["PATH"]))
 
         completed = subprocess.run(
             [node, str(project.repo_root() / "scripts" / "project.mjs"), "check"],
