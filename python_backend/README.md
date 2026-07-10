@@ -925,6 +925,39 @@ outputs/global_ball_trajectory_v1/
 必须尚不存在。`global_ball_trajectory_report.v1.json` 是原子提交标记，只在最终来源复验通过后写入；消费方必须
 把缺少该报告的目录视为未完成。
 
+### P2：混合广播镜头路径
+
+全局球轨迹 generation 完成后，显式传入同一视频、轨迹 CSV 和提交报告：
+
+```powershell
+python scripts\solve_hybrid_broadcast_camera.py `
+  --source-video data\match.mp4 `
+  --ball-track outputs\global_ball_trajectory_v1\ball_track.v2.csv `
+  --trajectory-report outputs\global_ball_trajectory_v1\global_ball_trajectory_report.v1.json `
+  --output-dir outputs\hybrid_camera_v1
+```
+
+求解器先验证视频 SHA-256、FPS、尺寸、帧数，以及轨迹 CSV 的 SHA-256/大小均与 PR6 报告一致，再顺序解码一次视频。相邻帧只保留有界降采样特征，用确定性的 partial-affine 证据描述 pan/zoom；低置信证据明确标为 unknown/rejected，硬切镜则新建 `ShotId` 并重置速度、缩放和融合状态。`detected` 与 `interpolated` 保持各自语义；后者降权。`unknown/out_of_view` 的 `TrackX/TrackY`、`TargetX/TargetY` 必须为空，相机仅能采用源运动、有界 hold 或宽景/home fallback。
+
+```text
+outputs/hybrid_camera_v1/
+  camera_path.v2.csv
+  camera_motion_evidence.v1.jsonl
+  hybrid_broadcast_camera_decisions.v1.jsonl
+  camera_motion_audit.json
+  hybrid_broadcast_camera_report.v1.json
+```
+
+镜头审计按 shot 分段，合法切镜不计入连续 pan/accel/zoom 峰值。目标目录必须不存在；跨进程锁、同文件系统 staging/rename、最终来源复验和 report-last 提交保证失败运行不会留下可读成功 generation。渲染命令会再次验证视频与路径血缘，并逐帧消费 crop：
+
+```powershell
+python scripts\render_hybrid_camera_path.py `
+  --source-video data\match.mp4 `
+  --camera-path outputs\hybrid_camera_v1\camera_path.v2.csv `
+  --hybrid-report outputs\hybrid_camera_v1\hybrid_broadcast_camera_report.v1.json `
+  --output-video outputs\hybrid_camera_v1.mp4
+```
+
 ### P2 offline global ball trajectory
 
 The same command accepts `--source-video`, `--contract`, `--predictions`, and a dedicated `--output-dir`.
@@ -932,6 +965,15 @@ It revalidates the source SHA-256 and video metadata, exact candidate-v1 populat
 and normalized seven-class probabilities. Large arrays are streamed into a disk-backed index. Optional pitch/player priors
 must carry matching source lineage. The report discloses capacity pruning, and long or unsupported gaps remain `unknown`
 instead of being extended as successful predictions.
+
+### P2 hybrid broadcast camera path
+
+`solve_hybrid_broadcast_camera.py` requires the source video, an explicit `ball_track.v2.csv`, its matching completed global
+trajectory report, and a new output directory. It derives bounded partial-affine source-camera evidence, segments hard cuts,
+and fuses only trusted detected/interpolated ball evidence. Unknown and out-of-view frames never receive ball coordinates or
+ball-derived targets. The immutable generation records every motion rejection, fallback, crop, shot, and target source; the
+hybrid report is written last as its commit marker. `render_hybrid_camera_path.py` verifies the report bindings and consumes
+the path without changing track states.
 
 ### 主要输出文件
 

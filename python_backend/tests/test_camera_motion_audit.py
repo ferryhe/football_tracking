@@ -6,7 +6,10 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from football_tracking.camera_motion_audit import write_camera_motion_audit_report
+from football_tracking.camera_motion_audit import (
+    write_camera_motion_audit_report,
+    write_streaming_camera_motion_audit_report,
+)
 
 
 class CameraMotionAuditTests(unittest.TestCase):
@@ -98,7 +101,70 @@ class CameraMotionAuditTests(unittest.TestCase):
             self.assertEqual("ok", payload["summary"]["status"])
             self.assertEqual(3, payload["summary"]["frame_count"])
             self.assertEqual(0, payload["summary"]["review_event_count"])
+            self.assertEqual(0, payload["summary"]["cut_count"])
+            self.assertEqual(1, payload["summary"]["continuous_segment_count"])
+            self.assertEqual(0, payload["summary"]["low_confidence_motion_frame_count"])
             self.assertEqual([], payload["review_events"])
+
+    def test_cut_row_excludes_cross_boundary_motion_and_resets_velocity(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            self.write_camera_path_with_motion_evidence(
+                output_dir,
+                [
+                    ["0", "0", "0", "960", "540", "Detected", "glide", "shot-1", "false", "0.9"],
+                    ["1", "40", "0", "960", "540", "Detected", "glide", "shot-1", "false", "0.9"],
+                    ["2", "1000", "500", "480", "270", "Unknown", "cut_reset", "shot-2", "true", "0.2"],
+                    ["3", "1010", "500", "480", "270", "Detected", "glide", "shot-2", "false", "0.4"],
+                ],
+            )
+
+            payload = write_camera_motion_audit_report(output_dir)
+
+            self.assertEqual("ok", payload["summary"]["status"])
+            self.assertEqual(1, payload["summary"]["cut_count"])
+            self.assertEqual(2, payload["summary"]["continuous_segment_count"])
+            self.assertEqual(2, payload["summary"]["low_confidence_motion_frame_count"])
+            self.assertEqual(0.0, payload["summary"]["max_pan_accel_px"])
+            self.assertEqual(0.0, payload["summary"]["max_zoom_step_px"])
+            self.assertEqual([], payload["review_events"])
+
+    def test_shot_id_change_excludes_unmarked_cut_jump(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            self.write_camera_path_with_motion_evidence(
+                output_dir,
+                [
+                    ["0", "0", "0", "960", "540", "Detected", "glide", "shot-1", "false", ""],
+                    ["1", "900", "500", "480", "270", "Detected", "glide", "shot-2", "false", ""],
+                ],
+            )
+
+            payload = write_camera_motion_audit_report(output_dir)
+
+            self.assertEqual("ok", payload["summary"]["status"])
+            self.assertEqual(1, payload["summary"]["cut_count"])
+            self.assertEqual(2, payload["summary"]["continuous_segment_count"])
+            self.assertEqual(0.0, payload["summary"]["max_pan_step_px"])
+            self.assertEqual([], payload["review_events"])
+
+    def test_review_events_are_not_merged_across_cut_segments(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            self.write_camera_path_with_motion_evidence(
+                output_dir,
+                [
+                    ["0", "0", "0", "1000", "500", "Detected", "glide", "shot-1", "false", "1"],
+                    ["1", "100", "0", "1000", "500", "Detected", "glide", "shot-1", "false", "1"],
+                    ["2", "500", "0", "1000", "500", "Detected", "cut_reset", "shot-2", "true", "1"],
+                    ["3", "600", "0", "1000", "500", "Detected", "glide", "shot-2", "false", "1"],
+                ],
+            )
+
+            payload = write_camera_motion_audit_report(output_dir, target_width=1000, target_height=500)
+
+            self.assertEqual(2, payload["summary"]["review_event_count"])
+            self.assertEqual([1, 3], [event["start_frame"] for event in payload["review_events"]])
 
     def test_pan_spike_creates_warn_review_event(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:
@@ -286,6 +352,53 @@ class CameraMotionAuditTests(unittest.TestCase):
             self.assertEqual(["glide", "catch_up"], event["evidence"]["pan_modes"])
             self.assertEqual(["Detected", "Predicted"], event["evidence"]["statuses"])
 
+    def test_streaming_audit_matches_legacy_metrics_and_events_across_cut_segments(self) -> None:
+        rows = [
+            ["0", "0", "0", "1000", "500", "Detected", "glide", "0", "0", "0.9"],
+            ["1", "100", "0", "1000", "500", "Detected", "glide", "0", "0", "0.9"],
+            ["2", "300", "0", "1000", "550", "Predicted", "catch_up", "0", "0", "0.4"],
+            ["3", "800", "0", "1000", "550", "unknown", "scene_cut", "1", "1", ""],
+            ["4", "810", "0", "1000", "550", "Detected", "glide", "1", "0", "0.8"],
+        ]
+        with tempfile.TemporaryDirectory() as first_name, tempfile.TemporaryDirectory() as second_name:
+            first = Path(first_name)
+            second = Path(second_name)
+            self.write_camera_path_with_motion_evidence(first, rows)
+            self.write_camera_path_with_motion_evidence(second, rows)
+            legacy = write_camera_motion_audit_report(first, target_width=1000, target_height=500)
+            streamed = write_streaming_camera_motion_audit_report(
+                second,
+                target_width=1000,
+                target_height=500,
+                generated_at=None,
+            )
+            streamed_file = self.read_report(second)
+
+        self.assertEqual(legacy["summary"], streamed["summary"])
+        self.assertEqual(legacy["summary"], streamed_file["summary"])
+        self.assertEqual(legacy["review_events"], streamed_file["review_events"])
+        self.assertIsNone(streamed_file["generated_at"])
+
+    def test_streaming_audit_handles_one_hundred_thousand_frames(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            with (output_dir / "camera_path.csv").open("w", newline="", encoding="utf-8") as handle:
+                writer = csv.writer(handle)
+                writer.writerow(["Frame", "CenterX", "CenterY", "CropWidth", "CropHeight", "Status", "PanMode"])
+                for frame in range(100_000):
+                    writer.writerow([frame, "500", "250", "1000", "500", "unknown", "hold"])
+
+            payload = write_streaming_camera_motion_audit_report(
+                output_dir,
+                target_width=1000,
+                target_height=500,
+                generated_at=None,
+            )
+
+        self.assertEqual(100_000, payload["summary"]["frame_count"])
+        self.assertEqual(0.0, payload["summary"]["p95_pan_step_px"])
+        self.assertEqual(0, payload["summary"]["review_event_count"])
+
     def read_report(self, output_dir: Path) -> dict[str, object]:
         with (output_dir / "camera_motion_audit.json").open("r", encoding="utf-8") as handle:
             return json.load(handle)
@@ -302,6 +415,24 @@ class CameraMotionAuditTests(unittest.TestCase):
             writer = csv.writer(handle)
             writer.writerow(headers)
             writer.writerows(rows)
+
+    def write_camera_path_with_motion_evidence(self, output_dir: Path, rows: list[list[str]]) -> None:
+        self.write_rows(
+            output_dir,
+            [
+                "Frame",
+                "CenterX",
+                "CenterY",
+                "CropWidth",
+                "CropHeight",
+                "Status",
+                "PanMode",
+                "ShotId",
+                "CutDetected",
+                "MotionConfidence",
+            ],
+            rows,
+        )
 
 
 if __name__ == "__main__":

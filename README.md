@@ -146,6 +146,30 @@ The solver independently rebinds the source-video SHA-256, video metadata, candi
 
 The generation contains `ball_track.v2.csv`, `global_ball_trajectory_decisions.v1.jsonl`, and `global_ball_trajectory_report.v1.json`. The report is the atomic commit marker and appears only after final source verification; readers must treat a directory without it as incomplete. Short evidence-bounded gaps may be `interpolated`; longer gaps are `unknown`. `out_of_view` requires explicit upstream evidence. The target directory must not already exist: each run commits a new immutable generation by atomically publishing that report marker, so failures cannot overwrite an earlier generation.
 
+### Hybrid broadcast camera path (P2)
+
+Bind that trajectory back to the same source video and solve a cut-aware virtual camera path:
+
+```powershell
+python python_backend/scripts/solve_hybrid_broadcast_camera.py `
+  --source-video python_backend/data/match.mp4 `
+  --ball-track python_backend/outputs/global_ball_trajectory_v1/ball_track.v2.csv `
+  --trajectory-report python_backend/outputs/global_ball_trajectory_v1/global_ball_trajectory_report.v1.json `
+  --output-dir python_backend/outputs/hybrid_camera_v1
+```
+
+The solver estimates bounded source-camera pan/zoom evidence from adjacent frames, starts a new shot at an evidence-backed hard cut, and fuses that evidence with the global ball track. `detected` targets have the strongest weight; `interpolated` targets stay explicitly interpolated and are down-weighted. `unknown` and `out_of_view` frames never receive ball coordinates or ball-derived targets: they use audited source motion, a bounded hold, or a wide/home fallback. A cut resets pan velocity, zoom state, and cross-shot fusion history.
+
+Each immutable generation contains `camera_path.v2.csv`, `camera_motion_evidence.v1.jsonl`, `hybrid_broadcast_camera_decisions.v1.jsonl`, `camera_motion_audit.json`, and the report-last commit marker `hybrid_broadcast_camera_report.v1.json`. The path keeps the standard crop columns used by the existing camera audit and renderer, while adding shot, cut, motion, target-source, confidence, and fallback provenance. Render a verified path with:
+
+```powershell
+python python_backend/scripts/render_hybrid_camera_path.py `
+  --source-video python_backend/data/match.mp4 `
+  --camera-path python_backend/outputs/hybrid_camera_v1/camera_path.v2.csv `
+  --hybrid-report python_backend/outputs/hybrid_camera_v1/hybrid_broadcast_camera_report.v1.json `
+  --output-video python_backend/outputs/hybrid_camera_v1.mp4
+```
+
 ---
 
 ## 中文
@@ -288,3 +312,17 @@ python python_backend/scripts/solve_global_ball_trajectory.py `
 求解器会重新校验视频完整 SHA-256、FPS/尺寸/帧数、candidate-v1 身份、精确契约快照和完整分类概率集合；大 JSON 会流式落入临时 SQLite，再以有界二阶候选图求解。候选上限或 beam 发生剪枝时，报告会明确标记 `beam_approximation`，不会宣称得到无约束精确最优解。`--pitch-report` 与 `--player-tracks` 只有携带匹配的视频血缘时才参与成本，否则以中性先验降级并留下审计原因。
 
 输出目录固定包含 `ball_track.v2.csv`、`global_ball_trajectory_decisions.v1.jsonl` 和 `global_ball_trajectory_report.v1.json`。报告是原子提交标记，仅在最终来源复验通过后出现；读取方必须把缺少报告的目录视为未完成。短且有两端证据的缺口可标记为 `interpolated`；超过上限必须为 `unknown`；只有明确的上游离场证据才可标记 `out_of_view`。目标目录必须尚不存在；每次运行都通过原子发布报告标记来提交新的不可变 generation，因此绑定失败、取消或写盘失败不可能覆盖历史成功目录。
+
+### P2 混合广播镜头路径
+
+将全局轨迹与同一个源视频重新绑定后，可生成识别平移、缩放与切镜的虚拟镜头路径：
+
+```powershell
+python python_backend/scripts/solve_hybrid_broadcast_camera.py `
+  --source-video python_backend/data/match.mp4 `
+  --ball-track python_backend/outputs/global_ball_trajectory_v1/ball_track.v2.csv `
+  --trajectory-report python_backend/outputs/global_ball_trajectory_v1/global_ball_trajectory_report.v1.json `
+  --output-dir python_backend/outputs/hybrid_camera_v1
+```
+
+`detected` 球目标权重最高，`interpolated` 保留原状态并降权；`unknown/out_of_view` 永远不写球坐标或球派生目标，只允许使用有审计记录的源镜头运动、有界保持或宽景/home 回退。硬切镜会开启新 shot，并清空平移速度、缩放状态和跨镜头融合历史。输出包含 `camera_path.v2.csv`、逐帧镜头运动证据、逐帧融合决策、cut-aware 镜头审计，以及最后写入的 `hybrid_broadcast_camera_report.v1.json` 提交标记。可用 `render_hybrid_camera_path.py` 对路径与报告重新验签后逐帧渲染。
