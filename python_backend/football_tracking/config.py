@@ -383,6 +383,7 @@ class OutputConfig:
     save_frames: bool = True
     save_csv: bool = True
     save_debug_jsonl: bool = True
+    save_tracking_contract: bool = True
     draw_radius: int = 18
     draw_thickness: int = 4
     frame_text_scale: float = 1.0
@@ -398,6 +399,8 @@ class RuntimeConfig:
     capture_backend: str = "CAP_FFMPEG"
     start_frame: int = 0
     max_frames: int | None = None
+    candidate_source_sha256: str | None = None
+    candidate_source_stat_token: str | None = None
 
 
 @dataclass(slots=True)
@@ -1041,6 +1044,7 @@ def load_config(config_path: Path) -> AppConfig:
         save_frames=bool(output_raw.get("save_frames", True)),
         save_csv=bool(output_raw.get("save_csv", True)),
         save_debug_jsonl=bool(output_raw.get("save_debug_jsonl", True)),
+        save_tracking_contract=bool(output_raw.get("save_tracking_contract", True)),
         draw_radius=int(output_raw.get("draw_radius", 18)),
         draw_thickness=int(output_raw.get("draw_thickness", 4)),
         frame_text_scale=float(output_raw.get("frame_text_scale", 1.0)),
@@ -1072,6 +1076,16 @@ def load_config(config_path: Path) -> AppConfig:
         capture_backend=str(runtime_raw.get("capture_backend", "CAP_FFMPEG")),
         start_frame=start_frame,
         max_frames=max_frames,
+        candidate_source_sha256=(
+            str(runtime_raw["candidate_source_sha256"]).strip()
+            if runtime_raw.get("candidate_source_sha256") not in (None, "")
+            else None
+        ),
+        candidate_source_stat_token=(
+            str(runtime_raw["candidate_source_stat_token"]).strip()
+            if runtime_raw.get("candidate_source_stat_token") not in (None, "")
+            else None
+        ),
     )
 
     mock_raw = raw.get("mock", {})

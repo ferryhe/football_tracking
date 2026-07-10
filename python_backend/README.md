@@ -161,19 +161,25 @@ Run backend only:
 
 This P1 workflow classifies detector candidates as the match ball or noise. It is CPU-only, uses no downloaded
 pretrained model, and never changes the live detector hot path. The calibrated selective policy and bounded human
-review loop are implemented and fail closed. Prerequisite: the current tracking pipeline does not yet emit a
-candidate-populated V2 contract, and its runtime `Candidate` has no stable deterministic ID. Supply externally prepared
-training and policy V2 contracts with deterministic, source-scoped candidate IDs. PR5 owns wiring detector candidates
-into these contracts and the normal tracking run. Once that prerequisite exists, prepare two evidence-disjoint
-candidate populations and run these commands from the repository root. The training population is used only to
-train/calibrate/test the classifier. The separate policy population supplies human-confirmed binary evaluation
-holdouts plus application candidates. Candidate, video, group, split, temporal, and source evidence must not overlap
-between those populations; the policy-role builder rejects any such leakage.
+review loop are implemented and fail closed. Normal tracking runs now write `tracking_contract.v2.json` by default;
+set `output.save_tracking_contract: false` only when that artifact is intentionally unnecessary. Every primary and
+dynamic-ROI detector candidate is captured before filtering with a deterministic ID scoped by the input video's
+content SHA-256. Moving an unchanged video does not change its IDs. Temporal runs merge only stitched core frames into
+the top-level contract; high-recall window contracts remain separate and are not silently mixed into the baseline
+population. The source content is rechecked before publication; temporal workers reject stale source snapshots and the
+root run rechecks around stitching and high-recall execution. Runtime contracts intentionally start with empty
+`classifications` and `decisions` arrays: tracker selection is not a selective-policy decision.
+
+Prepare two evidence-disjoint candidate populations from separate tracking runs and run these commands from the
+repository root. The training population is used only to train/calibrate/test the classifier. The separate policy
+population supplies human-confirmed binary evaluation holdouts plus application candidates. Candidate, video, group,
+split, temporal, and source evidence must not overlap between those populations; the policy-role builder rejects any
+such leakage.
 
 ```powershell
 $env:PYTHONPATH='python_backend'
-$trainingSourceContract = 'data\candidate_training_contract.v2.json'
-$policySourceContract = 'data\candidate_policy_contract.v2.json'
+$trainingSourceContract = 'outputs\candidate_training_run\tracking_contract.v2.json'
+$policySourceContract = 'outputs\candidate_policy_run\tracking_contract.v2.json'
 
 .\.venv\Scripts\python.exe python_backend\scripts\build_candidate_dataset.py `
   --contract $trainingSourceContract `
@@ -282,7 +288,9 @@ queue or materialization output is published; a self-resealed policy/decision pa
 The source map is schema `1.0`. Each candidate must be bound exactly once to a real video; `candidate.source` remains
 detector provenance and is not a video identifier. Video paths are relative to and contained by the source-map
 directory. `video_sha256`, dimensions, and frame count must match the file. Use `sequential` for the safest HEVC
-decode; `preroll` and verified `direct` are also supported.
+decode; `preroll` and verified `direct` are also supported. Tracking runs do not auto-generate this map because
+`variant_id`, group/split/temporal boundaries, and decode policy are operator-owned evidence semantics that must not be
+guessed from a video path.
 
 ```json
 {
@@ -650,17 +658,23 @@ outputs/runs/<input_slug>/<run_id>/
 ### 候选球 AI 分类官方流程
 
 这套 P1 流程在 CPU 上把检测候选分成比赛用球或噪点，不下载预训练模型，也不接入实时 detector 热路径；
-校准后的选择性策略和有上限的人工复核闭环已经实现，并采用失败关闭。前置条件：当前跟踪主流程还不会
-自动生成带候选的 V2 契约，运行时 `Candidate` 也没有稳定的确定性 ID。需要先从外部准备
-两套 V2 契约，其中候选 ID 必须稳定且带来源作用域。把 detector 候选接入这些契约和常规跟踪 run 仍属于
-PR5。训练数据只允许用于分类器的 train/calibration/test；另一套证据完全独立的策略数据提供
+校准后的选择性策略和有上限的人工复核闭环已经实现，并采用失败关闭。常规跟踪 run 现在默认生成
+`tracking_contract.v2.json`；只有明确不需要该产物时才设置 `output.save_tracking_contract: false`。主 detector
+和动态 ROI 重检的所有候选都会在过滤前进入契约，其确定性 ID 由输入视频内容 SHA-256 提供来源作用域；
+视频只改路径不会改变 ID。temporal 模式的顶层契约只合并 stitch 后的 core frames；high-recall 子窗口契约
+保持独立，不会静默混入 baseline 候选人口。发布前会重新核对 source 内容；temporal worker 会拒绝过期的
+source snapshot，根运行也会在 stitch 和 high-recall 前后复验。初始契约的 `classifications` 和 `decisions`
+必须为空，tracker selection 不能冒充 selective-policy decision。
+
+请从两个证据完全隔离的 tracking run 准备候选人口。训练数据只允许用于分类器的 train/calibration/test；
+另一套策略数据提供
 `human_confirmed` 二元评估留出候选和应用候选。两套数据的 candidate、video、group、split、temporal 和
 source 证据都不得重叠，否则策略角色生成器会失败关闭。准备好后，在仓库根目录依次执行：
 
 ```powershell
 $env:PYTHONPATH='python_backend'
-$trainingSourceContract = 'data\candidate_training_contract.v2.json'
-$policySourceContract = 'data\candidate_policy_contract.v2.json'
+$trainingSourceContract = 'outputs\candidate_training_run\tracking_contract.v2.json'
+$policySourceContract = 'outputs\candidate_policy_run\tracking_contract.v2.json'
 
 .\.venv\Scripts\python.exe python_backend\scripts\build_candidate_dataset.py `
   --contract $trainingSourceContract `
@@ -771,7 +785,8 @@ $actions = 'data\candidate_selective_review_actions_v1.json'
 `frame_count`、`group_id`、`temporal_group`、`split_group` 和非空 `candidate_ids`。每个候选必须且只能绑定
 一个视频；V2 候选里的 `source` 仍表示 detector 来源，不是视频 ID。同一场比赛的不同编码应使用相同
 `group_id`/`split_group`，相邻五帧窗口应归入同一时间组。HEVC 优先使用 `sequential`，也支持
-`preroll` 和经过验证的 `direct`。
+`preroll` 和经过验证的 `direct`。tracking run 不会自动生成这份 source-map，因为 variant、group、split、
+temporal 边界和 decode policy 都属于操作员维护的证据语义，不能根据视频路径自动猜测。
 
 投票账本是有限 JSONL。第一行必须绑定原始契约和数据集证据；每张人工或 AI 的主票/裁决票都必须绑定
 唯一 sample 及 tight/context/review-montage 三类产物的规范聚合哈希。只有完全没有投票的空账本可以省略

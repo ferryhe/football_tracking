@@ -98,6 +98,32 @@ class ConfigAndProviderTests(unittest.TestCase):
         self.assertEqual(120, config.temporal_chunks.decode_preroll_frames)
         self.assertEqual("chunks", config.temporal_chunks.output_dir_name)
         self.assertEqual("overlap_quality", config.temporal_chunks.merge_strategy)
+        self.assertTrue(config.output.save_tracking_contract)
+        self.assertIsNone(config.runtime.candidate_source_sha256)
+        self.assertIsNone(config.runtime.candidate_source_stat_token)
+
+    def test_load_config_parses_runtime_candidate_contract_settings(self) -> None:
+        source_sha256 = "a" * 64
+        source_stat_token = "b" * 64
+        config_path = self.write_yaml(
+            "config/candidate_contract.yaml",
+            {
+                "input_video": "./data/input.mp4",
+                "output_dir": "./outputs/run_a",
+                "detector": {"model_path": "./weights/model.pt"},
+                "output": {"save_tracking_contract": False},
+                "runtime": {
+                    "candidate_source_sha256": source_sha256,
+                    "candidate_source_stat_token": source_stat_token,
+                },
+            },
+        )
+
+        config = load_config(config_path)
+
+        self.assertFalse(config.output.save_tracking_contract)
+        self.assertEqual(source_sha256, config.runtime.candidate_source_sha256)
+        self.assertEqual(source_stat_token, config.runtime.candidate_source_stat_token)
 
     def test_load_config_parses_detector_inference_mode_and_temporal_chunks(self) -> None:
         config_path = self.write_yaml(

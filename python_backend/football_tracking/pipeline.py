@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-from concurrent.futures import CancelledError
 import json
 import logging
 import math
 import time
+from concurrent.futures import CancelledError
 from dataclasses import dataclass
 from typing import Any, Callable
 
@@ -14,7 +14,15 @@ import torch
 from football_tracking.calibration import build_pitch_calibration_from_field_polygon
 from football_tracking.config import AppConfig
 from football_tracking.detector import MockBallDetector, YOLOSahiBallDetector
-from football_tracking.exporter import TrackingExporter
+from football_tracking.detector_candidate_contract import (
+    CandidateSourceSnapshot,
+    assign_candidate_ids,
+    capture_candidate_source_snapshot,
+    precomputed_candidate_source_snapshot,
+    remove_runtime_tracking_contract,
+    verify_candidate_source_snapshot,
+)
+from football_tracking.exporter import TrackingContractWriteError, TrackingExporter
 from football_tracking.filtering import CandidateFilter
 from football_tracking.follow_cam import FollowCamGenerator
 from football_tracking.mock_mode import MockFrameSource
@@ -39,8 +47,35 @@ class TentativeReacquireState:
 class BallTrackingPipeline:
     """主流程编排层：把五层架构串联起来。"""
 
-    def __init__(self, config: AppConfig) -> None:
+    def __init__(
+        self,
+        config: AppConfig,
+        *,
+        candidate_source_sha256: str | None = None,
+        candidate_source_stat_token: str | None = None,
+        verify_candidate_source_content: bool = True,
+    ) -> None:
         self.config = config
+        remove_runtime_tracking_contract(self.config.output_dir)
+        self.candidate_source_snapshot: CandidateSourceSnapshot | None = (
+            None
+            if candidate_source_sha256 is None
+            else precomputed_candidate_source_snapshot(
+                config,
+                candidate_source_sha256,
+                candidate_source_stat_token,
+            )
+        )
+        if self.candidate_source_snapshot is not None:
+            verify_candidate_source_snapshot(
+                config,
+                self.candidate_source_snapshot,
+                verify_content=False,
+            )
+        self.candidate_source_sha256 = (
+            None if self.candidate_source_snapshot is None else self.candidate_source_snapshot.sha256
+        )
+        self.verify_candidate_source_content = verify_candidate_source_content
         self._configure_runtime()
         self.logger = self._build_logger()
         self.detector = self._build_detector()
@@ -93,6 +128,16 @@ class BallTrackingPipeline:
         should_cancel: Callable[[], bool] | None = None,
     ) -> None:
         """执行完整视频处理流程。"""
+        remove_runtime_tracking_contract(self.config.output_dir)
+        if self.candidate_source_snapshot is None:
+            self.candidate_source_snapshot = capture_candidate_source_snapshot(self.config)
+        else:
+            verify_candidate_source_snapshot(
+                self.config,
+                self.candidate_source_snapshot,
+                verify_content=False,
+            )
+        self.candidate_source_sha256 = self.candidate_source_snapshot.sha256
         capture, width, height, fps = self._open_frame_source()
         total_frames = self._estimate_total_frames(capture)
 
@@ -109,6 +154,7 @@ class BallTrackingPipeline:
             logging_config=self.config.logging,
             frame_size=(width, height),
             fps=fps,
+            candidate_source_sha256=self.candidate_source_sha256,
         )
 
         if self.config.mock.enabled:
@@ -122,6 +168,7 @@ class BallTrackingPipeline:
         start_frame = self.config.runtime.start_frame
         max_frames = self.config.runtime.max_frames
         last_progress_at = 0.0
+        completed = False
 
         def emit_progress(stage: str, current_frame: int | None, total_frame_count: int | None, *, force: bool = False) -> None:
             nonlocal last_progress_at
@@ -166,8 +213,10 @@ class BallTrackingPipeline:
 
                 try:
                     exporter.write(annotated_frame, track_result)
+                except TrackingContractWriteError:
+                    raise
                 except Exception as exc:
-                    # 输出异常单独捕获，避免一次写盘失败直接终止后续帧。
+                    # 非契约输出保留原有逐帧降级；契约捕获失败必须立即终止。
                     self.logger.exception("第 %s 帧输出异常，将继续处理后续帧: %s", frame_index, exc)
                     continue
 
@@ -180,24 +229,50 @@ class BallTrackingPipeline:
                         track_result.state.value,
                         track_result.lost_frames,
                     )
+            completed = True
         finally:
             capture.release()
-            exporter.close()
-            if not self.config.mock.enabled and not cancel_requested():
-                emit_progress("tracking", processed_frames, total_frames, force=True)
-                if self.config.postprocess.enabled:
-                    self.logger.info("Starting postprocess cleanup...")
-                    emit_progress("postprocess", 0, 1, force=True)
-                    raise_if_cancelled()
-                    TrackPostprocessor(self.config).run()
-                    emit_progress("postprocess", 1, 1, force=True)
-                if self.config.follow_cam.enabled:
-                    self.logger.info("Starting follow-cam rendering...")
-                    raise_if_cancelled()
-                    FollowCamGenerator(self.config).run(
-                        progress_callback=progress_callback,
-                        should_cancel=should_cancel,
+            publish_tracking_contract = completed and not cancel_requested()
+            source_error: BaseException | None = None
+            if publish_tracking_contract:
+                try:
+                    verify_candidate_source_snapshot(
+                        self.config,
+                        self.candidate_source_snapshot,
+                        verify_content=self.verify_candidate_source_content,
                     )
+                except BaseException as exc:
+                    source_error = exc
+                    publish_tracking_contract = False
+            exporter.close(publish_tracking_contract=publish_tracking_contract)
+            if source_error is not None:
+                raise RuntimeError("candidate source changed before contract publication") from source_error
+            if completed and not self.config.mock.enabled and not cancel_requested():
+                try:
+                    emit_progress("tracking", processed_frames, total_frames, force=True)
+                    if self.config.postprocess.enabled:
+                        self.logger.info("Starting postprocess cleanup...")
+                        emit_progress("postprocess", 0, 1, force=True)
+                        raise_if_cancelled()
+                        TrackPostprocessor(self.config).run()
+                        emit_progress("postprocess", 1, 1, force=True)
+                    if self.config.follow_cam.enabled:
+                        self.logger.info("Starting follow-cam rendering...")
+                        raise_if_cancelled()
+                        FollowCamGenerator(self.config).run(
+                            progress_callback=progress_callback,
+                            should_cancel=should_cancel,
+                        )
+                finally:
+                    try:
+                        verify_candidate_source_snapshot(
+                            self.config,
+                            self.candidate_source_snapshot,
+                            verify_content=False,
+                        )
+                    except BaseException as exc:
+                        remove_runtime_tracking_contract(self.config.output_dir)
+                        raise RuntimeError("candidate source changed during post-tracking outputs") from exc
             self.logger.info("处理完成，输出目录: %s", self.config.output_dir)
 
     def _estimate_total_frames(self, capture) -> int | None:
@@ -300,8 +375,10 @@ class BallTrackingPipeline:
 
     def _process_frame(self, frame, frame_index: int):
         """处理单帧，任何异常都退化为预测或丢失，不让整体流程中断。"""
+        raw_candidates = []
         try:
             raw_candidates = self.detector.detect(frame, frame_index=frame_index)
+            self._assign_candidate_ids(raw_candidates)
             context = self._attach_selection_prior_context(self.tracker.build_context())
             filtered_candidates, filter_rejections, filter_rejection_counts = self.candidate_filter.filter(
                 raw_candidates,
@@ -391,6 +468,7 @@ class BallTrackingPipeline:
             )
             track_result.filter_rejections = filter_rejections
             track_result.filter_rejection_counts = filter_rejection_counts
+            track_result.raw_candidates = list(raw_candidates)
             track_result.reacquire_attempted = reacquire_attempted
             track_result.reacquire_candidate_count = len(reacquire_candidates)
             track_result.reacquire_window = None if reacquire_window is None else list(reacquire_window)
@@ -424,13 +502,14 @@ class BallTrackingPipeline:
             track_result = self.tracker.update(
                 frame_index=frame_index,
                 decision=decision,
-                raw_candidate_count=0,
+                raw_candidate_count=len(raw_candidates),
                 filtered_candidate_count=0,
                 missing_reason=f"frame_exception: {exc}",
                 frame_size=(frame.shape[1], frame.shape[0]),
             )
             track_result.filter_rejections = []
             track_result.filter_rejection_counts = {}
+            track_result.raw_candidates = list(raw_candidates)
             track_result.reacquire_attempted = False
             track_result.reacquire_candidate_count = 0
             track_result.reacquire_window = None
@@ -458,6 +537,13 @@ class BallTrackingPipeline:
             track_result.reason,
         )
         return track_result
+
+    def _assign_candidate_ids(self, candidates) -> None:
+        if self.candidate_source_snapshot is None:
+            self.candidate_source_snapshot = capture_candidate_source_snapshot(self.config)
+            self.candidate_source_sha256 = self.candidate_source_snapshot.sha256
+        assert self.candidate_source_sha256 is not None
+        assign_candidate_ids(candidates, self.candidate_source_sha256)
 
     def _maybe_run_dynamic_reacquire(
         self,
@@ -568,7 +654,9 @@ class BallTrackingPipeline:
                 burst_active,
             )
 
-        combined_raw_candidates = [*raw_candidates, *reacquire_candidates]
+        raw_candidates.extend(reacquire_candidates)
+        combined_raw_candidates = raw_candidates
+        self._assign_candidate_ids(combined_raw_candidates)
         combined_filtered_candidates, combined_filter_rejections, combined_filter_rejection_counts = self.candidate_filter.filter(
             combined_raw_candidates,
             reacquire_context,
