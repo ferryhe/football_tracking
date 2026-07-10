@@ -212,9 +212,90 @@ def validate_review_queue_bindings(
             path = _contained_nonlink_file(root, path, f"bound review evidence {name}")
         if sha256_file(path) != _required_sha256(binding.get("sha256"), f"review queue binding {name} sha256"):
             raise BroadcastApiError(f"bound review evidence changed: {name}")
+    _validate_bound_dataset_sample_artifacts(
+        queue_path,
+        bindings["dataset"],
+        trusted_root=root,
+    )
     if sha256_file(queue_path) != queue_sha256:
         raise BroadcastApiError("selective review queue changed during validation")
     return queue, queue_sha256
+
+
+def _validate_bound_dataset_sample_artifacts(
+    queue_path: Path,
+    raw_dataset_binding: Any,
+    *,
+    trusted_root: Path | None,
+) -> None:
+    """Re-hash every file descriptor carried by the queue-bound dataset."""
+
+    binding = _required_mapping(raw_dataset_binding, "review queue dataset binding")
+    raw_dataset_path = Path(_required_text(binding.get("path"), "review queue dataset path"))
+    if not raw_dataset_path.is_absolute():
+        raw_dataset_path = queue_path.parent / raw_dataset_path
+    if trusted_root is None:
+        dataset_path = Path(os.path.abspath(raw_dataset_path))
+        if _is_link_or_reparse(dataset_path) or not dataset_path.is_file():
+            raise BroadcastApiError("candidate dataset manifest is unavailable")
+    else:
+        dataset_path = _contained_nonlink_file(
+            trusted_root,
+            raw_dataset_path,
+            "candidate dataset manifest",
+        )
+    dataset, dataset_sha256 = load_bound_json(dataset_path, "candidate dataset manifest")
+    if dataset_sha256 != _required_sha256(binding.get("sha256"), "review queue dataset sha256"):
+        raise BroadcastApiError("candidate dataset manifest changed after queue validation")
+
+    raw_samples = dataset.get("samples", [])
+    if not isinstance(raw_samples, list):
+        raise BroadcastApiError("candidate dataset samples must be a list")
+    dataset_root = _trusted_directory(dataset_path.parent, "candidate dataset root")
+    for sample_index, raw_sample in enumerate(raw_samples):
+        sample = _required_mapping(raw_sample, f"candidate dataset sample {sample_index}")
+        sample_id = sample.get("sample_id")
+        sample_label = sample_id if isinstance(sample_id, str) and sample_id else str(sample_index)
+        artifacts = _required_mapping(
+            sample.get("artifacts"),
+            f"candidate dataset sample {sample_label} artifacts",
+        )
+        for artifact_name, raw_descriptor in artifacts.items():
+            if not isinstance(artifact_name, str) or not artifact_name:
+                raise BroadcastApiError(f"candidate dataset sample {sample_label} artifact name is invalid")
+            descriptor = _required_mapping(
+                raw_descriptor,
+                f"candidate dataset sample {sample_label} artifact {artifact_name}",
+            )
+            raw_artifact_path = Path(
+                _required_text(
+                    descriptor.get("path"),
+                    f"candidate dataset sample {sample_label} artifact {artifact_name} path",
+                )
+            )
+            if raw_artifact_path.is_absolute() or ".." in raw_artifact_path.parts:
+                raise BroadcastApiError(
+                    f"candidate dataset sample {sample_label} artifact {artifact_name} path must be contained and relative"
+                )
+            artifact_path = _contained_nonlink_file(
+                dataset_root,
+                dataset_path.parent / raw_artifact_path,
+                f"candidate dataset sample {sample_label} artifact {artifact_name}",
+            )
+            _verify_bound_file(
+                artifact_path,
+                expected_sha256=_required_sha256(
+                    descriptor.get("sha256"),
+                    f"candidate dataset sample {sample_label} artifact {artifact_name} sha256",
+                ),
+                expected_size=_required_nonnegative_int(
+                    descriptor.get("size_bytes"),
+                    f"candidate dataset sample {sample_label} artifact {artifact_name} size_bytes",
+                ),
+                label=f"candidate dataset sample {sample_label} artifact {artifact_name}",
+            )
+    if sha256_file(dataset_path) != dataset_sha256:
+        raise BroadcastApiError("candidate dataset manifest changed during sample validation")
 
 
 def collect_review_evidence_paths(queue_path: Path, trusted_root: Path) -> list[Path]:
@@ -473,11 +554,20 @@ def validate_broadcast_quality_report(output_dir: Path, report_path: Path) -> di
 
     output_dir = Path(output_dir).resolve()
     report_path = Path(report_path).resolve()
-    report, _ = load_bound_json(report_path, "broadcast quality report")
+    report, report_sha256 = load_bound_json(report_path, "broadcast quality report")
     _verify_report_artifacts(output_dir, report)
     if report_path.parent == output_dir and report_path.name == QUALITY_REPORT_NAME:
         if report.get("status") != "ready":
             raise BroadcastApiError("root broadcast quality report must be ready")
+        generation = _required_sha256(report.get("status_generation"), "status generation")
+        versioned_path = _contained_nonlink_file(
+            output_dir,
+            output_dir / "broadcast_status" / generation / QUALITY_REPORT_NAME,
+            "versioned broadcast quality report",
+        )
+        versioned_report, versioned_sha256 = load_bound_json(versioned_path, "versioned broadcast quality report")
+        if versioned_report != report or versioned_sha256 != report_sha256:
+            raise BroadcastApiError("root broadcast quality report does not match its immutable status generation")
         return report
     expected = (
         output_dir
@@ -545,6 +635,7 @@ def _verify_report_artifacts(output_dir: Path, report: dict[str, Any]) -> None:
     if status == "ready":
         if report.get("blocking_reasons"):
             raise BroadcastApiError("ready broadcast quality report cannot contain blocking reasons")
+        validate_review_queue_bindings(output_dir / _QUEUE_NAME, trusted_root=output_dir)
         blockers, final_bindings = _validated_final_bindings(output_dir, artifacts)
         if blockers or report.get("final_bindings") != final_bindings:
             raise BroadcastApiError("ready broadcast quality report final bindings are stale or invalid")

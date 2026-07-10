@@ -12,7 +12,11 @@ from typing import Any
 from unittest import mock
 
 from football_tracking import broadcast_hybrid_orchestration as orchestration
-from football_tracking.api.broadcast_api import publish_broadcast_facade
+from football_tracking.api.broadcast_api import (
+    BroadcastApiError,
+    publish_broadcast_facade,
+    validate_broadcast_quality_report,
+)
 from football_tracking.camera_path_renderer import CameraPathRenderResult
 from football_tracking.candidate_annotations import ADJUDICATION_QUEUE_NAME, ANNOTATION_RESOLUTION_NAME
 from football_tracking.candidate_classifier import (
@@ -631,6 +635,87 @@ class BroadcastHybridOrchestrationTests(unittest.TestCase):
         (self.fixture.run_dir / TRACK_NAME).write_bytes(b"mutated-public-copy")
         self.assertEqual(immutable_bytes, immutable_track.read_bytes())
 
+    def test_ready_facade_revalidates_every_bound_dataset_sample_artifact(self) -> None:
+        evidence = self.fixture.paths["dataset"].parent / "evidence.bin"
+        evidence.write_bytes(b"original-evidence")
+        dataset = json.loads(self.fixture.paths["dataset"].read_text(encoding="utf-8"))
+        dataset["samples"] = [
+            {
+                "sample_id": "sample-1",
+                "candidate_id": "candidate-1",
+                "artifacts": {
+                    "frame": {
+                        "path": evidence.name,
+                        "sha256": _sha256(evidence),
+                        "size_bytes": evidence.stat().st_size,
+                    }
+                },
+            }
+        ]
+        _write_json(self.fixture.paths["dataset"], dataset)
+        queue = json.loads(self.fixture.queue_path.read_text(encoding="utf-8"))
+        queue["bindings"]["dataset"]["sha256"] = _sha256(self.fixture.paths["dataset"])
+        _write_json(self.fixture.queue_path, queue)
+
+        self._publish_ready_final()
+        quality = publish_broadcast_facade(self.fixture.run_dir)
+        root_report = self.fixture.run_dir / "broadcast_quality_report.json"
+        self.assertEqual(quality, validate_broadcast_quality_report(self.fixture.run_dir, root_report))
+
+        evidence.write_bytes(b"mutated-evidence!")
+
+        with self.assertRaisesRegex(BroadcastApiError, "hash changed"):
+            validate_broadcast_quality_report(self.fixture.run_dir, root_report)
+
+    def test_ready_facade_requires_its_exact_versioned_status_report(self) -> None:
+        self._publish_ready_final()
+        quality = publish_broadcast_facade(self.fixture.run_dir)
+        root_report = self.fixture.run_dir / "broadcast_quality_report.json"
+        versioned_report = (
+            self.fixture.run_dir
+            / "broadcast_status"
+            / str(quality["status_generation"])
+            / "broadcast_quality_report.json"
+        )
+        self.assertEqual(quality, validate_broadcast_quality_report(self.fixture.run_dir, root_report))
+
+        versioned_report.unlink()
+
+        with self.assertRaisesRegex(BroadcastApiError, "versioned broadcast quality report"):
+            validate_broadcast_quality_report(self.fixture.run_dir, root_report)
+
+    def test_zero_candidate_review_runs_preflight_classifier_and_trajectory(self) -> None:
+        queue = json.loads(self.fixture.queue_path.read_text(encoding="utf-8"))
+        queue["items"] = []
+        queue["review_item_count"] = 0
+        queue["candidate_count"] = 0
+        _write_json(self.fixture.queue_path, queue)
+        decisions = json.loads(self.fixture.actions_path.read_text(encoding="utf-8"))
+        decisions["actions"] = []
+        _write_json(self.fixture.actions_path, decisions)
+
+        preflight = orchestration.preflight_recompute_reviewed_trajectory(self.fixture.run_dir)
+        self.assertEqual(_sha256(self.fixture.actions_path), preflight["review_decisions_sha256"])
+        with (
+            mock.patch.object(
+                orchestration,
+                "materialize_selective_review_actions",
+                side_effect=_fake_materialize,
+            ) as materialize,
+            mock.patch.object(orchestration, "classify_candidates", side_effect=_fake_classify) as classify,
+            mock.patch.object(
+                orchestration,
+                "solve_global_ball_trajectory",
+                side_effect=_fake_solve_trajectory,
+            ) as trajectory,
+        ):
+            recomputed = orchestration.recompute_reviewed_trajectory(self.fixture.run_dir)
+
+        self.assertTrue(str(recomputed["trajectory_generation_id"]).startswith("trajectory-"))
+        materialize.assert_called_once()
+        classify.assert_called_once()
+        trajectory.assert_called_once()
+
     def test_correct_trajectory_is_rejected_before_any_generation_or_solver_call(self) -> None:
         actions = json.loads(self.fixture.actions_path.read_text(encoding="utf-8"))
         actions["actions"][0]["action"] = "correct_trajectory"
@@ -680,6 +765,7 @@ class BroadcastHybridOrchestrationTests(unittest.TestCase):
         rendered = self._publish_ready_final()
         real_hash = orchestration._sha256_file
         source_hash_calls = 0
+        run_directory_token = orchestration._stat_token(self.fixture.run_dir)
 
         def counted_hash(path: Path) -> str:
             nonlocal source_hash_calls
@@ -692,6 +778,7 @@ class BroadcastHybridOrchestrationTests(unittest.TestCase):
 
         self.assertEqual(rendered["final_bindings"], validated)
         self.assertEqual(1, source_hash_calls)
+        self.assertEqual(run_directory_token, orchestration._stat_token(self.fixture.run_dir))
 
     def test_normal_render_reuses_the_trusted_trajectory_and_hashes_the_source_once(self) -> None:
         with (

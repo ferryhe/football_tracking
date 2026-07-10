@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import os
@@ -9,6 +10,7 @@ import time
 import unittest
 from concurrent.futures import CancelledError
 from pathlib import Path
+from typing import Any
 from unittest import mock
 
 import cv2
@@ -24,7 +26,10 @@ from football_tracking.api.broadcast_api import (
     collect_review_evidence_paths,
     publish_broadcast_facade,
     publish_json_exclusive,
+    validate_broadcast_quality_report,
+    validate_review_queue_bindings,
 )
+from football_tracking.api.routes.artifacts import get_artifact
 from football_tracking.api.schemas import (
     BroadcastOperationResponse,
     BroadcastReviewAction,
@@ -34,7 +39,10 @@ from football_tracking.api.schemas import (
     RunRecord,
 )
 from football_tracking.api.service import ApiService
-from football_tracking.broadcast_hybrid_orchestration import BroadcastHybridOrchestrationError
+from football_tracking.broadcast_hybrid_orchestration import (
+    PUBLIC_ARTIFACTS,
+    BroadcastHybridOrchestrationError,
+)
 from football_tracking.candidate_annotations import sample_evidence_sha256
 from football_tracking.tracking_contracts import build_tracking_contract
 
@@ -120,6 +128,7 @@ class BroadcastRequestSchemaTests(unittest.TestCase):
             )
 
     def test_review_action_shapes_fail_closed(self) -> None:
+        self.assertEqual([], BroadcastReviewActionsRequest(actions=[]).actions)
         valid = BroadcastReviewActionsRequest(
             actions=[
                 BroadcastReviewAction(
@@ -418,6 +427,68 @@ class BroadcastReviewBindingTests(unittest.TestCase):
                 publish_json_exclusive(target, {"status": "blocked"}, trusted_root=root)
             self.assertFalse(external_target.exists())
 
+    def test_queue_binding_rehashes_every_dataset_sample_descriptor(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            inputs = root / "inputs"
+            inputs.mkdir()
+            evidence = inputs / "evidence.bin"
+            evidence.write_bytes(b"original-evidence")
+            binding_names = (
+                "review_timing",
+                "policy",
+                "decisions",
+                "model",
+                "training_report",
+                "model_weights",
+                "dataset",
+                "predictions",
+                "contract",
+                "annotation_resolution",
+                "resolved_tracking_contract",
+                "policy_roles",
+            )
+            bindings: dict[str, dict[str, str]] = {}
+            for name in binding_names:
+                path = inputs / f"{name}.json"
+                payload: object = {"name": name}
+                if name == "dataset":
+                    payload = {
+                        "artifact_type": "candidate_dataset_manifest",
+                        "samples": [
+                            {
+                                "sample_id": "sample-1",
+                                "candidate_id": "candidate-1",
+                                "artifacts": {
+                                    "frame": {
+                                        "path": evidence.name,
+                                        "sha256": _sha256(evidence),
+                                        "size_bytes": evidence.stat().st_size,
+                                    }
+                                },
+                            }
+                        ],
+                    }
+                _write_json(path, payload)
+                bindings[name] = {
+                    "path": path.relative_to(root).as_posix(),
+                    "sha256": _sha256(path),
+                }
+            queue_path = root / "selective_review_queue.v1.json"
+            _write_json(
+                queue_path,
+                {
+                    "artifact_type": "selective_review_queue",
+                    "bindings": bindings,
+                },
+            )
+
+            validate_review_queue_bindings(queue_path, trusted_root=root)
+            evidence.write_bytes(b"mutated-evidence!")
+
+            with self.assertRaisesRegex(BroadcastApiError, "hash changed"):
+                validate_review_queue_bindings(queue_path, trusted_root=root)
+
 
 class BroadcastFacadeTests(unittest.TestCase):
     def test_facade_withholds_mutable_candidate_aliases_until_final_publication(self) -> None:
@@ -508,6 +579,30 @@ class BroadcastFacadeTests(unittest.TestCase):
 
             with self.assertRaisesRegex(BroadcastApiError, "immutable directory state"):
                 publish_broadcast_facade(output_dir)
+
+    def test_ready_root_report_requires_the_exact_immutable_generation_copy(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output_dir = Path(temp_dir)
+            report = {
+                "artifact_type": "broadcast_quality_report",
+                "status": "ready",
+                "status_generation": "a" * 64,
+            }
+            root_report = output_dir / "broadcast_quality_report.json"
+            versioned_report = (
+                output_dir / "broadcast_status" / str(report["status_generation"]) / "broadcast_quality_report.json"
+            )
+            _write_json(root_report, report)
+            _write_json(versioned_report, report)
+
+            with mock.patch("football_tracking.api.broadcast_api._verify_report_artifacts"):
+                self.assertEqual(report, validate_broadcast_quality_report(output_dir, root_report))
+                versioned_report.unlink()
+                with self.assertRaisesRegex(BroadcastApiError, "versioned broadcast quality report"):
+                    validate_broadcast_quality_report(output_dir, root_report)
+                versioned_report.write_text(json.dumps(report, indent=2), encoding="utf-8")
+                with self.assertRaisesRegex(BroadcastApiError, "does not match"):
+                    validate_broadcast_quality_report(output_dir, root_report)
 
 
 class BroadcastApiServiceTests(unittest.TestCase):
@@ -817,6 +912,22 @@ class BroadcastApiServiceTests(unittest.TestCase):
             )
         self.assertFalse((output_dir / "review_decisions.json").exists())
 
+        empty_queue = json.loads(queue_path.read_text(encoding="utf-8"))
+        empty_queue["items"] = []
+        empty_queue["review_item_count"] = 0
+        _write_json(queue_path, empty_queue)
+        empty_windows = self.service.get_broadcast_review_windows("broadcast-test")
+        self.assertEqual("ready", empty_windows["status"])
+        self.assertEqual(0, empty_windows["review_item_count"])
+
+        submitted = self.service.submit_broadcast_review_actions(
+            "broadcast-test",
+            {"actions": []},
+        )
+        self.assertEqual("review_actions_accepted", submitted["reason"])
+        decisions = json.loads((output_dir / "review_decisions.json").read_text(encoding="utf-8"))
+        self.assertEqual([], decisions["actions"])
+
     def test_camera_path_api_prefers_the_v2_public_camera_target(self) -> None:
         output_dir = self.repo_root / "outputs" / "runs" / "match" / "broadcast-test"
         output_dir.mkdir(parents=True)
@@ -869,6 +980,596 @@ class BroadcastApiServiceTests(unittest.TestCase):
             status_path.resolve(),
             self.service.get_artifact_path("broadcast-test", status_path.relative_to(output_dir).as_posix()),
         )
+
+    def test_ready_broadcast_artifact_access_revalidates_final_bindings(self) -> None:
+        output_dir = self.repo_root / "outputs" / "runs" / "match" / "broadcast-test"
+        output_dir.mkdir(parents=True)
+        quality, _ = self._write_mock_ready_delivery_contract(output_dir)
+        self._register_broadcast_run(output_dir)
+        registry = self.service._read_registry()
+        run = next(item for item in registry["runs"] if item["run_id"] == "broadcast-test")
+        run["broadcast"] = {
+            "status": "ready",
+            "status_generation": quality["status_generation"],
+        }
+        self.service._write_registry(registry)
+
+        with mock.patch(
+            "football_tracking.api.service.validate_broadcast_quality_report",
+            side_effect=BroadcastApiError("published broadcast artifact changed"),
+        ):
+            self.assertEqual([], self.service.list_artifacts("broadcast-test"))
+            with self.assertRaises(FileNotFoundError):
+                self.service.get_artifact_path("broadcast-test", "broadcast.mp4")
+
+    def test_ready_broadcast_artifacts_require_the_run_status_generation(self) -> None:
+        output_dir = self.repo_root / "outputs" / "runs" / "match" / "broadcast-test"
+        output_dir.mkdir(parents=True)
+        self._write_mock_ready_delivery_contract(output_dir)
+        self._register_broadcast_run(output_dir)
+        registry = self.service._read_registry()
+        run = next(item for item in registry["runs"] if item["run_id"] == "broadcast-test")
+        run["broadcast"] = {"status": "ready"}
+        self.service._write_registry(registry)
+
+        with mock.patch(
+            "football_tracking.api.service.validate_broadcast_quality_report",
+            side_effect=AssertionError("missing generation must reject before validation"),
+        ):
+            self.assertEqual([], self.service.list_artifacts("broadcast-test"))
+            with self.assertRaises(FileNotFoundError):
+                self.service.get_artifact_path("broadcast-test", "broadcast.mp4")
+            with self.assertRaises(FileNotFoundError):
+                self.service.acquire_artifact_response_lease("broadcast-test", "broadcast.mp4")
+
+    def test_ready_broadcast_artifact_validation_reuses_a_sealed_delivery_snapshot(self) -> None:
+        output_dir = self.repo_root / "outputs" / "ready-cache"
+        output_dir.mkdir(parents=True)
+        quality, _ = self._write_mock_ready_delivery_contract(output_dir)
+
+        with mock.patch(
+            "football_tracking.api.service.validate_broadcast_quality_report",
+            return_value=quality,
+        ) as full_validation:
+            first = self.service._ready_broadcast_delivery_snapshots(
+                output_dir,
+                expected_status_generation=quality["status_generation"],
+            )
+            second = self.service._ready_broadcast_delivery_snapshots(
+                output_dir,
+                expected_status_generation=quality["status_generation"],
+            )
+
+        self.assertIsNotNone(first)
+        self.assertEqual(first, second)
+        assert first is not None
+        self.assertNotEqual((output_dir / "broadcast.mp4").resolve(), first["broadcast.mp4"])
+        self.assertEqual((output_dir / "broadcast.mp4").read_bytes(), first["broadcast.mp4"].read_bytes())
+        full_validation.assert_called_once_with(output_dir, output_dir / "broadcast_quality_report.json")
+
+    def test_ready_broadcast_large_output_tree_uses_tokens_instead_of_one_lease_per_file(self) -> None:
+        output_dir = self.repo_root / "outputs" / "ready-cache-large-tree"
+        output_dir.mkdir(parents=True)
+        quality, _ = self._write_mock_ready_delivery_contract(output_dir)
+        samples_dir = output_dir / "candidate_samples"
+        samples_dir.mkdir()
+        for index in range(800):
+            (samples_dir / f"sample-{index:04d}.bin").write_bytes(b"sample")
+
+        with mock.patch(
+            "football_tracking.api.service.validate_broadcast_quality_report",
+            return_value=quality,
+        ):
+            snapshots = self.service._ready_broadcast_delivery_snapshots(
+                output_dir,
+                expected_status_generation=quality["status_generation"],
+            )
+
+        self.assertIsNotNone(snapshots)
+        entry = next(iter(self.service._ready_broadcast_delivery_cache.values()))
+        self.assertEqual(9, len(entry["dependencies"]))
+        self.assertLess(len(entry["dependency_tokens"]), 32)
+        self.assertIn(samples_dir.resolve(), entry["directory_tokens"])
+        self.assertGreaterEqual(len(entry["output_inventory"]), 810)
+        with mock.patch.object(
+            self.service,
+            "_ready_broadcast_output_inventory",
+            side_effect=AssertionError("cache hit rescanned every output file"),
+        ):
+            repeated = self.service._ready_broadcast_delivery_snapshots(
+                output_dir,
+                expected_status_generation=str(quality["status_generation"]),
+            )
+        self.assertEqual(snapshots, repeated)
+
+    def test_ready_broadcast_range_acquire_revalidates_the_full_lineage(self) -> None:
+        output_dir = self.repo_root / "outputs" / "runs" / "match" / "broadcast-test"
+        output_dir.mkdir(parents=True)
+        quality, generation_payload = self._write_mock_ready_delivery_contract(output_dir)
+        self._register_broadcast_run(output_dir)
+        registry = self.service._read_registry()
+        run = next(item for item in registry["runs"] if item["run_id"] == "broadcast-test")
+        run["broadcast"] = {
+            "status": "ready",
+            "status_generation": quality["status_generation"],
+        }
+        self.service._write_registry(registry)
+
+        with mock.patch(
+            "football_tracking.api.service.validate_broadcast_quality_report",
+            side_effect=[quality, BroadcastApiError("generation lineage changed")],
+        ) as full_validation:
+            self.assertEqual(8, len(self.service.list_artifacts("broadcast-test")))
+            generation_payload.write_bytes(b"omega")
+            with self.assertRaises(FileNotFoundError):
+                self.service.acquire_artifact_response_lease(
+                    "broadcast-test",
+                    "broadcast.mp4",
+                )
+
+        self.assertEqual(2, full_validation.call_count)
+
+    def test_ready_broadcast_cache_keeps_two_interleaved_generations_with_lru_eviction(self) -> None:
+        outputs: list[Path] = []
+        qualities: list[dict[str, object]] = []
+        for index in range(3):
+            output_dir = self.repo_root / "outputs" / f"ready-cache-lru-{index}"
+            output_dir.mkdir(parents=True)
+            quality, _ = self._write_mock_ready_delivery_contract(output_dir)
+            outputs.append(output_dir.resolve())
+            qualities.append(quality)
+
+        with mock.patch(
+            "football_tracking.api.service.validate_broadcast_quality_report",
+            side_effect=qualities,
+        ) as full_validation:
+            first = self.service._ready_broadcast_delivery_snapshots(
+                outputs[0],
+                expected_status_generation=str(qualities[0]["status_generation"]),
+            )
+            second = self.service._ready_broadcast_delivery_snapshots(
+                outputs[1],
+                expected_status_generation=str(qualities[1]["status_generation"]),
+            )
+            first_again = self.service._ready_broadcast_delivery_snapshots(
+                outputs[0],
+                expected_status_generation=str(qualities[0]["status_generation"]),
+            )
+            third = self.service._ready_broadcast_delivery_snapshots(
+                outputs[2],
+                expected_status_generation=str(qualities[2]["status_generation"]),
+            )
+
+        self.assertEqual(first, first_again)
+        self.assertIsNotNone(second)
+        self.assertIsNotNone(third)
+        self.assertEqual(3, full_validation.call_count)
+        self.assertEqual(2, len(self.service._ready_broadcast_delivery_cache))
+        cached_output_dirs = {key[0] for key in self.service._ready_broadcast_delivery_cache}
+        self.assertEqual({outputs[0], outputs[2]}, cached_output_dirs)
+        for entry in self.service._ready_broadcast_delivery_cache.values():
+            self.assertEqual(9, len(entry["dependencies"]))
+            self.assertEqual(9, len(entry["snapshot_leases"]))
+
+    def test_ready_broadcast_snapshot_rejects_a_generation_mutation_during_validation(self) -> None:
+        output_dir = self.repo_root / "outputs" / "ready-cache-race"
+        output_dir.mkdir(parents=True)
+        quality, generation_payload = self._write_mock_ready_delivery_contract(output_dir)
+        original_stat = generation_payload.stat()
+        mutation_blocked = False
+
+        def mutate_generation(*_args: object, **_kwargs: object) -> dict[str, object]:
+            nonlocal mutation_blocked
+            try:
+                generation_payload.write_bytes(b"omega")
+                os.utime(
+                    generation_payload,
+                    ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns),
+                )
+            except OSError:
+                mutation_blocked = True
+            return quality
+
+        with mock.patch(
+            "football_tracking.api.service.validate_broadcast_quality_report",
+            side_effect=mutate_generation,
+        ):
+            snapshots = self.service._ready_broadcast_delivery_snapshots(
+                output_dir,
+                expected_status_generation=quality["status_generation"],
+            )
+
+        if mutation_blocked:
+            self.assertIsNotNone(snapshots)
+            self.assertEqual(b"alpha", generation_payload.read_bytes())
+        else:
+            self.assertIsNone(snapshots)
+            self.assertEqual({}, self.service._ready_broadcast_delivery_cache)
+
+    def test_ready_broadcast_snapshot_rejects_a_generation_directory_aba(self) -> None:
+        output_dir = self.repo_root / "outputs" / "ready-cache-directory-aba"
+        output_dir.mkdir(parents=True)
+        quality, generation_payload = self._write_mock_ready_delivery_contract(output_dir)
+        generation_dir = generation_payload.parent
+        saved_dir = generation_dir.with_name("render-saved")
+        replacement_dir = generation_dir.with_name("render-replacement")
+        replacement_dir.mkdir()
+        (replacement_dir / generation_payload.name).write_bytes(b"omega")
+        mutation_blocked = False
+
+        def swap_and_restore_generation(*_args: object, **_kwargs: object) -> dict[str, object]:
+            nonlocal mutation_blocked
+            try:
+                generation_dir.rename(saved_dir)
+                replacement_dir.rename(generation_dir)
+                generation_dir.rename(replacement_dir)
+                saved_dir.rename(generation_dir)
+            except OSError:
+                mutation_blocked = True
+            return quality
+
+        with mock.patch(
+            "football_tracking.api.service.validate_broadcast_quality_report",
+            side_effect=swap_and_restore_generation,
+        ):
+            snapshots = self.service._ready_broadcast_delivery_snapshots(
+                output_dir,
+                expected_status_generation=quality["status_generation"],
+            )
+
+        if mutation_blocked:
+            self.assertIsNotNone(snapshots)
+        else:
+            self.assertIsNone(snapshots)
+            self.assertEqual({}, self.service._ready_broadcast_delivery_cache)
+
+    def test_ready_broadcast_cache_detects_a_transitive_generation_mutation(self) -> None:
+        output_dir = self.repo_root / "outputs" / "ready-cache-lineage"
+        output_dir.mkdir(parents=True)
+        quality, generation_payload = self._write_mock_ready_delivery_contract(output_dir)
+        original_stat = generation_payload.stat()
+
+        with mock.patch(
+            "football_tracking.api.service.validate_broadcast_quality_report",
+            side_effect=[quality, BroadcastApiError("generation lineage changed")],
+        ) as full_validation:
+            first = self.service._ready_broadcast_delivery_snapshots(
+                output_dir,
+                expected_status_generation=quality["status_generation"],
+            )
+            self.assertIsNotNone(first)
+            mutation_blocked = False
+            try:
+                generation_payload.write_bytes(b"omega")
+                os.utime(
+                    generation_payload,
+                    ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns),
+                )
+            except OSError:
+                mutation_blocked = True
+            second = self.service._ready_broadcast_delivery_snapshots(
+                output_dir,
+                expected_status_generation=quality["status_generation"],
+            )
+
+        if mutation_blocked:
+            self.assertEqual(first, second)
+            self.assertEqual(1, full_validation.call_count)
+        else:
+            self.assertIsNone(second)
+            self.assertEqual(2, full_validation.call_count)
+
+    def test_ready_broadcast_cache_rejects_an_unexpected_generation_file(self) -> None:
+        output_dir = self.repo_root / "outputs" / "ready-cache-inventory"
+        output_dir.mkdir(parents=True)
+        quality, generation_payload = self._write_mock_ready_delivery_contract(output_dir)
+
+        with mock.patch(
+            "football_tracking.api.service.validate_broadcast_quality_report",
+            side_effect=[quality, BroadcastApiError("unexpected generation artifact")],
+        ) as full_validation:
+            first = self.service._ready_broadcast_delivery_snapshots(
+                output_dir,
+                expected_status_generation=quality["status_generation"],
+            )
+            self.assertIsNotNone(first)
+            (generation_payload.parent / "unexpected.bin").write_bytes(b"unexpected")
+            second = self.service._ready_broadcast_delivery_snapshots(
+                output_dir,
+                expected_status_generation=quality["status_generation"],
+            )
+
+        self.assertIsNone(second)
+        self.assertEqual(2, full_validation.call_count)
+
+    def test_ready_broadcast_cache_tracks_external_queue_bindings(self) -> None:
+        output_dir = self.repo_root / "outputs" / "ready-cache-external"
+        output_dir.mkdir(parents=True)
+        quality, _ = self._write_mock_ready_delivery_contract(output_dir)
+        external_policy = self._write_mock_ready_queue(output_dir)
+        original_stat = external_policy.stat()
+
+        with mock.patch(
+            "football_tracking.api.service.validate_broadcast_quality_report",
+            side_effect=[quality, BroadcastApiError("external queue binding changed")],
+        ) as full_validation:
+            first = self.service._ready_broadcast_delivery_snapshots(
+                output_dir,
+                expected_status_generation=quality["status_generation"],
+            )
+            self.assertIsNotNone(first)
+            mutation_blocked = False
+            try:
+                external_policy.write_bytes(b"x" * original_stat.st_size)
+                os.utime(
+                    external_policy,
+                    ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns),
+                )
+            except OSError:
+                mutation_blocked = True
+            second = self.service._ready_broadcast_delivery_snapshots(
+                output_dir,
+                expected_status_generation=quality["status_generation"],
+            )
+
+        if mutation_blocked:
+            self.assertEqual(first, second)
+            self.assertEqual(1, full_validation.call_count)
+        else:
+            self.assertIsNone(second)
+            self.assertEqual(1, full_validation.call_count)
+
+    def test_ready_broadcast_snapshot_invalidation_rebuilds_into_a_fresh_directory(self) -> None:
+        output_dir = self.repo_root / "outputs" / "ready-cache-rebuild"
+        output_dir.mkdir(parents=True)
+        quality, _ = self._write_mock_ready_delivery_contract(output_dir)
+
+        with mock.patch(
+            "football_tracking.api.service.validate_broadcast_quality_report",
+            return_value=quality,
+        ) as full_validation:
+            first = self.service._ready_broadcast_delivery_snapshots(
+                output_dir,
+                expected_status_generation=quality["status_generation"],
+            )
+            self.assertIsNotNone(first)
+            assert first is not None
+            first_video = first["broadcast.mp4"]
+            cache_entry = next(iter(self.service._ready_broadcast_delivery_cache.values()))
+            cache_entry["snapshot_tokens"]["broadcast.mp4"] = (-1, -1, -1, -1, -1)
+            second = self.service._ready_broadcast_delivery_snapshots(
+                output_dir,
+                expected_status_generation=quality["status_generation"],
+            )
+
+        self.assertIsNotNone(second)
+        assert second is not None
+        self.assertNotEqual(first_video.parent, second["broadcast.mp4"].parent)
+        self.assertEqual((output_dir / "broadcast.mp4").read_bytes(), second["broadcast.mp4"].read_bytes())
+        self.assertEqual(2, full_validation.call_count)
+
+    def test_ready_broadcast_snapshot_same_size_rewrite_is_blocked_or_invalidated(self) -> None:
+        output_dir = self.repo_root / "outputs" / "ready-cache-snapshot-aba"
+        output_dir.mkdir(parents=True)
+        quality, _ = self._write_mock_ready_delivery_contract(output_dir)
+
+        with mock.patch(
+            "football_tracking.api.service.validate_broadcast_quality_report",
+            return_value=quality,
+        ) as full_validation:
+            first = self.service._ready_broadcast_delivery_snapshots(
+                output_dir,
+                expected_status_generation=quality["status_generation"],
+            )
+            self.assertIsNotNone(first)
+            assert first is not None
+            first_video = first["broadcast.mp4"]
+            original = first_video.read_bytes()
+            original_stat = first_video.stat()
+            mutation_blocked = False
+            try:
+                first_video.write_bytes(b"x" * len(original))
+                os.utime(first_video, ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns))
+            except OSError:
+                mutation_blocked = True
+            second = self.service._ready_broadcast_delivery_snapshots(
+                output_dir,
+                expected_status_generation=quality["status_generation"],
+            )
+
+        self.assertIsNotNone(second)
+        assert second is not None
+        self.assertEqual(original, second["broadcast.mp4"].read_bytes())
+        self.assertEqual(1 if mutation_blocked else 2, full_validation.call_count)
+
+    def test_ready_broadcast_artifact_path_is_a_private_validated_snapshot(self) -> None:
+        output_dir = self.repo_root / "outputs" / "runs" / "match" / "broadcast-test"
+        output_dir.mkdir(parents=True)
+        quality, _ = self._write_mock_ready_delivery_contract(output_dir)
+        self._register_broadcast_run(output_dir)
+        registry = self.service._read_registry()
+        run = next(item for item in registry["runs"] if item["run_id"] == "broadcast-test")
+        run["broadcast"] = {
+            "status": "ready",
+            "status_generation": quality["status_generation"],
+        }
+        self.service._write_registry(registry)
+
+        with mock.patch(
+            "football_tracking.api.service.validate_broadcast_quality_report",
+            return_value=quality,
+        ) as full_validation:
+            listed_run = next(run for run in self.service.list_runs() if run["run_id"] == "broadcast-test")
+            listed_artifacts = self.service.list_artifacts("broadcast-test")
+            snapshot_path = self.service.get_artifact_path("broadcast-test", "broadcast.mp4")
+            repeated_path = self.service.get_artifact_path("broadcast-test", "broadcast.mp4")
+            ranged_response = get_artifact("broadcast-test", "broadcast.mp4", self.service)
+            ranged_handle = ranged_response._lease.handle
+            ranged_status, ranged_headers, ranged_body = self._invoke_artifact_response(
+                ranged_response,
+                method="GET",
+                headers=[(b"range", b"bytes=2-7")],
+            )
+            headed_response = get_artifact("broadcast-test", "broadcast.mp4", self.service)
+            headed_handle = headed_response._lease.handle
+            headed_status, headed_headers, headed_body = self._invoke_artifact_response(
+                headed_response,
+                method="HEAD",
+            )
+            truncated_response = get_artifact("broadcast-test", "broadcast.mp4", self.service)
+            truncated_handle = truncated_response._lease.handle
+            with (
+                mock.patch.object(truncated_response, "_read", new=mock.AsyncMock(return_value=b"")),
+                self.assertRaisesRegex(RuntimeError, "ended before the declared range"),
+            ):
+                self._invoke_artifact_response(
+                    truncated_response,
+                    method="GET",
+                    headers=[(b"range", b"bytes=0-1,4-5")],
+                )
+            partial_response = get_artifact("broadcast-test", "broadcast.mp4", self.service)
+            partial_handle = partial_response._lease.handle
+            with (
+                mock.patch.object(
+                    partial_response,
+                    "_read",
+                    new=mock.AsyncMock(side_effect=[b"x", b""]),
+                ),
+                self.assertRaisesRegex(RuntimeError, "ended before the declared range"),
+            ):
+                self._invoke_artifact_response(
+                    partial_response,
+                    method="GET",
+                    headers=[(b"range", b"bytes=0-4")],
+                )
+
+        self.assertEqual(snapshot_path, repeated_path)
+        self.assertEqual([], listed_run["artifacts"])
+        self.assertEqual(
+            {*PUBLIC_ARTIFACTS, "broadcast_quality_report.json"},
+            {artifact["name"] for artifact in listed_artifacts},
+        )
+        self.assertNotEqual((output_dir / "broadcast.mp4").resolve(), snapshot_path)
+        self.assertEqual((output_dir / "broadcast.mp4").read_bytes(), snapshot_path.read_bytes())
+        expected_video = (output_dir / "broadcast.mp4").read_bytes()
+        self.assertEqual(206, ranged_status)
+        self.assertEqual(expected_video[2:8], ranged_body)
+        self.assertEqual(f"bytes 2-7/{len(expected_video)}", ranged_headers["content-range"])
+        self.assertEqual(200, headed_status)
+        self.assertEqual(b"", headed_body)
+        self.assertEqual(str(len(expected_video)), headed_headers["content-length"])
+        self.assertTrue(ranged_handle.closed)
+        self.assertTrue(headed_handle.closed)
+        self.assertTrue(truncated_handle.closed)
+        self.assertTrue(partial_handle.closed)
+        full_validation.assert_called_once()
+
+    def test_ready_broadcast_cache_releases_leases_before_run_output_deletion(self) -> None:
+        output_dir = self.repo_root / "outputs" / "runs" / "match" / "broadcast-test"
+        output_dir.mkdir(parents=True)
+        quality, _ = self._write_mock_ready_delivery_contract(output_dir)
+        self._register_broadcast_run(output_dir)
+        registry = self.service._read_registry()
+        run = next(item for item in registry["runs"] if item["run_id"] == "broadcast-test")
+        run["broadcast"] = {"status": "ready", "status_generation": quality["status_generation"]}
+        self.service._write_registry(registry)
+
+        with mock.patch(
+            "football_tracking.api.service.validate_broadcast_quality_report",
+            return_value=quality,
+        ):
+            self.assertEqual(8, len(self.service.list_artifacts("broadcast-test")))
+            deleted = self.service.delete_run_output("broadcast-test")
+
+        self.assertTrue(deleted["deleted"])
+        self.assertFalse(output_dir.exists())
+        self.assertEqual({}, self.service._ready_broadcast_delivery_cache)
+        self.assertNotIn(
+            "broadcast-test",
+            {item.get("run_id") for item in self.service._read_registry()["runs"]},
+        )
+
+    def test_ready_broadcast_cache_releases_source_lease_before_input_deletion(self) -> None:
+        output_dir = self.repo_root / "outputs" / "runs" / "match" / "broadcast-test"
+        output_dir.mkdir(parents=True)
+        quality, _ = self._write_mock_ready_delivery_contract(output_dir)
+        self._register_broadcast_run(output_dir)
+        registry = self.service._read_registry()
+        run = next(item for item in registry["runs"] if item["run_id"] == "broadcast-test")
+        run["broadcast"] = {"status": "ready", "status_generation": quality["status_generation"]}
+        self.service._write_registry(registry)
+
+        with mock.patch(
+            "football_tracking.api.service.validate_broadcast_quality_report",
+            return_value=quality,
+        ):
+            self.assertEqual(8, len(self.service.list_artifacts("broadcast-test")))
+            deleted = self.service.delete_input_video("match.avi")
+
+        self.assertTrue(deleted["deleted"])
+        self.assertFalse(self.video.exists())
+        self.assertEqual({}, self.service._ready_broadcast_delivery_cache)
+
+    def test_ready_broadcast_eviction_does_not_retain_unrelated_snapshots_during_a_slow_response(self) -> None:
+        output_dir = self.repo_root / "outputs" / "runs" / "match" / "broadcast-test"
+        output_dir.mkdir(parents=True)
+        quality, _ = self._write_mock_ready_delivery_contract(output_dir)
+        self._register_broadcast_run(output_dir)
+        registry = self.service._read_registry()
+        run = next(item for item in registry["runs"] if item["run_id"] == "broadcast-test")
+        run["broadcast"] = {"status": "ready", "status_generation": quality["status_generation"]}
+        self.service._write_registry(registry)
+
+        with mock.patch(
+            "football_tracking.api.service.validate_broadcast_quality_report",
+            return_value=quality,
+        ):
+            response_lease = self.service.acquire_artifact_response_lease("broadcast-test", "broadcast.mp4")
+            for index in range(4):
+                other_output = self.repo_root / "outputs" / f"ready-cache-slow-response-{index}"
+                other_output.mkdir()
+                other_quality, _ = self._write_mock_ready_delivery_contract(other_output)
+                self.assertIsNotNone(
+                    self.service._ready_broadcast_delivery_snapshots(
+                        other_output,
+                        expected_status_generation=str(other_quality["status_generation"]),
+                    )
+                )
+
+        snapshot_root = self.service._ready_broadcast_delivery_temp
+        assert snapshot_root is not None
+        self.assertLessEqual(len(list(snapshot_root.iterdir())), 3)
+        self.assertLessEqual(len(self.service._ready_broadcast_retired_snapshot_dirs), 1)
+
+        response_lease.close()
+
+        self.assertEqual(2, len(list(snapshot_root.iterdir())))
+        self.assertEqual(set(), self.service._ready_broadcast_retired_snapshot_dirs)
+
+    def test_service_close_defers_ready_snapshot_cleanup_until_response_release(self) -> None:
+        output_dir = self.repo_root / "outputs" / "runs" / "match" / "broadcast-test"
+        output_dir.mkdir(parents=True)
+        quality, _ = self._write_mock_ready_delivery_contract(output_dir)
+        self._register_broadcast_run(output_dir)
+        registry = self.service._read_registry()
+        run = next(item for item in registry["runs"] if item["run_id"] == "broadcast-test")
+        run["broadcast"] = {"status": "ready", "status_generation": quality["status_generation"]}
+        self.service._write_registry(registry)
+
+        with mock.patch(
+            "football_tracking.api.service.validate_broadcast_quality_report",
+            return_value=quality,
+        ):
+            response_lease = self.service.acquire_artifact_response_lease("broadcast-test", "broadcast.mp4")
+        snapshot_root = self.service._ready_broadcast_delivery_temp
+        assert snapshot_root is not None
+
+        self.service.close()
+        self.assertTrue(snapshot_root.exists())
+        response_lease.close()
+
+        self.assertFalse(snapshot_root.exists())
+        self.assertTrue(response_lease.closed)
 
     def test_recompute_queues_a_cancellable_child_and_completes_in_the_background(self) -> None:
         output_dir = self.repo_root / "outputs" / "runs" / "match" / "broadcast-test"
@@ -2106,7 +2807,8 @@ class BroadcastApiServiceTests(unittest.TestCase):
         self.assertTrue((Path(child["output_dir"]) / "broadcast_operation_report.v1.json").is_file())
 
     def test_app_registers_typed_broadcast_routes(self) -> None:
-        document = create_app(self.repo_root, initialize_service=False).openapi()
+        app = create_app(self.repo_root, initialize_service=False)
+        document = app.openapi()
         for path in (
             "/api/v1/runs/{run_id}/broadcast/review-windows",
             "/api/v1/runs/{run_id}/broadcast/review-actions",
@@ -2119,6 +2821,44 @@ class BroadcastApiServiceTests(unittest.TestCase):
             document["paths"]["/api/v1/runs/{run_id}/broadcast/trajectory-recompute"]["post"]["responses"],
         )
         self.assertIn("202", document["paths"]["/api/v1/runs/{run_id}/broadcast/render"]["post"]["responses"])
+        artifact_methods = {
+            method
+            for route in app.routes
+            if getattr(route, "path", None) == "/api/v1/runs/{run_id}/artifacts/{artifact_name:path}"
+            for method in getattr(route, "methods", set())
+        }
+        self.assertTrue({"GET", "HEAD"}.issubset(artifact_methods))
+
+    @staticmethod
+    def _invoke_artifact_response(
+        response: Any,
+        *,
+        method: str,
+        headers: list[tuple[bytes, bytes]] | None = None,
+    ) -> tuple[int, dict[str, str], bytes]:
+        events: list[dict[str, Any]] = []
+
+        async def receive() -> dict[str, str]:
+            return {"type": "http.disconnect"}
+
+        async def send(event: dict[str, Any]) -> None:
+            events.append(event)
+
+        asyncio.run(
+            response(
+                {
+                    "type": "http",
+                    "method": method,
+                    "headers": headers or [],
+                },
+                receive,
+                send,
+            )
+        )
+        start = next(event for event in events if event["type"] == "http.response.start")
+        response_headers = {key.decode("latin-1"): value.decode("latin-1") for key, value in start["headers"]}
+        body = b"".join(event.get("body", b"") for event in events if event["type"] == "http.response.body")
+        return start["status"], response_headers, body
 
     def _register_broadcast_run(self, output_dir: Path) -> None:
         registry = self.service._read_registry()
@@ -2145,6 +2885,79 @@ class BroadcastApiServiceTests(unittest.TestCase):
             }
         )
         self.service._write_registry(registry)
+
+    def _write_mock_ready_delivery_contract(
+        self,
+        output_dir: Path,
+    ) -> tuple[dict[str, object], Path]:
+        bindings: dict[str, object] = {}
+        for name in PUBLIC_ARTIFACTS:
+            path = output_dir / name
+            path.write_bytes(f"{name}-bytes".encode("utf-8"))
+            bindings[name] = {
+                "sha256": _sha256(path),
+                "size_bytes": path.stat().st_size,
+                "source_report": {
+                    "path": f"broadcast_generations/source-{name}.json",
+                    "sha256": "b" * 64,
+                },
+            }
+        _write_json(
+            output_dir / "broadcast_artifact_bindings.v1.json",
+            {
+                "artifact_type": "broadcast_artifact_bindings",
+                "artifacts": bindings,
+            },
+        )
+        quality: dict[str, object] = {
+            "artifact_type": "broadcast_quality_report",
+            "status": "ready",
+            "status_generation": "a" * 64,
+        }
+        _write_json(output_dir / "broadcast_quality_report.json", quality)
+        generation_payload = output_dir / "broadcast_generations" / "render-test" / "payload.bin"
+        generation_payload.parent.mkdir(parents=True)
+        generation_payload.write_bytes(b"alpha")
+        return quality, generation_payload
+
+    def _write_mock_ready_queue(self, output_dir: Path) -> Path:
+        external_dir = self.repo_root / "external-ready-bindings"
+        external_dir.mkdir()
+        binding_names = (
+            "review_timing",
+            "policy",
+            "decisions",
+            "model",
+            "training_report",
+            "model_weights",
+            "dataset",
+            "predictions",
+            "contract",
+            "annotation_resolution",
+            "resolved_tracking_contract",
+            "policy_roles",
+        )
+        bindings: dict[str, dict[str, str]] = {}
+        external_policy = external_dir / "policy.json"
+        for name in binding_names:
+            path = external_dir / f"{name}.json"
+            payload: object = {"name": name}
+            if name == "dataset":
+                payload = {
+                    "artifact_type": "candidate_dataset_manifest",
+                    "sources": [{"path": str(self.video), "sha256": _sha256(self.video)}],
+                    "samples": [],
+                }
+            _write_json(path, payload)
+            bindings[name] = {"path": str(path), "sha256": _sha256(path)}
+        _write_json(
+            output_dir / "selective_review_queue.v1.json",
+            {
+                "artifact_type": "selective_review_queue",
+                "bindings": bindings,
+            },
+        )
+        return external_policy
 
     def test_type_only_source_reports_cannot_forge_a_ready_final_report(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

@@ -7,6 +7,5 @@
 import type { BroadcastReviewAction } from "./broadcastReviewAction";
 
 export interface BroadcastReviewActionsRequest {
-  /** @minItems 1 */
   actions: BroadcastReviewAction[];
 }

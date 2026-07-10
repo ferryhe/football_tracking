@@ -18,10 +18,10 @@ from collections.abc import Callable
 from concurrent.futures import CancelledError
 from contextlib import contextmanager
 from copy import deepcopy
-from dataclasses import asdict, is_dataclass
+from dataclasses import asdict, dataclass, is_dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, BinaryIO
 from uuid import uuid4
 
 import cv2
@@ -61,6 +61,7 @@ from football_tracking.api.broadcast_api import (
 )
 from football_tracking.ball_audit import compact_ball_audit_summary
 from football_tracking.broadcast_hybrid_orchestration import (
+    PUBLIC_ARTIFACTS,
     BroadcastHybridOrchestrationError,
     preflight_recompute_reviewed_trajectory,
     preflight_render_broadcast_trajectory,
@@ -74,6 +75,10 @@ from football_tracking.config import DEFAULT_HIGH_RECALL_MAX_TOTAL_FRAMES, AppCo
 from football_tracking.events import compact_event_candidate_summary
 from football_tracking.final_artifact_manifest import finalize_ai_candidate
 from football_tracking.follow_cam import FollowCamGenerator
+from football_tracking.global_ball_trajectory import (
+    _close_source_lease_handle,
+    _open_source_lease_handle,
+)
 from football_tracking.high_recall_windows import approved_action_windows_from_report
 from football_tracking.highlight_window_validation import build_highlight_window_validation
 from football_tracking.highlights import render_highlight_clip
@@ -118,6 +123,39 @@ _WINDOWS_RESERVED_NAMES = {
 }
 
 _LIVE_SERVICE_INSTANCES: weakref.WeakValueDictionary[str, Any] = weakref.WeakValueDictionary()
+
+_READY_BROADCAST_DELIVERY_NAMES = (*PUBLIC_ARTIFACTS, "broadcast_quality_report.json")
+_MAX_READY_BROADCAST_DEPENDENCIES = 65_536
+_MAX_READY_BROADCAST_DELIVERY_CACHE_ENTRIES = 2
+_READY_BROADCAST_COPY_CHUNK_BYTES = 1024 * 1024
+_READY_BROADCAST_STRONG_OUTPUT_ROOTS = frozenset({"broadcast_generations", "broadcast_status"})
+_ReadyIdentityToken = tuple[int, int, int, int, int, int]
+
+
+@dataclass(frozen=True)
+class _ReadyBroadcastFileLease:
+    path: Path
+    handle: BinaryIO
+    stat_token: tuple[int, int, int, int, int]
+
+
+@dataclass
+class _ArtifactResponseLease:
+    path: Path
+    handle: BinaryIO
+    stat_token: tuple[int, int, int, int, int]
+    on_close: Callable[[], None] | None = None
+    closed: bool = False
+
+    def close(self) -> None:
+        if self.closed:
+            return
+        self.closed = True
+        try:
+            _close_source_lease_handle(self.handle)
+        finally:
+            if self.on_close is not None:
+                self.on_close()
 
 
 def _utc_now_iso() -> str:
@@ -444,8 +482,20 @@ class ApiService:
         self._starting_threads: set[str] = set()
         self._closing = False
         self._lease_waiter_started = False
-        self._broadcast_artifact_cache_lock = threading.Lock()
-        self._broadcast_artifact_validation_cache: dict[Path, dict[str, Any]] = {}
+        self._ready_broadcast_delivery_lock = threading.RLock()
+        self._ready_broadcast_delivery_cache: dict[tuple[Path, str], dict[str, Any]] = {}
+        self._ready_broadcast_active_responses = 0
+        self._ready_broadcast_cleanup_pending = False
+        self._ready_broadcast_retired_snapshot_dirs: set[Path] = set()
+        self._ready_broadcast_delivery_temp: Path | None = Path(
+            tempfile.mkdtemp(prefix=f"football-tracking-ready-{self._instance_id[:8]}-")
+        )
+        self._ready_broadcast_delivery_temp_finalizer = weakref.finalize(
+            self,
+            shutil.rmtree,
+            self._ready_broadcast_delivery_temp,
+            ignore_errors=True,
+        )
         try:
             self.provider_settings = load_provider_settings(repo_root)
             self.ai_client = OpenAIResponsesClient(self.provider_settings)
@@ -507,10 +557,91 @@ class ApiService:
                 self._cancel_events.pop(run_id, None)
 
     def _release_service_lease(self) -> None:
+        self._release_ready_broadcast_delivery_resources()
         _LIVE_SERVICE_INSTANCES.pop(self._instance_id, None)
         finalizer = getattr(self, "_service_lease_finalizer", None)
         if finalizer is not None and finalizer.alive:
             finalizer()
+
+    def _release_ready_broadcast_delivery_resources(self) -> None:
+        lock = getattr(self, "_ready_broadcast_delivery_lock", None)
+        if lock is None:
+            return
+        with lock:
+            cache = getattr(self, "_ready_broadcast_delivery_cache", {})
+            entries = list(cache.values())
+            cache.clear()
+            temp_finalizer = getattr(self, "_ready_broadcast_delivery_temp_finalizer", None)
+            self._ready_broadcast_delivery_temp = None
+            for entry in entries:
+                self._release_ready_broadcast_cache_entry(entry)
+            if self._ready_broadcast_active_responses:
+                self._ready_broadcast_cleanup_pending = True
+                return
+            self._cleanup_retired_ready_broadcast_snapshots()
+        if temp_finalizer is not None and temp_finalizer.alive:
+            temp_finalizer()
+
+    def _invalidate_ready_broadcast_delivery_cache(
+        self,
+        *,
+        output_dir: Path | None = None,
+        dependency_path: Path | None = None,
+    ) -> None:
+        normalized_output = Path(os.path.abspath(output_dir)) if output_dir is not None else None
+        normalized_dependency = Path(os.path.abspath(dependency_path)) if dependency_path is not None else None
+        with self._ready_broadcast_delivery_lock:
+            invalidated: list[dict[str, Any]] = []
+            for key, entry in list(self._ready_broadcast_delivery_cache.items()):
+                dependencies = entry.get("dependencies", ())
+                dependency_tokens = entry.get("dependency_tokens", {})
+                matches_output = normalized_output is not None and key[0] == normalized_output
+                matches_dependency = normalized_dependency is not None and (
+                    normalized_dependency in dependency_tokens
+                    or any(
+                        isinstance(lease, _ReadyBroadcastFileLease) and lease.path == normalized_dependency
+                        for lease in dependencies
+                    )
+                )
+                if not (matches_output or matches_dependency):
+                    continue
+                invalidated.append(self._ready_broadcast_delivery_cache.pop(key))
+            for entry in invalidated:
+                self._release_ready_broadcast_cache_entry(entry)
+
+    def _release_ready_broadcast_cache_entry(self, entry: dict[str, Any]) -> None:
+        self._release_ready_broadcast_file_leases(entry.get("dependencies", ()))
+        self._release_ready_broadcast_file_leases(entry.get("snapshot_leases", ()))
+        snapshot_manifest = entry.get("snapshot_manifest")
+        if not isinstance(snapshot_manifest, Path):
+            return
+        snapshot_dir = snapshot_manifest.parent
+        # An active response owns its own file handle. POSIX can unlink that
+        # snapshot immediately; Windows will leave only the actually leased
+        # directory behind for a later retry. Do not retain unrelated evictions
+        # merely because some other response is active.
+        shutil.rmtree(snapshot_dir, ignore_errors=True)
+        if snapshot_dir.exists():
+            self._ready_broadcast_retired_snapshot_dirs.add(snapshot_dir)
+
+    def _cleanup_retired_ready_broadcast_snapshots(self) -> None:
+        for snapshot_dir in list(self._ready_broadcast_retired_snapshot_dirs):
+            shutil.rmtree(snapshot_dir, ignore_errors=True)
+            if not snapshot_dir.exists():
+                self._ready_broadcast_retired_snapshot_dirs.discard(snapshot_dir)
+
+    def _ready_broadcast_response_released(self) -> None:
+        temp_finalizer: Any = None
+        with self._ready_broadcast_delivery_lock:
+            self._ready_broadcast_active_responses = max(0, self._ready_broadcast_active_responses - 1)
+            if self._ready_broadcast_active_responses:
+                return
+            self._cleanup_retired_ready_broadcast_snapshots()
+            if self._ready_broadcast_cleanup_pending:
+                self._ready_broadcast_cleanup_pending = False
+                temp_finalizer = getattr(self, "_ready_broadcast_delivery_temp_finalizer", None)
+        if temp_finalizer is not None and temp_finalizer.alive:
+            temp_finalizer()
 
     def health_summary(self) -> dict[str, Any]:
         runs = self.list_runs()
@@ -557,7 +688,9 @@ class ApiService:
         video_path = self._resolve_input_video_name(name)
         with self._lock:
             self._assert_path_not_used_by_active_run_locked(input_video=video_path)
-        video_path.unlink()
+            with self._ready_broadcast_delivery_lock:
+                self._invalidate_ready_broadcast_delivery_cache(dependency_path=video_path)
+                video_path.unlink()
         return {
             "name": name,
             "path": str(video_path),
@@ -822,23 +955,25 @@ class ApiService:
                 raise RuntimeError(f"Run owns child operation output and cannot be deleted first: {child['run_id']}")
             raw_output_dir = Path(run["output_dir"])
             output_dir = self._resolve_safe_run_output(raw_output_dir, allow_missing=True)
-            registry["runs"] = [item for item in registry["runs"] if item.get("run_id") != run_id]
-            self._write_registry(registry)
-        if output_dir.exists():
-            output_dir = self._resolve_safe_run_output(raw_output_dir)
-            shutil.rmtree(output_dir)
-            parent_dir = output_dir.parent
-            if parent_dir != self.outputs_dir.resolve() and parent_dir.exists():
-                try:
-                    safe_parent = self._resolve_safe_descendant(
-                        self.outputs_dir,
-                        parent_dir,
-                        expected_kind="directory",
-                    )
-                except RuntimeError:
-                    safe_parent = None
-                if safe_parent is not None and not any(safe_parent.iterdir()):
-                    safe_parent.rmdir()
+            with self._ready_broadcast_delivery_lock:
+                self._invalidate_ready_broadcast_delivery_cache(output_dir=output_dir)
+                if output_dir.exists():
+                    output_dir = self._resolve_safe_run_output(raw_output_dir)
+                    shutil.rmtree(output_dir)
+                    parent_dir = output_dir.parent
+                    if parent_dir != self.outputs_dir.resolve() and parent_dir.exists():
+                        try:
+                            safe_parent = self._resolve_safe_descendant(
+                                self.outputs_dir,
+                                parent_dir,
+                                expected_kind="directory",
+                            )
+                        except RuntimeError:
+                            safe_parent = None
+                        if safe_parent is not None and not any(safe_parent.iterdir()):
+                            safe_parent.rmdir()
+                registry["runs"] = [item for item in registry["runs"] if item.get("run_id") != run_id]
+                self._write_registry(registry)
         return {
             "name": run_id,
             "path": str(output_dir),
@@ -884,6 +1019,12 @@ class ApiService:
                 key=lambda item: self._timestamp_value(self._run_activity_at(item)),
                 reverse=True,
             )
+        for run in runs:
+            if not self._is_ready_broadcast_run(run):
+                continue
+            # The dedicated artifacts endpoint seals and validates ready delivery.
+            # Metadata-only run polling must stay bounded and cannot authorize stale paths.
+            run["artifacts"] = []
         return runs
 
     def list_asset_groups(self) -> list[dict[str, Any]]:
@@ -992,6 +1133,7 @@ class ApiService:
         return prepared_groups
 
     def get_run(self, run_id: str) -> dict[str, Any]:
+        snapshot: dict[str, Any] | None = None
         with self._lock:
             registry = self._read_registry()
             for run in registry["runs"]:
@@ -999,35 +1141,74 @@ class ApiService:
                     if not self._registry_run_has_safe_output(run):
                         raise KeyError(run_id)
                     snapshot = deepcopy(run)
-                    output_dir = (
-                        self._resolve_safe_run_output(Path(snapshot["output_dir"]), allow_missing=True)
-                        if snapshot.get("output_dir")
-                        else None
-                    )
-                    if output_dir is not None and output_dir.is_dir():
-                        snapshot["artifacts"] = self._collect_artifacts(output_dir)
-                        snapshot["stats"] = self._collect_stats(output_dir)
-                        self._attach_ai_candidate_lifecycle(snapshot)
-                    return snapshot
-            original = deepcopy(registry)
-            self._refresh_discovered_runs_locked(registry)
-            if registry != original:
-                try:
-                    self._write_registry(registry)
-                except RuntimeError:
-                    registry = self._read_registry()
-            for run in registry["runs"]:
-                if run["run_id"] == run_id:
-                    if not self._registry_run_has_safe_output(run):
-                        raise KeyError(run_id)
-                    return deepcopy(run)
-        raise KeyError(run_id)
+                    break
+            if snapshot is None:
+                original = deepcopy(registry)
+                self._refresh_discovered_runs_locked(registry)
+                if registry != original:
+                    try:
+                        self._write_registry(registry)
+                    except RuntimeError:
+                        registry = self._read_registry()
+                for run in registry["runs"]:
+                    if run["run_id"] == run_id:
+                        if not self._registry_run_has_safe_output(run):
+                            raise KeyError(run_id)
+                        snapshot = deepcopy(run)
+                        break
+        if snapshot is None:
+            raise KeyError(run_id)
+
+        output_dir = (
+            self._resolve_safe_run_output(Path(snapshot["output_dir"]), allow_missing=True)
+            if snapshot.get("output_dir")
+            else None
+        )
+        if output_dir is not None and output_dir.is_dir():
+            if self._is_ready_broadcast_run(snapshot):
+                snapshot["artifacts"] = []
+            else:
+                snapshot["artifacts"] = self._collect_artifacts(output_dir)
+            snapshot["stats"] = self._collect_stats(output_dir)
+            self._attach_ai_candidate_lifecycle(snapshot)
+        return snapshot
 
     def list_artifacts(self, run_id: str) -> list[dict[str, Any]]:
-        return self.get_run(run_id).get("artifacts", [])
+        run = self.get_run(run_id)
+        if self._is_ready_broadcast_run(run):
+            try:
+                output_dir = self._resolve_safe_run_output(Path(run["output_dir"]))
+            except (KeyError, RuntimeError):
+                return []
+            return self._ready_broadcast_artifact_summaries(
+                output_dir,
+                expected_status_generation=self._ready_broadcast_status_generation(run),
+            )
+        return run.get("artifacts", [])
 
     def get_artifact_path(self, run_id: str, artifact_name: str) -> Path:
         run = self.get_run(run_id)
+        if self._is_ready_broadcast_run(run):
+            relative = Path(artifact_name)
+            normalized_name = relative.as_posix()
+            if (
+                relative.is_absolute()
+                or normalized_name != artifact_name.replace("\\", "/")
+                or ".." in relative.parts
+                or normalized_name not in _READY_BROADCAST_DELIVERY_NAMES
+            ):
+                raise FileNotFoundError(artifact_name)
+            try:
+                output_dir = self._resolve_safe_run_output(Path(run["output_dir"]))
+            except (KeyError, RuntimeError) as exc:
+                raise FileNotFoundError(artifact_name) from exc
+            snapshots = self._ready_broadcast_delivery_snapshots(
+                output_dir,
+                expected_status_generation=self._ready_broadcast_status_generation(run),
+            )
+            if snapshots is None or normalized_name not in snapshots:
+                raise FileNotFoundError(artifact_name)
+            return snapshots[normalized_name]
         try:
             output_dir = self._resolve_safe_run_output(Path(run["output_dir"]))
             candidate = self._resolve_safe_descendant(
@@ -1041,6 +1222,845 @@ class ApiService:
         if candidate not in allowed:
             raise FileNotFoundError(artifact_name)
         return candidate
+
+    def acquire_artifact_response_lease(
+        self,
+        run_id: str,
+        artifact_name: str,
+    ) -> _ArtifactResponseLease:
+        run = self.get_run(run_id)
+        if not self._is_ready_broadcast_run(run):
+            lease = self._acquire_ready_broadcast_file_lease(self.get_artifact_path(run_id, artifact_name))
+            return _ArtifactResponseLease(lease.path, lease.handle, lease.stat_token)
+
+        status_generation = self._ready_broadcast_status_generation(run)
+        relative = Path(artifact_name)
+        normalized_name = relative.as_posix()
+        if (
+            status_generation is None
+            or relative.is_absolute()
+            or normalized_name != artifact_name.replace("\\", "/")
+            or ".." in relative.parts
+            or normalized_name not in _READY_BROADCAST_DELIVERY_NAMES
+        ):
+            raise FileNotFoundError(artifact_name)
+        try:
+            output_dir = self._resolve_safe_run_output(Path(run["output_dir"]))
+        except (KeyError, RuntimeError) as exc:
+            raise FileNotFoundError(artifact_name) from exc
+        with self._ready_broadcast_delivery_lock:
+            snapshots = self._ready_broadcast_delivery_snapshots(
+                output_dir,
+                expected_status_generation=status_generation,
+            )
+            entry = self._ready_broadcast_delivery_cache.get((output_dir, status_generation))
+            if snapshots is None or entry is None:
+                raise FileNotFoundError(artifact_name)
+            path = snapshots.get(normalized_name)
+            expected_token = entry.get("snapshot_tokens", {}).get(normalized_name)
+            if path is None or not isinstance(expected_token, tuple):
+                raise FileNotFoundError(artifact_name)
+            try:
+                lease = self._acquire_ready_broadcast_file_lease(path)
+            except (OSError, RuntimeError) as exc:
+                raise FileNotFoundError(artifact_name) from exc
+            if lease.stat_token != expected_token:
+                self._release_ready_broadcast_file_leases((lease,))
+                raise FileNotFoundError(artifact_name)
+            self._ready_broadcast_active_responses += 1
+            return _ArtifactResponseLease(
+                lease.path,
+                lease.handle,
+                lease.stat_token,
+                on_close=self._ready_broadcast_response_released,
+            )
+
+    @staticmethod
+    def _is_ready_broadcast_run(run: dict[str, Any]) -> bool:
+        broadcast = run.get("broadcast")
+        return (
+            run.get("source") == "broadcast_hybrid"
+            and isinstance(broadcast, dict)
+            and broadcast.get("status") == "ready"
+        )
+
+    @staticmethod
+    def _ready_broadcast_status_generation(run: dict[str, Any]) -> str | None:
+        broadcast = run.get("broadcast")
+        if not isinstance(broadcast, dict):
+            return None
+        status_generation = broadcast.get("status_generation")
+        return status_generation if isinstance(status_generation, str) else None
+
+    def _ready_broadcast_artifacts_are_valid(
+        self,
+        output_dir: Path,
+        *,
+        expected_status_generation: str | None = None,
+    ) -> bool:
+        return (
+            self._ready_broadcast_delivery_snapshots(
+                output_dir,
+                expected_status_generation=expected_status_generation,
+            )
+            is not None
+        )
+
+    def _ready_broadcast_artifact_summaries(
+        self,
+        output_dir: Path,
+        *,
+        expected_status_generation: str | None,
+    ) -> list[dict[str, Any]]:
+        snapshots = self._ready_broadcast_delivery_snapshots(
+            output_dir,
+            expected_status_generation=expected_status_generation,
+        )
+        if snapshots is None:
+            return []
+        summaries: list[dict[str, Any]] = []
+        for name in _READY_BROADCAST_DELIVERY_NAMES:
+            path = snapshots.get(name)
+            if path is None:
+                return []
+            try:
+                size_bytes = path.stat().st_size
+            except OSError:
+                return []
+            content_type, _ = mimetypes.guess_type(name)
+            summaries.append(
+                {
+                    "name": name,
+                    "path": str(path),
+                    "kind": self._artifact_kind(Path(name)),
+                    "exists": True,
+                    "size_bytes": size_bytes,
+                    "content_type": content_type,
+                }
+            )
+        return summaries
+
+    def _ready_broadcast_delivery_snapshots(
+        self,
+        output_dir: Path,
+        *,
+        expected_status_generation: str | None,
+    ) -> dict[str, Path] | None:
+        try:
+            output_dir = self._resolve_safe_run_output(output_dir)
+        except RuntimeError:
+            return None
+        if expected_status_generation is None or not re.fullmatch(r"[0-9a-f]{64}", expected_status_generation):
+            return None
+
+        with self._ready_broadcast_delivery_lock:
+            candidate_keys = [
+                key
+                for key in self._ready_broadcast_delivery_cache
+                if key[0] == output_dir and (expected_status_generation is None or key[1] == expected_status_generation)
+            ]
+            for key in candidate_keys:
+                entry = self._ready_broadcast_delivery_cache.get(key)
+                if entry is not None and self._ready_broadcast_delivery_entry_is_current(entry):
+                    # Dict insertion order is the bounded cache's LRU order.
+                    self._ready_broadcast_delivery_cache.pop(key, None)
+                    self._ready_broadcast_delivery_cache[key] = entry
+                    return dict(entry["artifacts"])
+                if entry is not None:
+                    self._ready_broadcast_delivery_cache.pop(key, None)
+                    self._release_ready_broadcast_cache_entry(entry)
+
+            try:
+                (
+                    status_generation,
+                    artifacts,
+                    dependencies,
+                    dependency_tokens,
+                    directory_tokens,
+                    snapshot_tokens,
+                    snapshot_manifest,
+                ) = self._build_ready_broadcast_delivery_snapshot(
+                    output_dir,
+                    expected_status_generation=expected_status_generation,
+                )
+            except (BroadcastApiError, BroadcastHybridOrchestrationError, OSError, RuntimeError, TypeError, ValueError):
+                return None
+
+            # A new status generation supersedes older seals for the same run.
+            # Keep two ready runs globally so interleaved Range requests do not
+            # repeatedly validate and copy both videos. The small LRU bound keeps
+            # open handles and duplicate video storage predictable.
+            for stale_key in [key for key in self._ready_broadcast_delivery_cache if key[0] == output_dir]:
+                old_entry = self._ready_broadcast_delivery_cache.pop(stale_key)
+                self._release_ready_broadcast_cache_entry(old_entry)
+            while len(self._ready_broadcast_delivery_cache) >= _MAX_READY_BROADCAST_DELIVERY_CACHE_ENTRIES:
+                oldest_key = next(iter(self._ready_broadcast_delivery_cache))
+                old_entry = self._ready_broadcast_delivery_cache.pop(oldest_key)
+                self._release_ready_broadcast_cache_entry(old_entry)
+            key = (output_dir, status_generation)
+            partial_entry = {
+                "dependencies": dependencies,
+                "snapshot_leases": (),
+                "snapshot_manifest": snapshot_manifest,
+            }
+            snapshot_lease_list: list[_ReadyBroadcastFileLease] = []
+            snapshot_leases: tuple[_ReadyBroadcastFileLease, ...] = ()
+            try:
+                output_inventory = self._ready_broadcast_output_inventory(output_dir)
+                snapshot_manifest_token = self._artifact_identity_token(snapshot_manifest)
+                for path in (snapshot_manifest, *(artifacts[name] for name in _READY_BROADCAST_DELIVERY_NAMES)):
+                    snapshot_lease_list.append(self._acquire_ready_broadcast_file_lease(path))
+                snapshot_leases = tuple(snapshot_lease_list)
+                expected_snapshot_tokens = {
+                    snapshot_manifest: snapshot_manifest_token,
+                    **{artifacts[name]: snapshot_tokens[name] for name in _READY_BROADCAST_DELIVERY_NAMES},
+                }
+                if any(lease.stat_token != expected_snapshot_tokens.get(lease.path) for lease in snapshot_leases):
+                    raise RuntimeError("ready broadcast snapshot changed while acquiring its immutable lease")
+            except (OSError, RuntimeError):
+                partial_entry["snapshot_leases"] = tuple(snapshot_lease_list)
+                self._release_ready_broadcast_cache_entry(partial_entry)
+                return None
+            entry = {
+                "artifacts": artifacts,
+                "dependencies": dependencies,
+                "dependency_tokens": dependency_tokens,
+                "directory_tokens": directory_tokens,
+                "output_dir": output_dir,
+                "output_inventory": output_inventory,
+                "snapshot_tokens": snapshot_tokens,
+                "snapshot_leases": snapshot_leases,
+                "snapshot_manifest": snapshot_manifest,
+                "snapshot_manifest_token": snapshot_manifest_token,
+            }
+            self._ready_broadcast_delivery_cache[key] = entry
+            if not self._ready_broadcast_delivery_entry_is_current(entry):
+                self._ready_broadcast_delivery_cache.pop(key, None)
+                self._release_ready_broadcast_cache_entry(entry)
+                return None
+            return dict(artifacts)
+
+    def _build_ready_broadcast_delivery_snapshot(
+        self,
+        output_dir: Path,
+        *,
+        expected_status_generation: str | None,
+    ) -> tuple[
+        str,
+        dict[str, Path],
+        tuple[_ReadyBroadcastFileLease, ...],
+        dict[Path, _ReadyIdentityToken],
+        dict[Path, _ReadyIdentityToken],
+        dict[str, tuple[int, int, int, int, int]],
+        Path,
+    ]:
+        dependency_paths = self._ready_broadcast_dependency_paths(output_dir)
+        dependency_tokens = self._capture_ready_broadcast_path_tokens(dependency_paths)
+        directory_tokens = self._ready_broadcast_directory_tokens(output_dir, dependency_paths)
+        required_paths = {
+            output_dir / name for name in (*_READY_BROADCAST_DELIVERY_NAMES, "broadcast_artifact_bindings.v1.json")
+        }
+        if not required_paths.issubset(set(dependency_paths)):
+            raise RuntimeError("ready broadcast delivery contract is incomplete")
+
+        dependencies: list[_ReadyBroadcastFileLease] = []
+        staging: Path | None = None
+        final_dir: Path | None = None
+        published = False
+        try:
+            for path in sorted(required_paths, key=lambda item: str(item).casefold()):
+                dependencies.append(self._acquire_ready_broadcast_file_lease(path))
+            leases_by_path = {lease.path: lease for lease in dependencies}
+            quality_path = output_dir / "broadcast_quality_report.json"
+            manifest_path = output_dir / "broadcast_artifact_bindings.v1.json"
+            quality_lease = leases_by_path[quality_path]
+            manifest_lease = leases_by_path[manifest_path]
+
+            validated_quality = validate_broadcast_quality_report(output_dir, quality_path)
+            self._verify_ready_broadcast_file_leases(dependencies)
+            self._verify_ready_broadcast_path_tokens(dependency_tokens)
+            quality = self._read_ready_broadcast_lease_json(quality_lease, "broadcast quality report")
+            manifest = self._read_ready_broadcast_lease_json(manifest_lease, "broadcast final artifact bindings")
+            if validated_quality != quality or quality.get("status") != "ready":
+                raise RuntimeError("ready broadcast quality report changed during validation")
+            status_generation = quality.get("status_generation")
+            if not isinstance(status_generation, str) or not re.fullmatch(r"[0-9a-f]{64}", status_generation):
+                raise RuntimeError("ready broadcast status generation is invalid")
+            if expected_status_generation is not None and status_generation != expected_status_generation:
+                raise RuntimeError("ready broadcast status generation is stale")
+            if manifest.get("artifact_type") != "broadcast_artifact_bindings":
+                raise RuntimeError("ready broadcast final bindings are invalid")
+            raw_bindings = manifest.get("artifacts")
+            if not isinstance(raw_bindings, dict) or set(raw_bindings) != set(PUBLIC_ARTIFACTS):
+                raise RuntimeError("ready broadcast final bindings are incomplete")
+
+            temporary = self._ready_broadcast_delivery_temp
+            if temporary is None:
+                raise RuntimeError("ready broadcast delivery cache is closed")
+            cache_root = temporary
+            cache_key = hashlib.sha256(str(output_dir).encode("utf-8")).hexdigest()[:16]
+            snapshot_id = uuid4().hex
+            final_dir = cache_root / f"{cache_key}-{status_generation}-{snapshot_id}"
+            staging = cache_root / f".{final_dir.name}.tmp"
+            staging.mkdir()
+
+            snapshot_records: dict[str, dict[str, Any]] = {}
+            for name in _READY_BROADCAST_DELIVERY_NAMES:
+                source_lease = leases_by_path[output_dir / name]
+                expected_sha256: str | None = None
+                expected_size: int | None = None
+                if name in PUBLIC_ARTIFACTS:
+                    binding = raw_bindings.get(name)
+                    if not isinstance(binding, dict):
+                        raise RuntimeError(f"ready broadcast binding is invalid: {name}")
+                    expected_sha256 = binding.get("sha256")
+                    expected_size = binding.get("size_bytes")
+                    if (
+                        not isinstance(expected_sha256, str)
+                        or not re.fullmatch(r"[0-9a-f]{64}", expected_sha256)
+                        or isinstance(expected_size, bool)
+                        or not isinstance(expected_size, int)
+                        or expected_size < 0
+                    ):
+                        raise RuntimeError(f"ready broadcast binding is invalid: {name}")
+                digest, size_bytes = self._copy_ready_broadcast_lease(
+                    source_lease,
+                    staging / name,
+                    expected_sha256=expected_sha256,
+                    expected_size=expected_size,
+                )
+                content_type, _ = mimetypes.guess_type(name)
+                snapshot_records[name] = {
+                    "sha256": digest,
+                    "size_bytes": size_bytes,
+                    "content_type": content_type,
+                }
+
+            self._verify_ready_broadcast_file_leases(dependencies)
+            self._verify_ready_broadcast_path_tokens(dependency_tokens)
+            self._verify_ready_broadcast_directory_tokens(directory_tokens)
+            if self._ready_broadcast_dependency_paths(output_dir) != dependency_paths:
+                raise RuntimeError("ready broadcast dependency set changed during validation")
+            snapshot_manifest = staging / "delivery_snapshot.v1.json"
+            snapshot_payload = {
+                "schema_version": "1.0",
+                "artifact_type": "ready_broadcast_delivery_snapshot",
+                "source_output_dir_sha256": hashlib.sha256(str(output_dir).encode("utf-8")).hexdigest(),
+                "status_generation": status_generation,
+                "quality_report_sha256": snapshot_records["broadcast_quality_report.json"]["sha256"],
+                "final_bindings_sha256": self._hash_ready_broadcast_lease(manifest_lease),
+                "artifacts": snapshot_records,
+            }
+            publish_json_exclusive(snapshot_manifest, snapshot_payload, trusted_root=staging)
+            staging.replace(final_dir)
+            published = True
+
+            artifacts = {name: final_dir / name for name in _READY_BROADCAST_DELIVERY_NAMES}
+            snapshot_tokens = {name: self._artifact_identity_token(path) for name, path in artifacts.items()}
+            final_manifest = final_dir / snapshot_manifest.name
+            return (
+                status_generation,
+                artifacts,
+                tuple(dependencies),
+                dependency_tokens,
+                directory_tokens,
+                snapshot_tokens,
+                final_manifest,
+            )
+        except BaseException:
+            self._release_ready_broadcast_file_leases(dependencies)
+            if staging is not None:
+                shutil.rmtree(staging, ignore_errors=True)
+            if published and final_dir is not None:
+                shutil.rmtree(final_dir, ignore_errors=True)
+            raise
+
+    def _ready_broadcast_dependency_paths(self, output_dir: Path) -> list[Path]:
+        contained_paths, _ = self._ready_broadcast_output_tree(output_dir)
+        paths = {
+            path
+            for path in contained_paths
+            if len(path.relative_to(output_dir).parts) == 1
+            or path.relative_to(output_dir).parts[0] in _READY_BROADCAST_STRONG_OUTPUT_ROOTS
+        }
+
+        queue_path = output_dir / "selective_review_queue.v1.json"
+        if queue_path.is_file():
+            queue, _ = validate_review_queue_bindings(queue_path)
+            queue_bindings = queue.get("bindings")
+            if not isinstance(queue_bindings, dict):
+                raise RuntimeError("ready broadcast queue bindings are unavailable")
+            bound_paths: dict[str, Path] = {}
+            for binding_name, raw_binding in queue_bindings.items():
+                if not isinstance(binding_name, str) or not isinstance(raw_binding, dict):
+                    raise RuntimeError("ready broadcast queue binding is invalid")
+                raw_binding_path = raw_binding.get("path")
+                if not isinstance(raw_binding_path, str) or not raw_binding_path:
+                    raise RuntimeError("ready broadcast queue binding is invalid")
+                binding_path = Path(raw_binding_path)
+                if not binding_path.is_absolute():
+                    binding_path = queue_path.parent / binding_path
+                binding_path = self._resolve_nonlink_ready_broadcast_file(
+                    binding_path,
+                    "ready broadcast queue-bound artifact",
+                )
+                bound_paths[binding_name] = binding_path
+                paths.add(binding_path)
+            dataset_path = bound_paths.get("dataset")
+            if dataset_path is None:
+                raise RuntimeError("ready broadcast dataset binding is unavailable")
+            dataset_binding = queue_bindings.get("dataset")
+            if not isinstance(dataset_binding, dict):
+                raise RuntimeError("ready broadcast dataset binding is unavailable")
+            raw_dataset_path = dataset_binding.get("path")
+            if not isinstance(raw_dataset_path, str) or not raw_dataset_path:
+                raise RuntimeError("ready broadcast dataset binding is unavailable")
+            dataset, _ = load_bound_json(dataset_path, "ready broadcast candidate dataset")
+            sources = dataset.get("sources")
+            if not isinstance(sources, list) or len(sources) != 1 or not isinstance(sources[0], dict):
+                raise RuntimeError("ready broadcast candidate dataset source is invalid")
+            raw_source_path = sources[0].get("path")
+            if not isinstance(raw_source_path, str) or not raw_source_path:
+                raise RuntimeError("ready broadcast candidate dataset source is invalid")
+            source_path = Path(raw_source_path)
+            if not source_path.is_absolute():
+                source_path = dataset_path.parent / source_path
+            source_path = self._resolve_nonlink_ready_broadcast_file(
+                source_path,
+                "ready broadcast candidate dataset source",
+            )
+            paths.add(source_path)
+            samples = dataset.get("samples")
+            if isinstance(samples, list):
+                for raw_sample in samples:
+                    if not isinstance(raw_sample, dict):
+                        raise RuntimeError("ready broadcast candidate dataset sample is invalid")
+                    sample_artifacts = raw_sample.get("artifacts")
+                    if not isinstance(sample_artifacts, dict):
+                        continue
+                    for raw_descriptor in sample_artifacts.values():
+                        if not isinstance(raw_descriptor, dict):
+                            raise RuntimeError("ready broadcast candidate evidence descriptor is invalid")
+                        raw_evidence_path = raw_descriptor.get("path")
+                        if not isinstance(raw_evidence_path, str) or not raw_evidence_path:
+                            raise RuntimeError("ready broadcast candidate evidence path is invalid")
+                        evidence_path = Path(raw_evidence_path)
+                        if not evidence_path.is_absolute():
+                            evidence_path = dataset_path.parent / evidence_path
+                        evidence_path = self._resolve_nonlink_ready_broadcast_file(
+                            evidence_path,
+                            "ready broadcast candidate evidence",
+                        )
+                        paths.add(evidence_path)
+
+        registry = self._read_registry()
+        for run in registry.get("runs", []):
+            if not isinstance(run, dict) or not isinstance(run.get("output_dir"), str):
+                continue
+            try:
+                run_output = self._resolve_safe_run_output(Path(run["output_dir"]), allow_missing=True)
+            except RuntimeError:
+                continue
+            if run_output != output_dir or not isinstance(run.get("input_video"), str):
+                continue
+            input_video = self._resolve_nonlink_ready_broadcast_file(
+                Path(run["input_video"]),
+                "ready broadcast source video",
+            )
+            paths.add(input_video)
+            break
+
+        if len(paths) > _MAX_READY_BROADCAST_DEPENDENCIES:
+            raise RuntimeError("ready broadcast dependency set exceeds the safe lease bound")
+        return sorted(paths, key=lambda item: str(item).casefold())
+
+    def _ready_broadcast_output_tree(self, output_dir: Path) -> tuple[list[Path], tuple[str, ...]]:
+        files: list[Path] = []
+        inventory: list[str] = []
+        stack = [output_dir]
+        while stack:
+            directory = stack.pop()
+            for candidate in directory.iterdir():
+                if self._is_link_or_reparse_point(candidate):
+                    raise RuntimeError("ready broadcast output contains a link or reparse point")
+                relative = candidate.relative_to(output_dir).as_posix()
+                if candidate.is_dir():
+                    inventory.append(f"{relative}/")
+                    stack.append(candidate)
+                elif candidate.is_file():
+                    inventory.append(relative)
+                    files.append(
+                        self._resolve_safe_descendant(
+                            output_dir,
+                            candidate,
+                            expected_kind="file",
+                        )
+                    )
+                else:
+                    raise RuntimeError("ready broadcast output contains a special file")
+        return sorted(files, key=lambda item: str(item).casefold()), tuple(sorted(inventory))
+
+    def _ready_broadcast_output_inventory(self, output_dir: Path) -> tuple[str, ...]:
+        _, inventory = self._ready_broadcast_output_tree(output_dir)
+        return inventory
+
+    def _capture_ready_broadcast_path_tokens(
+        self,
+        paths: list[Path],
+    ) -> dict[Path, _ReadyIdentityToken]:
+        tokens: dict[Path, _ReadyIdentityToken] = {}
+        for path in paths:
+            before = self._ready_broadcast_path_identity_token(path)
+            after = self._ready_broadcast_path_identity_token(path)
+            if before != after:
+                raise RuntimeError("ready broadcast dependency changed while its identity was captured")
+            tokens[path] = after
+        return tokens
+
+    def _verify_ready_broadcast_path_tokens(
+        self,
+        path_tokens: dict[Path, _ReadyIdentityToken],
+    ) -> None:
+        for path, expected_token in path_tokens.items():
+            try:
+                if self._ready_broadcast_path_identity_token(path) != expected_token:
+                    raise RuntimeError("ready broadcast dependency changed after validation")
+            except OSError as exc:
+                raise RuntimeError("ready broadcast dependency changed after validation") from exc
+
+    def _ready_broadcast_directory_tokens(
+        self,
+        output_dir: Path,
+        dependency_paths: list[Path],
+    ) -> dict[Path, _ReadyIdentityToken]:
+        repo_root = self.repo_root.resolve()
+        directories = {output_dir, output_dir.parent}
+        _, output_inventory = self._ready_broadcast_output_tree(output_dir)
+        directories.update(output_dir / relative.rstrip("/") for relative in output_inventory if relative.endswith("/"))
+        for dependency_path in dependency_paths:
+            directory = dependency_path.parent
+            if dependency_path.is_relative_to(output_dir):
+                trusted_ancestor = output_dir
+            elif dependency_path.is_relative_to(repo_root):
+                trusted_ancestor = repo_root
+            else:
+                trusted_ancestor = directory.parent
+            while True:
+                directories.add(directory)
+                if directory == trusted_ancestor or directory.parent == directory:
+                    break
+                directory = directory.parent
+        tokens: dict[Path, _ReadyIdentityToken] = {}
+        for directory in directories:
+            if self._is_link_or_reparse_point(directory) or not directory.is_dir():
+                raise RuntimeError("ready broadcast dependency ancestor must be a regular directory")
+            tokens[directory] = self._ready_broadcast_path_identity_token(directory)
+        return tokens
+
+    def _verify_ready_broadcast_directory_tokens(
+        self,
+        directory_tokens: dict[Path, _ReadyIdentityToken],
+    ) -> None:
+        for directory, expected_token in directory_tokens.items():
+            try:
+                if (
+                    self._is_link_or_reparse_point(directory)
+                    or not directory.is_dir()
+                    or self._ready_broadcast_path_identity_token(directory) != expected_token
+                ):
+                    raise RuntimeError("ready broadcast dependency directory changed during validation")
+            except OSError as exc:
+                raise RuntimeError("ready broadcast dependency directory changed during validation") from exc
+
+    def _ready_broadcast_path_identity_token(self, path: Path) -> _ReadyIdentityToken:
+        path = Path(os.path.abspath(path))
+        if self._is_link_or_reparse_point(path):
+            raise RuntimeError("ready broadcast identity path must not be a link or reparse point")
+        if os.name != "nt":
+            metadata = path.stat()
+            return (
+                int(metadata.st_dev),
+                int(metadata.st_ino),
+                int(metadata.st_size),
+                int(metadata.st_mtime_ns),
+                int(metadata.st_ctime_ns),
+                int(metadata.st_mode),
+            )
+        return self._windows_ready_broadcast_path_identity_token(path)
+
+    @staticmethod
+    def _windows_ready_broadcast_path_identity_token(path: Path) -> _ReadyIdentityToken:
+        import ctypes
+        from ctypes import wintypes
+
+        class ByHandleFileInformation(ctypes.Structure):
+            _fields_ = (
+                ("file_attributes", wintypes.DWORD),
+                ("creation_time", wintypes.FILETIME),
+                ("last_access_time", wintypes.FILETIME),
+                ("last_write_time", wintypes.FILETIME),
+                ("volume_serial_number", wintypes.DWORD),
+                ("file_size_high", wintypes.DWORD),
+                ("file_size_low", wintypes.DWORD),
+                ("number_of_links", wintypes.DWORD),
+                ("file_index_high", wintypes.DWORD),
+                ("file_index_low", wintypes.DWORD),
+            )
+
+        class FileBasicInformation(ctypes.Structure):
+            _fields_ = (
+                ("creation_time", ctypes.c_longlong),
+                ("last_access_time", ctypes.c_longlong),
+                ("last_write_time", ctypes.c_longlong),
+                ("change_time", ctypes.c_longlong),
+                ("file_attributes", wintypes.DWORD),
+            )
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        create_file = kernel32.CreateFileW
+        create_file.argtypes = (
+            wintypes.LPCWSTR,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            wintypes.LPVOID,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            wintypes.HANDLE,
+        )
+        create_file.restype = wintypes.HANDLE
+        get_file_information = kernel32.GetFileInformationByHandle
+        get_file_information.argtypes = (wintypes.HANDLE, ctypes.POINTER(ByHandleFileInformation))
+        get_file_information.restype = wintypes.BOOL
+        get_file_information_ex = kernel32.GetFileInformationByHandleEx
+        get_file_information_ex.argtypes = (wintypes.HANDLE, ctypes.c_int, wintypes.LPVOID, wintypes.DWORD)
+        get_file_information_ex.restype = wintypes.BOOL
+        close_handle = kernel32.CloseHandle
+        close_handle.argtypes = (wintypes.HANDLE,)
+        close_handle.restype = wintypes.BOOL
+        handle = create_file(
+            str(path),
+            0x00000080,  # FILE_READ_ATTRIBUTES
+            0x00000007,  # share read, write, and delete while observing identity
+            None,
+            3,  # OPEN_EXISTING
+            0x02200000,  # FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT
+            None,
+        )
+        invalid_handle = ctypes.c_void_p(-1).value
+        if handle is None or int(handle) == invalid_handle:
+            error = ctypes.get_last_error()
+            raise OSError(error, ctypes.FormatError(error), str(path))
+        try:
+            identity = ByHandleFileInformation()
+            basic = FileBasicInformation()
+            if not get_file_information(handle, ctypes.byref(identity)):
+                error = ctypes.get_last_error()
+                raise OSError(error, ctypes.FormatError(error), str(path))
+            if not get_file_information_ex(handle, 0, ctypes.byref(basic), ctypes.sizeof(basic)):
+                error = ctypes.get_last_error()
+                raise OSError(error, ctypes.FormatError(error), str(path))
+            file_index = (int(identity.file_index_high) << 32) | int(identity.file_index_low)
+            size_bytes = (int(identity.file_size_high) << 32) | int(identity.file_size_low)
+            return (
+                int(identity.volume_serial_number),
+                file_index,
+                size_bytes,
+                int(basic.last_write_time),
+                int(basic.creation_time),
+                int(basic.change_time),
+            )
+        finally:
+            close_handle(handle)
+
+    def _acquire_ready_broadcast_file_lease(self, path: Path) -> _ReadyBroadcastFileLease:
+        path = Path(os.path.abspath(path))
+        if self._is_link_or_reparse_point(path) or not path.is_file():
+            raise RuntimeError("ready broadcast dependency must be a regular file")
+        handle: BinaryIO | None = None
+        try:
+            handle = _open_source_lease_handle(path)
+            before = os.fstat(handle.fileno())
+            current = path.stat()
+            if not stat.S_ISREG(before.st_mode) or self._stat_result_token(before) != self._stat_result_token(current):
+                raise RuntimeError("ready broadcast dependency changed while acquiring its lease")
+            return _ReadyBroadcastFileLease(
+                path=path,
+                handle=handle,
+                stat_token=self._stat_result_token(before),
+            )
+        except BaseException:
+            if handle is not None:
+                try:
+                    _close_source_lease_handle(handle)
+                except BaseException:
+                    pass
+            raise
+
+    def _resolve_nonlink_ready_broadcast_file(self, path: Path, label: str) -> Path:
+        candidate = Path(os.path.abspath(path))
+        ancestor = candidate
+        while True:
+            if self._is_link_or_reparse_point(ancestor):
+                raise RuntimeError(f"{label} must not traverse a link or reparse point")
+            if ancestor.parent == ancestor:
+                break
+            ancestor = ancestor.parent
+        resolved = candidate.resolve()
+        if not resolved.is_file():
+            raise RuntimeError(f"{label} is unavailable")
+        return resolved
+
+    def _verify_ready_broadcast_file_leases(
+        self,
+        leases: list[_ReadyBroadcastFileLease] | tuple[_ReadyBroadcastFileLease, ...],
+    ) -> None:
+        for lease in leases:
+            if not self._ready_broadcast_file_lease_is_current(lease):
+                raise RuntimeError("ready broadcast dependency changed during validation")
+
+    def _ready_broadcast_file_lease_is_current(self, lease: _ReadyBroadcastFileLease) -> bool:
+        try:
+            if self._is_link_or_reparse_point(lease.path):
+                return False
+            return (
+                self._stat_result_token(os.fstat(lease.handle.fileno())) == lease.stat_token
+                and self._artifact_identity_token(lease.path) == lease.stat_token
+            )
+        except (OSError, ValueError):
+            return False
+
+    @staticmethod
+    def _release_ready_broadcast_file_leases(
+        leases: list[_ReadyBroadcastFileLease] | tuple[_ReadyBroadcastFileLease, ...],
+    ) -> None:
+        for lease in reversed(leases):
+            try:
+                _close_source_lease_handle(lease.handle)
+            except BaseException:
+                pass
+
+    def _ready_broadcast_delivery_entry_is_current(self, entry: dict[str, Any]) -> bool:
+        dependencies = entry.get("dependencies")
+        dependency_tokens = entry.get("dependency_tokens")
+        snapshot_leases = entry.get("snapshot_leases")
+        directory_tokens = entry.get("directory_tokens")
+        artifacts = entry.get("artifacts")
+        snapshot_tokens = entry.get("snapshot_tokens")
+        snapshot_manifest = entry.get("snapshot_manifest")
+        snapshot_manifest_token = entry.get("snapshot_manifest_token")
+        output_dir = entry.get("output_dir")
+        output_inventory = entry.get("output_inventory")
+        if (
+            not isinstance(dependencies, tuple)
+            or not isinstance(dependency_tokens, dict)
+            or not isinstance(snapshot_leases, tuple)
+            or len(snapshot_leases) != len(_READY_BROADCAST_DELIVERY_NAMES) + 1
+            or not isinstance(directory_tokens, dict)
+            or not isinstance(artifacts, dict)
+            or set(artifacts) != set(_READY_BROADCAST_DELIVERY_NAMES)
+            or not isinstance(snapshot_tokens, dict)
+            or not isinstance(snapshot_manifest, Path)
+            or not isinstance(snapshot_manifest_token, tuple)
+            or not isinstance(output_dir, Path)
+            or not isinstance(output_inventory, tuple)
+        ):
+            return False
+        if any(not self._ready_broadcast_file_lease_is_current(lease) for lease in snapshot_leases):
+            return False
+        try:
+            if any(not self._ready_broadcast_file_lease_is_current(lease) for lease in dependencies):
+                return False
+            self._verify_ready_broadcast_path_tokens(dependency_tokens)
+            self._verify_ready_broadcast_directory_tokens(directory_tokens)
+            if (
+                self._is_link_or_reparse_point(snapshot_manifest)
+                or self._artifact_identity_token(snapshot_manifest) != snapshot_manifest_token
+            ):
+                return False
+            for name, path in artifacts.items():
+                if (
+                    not isinstance(path, Path)
+                    or path.parent != snapshot_manifest.parent
+                    or self._is_link_or_reparse_point(path)
+                    or self._artifact_identity_token(path) != snapshot_tokens.get(name)
+                ):
+                    return False
+        except (OSError, RuntimeError, TypeError, ValueError):
+            return False
+        return True
+
+    def _read_ready_broadcast_lease_json(
+        self,
+        lease: _ReadyBroadcastFileLease,
+        label: str,
+    ) -> dict[str, Any]:
+        lease.handle.seek(0)
+        raw = lease.handle.read(16 * 1024 * 1024 + 1)
+        lease.handle.seek(0)
+        if len(raw) > 16 * 1024 * 1024:
+            raise RuntimeError(f"{label} exceeds the safe snapshot bound")
+        try:
+            payload = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise RuntimeError(f"{label} is invalid JSON") from exc
+        if not isinstance(payload, dict):
+            raise RuntimeError(f"{label} must contain a JSON object")
+        return payload
+
+    def _copy_ready_broadcast_lease(
+        self,
+        lease: _ReadyBroadcastFileLease,
+        target: Path,
+        *,
+        expected_sha256: str | None,
+        expected_size: int | None,
+    ) -> tuple[str, int]:
+        digest = hashlib.sha256()
+        size_bytes = 0
+        before = self._stat_result_token(os.fstat(lease.handle.fileno()))
+        lease.handle.seek(0)
+        with target.open("xb") as output_handle:
+            while True:
+                chunk = lease.handle.read(_READY_BROADCAST_COPY_CHUNK_BYTES)
+                if not chunk:
+                    break
+                output_handle.write(chunk)
+                digest.update(chunk)
+                size_bytes += len(chunk)
+            output_handle.flush()
+            os.fsync(output_handle.fileno())
+        lease.handle.seek(0)
+        actual_sha256 = digest.hexdigest()
+        if (
+            before != lease.stat_token
+            or not self._ready_broadcast_file_lease_is_current(lease)
+            or (expected_sha256 is not None and actual_sha256 != expected_sha256)
+            or (expected_size is not None and size_bytes != expected_size)
+        ):
+            raise RuntimeError(f"ready broadcast artifact changed while sealing: {lease.path.name}")
+        return actual_sha256, size_bytes
+
+    @staticmethod
+    def _hash_ready_broadcast_lease(lease: _ReadyBroadcastFileLease) -> str:
+        digest = hashlib.sha256()
+        lease.handle.seek(0)
+        while True:
+            chunk = lease.handle.read(_READY_BROADCAST_COPY_CHUNK_BYTES)
+            if not chunk:
+                break
+            digest.update(chunk)
+        lease.handle.seek(0)
+        return digest.hexdigest()
+
+    @staticmethod
+    def _stat_result_token(metadata: os.stat_result) -> tuple[int, int, int, int, int]:
+        return (
+            int(metadata.st_dev),
+            int(metadata.st_ino),
+            int(metadata.st_size),
+            int(metadata.st_mtime_ns),
+            int(metadata.st_ctime_ns),
+        )
 
     def get_cleanup_report(self, run_id: str) -> dict[str, Any]:
         return self._load_optional_json_artifact(run_id, "cleanup_report.json")
@@ -3354,8 +4374,8 @@ class ApiService:
         if not queue_path.is_file():
             raise RuntimeError("missing qualified selective review queue")
         raw_actions = request.get("actions")
-        if not isinstance(raw_actions, list) or not raw_actions:
-            raise ValueError("review action submission must contain actions")
+        if not isinstance(raw_actions, list):
+            raise ValueError("review action submission actions must be a list")
         if any(isinstance(action, dict) and action.get("action") == "correct_trajectory" for action in raw_actions):
             raise RuntimeError("correct_trajectory is not supported by the global trajectory solver")
         try:
@@ -7623,9 +8643,6 @@ class ApiService:
             output_dir = self._resolve_safe_run_output(output_dir)
         except RuntimeError:
             return []
-        cached_paths = self._cached_broadcast_nested_artifact_paths(output_dir)
-        if cached_paths is not None:
-            return cached_paths
         paths: set[Path] = set()
         try:
             queue_path = self._resolve_safe_descendant(
@@ -7748,136 +8765,7 @@ class ApiService:
                 continue
             if sha256_file(candidate) == expected_sha256:
                 paths.add(candidate)
-        sorted_paths = sorted(paths)
-        ready_status_path = output_dir / "broadcast_status" / str(quality.get("status_generation")) / quality_path.name
-        if ready_status_path in paths:
-            self._cache_broadcast_nested_artifact_paths(
-                output_dir=output_dir,
-                nested_paths=sorted_paths,
-                quality_path=quality_path,
-                manifest_path=manifest_path,
-                manifest_bindings=bindings,
-                queue_path=output_dir / "selective_review_queue.v1.json",
-            )
-        return sorted_paths
-
-    def _cached_broadcast_nested_artifact_paths(self, output_dir: Path) -> list[Path] | None:
-        with self._broadcast_artifact_cache_lock:
-            entry = deepcopy(self._broadcast_artifact_validation_cache.get(output_dir))
-        if not isinstance(entry, dict):
-            return None
-        try:
-            for relative_text, expected_token in entry.get("contained_tokens", []):
-                relative = Path(relative_text)
-                path = self._resolve_safe_descendant(
-                    output_dir,
-                    output_dir / relative,
-                    expected_kind="file",
-                )
-                if self._artifact_identity_token(path) != tuple(expected_token):
-                    raise RuntimeError("cached broadcast artifact changed")
-            for raw_path, expected_token in entry.get("external_tokens", []):
-                path = Path(raw_path)
-                if self._is_link_or_reparse_point(path) or not path.is_file():
-                    raise RuntimeError("cached external broadcast source is unavailable")
-                if self._artifact_identity_token(path) != tuple(expected_token):
-                    raise RuntimeError("cached external broadcast source changed")
-            return [
-                self._resolve_safe_descendant(
-                    output_dir,
-                    output_dir / Path(relative_text),
-                    expected_kind="file",
-                )
-                for relative_text in entry.get("nested_paths", [])
-            ]
-        except (OSError, RuntimeError, TypeError, ValueError):
-            with self._broadcast_artifact_cache_lock:
-                self._broadcast_artifact_validation_cache.pop(output_dir, None)
-            return None
-
-    def _cache_broadcast_nested_artifact_paths(
-        self,
-        *,
-        output_dir: Path,
-        nested_paths: list[Path],
-        quality_path: Path,
-        manifest_path: Path,
-        manifest_bindings: dict[str, Any],
-        queue_path: Path,
-    ) -> None:
-        contained_paths = {quality_path, manifest_path, *nested_paths}
-        try:
-            for public_name in manifest_bindings:
-                contained_paths.add(
-                    self._resolve_safe_descendant(
-                        output_dir,
-                        output_dir / public_name,
-                        expected_kind="file",
-                        direct=True,
-                    )
-                )
-            queue, _ = validate_review_queue_bindings(queue_path, trusted_root=output_dir)
-            contained_paths.add(
-                self._resolve_safe_descendant(
-                    output_dir,
-                    queue_path,
-                    expected_kind="file",
-                    direct=True,
-                )
-            )
-            queue_bindings = queue.get("bindings")
-            if not isinstance(queue_bindings, dict):
-                return
-            for raw_binding in queue_bindings.values():
-                if not isinstance(raw_binding, dict) or not isinstance(raw_binding.get("path"), str):
-                    return
-                raw_path = Path(raw_binding["path"])
-                candidate = raw_path if raw_path.is_absolute() else queue_path.parent / raw_path
-                contained_paths.add(
-                    self._resolve_safe_descendant(
-                        output_dir,
-                        candidate,
-                        expected_kind="file",
-                    )
-                )
-
-            external_paths: set[Path] = set()
-            registry = self._read_registry()
-            for run in registry.get("runs", []):
-                if not isinstance(run, dict) or not isinstance(run.get("output_dir"), str):
-                    continue
-                try:
-                    run_output = self._resolve_safe_run_output(Path(run["output_dir"]), allow_missing=True)
-                except RuntimeError:
-                    continue
-                if run_output != output_dir or not isinstance(run.get("input_video"), str):
-                    continue
-                raw_input_video = Path(run["input_video"])
-                if self._is_link_or_reparse_point(raw_input_video):
-                    return
-                input_video = raw_input_video.resolve()
-                if input_video.is_file() and not self._is_link_or_reparse_point(input_video):
-                    external_paths.add(input_video)
-                break
-
-            contained_tokens = []
-            for path in sorted(contained_paths, key=lambda item: item.relative_to(output_dir).as_posix()):
-                safe_path = self._resolve_safe_descendant(output_dir, path, expected_kind="file")
-                contained_tokens.append(
-                    (safe_path.relative_to(output_dir).as_posix(), self._artifact_identity_token(safe_path))
-                )
-            external_tokens = [
-                (str(path), self._artifact_identity_token(path)) for path in sorted(external_paths, key=str)
-            ]
-            entry = {
-                "nested_paths": [path.relative_to(output_dir).as_posix() for path in nested_paths],
-                "contained_tokens": contained_tokens,
-                "external_tokens": external_tokens,
-            }
-        except (OSError, RuntimeError, TypeError, ValueError):
-            return
-        with self._broadcast_artifact_cache_lock:
-            self._broadcast_artifact_validation_cache[output_dir] = entry
+        return sorted(paths)
 
     @staticmethod
     def _artifact_identity_token(path: Path) -> tuple[int, int, int, int, int]:

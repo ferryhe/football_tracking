@@ -3093,42 +3093,40 @@ export const submitBroadcastReviewActionsBodyActionsItemCandidateIdMax = 300;
 export const submitBroadcastReviewActionsBodyActionsItemReviewerIdMax = 200;
 
 export const SubmitBroadcastReviewActionsBody = zod.object({
-  actions: zod
-    .array(
-      zod.object({
-        action_id: zod
-          .string()
-          .min(1)
-          .max(submitBroadcastReviewActionsBodyActionsItemActionIdMax),
-        review_item_id: zod
-          .string()
-          .min(1)
-          .max(submitBroadcastReviewActionsBodyActionsItemReviewItemIdMax),
-        candidate_id: zod
-          .string()
-          .min(1)
-          .max(submitBroadcastReviewActionsBodyActionsItemCandidateIdMax),
-        reviewer_id: zod
-          .string()
-          .min(1)
-          .max(submitBroadcastReviewActionsBodyActionsItemReviewerIdMax),
-        created_at: zod.union([zod.string(), zod.null()]).optional(),
-        action: zod.enum(["confirm_ball", "reject_noise", "mark_unknown"]),
-        noise_subtype: zod
-          .union([
-            zod.enum([
-              "player_body_or_shoe",
-              "field_line_or_mark",
-              "sideline_or_spare_ball",
-              "equipment_or_background",
-              "lighting_shadow_or_blur",
-            ]),
-            zod.null(),
-          ])
-          .optional(),
-      }),
-    )
-    .min(1),
+  actions: zod.array(
+    zod.object({
+      action_id: zod
+        .string()
+        .min(1)
+        .max(submitBroadcastReviewActionsBodyActionsItemActionIdMax),
+      review_item_id: zod
+        .string()
+        .min(1)
+        .max(submitBroadcastReviewActionsBodyActionsItemReviewItemIdMax),
+      candidate_id: zod
+        .string()
+        .min(1)
+        .max(submitBroadcastReviewActionsBodyActionsItemCandidateIdMax),
+      reviewer_id: zod
+        .string()
+        .min(1)
+        .max(submitBroadcastReviewActionsBodyActionsItemReviewerIdMax),
+      created_at: zod.union([zod.string(), zod.null()]).optional(),
+      action: zod.enum(["confirm_ball", "reject_noise", "mark_unknown"]),
+      noise_subtype: zod
+        .union([
+          zod.enum([
+            "player_body_or_shoe",
+            "field_line_or_mark",
+            "sideline_or_spare_ball",
+            "equipment_or_background",
+            "lighting_shadow_or_blur",
+          ]),
+          zod.null(),
+        ])
+        .optional(),
+    }),
+  ),
 });
 
 export const submitBroadcastReviewActionsResponseDetailsReviewDecisionsSha256OneRegExp =

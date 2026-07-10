@@ -1,5 +1,11 @@
 import { useState } from "react";
-import { Switch, Route, Router as WouterRouter, Link, useLocation } from "wouter";
+import {
+  Switch,
+  Route,
+  Router as WouterRouter,
+  Link,
+  useLocation,
+} from "wouter";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { Toaster } from "@/components/ui/toaster";
 import { TooltipProvider } from "@/components/ui/tooltip";
@@ -13,6 +19,7 @@ import BaselinePage from "@/pages/baseline";
 import AIAnalysisPage from "@/pages/ai-analysis";
 import DeliverablePage from "@/pages/deliverable";
 import HistoryPage from "@/pages/history";
+import BroadcastPage from "@/pages/broadcast";
 import {
   LayoutDashboard,
   Play,
@@ -24,6 +31,7 @@ import {
   Goal,
   Sun,
   Moon,
+  RadioTower,
 } from "lucide-react";
 
 const queryClient = new QueryClient({
@@ -37,13 +45,22 @@ function NavItems() {
   return [
     { path: "/", label: t.nav.dashboard, icon: LayoutDashboard },
     { path: "/baseline", label: t.nav.baseline, icon: Play },
+    { path: "/broadcast", label: t.nav.broadcast, icon: RadioTower },
     { path: "/ai", label: t.nav.aiAnalysis, icon: SlidersHorizontal },
     { path: "/deliverable", label: t.nav.deliverable, icon: Film },
     { path: "/history", label: t.nav.history, icon: Clock },
   ];
 }
 
-function NavLink({ path, label, icon: Icon }: { path: string; label: string; icon: React.ElementType }) {
+function NavLink({
+  path,
+  label,
+  icon: Icon,
+}: {
+  path: string;
+  label: string;
+  icon: React.ElementType;
+}) {
   const [location] = useLocation();
   const isActive = path === "/" ? location === "/" : location.startsWith(path);
 
@@ -54,7 +71,7 @@ function NavLink({ path, label, icon: Icon }: { path: string; label: string; ico
         "flex items-center gap-2.5 rounded-md px-3 py-2 text-sm font-medium transition-colors w-full",
         isActive
           ? "bg-primary text-primary-foreground"
-          : "text-sidebar-foreground hover:bg-sidebar-accent hover:text-sidebar-accent-foreground"
+          : "text-sidebar-foreground hover:bg-sidebar-accent hover:text-sidebar-accent-foreground",
       )}
       data-testid={`nav-link-${label}`}
     >
@@ -75,7 +92,11 @@ function ThemeToggle() {
       data-testid="button-toggle-theme"
       title={theme === "dark" ? "Switch to light mode" : "Switch to dark mode"}
     >
-      {theme === "dark" ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
+      {theme === "dark" ? (
+        <Sun className="h-4 w-4" />
+      ) : (
+        <Moon className="h-4 w-4" />
+      )}
     </Button>
   );
 }
@@ -193,6 +214,7 @@ function Layout() {
           <Switch>
             <Route path="/" component={DashboardPage} />
             <Route path="/baseline" component={BaselinePage} />
+            <Route path="/broadcast" component={BroadcastPage} />
             <Route path="/ai" component={AIAnalysisPage} />
             <Route path="/deliverable" component={DeliverablePage} />
             <Route path="/history" component={HistoryPage} />

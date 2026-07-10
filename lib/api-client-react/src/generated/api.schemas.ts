@@ -1126,7 +1126,6 @@ export interface BroadcastReviewAction {
 }
 
 export interface BroadcastReviewActionsRequest {
-  /** @minItems 1 */
   actions: BroadcastReviewAction[];
 }
 
