@@ -43,6 +43,11 @@ jobs:
             exit 1
           fi
 
+      - name: Test broadcast workflow state and validation
+        run: |
+          pnpm --filter @workspace/web run test:broadcast-workflow
+          pnpm --filter @workspace/web run test:broadcast-components
+
       - name: Type-check workspace
         run: pnpm run typecheck
 

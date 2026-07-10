@@ -467,13 +467,14 @@ class _Fixture:
         extra_uncertain: int = 0,
         extra_holdouts: int = 0,
         audit_frame_step: int = 300,
+        include_application_candidates: bool = True,
     ) -> None:
         root.mkdir(parents=True, exist_ok=True)
         inputs = _write_inputs(
             root,
             calibration_per_class=368,
             audit_per_class=368,
-            include_application_cases=True,
+            include_application_cases=include_application_candidates,
         )
         source_contract_path = root / "source-contract.json"
         source_contract = json.loads(source_contract_path.read_text(encoding="utf-8"))
@@ -593,30 +594,31 @@ class _Fixture:
                 }
             )
 
-        upsert_application(
-            "a-edge",
-            frame_index=0,
-            bbox=[10.0, 12.0, 18.0, 20.0],
-            confidence=0.7,
-            variant_id="a",
-            probabilities=uncertain_probabilities,
-        )
-        upsert_application(
-            "a-mid",
-            frame_index=180,
-            bbox=[20.0, 22.0, 28.0, 30.0],
-            confidence=0.6,
-            variant_id="a",
-            probabilities=ball_probabilities,
-        )
-        upsert_application(
-            "b-mid",
-            frame_index=150,
-            bbox=[30.0, 32.0, 38.0, 40.0],
-            confidence=0.5,
-            variant_id="b",
-            probabilities=noise_probabilities,
-        )
+        if include_application_candidates:
+            upsert_application(
+                "a-edge",
+                frame_index=0,
+                bbox=[10.0, 12.0, 18.0, 20.0],
+                confidence=0.7,
+                variant_id="a",
+                probabilities=uncertain_probabilities,
+            )
+            upsert_application(
+                "a-mid",
+                frame_index=180,
+                bbox=[20.0, 22.0, 28.0, 30.0],
+                confidence=0.6,
+                variant_id="a",
+                probabilities=ball_probabilities,
+            )
+            upsert_application(
+                "b-mid",
+                frame_index=150,
+                bbox=[30.0, 32.0, 38.0, 40.0],
+                confidence=0.5,
+                variant_id="b",
+                probabilities=noise_probabilities,
+            )
         for index in range(extra_audits):
             candidate_id = f"audit-{index:03d}"
             noise = (index // 2) % 2 == 1
@@ -662,44 +664,47 @@ class _Fixture:
             for source in dataset["sources"]
             if not any(candidate_id in application_ids for candidate_id in source["candidate_ids"])
         ]
-        max_frame = max(source_candidates[candidate_id]["frame_index"] for candidate_id in application_ids)
-        for variant_id in ("a", "b"):
-            candidate_ids = sorted(
-                candidate_id for candidate_id in application_ids if samples[candidate_id]["variant_id"] == variant_id
-            )
-            video = root / f"{variant_id}.mp4"
-            video.write_bytes((variant_id * 31).encode())
-            source = {
-                "path": video.name,
-                "sha256": _sha256(video),
-                "variant_id": variant_id,
-                "width": 640,
-                "height": 360,
-                "frame_count": max(600, max_frame + 300),
-                "group_id": f"group-{variant_id}",
-                "split_group": f"split-{variant_id}",
-                "temporal_group": f"temporal-{variant_id}",
-                "candidate_ids": candidate_ids,
-            }
-            if fps_by_variant[variant_id] is not None:
-                source["fps"] = fps_by_variant[variant_id]
-            dataset["sources"].append(source)
-            for candidate_id in candidate_ids:
-                sample = samples[candidate_id]
-                artifacts = {}
-                for artifact_name, filename in (
-                    ("tight_tensor", "tight.npy"),
-                    ("context_tensor", "context.npy"),
-                    ("review_montage", "review_montage.png"),
-                ):
-                    artifact = root / "evidence" / candidate_id / filename
-                    artifact.parent.mkdir(parents=True, exist_ok=True)
-                    artifact.write_bytes(f"{artifact_name}:{candidate_id}".encode())
-                    artifacts[artifact_name] = {
-                        "path": artifact.relative_to(root).as_posix(),
-                        "sha256": _sha256(artifact),
-                    }
-                sample["artifacts"] = artifacts
+        if application_ids:
+            max_frame = max(source_candidates[candidate_id]["frame_index"] for candidate_id in application_ids)
+            for variant_id in ("a", "b"):
+                candidate_ids = sorted(
+                    candidate_id
+                    for candidate_id in application_ids
+                    if samples[candidate_id]["variant_id"] == variant_id
+                )
+                video = root / f"{variant_id}.mp4"
+                video.write_bytes((variant_id * 31).encode())
+                source = {
+                    "path": video.name,
+                    "sha256": _sha256(video),
+                    "variant_id": variant_id,
+                    "width": 640,
+                    "height": 360,
+                    "frame_count": max(600, max_frame + 300),
+                    "group_id": f"group-{variant_id}",
+                    "split_group": f"split-{variant_id}",
+                    "temporal_group": f"temporal-{variant_id}",
+                    "candidate_ids": candidate_ids,
+                }
+                if fps_by_variant[variant_id] is not None:
+                    source["fps"] = fps_by_variant[variant_id]
+                dataset["sources"].append(source)
+                for candidate_id in candidate_ids:
+                    sample = samples[candidate_id]
+                    artifacts = {}
+                    for artifact_name, filename in (
+                        ("tight_tensor", "tight.npy"),
+                        ("context_tensor", "context.npy"),
+                        ("review_montage", "review_montage.png"),
+                    ):
+                        artifact = root / "evidence" / candidate_id / filename
+                        artifact.parent.mkdir(parents=True, exist_ok=True)
+                        artifact.write_bytes(f"{artifact_name}:{candidate_id}".encode())
+                        artifacts[artifact_name] = {
+                            "path": artifact.relative_to(root).as_posix(),
+                            "sha256": _sha256(artifact),
+                        }
+                    sample["artifacts"] = artifacts
 
         source_contract = build_tracking_contract(candidates=source_contract["candidates"])
         resolved_contract = build_tracking_contract(
@@ -2106,6 +2111,42 @@ class SelectiveReviewArtifactTests(unittest.TestCase):
                     )
                     with self.assertRaisesRegex(SelectiveReviewError, "action coverage.*missing"):
                         _materialize(fixture, queue_path, actions_path, root / f"round-{name}")
+
+    def test_materialization_accepts_exact_empty_actions_for_zero_candidate_queue(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            fixture = _Fixture(
+                root,
+                fps_by_variant={"a": 20.0, "b": 20.0},
+                include_application_candidates=False,
+            )
+            queue = fixture.build_queue(root / "queue")
+            queue_path = root / "queue" / "selective_review_queue.v1.json"
+            self.assertEqual([], queue["items"])
+            self.assertEqual(0, queue["review_item_count"])
+            self.assertEqual(0, queue["candidate_count"])
+            self.assertEqual(0, queue["selection"]["counts"]["eligible"])
+            actions_path = root / "actions-empty-queue.json"
+            _write_json(
+                actions_path,
+                {
+                    "schema_version": "1.0",
+                    "artifact_type": "selective_review_actions",
+                    "actions": [],
+                },
+            )
+
+            report = _materialize(
+                fixture,
+                queue_path,
+                actions_path,
+                root / "round-empty-queue",
+            )
+
+            self.assertEqual(0, report["summary"]["action_count"])
+            self.assertEqual(0, report["summary"]["vote_count"])
+            votes = (root / "round-empty-queue" / "human_adjudication_votes.v1.jsonl").read_text().splitlines()
+            self.assertEqual(1, len(votes))
 
     def test_reject_noise_requires_concrete_subtype_and_keypoints_are_bounded(self) -> None:
         with tempfile.TemporaryDirectory() as raw:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import atexit
 import hashlib
 import json
 import os
@@ -96,6 +97,8 @@ _GENERATION_PATTERN = re.compile(r"[a-z0-9][a-z0-9-]{0,119}\Z")
 _HASH_CHUNK_BYTES = 1024 * 1024
 _MAX_JSON_BYTES = 256 * 1024 * 1024
 _WINDOWS_REPARSE_ATTRIBUTE = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+_FINAL_VALIDATION_TEMP_ROOT = Path(tempfile.mkdtemp(prefix="football-tracking-final-validation-root-"))
+atexit.register(shutil.rmtree, _FINAL_VALIDATION_TEMP_ROOT, ignore_errors=True)
 _GENERATION_VALIDATION_CACHE_LOCK = threading.RLock()
 _VALIDATED_MATERIALIZATION_GENERATIONS: dict[Path, tuple[tuple[str, str], ...]] = {}
 _VALIDATED_CLASSIFIER_GENERATIONS: dict[Path, tuple[tuple[str, str], ...]] = {}
@@ -128,8 +131,8 @@ def preflight_recompute_reviewed_trajectory(run_dir: Path) -> dict[str, Any]:
     if actions.get("artifact_type") != "selective_review_actions":
         raise BroadcastHybridOrchestrationError("review decisions artifact_type is invalid")
     raw_actions = actions.get("actions")
-    if not isinstance(raw_actions, list) or not raw_actions:
-        raise BroadcastHybridOrchestrationError("review decisions must contain at least one action")
+    if not isinstance(raw_actions, list):
+        raise BroadcastHybridOrchestrationError("review decisions actions must be a list")
     if any(isinstance(action, dict) and action.get("action") == "correct_trajectory" for action in raw_actions):
         raise BroadcastHybridOrchestrationError(
             "correct_trajectory is not supported because global_ball_trajectory does not consume trajectory corrections"
@@ -214,8 +217,8 @@ def recompute_reviewed_trajectory(
     if actions.get("artifact_type") != "selective_review_actions":
         raise BroadcastHybridOrchestrationError("review decisions artifact_type is invalid")
     raw_actions = actions.get("actions")
-    if not isinstance(raw_actions, list) or not raw_actions:
-        raise BroadcastHybridOrchestrationError("review decisions must contain at least one action")
+    if not isinstance(raw_actions, list):
+        raise BroadcastHybridOrchestrationError("review decisions actions must be a list")
     if any(isinstance(action, dict) and action.get("action") == "correct_trajectory" for action in raw_actions):
         raise BroadcastHybridOrchestrationError(
             "correct_trajectory is not supported because global_ball_trajectory does not consume trajectory corrections"
@@ -675,7 +678,9 @@ def validate_final_broadcast_artifacts(run_dir: Path) -> dict[str, Any]:
     if set(bindings) != set(PUBLIC_ARTIFACTS):
         raise BroadcastHybridOrchestrationError("final public artifact bindings are incomplete or unexpected")
 
-    staging = Path(tempfile.mkdtemp(prefix=".broadcast-final-validation-", dir=run_dir))
+    # Read-only final validation must not mutate the trusted run directory;
+    # delivery sealing records its directory identity to detect generation ABA.
+    staging = Path(tempfile.mkdtemp(prefix="snapshot-", dir=_FINAL_VALIDATION_TEMP_ROOT))
     try:
         _stream_json_array(materialized_contract, "candidates.item", staging / "ball_candidates.jsonl")
         _stream_json_array(predictions, "predictions.item", staging / "candidate_classifications.jsonl")

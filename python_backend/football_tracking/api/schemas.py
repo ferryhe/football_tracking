@@ -695,7 +695,9 @@ class BroadcastReviewAction(BaseModel):
 
 
 class BroadcastReviewActionsRequest(BaseModel):
-    actions: list[BroadcastReviewAction] = Field(min_length=1)
+    # Empty actions are valid only for an evidence-bound queue with zero
+    # candidates. The service revalidates that exact queue before publishing.
+    actions: list[BroadcastReviewAction]
 
     @model_validator(mode="after")
     def validate_unique_actions(self) -> "BroadcastReviewActionsRequest":
