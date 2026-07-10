@@ -1021,6 +1021,18 @@ export const CheckInputQualityResponse = zod.object({
 /**
  * @summary List Runs
  */
+export const listRunsResponseBroadcastMaxManualReviewWindowsOneMax = 30;
+
+export const listRunsResponseBroadcastPreflightOneCalibrationOneFieldPolygonMin = 3;
+
+export const listRunsResponseBroadcastStatusGenerationOneRegExp = new RegExp(
+  "^[0-9a-f]{64}$",
+);
+export const listRunsResponseBroadcastRequestOneTrajectoryGenerationIdOneRegExp =
+  new RegExp("^trajectory-[0-9a-f]{24}$");
+export const listRunsResponseBroadcastCommitStartedDefault = false;
+export const listRunsResponseBroadcastCancelRequestedDefault = false;
+export const listRunsResponseBroadcastLastOperationOneRecoveredDefault = false;
 export const listRunsResponseAiCandidateLifecycleSchemaVersionDefault = `1.0`;
 export const listRunsResponseAiCandidateLifecycleSummaryStageDefault = `review_only`;
 export const listRunsResponseAiCandidateLifecycleSummaryComparisonStatusDefault = `none`;
@@ -1061,6 +1073,179 @@ export const ListRunsResponseItem = zod.object({
     )
     .optional(),
   stats: zod.record(zod.string(), zod.unknown()).optional(),
+  broadcast: zod
+    .object({
+      status: zod.union([zod.string(), zod.null()]).optional(),
+      quality_profile: zod
+        .union([zod.literal("stable_broadcast"), zod.null()])
+        .optional(),
+      max_manual_review_windows: zod
+        .union([
+          zod
+            .number()
+            .min(1)
+            .max(listRunsResponseBroadcastMaxManualReviewWindowsOneMax),
+          zod.null(),
+        ])
+        .optional(),
+      preflight: zod
+        .union([
+          zod.object({
+            input_video: zod.union([zod.string(), zod.null()]).optional(),
+            source_resolution: zod
+              .union([zod.tuple([zod.number(), zod.number()]), zod.null()])
+              .optional(),
+            source_frame_count: zod
+              .union([zod.number(), zod.null()])
+              .optional(),
+            fps: zod.union([zod.number(), zod.null()]).optional(),
+            source_size_bytes: zod.union([zod.number(), zod.null()]).optional(),
+            source_mtime_ns: zod.union([zod.number(), zod.null()]).optional(),
+            calibration: zod
+              .union([
+                zod
+                  .object({
+                    source_resolution: zod.tuple([zod.number(), zod.number()]),
+                    confirmed_sample_frames: zod.tuple([
+                      zod.number(),
+                      zod.number(),
+                      zod.number(),
+                    ]),
+                    field_polygon: zod
+                      .array(zod.tuple([zod.number(), zod.number()]))
+                      .min(
+                        listRunsResponseBroadcastPreflightOneCalibrationOneFieldPolygonMin,
+                      ),
+                    exclusion_polygons: zod
+                      .array(zod.array(zod.tuple([zod.number(), zod.number()])))
+                      .optional(),
+                  })
+                  .describe(
+                    "Three-frame, per-source calibration required by the hybrid broadcast workflow.",
+                  ),
+                zod.null(),
+              ])
+              .optional(),
+            classifier_status: zod.union([zod.string(), zod.null()]).optional(),
+            selective_policy_status: zod
+              .union([zod.string(), zod.null()])
+              .optional(),
+          }),
+          zod.null(),
+        ])
+        .optional(),
+      blocking_reasons: zod.array(zod.string()).optional(),
+      limitations: zod.array(zod.string()).optional(),
+      status_generation: zod
+        .union([
+          zod
+            .string()
+            .regex(listRunsResponseBroadcastStatusGenerationOneRegExp),
+          zod.null(),
+        ])
+        .optional(),
+      trajectory_generation_id: zod
+        .union([zod.string(), zod.null()])
+        .optional(),
+      camera_generation_id: zod.union([zod.string(), zod.null()]).optional(),
+      render_generation_id: zod.union([zod.string(), zod.null()]).optional(),
+      operation: zod
+        .union([zod.enum(["recompute", "render"]), zod.null()])
+        .optional(),
+      operation_status: zod
+        .union([
+          zod.enum([
+            "queued",
+            "running",
+            "committing",
+            "completed",
+            "failed",
+            "cancelled",
+            "metadata_conflict",
+          ]),
+          zod.null(),
+        ])
+        .optional(),
+      operation_report_status: zod
+        .union([
+          zod.enum(["available", "missing_after_ready_commit", "conflict"]),
+          zod.null(),
+        ])
+        .optional(),
+      parent_run_id: zod.union([zod.string(), zod.null()]).optional(),
+      owner_pid: zod.union([zod.number(), zod.null()]).optional(),
+      owner_instance_id: zod.union([zod.string(), zod.null()]).optional(),
+      request: zod
+        .union([
+          zod.object({
+            trajectory_generation_id: zod
+              .union([
+                zod
+                  .string()
+                  .regex(
+                    listRunsResponseBroadcastRequestOneTrajectoryGenerationIdOneRegExp,
+                  ),
+                zod.null(),
+              ])
+              .optional(),
+            target_width: zod.union([zod.number(), zod.null()]).optional(),
+            target_height: zod.union([zod.number(), zod.null()]).optional(),
+          }),
+          zod.null(),
+        ])
+        .optional(),
+      result: zod
+        .union([
+          zod.object({
+            status: zod.union([zod.string(), zod.null()]).optional(),
+            trajectory_generation_id: zod
+              .union([zod.string(), zod.null()])
+              .optional(),
+            camera_generation_id: zod
+              .union([zod.string(), zod.null()])
+              .optional(),
+            render_generation_id: zod
+              .union([zod.string(), zod.null()])
+              .optional(),
+          }),
+          zod.null(),
+        ])
+        .optional(),
+      commit_started: zod
+        .boolean()
+        .default(listRunsResponseBroadcastCommitStartedDefault),
+      cancel_requested: zod
+        .boolean()
+        .default(listRunsResponseBroadcastCancelRequestedDefault),
+      last_operation: zod
+        .union([
+          zod.object({
+            operation_run_id: zod.string(),
+            operation: zod.enum(["recompute", "render"]),
+            status: zod.enum([
+              "queued",
+              "running",
+              "committing",
+              "completed",
+              "failed",
+              "cancelled",
+            ]),
+            recovered: zod
+              .boolean()
+              .default(
+                listRunsResponseBroadcastLastOperationOneRecoveredDefault,
+              ),
+            error: zod.union([zod.string(), zod.null()]).optional(),
+          }),
+          zod.null(),
+        ])
+        .optional(),
+      metadata_warnings: zod.array(zod.string()).optional(),
+    })
+    .optional()
+    .describe(
+      "Stable public broadcast fields; extra lineage remains forward compatible.",
+    ),
   ai_candidate_lifecycle: zod
     .object({
       schema_version: zod
@@ -1238,6 +1423,11 @@ export const DeleteRunOutputResponse = zod.object({
 /**
  * @summary Create Run
  */
+export const createRunBodyPipelineModeDefault = `standard`;
+export const createRunBodyCalibrationConfirmationOneFieldPolygonMin = 3;
+
+export const createRunBodyMaxManualReviewWindowsOneMax = 30;
+
 export const CreateRunBody = zod.object({
   config_name: zod.union([zod.string(), zod.null()]).optional(),
   input_video: zod.union([zod.string(), zod.null()]).optional(),
@@ -1252,6 +1442,41 @@ export const CreateRunBody = zod.object({
   approved_actions_artifact_name: zod
     .union([zod.string(), zod.null()])
     .optional(),
+  pipeline_mode: zod
+    .enum(["standard", "broadcast_hybrid"])
+    .default(createRunBodyPipelineModeDefault),
+  calibration_confirmation: zod
+    .union([
+      zod
+        .object({
+          source_resolution: zod.tuple([zod.number(), zod.number()]),
+          confirmed_sample_frames: zod.tuple([
+            zod.number(),
+            zod.number(),
+            zod.number(),
+          ]),
+          field_polygon: zod
+            .array(zod.tuple([zod.number(), zod.number()]))
+            .min(createRunBodyCalibrationConfirmationOneFieldPolygonMin),
+          exclusion_polygons: zod
+            .array(zod.array(zod.tuple([zod.number(), zod.number()])))
+            .optional(),
+        })
+        .describe(
+          "Three-frame, per-source calibration required by the hybrid broadcast workflow.",
+        ),
+      zod.null(),
+    ])
+    .optional(),
+  quality_profile: zod
+    .union([zod.literal("stable_broadcast"), zod.null()])
+    .optional(),
+  max_manual_review_windows: zod
+    .union([
+      zod.number().min(1).max(createRunBodyMaxManualReviewWindowsOneMax),
+      zod.null(),
+    ])
+    .optional(),
   notes: zod.union([zod.string(), zod.null()]).optional(),
 });
 
@@ -1261,6 +1486,17 @@ export const CreateRunBody = zod.object({
 export const listAssetGroupsResponseRunCountDefault = 0;
 export const listAssetGroupsResponseConfigCountDefault = 0;
 export const listAssetGroupsResponseOutputCountDefault = 0;
+export const listAssetGroupsResponseRunsItemBroadcastMaxManualReviewWindowsOneMax = 30;
+
+export const listAssetGroupsResponseRunsItemBroadcastPreflightOneCalibrationOneFieldPolygonMin = 3;
+
+export const listAssetGroupsResponseRunsItemBroadcastStatusGenerationOneRegExp =
+  new RegExp("^[0-9a-f]{64}$");
+export const listAssetGroupsResponseRunsItemBroadcastRequestOneTrajectoryGenerationIdOneRegExp =
+  new RegExp("^trajectory-[0-9a-f]{24}$");
+export const listAssetGroupsResponseRunsItemBroadcastCommitStartedDefault = false;
+export const listAssetGroupsResponseRunsItemBroadcastCancelRequestedDefault = false;
+export const listAssetGroupsResponseRunsItemBroadcastLastOperationOneRecoveredDefault = false;
 export const listAssetGroupsResponseRunsItemAiCandidateLifecycleSchemaVersionDefault = `1.0`;
 export const listAssetGroupsResponseRunsItemAiCandidateLifecycleSummaryStageDefault = `review_only`;
 export const listAssetGroupsResponseRunsItemAiCandidateLifecycleSummaryComparisonStatusDefault = `none`;
@@ -1274,6 +1510,17 @@ export const listAssetGroupsResponseRunsItemAiCandidateLifecycleCandidatesItemCo
 export const listAssetGroupsResponseRunsItemAiCandidateLifecycleCandidatesItemPromotionStatusDefault = `not_promoted`;
 export const listAssetGroupsResponseRunsItemAiCandidateLifecycleCandidatesItemResolutionStatusDefault = `none`;
 export const listAssetGroupsResponseRunsItemProgressOnePercentDefault = 0;
+export const listAssetGroupsResponseOutputsItemBroadcastMaxManualReviewWindowsOneMax = 30;
+
+export const listAssetGroupsResponseOutputsItemBroadcastPreflightOneCalibrationOneFieldPolygonMin = 3;
+
+export const listAssetGroupsResponseOutputsItemBroadcastStatusGenerationOneRegExp =
+  new RegExp("^[0-9a-f]{64}$");
+export const listAssetGroupsResponseOutputsItemBroadcastRequestOneTrajectoryGenerationIdOneRegExp =
+  new RegExp("^trajectory-[0-9a-f]{24}$");
+export const listAssetGroupsResponseOutputsItemBroadcastCommitStartedDefault = false;
+export const listAssetGroupsResponseOutputsItemBroadcastCancelRequestedDefault = false;
+export const listAssetGroupsResponseOutputsItemBroadcastLastOperationOneRecoveredDefault = false;
 export const listAssetGroupsResponseOutputsItemAiCandidateLifecycleSchemaVersionDefault = `1.0`;
 export const listAssetGroupsResponseOutputsItemAiCandidateLifecycleSummaryStageDefault = `review_only`;
 export const listAssetGroupsResponseOutputsItemAiCandidateLifecycleSummaryComparisonStatusDefault = `none`;
@@ -1341,6 +1588,215 @@ export const ListAssetGroupsResponseItem = zod.object({
           )
           .optional(),
         stats: zod.record(zod.string(), zod.unknown()).optional(),
+        broadcast: zod
+          .object({
+            status: zod.union([zod.string(), zod.null()]).optional(),
+            quality_profile: zod
+              .union([zod.literal("stable_broadcast"), zod.null()])
+              .optional(),
+            max_manual_review_windows: zod
+              .union([
+                zod
+                  .number()
+                  .min(1)
+                  .max(
+                    listAssetGroupsResponseRunsItemBroadcastMaxManualReviewWindowsOneMax,
+                  ),
+                zod.null(),
+              ])
+              .optional(),
+            preflight: zod
+              .union([
+                zod.object({
+                  input_video: zod.union([zod.string(), zod.null()]).optional(),
+                  source_resolution: zod
+                    .union([
+                      zod.tuple([zod.number(), zod.number()]),
+                      zod.null(),
+                    ])
+                    .optional(),
+                  source_frame_count: zod
+                    .union([zod.number(), zod.null()])
+                    .optional(),
+                  fps: zod.union([zod.number(), zod.null()]).optional(),
+                  source_size_bytes: zod
+                    .union([zod.number(), zod.null()])
+                    .optional(),
+                  source_mtime_ns: zod
+                    .union([zod.number(), zod.null()])
+                    .optional(),
+                  calibration: zod
+                    .union([
+                      zod
+                        .object({
+                          source_resolution: zod.tuple([
+                            zod.number(),
+                            zod.number(),
+                          ]),
+                          confirmed_sample_frames: zod.tuple([
+                            zod.number(),
+                            zod.number(),
+                            zod.number(),
+                          ]),
+                          field_polygon: zod
+                            .array(zod.tuple([zod.number(), zod.number()]))
+                            .min(
+                              listAssetGroupsResponseRunsItemBroadcastPreflightOneCalibrationOneFieldPolygonMin,
+                            ),
+                          exclusion_polygons: zod
+                            .array(
+                              zod.array(
+                                zod.tuple([zod.number(), zod.number()]),
+                              ),
+                            )
+                            .optional(),
+                        })
+                        .describe(
+                          "Three-frame, per-source calibration required by the hybrid broadcast workflow.",
+                        ),
+                      zod.null(),
+                    ])
+                    .optional(),
+                  classifier_status: zod
+                    .union([zod.string(), zod.null()])
+                    .optional(),
+                  selective_policy_status: zod
+                    .union([zod.string(), zod.null()])
+                    .optional(),
+                }),
+                zod.null(),
+              ])
+              .optional(),
+            blocking_reasons: zod.array(zod.string()).optional(),
+            limitations: zod.array(zod.string()).optional(),
+            status_generation: zod
+              .union([
+                zod
+                  .string()
+                  .regex(
+                    listAssetGroupsResponseRunsItemBroadcastStatusGenerationOneRegExp,
+                  ),
+                zod.null(),
+              ])
+              .optional(),
+            trajectory_generation_id: zod
+              .union([zod.string(), zod.null()])
+              .optional(),
+            camera_generation_id: zod
+              .union([zod.string(), zod.null()])
+              .optional(),
+            render_generation_id: zod
+              .union([zod.string(), zod.null()])
+              .optional(),
+            operation: zod
+              .union([zod.enum(["recompute", "render"]), zod.null()])
+              .optional(),
+            operation_status: zod
+              .union([
+                zod.enum([
+                  "queued",
+                  "running",
+                  "committing",
+                  "completed",
+                  "failed",
+                  "cancelled",
+                  "metadata_conflict",
+                ]),
+                zod.null(),
+              ])
+              .optional(),
+            operation_report_status: zod
+              .union([
+                zod.enum([
+                  "available",
+                  "missing_after_ready_commit",
+                  "conflict",
+                ]),
+                zod.null(),
+              ])
+              .optional(),
+            parent_run_id: zod.union([zod.string(), zod.null()]).optional(),
+            owner_pid: zod.union([zod.number(), zod.null()]).optional(),
+            owner_instance_id: zod.union([zod.string(), zod.null()]).optional(),
+            request: zod
+              .union([
+                zod.object({
+                  trajectory_generation_id: zod
+                    .union([
+                      zod
+                        .string()
+                        .regex(
+                          listAssetGroupsResponseRunsItemBroadcastRequestOneTrajectoryGenerationIdOneRegExp,
+                        ),
+                      zod.null(),
+                    ])
+                    .optional(),
+                  target_width: zod
+                    .union([zod.number(), zod.null()])
+                    .optional(),
+                  target_height: zod
+                    .union([zod.number(), zod.null()])
+                    .optional(),
+                }),
+                zod.null(),
+              ])
+              .optional(),
+            result: zod
+              .union([
+                zod.object({
+                  status: zod.union([zod.string(), zod.null()]).optional(),
+                  trajectory_generation_id: zod
+                    .union([zod.string(), zod.null()])
+                    .optional(),
+                  camera_generation_id: zod
+                    .union([zod.string(), zod.null()])
+                    .optional(),
+                  render_generation_id: zod
+                    .union([zod.string(), zod.null()])
+                    .optional(),
+                }),
+                zod.null(),
+              ])
+              .optional(),
+            commit_started: zod
+              .boolean()
+              .default(
+                listAssetGroupsResponseRunsItemBroadcastCommitStartedDefault,
+              ),
+            cancel_requested: zod
+              .boolean()
+              .default(
+                listAssetGroupsResponseRunsItemBroadcastCancelRequestedDefault,
+              ),
+            last_operation: zod
+              .union([
+                zod.object({
+                  operation_run_id: zod.string(),
+                  operation: zod.enum(["recompute", "render"]),
+                  status: zod.enum([
+                    "queued",
+                    "running",
+                    "committing",
+                    "completed",
+                    "failed",
+                    "cancelled",
+                  ]),
+                  recovered: zod
+                    .boolean()
+                    .default(
+                      listAssetGroupsResponseRunsItemBroadcastLastOperationOneRecoveredDefault,
+                    ),
+                  error: zod.union([zod.string(), zod.null()]).optional(),
+                }),
+                zod.null(),
+              ])
+              .optional(),
+            metadata_warnings: zod.array(zod.string()).optional(),
+          })
+          .optional()
+          .describe(
+            "Stable public broadcast fields; extra lineage remains forward compatible.",
+          ),
         ai_candidate_lifecycle: zod
           .object({
             schema_version: zod
@@ -1559,6 +2015,215 @@ export const ListAssetGroupsResponseItem = zod.object({
           )
           .optional(),
         stats: zod.record(zod.string(), zod.unknown()).optional(),
+        broadcast: zod
+          .object({
+            status: zod.union([zod.string(), zod.null()]).optional(),
+            quality_profile: zod
+              .union([zod.literal("stable_broadcast"), zod.null()])
+              .optional(),
+            max_manual_review_windows: zod
+              .union([
+                zod
+                  .number()
+                  .min(1)
+                  .max(
+                    listAssetGroupsResponseOutputsItemBroadcastMaxManualReviewWindowsOneMax,
+                  ),
+                zod.null(),
+              ])
+              .optional(),
+            preflight: zod
+              .union([
+                zod.object({
+                  input_video: zod.union([zod.string(), zod.null()]).optional(),
+                  source_resolution: zod
+                    .union([
+                      zod.tuple([zod.number(), zod.number()]),
+                      zod.null(),
+                    ])
+                    .optional(),
+                  source_frame_count: zod
+                    .union([zod.number(), zod.null()])
+                    .optional(),
+                  fps: zod.union([zod.number(), zod.null()]).optional(),
+                  source_size_bytes: zod
+                    .union([zod.number(), zod.null()])
+                    .optional(),
+                  source_mtime_ns: zod
+                    .union([zod.number(), zod.null()])
+                    .optional(),
+                  calibration: zod
+                    .union([
+                      zod
+                        .object({
+                          source_resolution: zod.tuple([
+                            zod.number(),
+                            zod.number(),
+                          ]),
+                          confirmed_sample_frames: zod.tuple([
+                            zod.number(),
+                            zod.number(),
+                            zod.number(),
+                          ]),
+                          field_polygon: zod
+                            .array(zod.tuple([zod.number(), zod.number()]))
+                            .min(
+                              listAssetGroupsResponseOutputsItemBroadcastPreflightOneCalibrationOneFieldPolygonMin,
+                            ),
+                          exclusion_polygons: zod
+                            .array(
+                              zod.array(
+                                zod.tuple([zod.number(), zod.number()]),
+                              ),
+                            )
+                            .optional(),
+                        })
+                        .describe(
+                          "Three-frame, per-source calibration required by the hybrid broadcast workflow.",
+                        ),
+                      zod.null(),
+                    ])
+                    .optional(),
+                  classifier_status: zod
+                    .union([zod.string(), zod.null()])
+                    .optional(),
+                  selective_policy_status: zod
+                    .union([zod.string(), zod.null()])
+                    .optional(),
+                }),
+                zod.null(),
+              ])
+              .optional(),
+            blocking_reasons: zod.array(zod.string()).optional(),
+            limitations: zod.array(zod.string()).optional(),
+            status_generation: zod
+              .union([
+                zod
+                  .string()
+                  .regex(
+                    listAssetGroupsResponseOutputsItemBroadcastStatusGenerationOneRegExp,
+                  ),
+                zod.null(),
+              ])
+              .optional(),
+            trajectory_generation_id: zod
+              .union([zod.string(), zod.null()])
+              .optional(),
+            camera_generation_id: zod
+              .union([zod.string(), zod.null()])
+              .optional(),
+            render_generation_id: zod
+              .union([zod.string(), zod.null()])
+              .optional(),
+            operation: zod
+              .union([zod.enum(["recompute", "render"]), zod.null()])
+              .optional(),
+            operation_status: zod
+              .union([
+                zod.enum([
+                  "queued",
+                  "running",
+                  "committing",
+                  "completed",
+                  "failed",
+                  "cancelled",
+                  "metadata_conflict",
+                ]),
+                zod.null(),
+              ])
+              .optional(),
+            operation_report_status: zod
+              .union([
+                zod.enum([
+                  "available",
+                  "missing_after_ready_commit",
+                  "conflict",
+                ]),
+                zod.null(),
+              ])
+              .optional(),
+            parent_run_id: zod.union([zod.string(), zod.null()]).optional(),
+            owner_pid: zod.union([zod.number(), zod.null()]).optional(),
+            owner_instance_id: zod.union([zod.string(), zod.null()]).optional(),
+            request: zod
+              .union([
+                zod.object({
+                  trajectory_generation_id: zod
+                    .union([
+                      zod
+                        .string()
+                        .regex(
+                          listAssetGroupsResponseOutputsItemBroadcastRequestOneTrajectoryGenerationIdOneRegExp,
+                        ),
+                      zod.null(),
+                    ])
+                    .optional(),
+                  target_width: zod
+                    .union([zod.number(), zod.null()])
+                    .optional(),
+                  target_height: zod
+                    .union([zod.number(), zod.null()])
+                    .optional(),
+                }),
+                zod.null(),
+              ])
+              .optional(),
+            result: zod
+              .union([
+                zod.object({
+                  status: zod.union([zod.string(), zod.null()]).optional(),
+                  trajectory_generation_id: zod
+                    .union([zod.string(), zod.null()])
+                    .optional(),
+                  camera_generation_id: zod
+                    .union([zod.string(), zod.null()])
+                    .optional(),
+                  render_generation_id: zod
+                    .union([zod.string(), zod.null()])
+                    .optional(),
+                }),
+                zod.null(),
+              ])
+              .optional(),
+            commit_started: zod
+              .boolean()
+              .default(
+                listAssetGroupsResponseOutputsItemBroadcastCommitStartedDefault,
+              ),
+            cancel_requested: zod
+              .boolean()
+              .default(
+                listAssetGroupsResponseOutputsItemBroadcastCancelRequestedDefault,
+              ),
+            last_operation: zod
+              .union([
+                zod.object({
+                  operation_run_id: zod.string(),
+                  operation: zod.enum(["recompute", "render"]),
+                  status: zod.enum([
+                    "queued",
+                    "running",
+                    "committing",
+                    "completed",
+                    "failed",
+                    "cancelled",
+                  ]),
+                  recovered: zod
+                    .boolean()
+                    .default(
+                      listAssetGroupsResponseOutputsItemBroadcastLastOperationOneRecoveredDefault,
+                    ),
+                  error: zod.union([zod.string(), zod.null()]).optional(),
+                }),
+                zod.null(),
+              ])
+              .optional(),
+            metadata_warnings: zod.array(zod.string()).optional(),
+          })
+          .optional()
+          .describe(
+            "Stable public broadcast fields; extra lineage remains forward compatible.",
+          ),
         ai_candidate_lifecycle: zod
           .object({
             schema_version: zod
@@ -1739,6 +2404,18 @@ export const GetRunParams = zod.object({
   run_id: zod.coerce.string(),
 });
 
+export const getRunResponseBroadcastMaxManualReviewWindowsOneMax = 30;
+
+export const getRunResponseBroadcastPreflightOneCalibrationOneFieldPolygonMin = 3;
+
+export const getRunResponseBroadcastStatusGenerationOneRegExp = new RegExp(
+  "^[0-9a-f]{64}$",
+);
+export const getRunResponseBroadcastRequestOneTrajectoryGenerationIdOneRegExp =
+  new RegExp("^trajectory-[0-9a-f]{24}$");
+export const getRunResponseBroadcastCommitStartedDefault = false;
+export const getRunResponseBroadcastCancelRequestedDefault = false;
+export const getRunResponseBroadcastLastOperationOneRecoveredDefault = false;
 export const getRunResponseAiCandidateLifecycleSchemaVersionDefault = `1.0`;
 export const getRunResponseAiCandidateLifecycleSummaryStageDefault = `review_only`;
 export const getRunResponseAiCandidateLifecycleSummaryComparisonStatusDefault = `none`;
@@ -1779,6 +2456,175 @@ export const GetRunResponse = zod.object({
     )
     .optional(),
   stats: zod.record(zod.string(), zod.unknown()).optional(),
+  broadcast: zod
+    .object({
+      status: zod.union([zod.string(), zod.null()]).optional(),
+      quality_profile: zod
+        .union([zod.literal("stable_broadcast"), zod.null()])
+        .optional(),
+      max_manual_review_windows: zod
+        .union([
+          zod
+            .number()
+            .min(1)
+            .max(getRunResponseBroadcastMaxManualReviewWindowsOneMax),
+          zod.null(),
+        ])
+        .optional(),
+      preflight: zod
+        .union([
+          zod.object({
+            input_video: zod.union([zod.string(), zod.null()]).optional(),
+            source_resolution: zod
+              .union([zod.tuple([zod.number(), zod.number()]), zod.null()])
+              .optional(),
+            source_frame_count: zod
+              .union([zod.number(), zod.null()])
+              .optional(),
+            fps: zod.union([zod.number(), zod.null()]).optional(),
+            source_size_bytes: zod.union([zod.number(), zod.null()]).optional(),
+            source_mtime_ns: zod.union([zod.number(), zod.null()]).optional(),
+            calibration: zod
+              .union([
+                zod
+                  .object({
+                    source_resolution: zod.tuple([zod.number(), zod.number()]),
+                    confirmed_sample_frames: zod.tuple([
+                      zod.number(),
+                      zod.number(),
+                      zod.number(),
+                    ]),
+                    field_polygon: zod
+                      .array(zod.tuple([zod.number(), zod.number()]))
+                      .min(
+                        getRunResponseBroadcastPreflightOneCalibrationOneFieldPolygonMin,
+                      ),
+                    exclusion_polygons: zod
+                      .array(zod.array(zod.tuple([zod.number(), zod.number()])))
+                      .optional(),
+                  })
+                  .describe(
+                    "Three-frame, per-source calibration required by the hybrid broadcast workflow.",
+                  ),
+                zod.null(),
+              ])
+              .optional(),
+            classifier_status: zod.union([zod.string(), zod.null()]).optional(),
+            selective_policy_status: zod
+              .union([zod.string(), zod.null()])
+              .optional(),
+          }),
+          zod.null(),
+        ])
+        .optional(),
+      blocking_reasons: zod.array(zod.string()).optional(),
+      limitations: zod.array(zod.string()).optional(),
+      status_generation: zod
+        .union([
+          zod.string().regex(getRunResponseBroadcastStatusGenerationOneRegExp),
+          zod.null(),
+        ])
+        .optional(),
+      trajectory_generation_id: zod
+        .union([zod.string(), zod.null()])
+        .optional(),
+      camera_generation_id: zod.union([zod.string(), zod.null()]).optional(),
+      render_generation_id: zod.union([zod.string(), zod.null()]).optional(),
+      operation: zod
+        .union([zod.enum(["recompute", "render"]), zod.null()])
+        .optional(),
+      operation_status: zod
+        .union([
+          zod.enum([
+            "queued",
+            "running",
+            "committing",
+            "completed",
+            "failed",
+            "cancelled",
+            "metadata_conflict",
+          ]),
+          zod.null(),
+        ])
+        .optional(),
+      operation_report_status: zod
+        .union([
+          zod.enum(["available", "missing_after_ready_commit", "conflict"]),
+          zod.null(),
+        ])
+        .optional(),
+      parent_run_id: zod.union([zod.string(), zod.null()]).optional(),
+      owner_pid: zod.union([zod.number(), zod.null()]).optional(),
+      owner_instance_id: zod.union([zod.string(), zod.null()]).optional(),
+      request: zod
+        .union([
+          zod.object({
+            trajectory_generation_id: zod
+              .union([
+                zod
+                  .string()
+                  .regex(
+                    getRunResponseBroadcastRequestOneTrajectoryGenerationIdOneRegExp,
+                  ),
+                zod.null(),
+              ])
+              .optional(),
+            target_width: zod.union([zod.number(), zod.null()]).optional(),
+            target_height: zod.union([zod.number(), zod.null()]).optional(),
+          }),
+          zod.null(),
+        ])
+        .optional(),
+      result: zod
+        .union([
+          zod.object({
+            status: zod.union([zod.string(), zod.null()]).optional(),
+            trajectory_generation_id: zod
+              .union([zod.string(), zod.null()])
+              .optional(),
+            camera_generation_id: zod
+              .union([zod.string(), zod.null()])
+              .optional(),
+            render_generation_id: zod
+              .union([zod.string(), zod.null()])
+              .optional(),
+          }),
+          zod.null(),
+        ])
+        .optional(),
+      commit_started: zod
+        .boolean()
+        .default(getRunResponseBroadcastCommitStartedDefault),
+      cancel_requested: zod
+        .boolean()
+        .default(getRunResponseBroadcastCancelRequestedDefault),
+      last_operation: zod
+        .union([
+          zod.object({
+            operation_run_id: zod.string(),
+            operation: zod.enum(["recompute", "render"]),
+            status: zod.enum([
+              "queued",
+              "running",
+              "committing",
+              "completed",
+              "failed",
+              "cancelled",
+            ]),
+            recovered: zod
+              .boolean()
+              .default(getRunResponseBroadcastLastOperationOneRecoveredDefault),
+            error: zod.union([zod.string(), zod.null()]).optional(),
+          }),
+          zod.null(),
+        ])
+        .optional(),
+      metadata_warnings: zod.array(zod.string()).optional(),
+    })
+    .optional()
+    .describe(
+      "Stable public broadcast fields; extra lineage remains forward compatible.",
+    ),
   ai_candidate_lifecycle: zod
     .object({
       schema_version: zod
@@ -2198,6 +3044,330 @@ export const GetBallAuditReportResponse = zod.object({
 });
 
 /**
+ * @summary Render Broadcast Hybrid
+ */
+export const RenderBroadcastHybridParams = zod.object({
+  run_id: zod.coerce.string(),
+});
+
+export const renderBroadcastHybridBodyTrajectoryGenerationIdRegExp = new RegExp(
+  "^trajectory-[0-9a-f]{24}$",
+);
+export const renderBroadcastHybridBodyTargetWidthDefault = 1920;
+export const renderBroadcastHybridBodyTargetWidthMin = 320;
+export const renderBroadcastHybridBodyTargetWidthMax = 7680;
+
+export const renderBroadcastHybridBodyTargetHeightDefault = 1080;
+export const renderBroadcastHybridBodyTargetHeightMin = 180;
+export const renderBroadcastHybridBodyTargetHeightMax = 4320;
+
+export const RenderBroadcastHybridBody = zod.object({
+  trajectory_generation_id: zod
+    .string()
+    .regex(renderBroadcastHybridBodyTrajectoryGenerationIdRegExp),
+  target_width: zod
+    .number()
+    .min(renderBroadcastHybridBodyTargetWidthMin)
+    .max(renderBroadcastHybridBodyTargetWidthMax)
+    .default(renderBroadcastHybridBodyTargetWidthDefault),
+  target_height: zod
+    .number()
+    .min(renderBroadcastHybridBodyTargetHeightMin)
+    .max(renderBroadcastHybridBodyTargetHeightMax)
+    .default(renderBroadcastHybridBodyTargetHeightDefault),
+});
+
+/**
+ * @summary Submit Broadcast Review Actions
+ */
+export const SubmitBroadcastReviewActionsParams = zod.object({
+  run_id: zod.coerce.string(),
+});
+
+export const submitBroadcastReviewActionsBodyActionsItemActionIdMax = 200;
+
+export const submitBroadcastReviewActionsBodyActionsItemReviewItemIdMax = 200;
+
+export const submitBroadcastReviewActionsBodyActionsItemCandidateIdMax = 300;
+
+export const submitBroadcastReviewActionsBodyActionsItemReviewerIdMax = 200;
+
+export const SubmitBroadcastReviewActionsBody = zod.object({
+  actions: zod
+    .array(
+      zod.object({
+        action_id: zod
+          .string()
+          .min(1)
+          .max(submitBroadcastReviewActionsBodyActionsItemActionIdMax),
+        review_item_id: zod
+          .string()
+          .min(1)
+          .max(submitBroadcastReviewActionsBodyActionsItemReviewItemIdMax),
+        candidate_id: zod
+          .string()
+          .min(1)
+          .max(submitBroadcastReviewActionsBodyActionsItemCandidateIdMax),
+        reviewer_id: zod
+          .string()
+          .min(1)
+          .max(submitBroadcastReviewActionsBodyActionsItemReviewerIdMax),
+        created_at: zod.union([zod.string(), zod.null()]).optional(),
+        action: zod.enum(["confirm_ball", "reject_noise", "mark_unknown"]),
+        noise_subtype: zod
+          .union([
+            zod.enum([
+              "player_body_or_shoe",
+              "field_line_or_mark",
+              "sideline_or_spare_ball",
+              "equipment_or_background",
+              "lighting_shadow_or_blur",
+            ]),
+            zod.null(),
+          ])
+          .optional(),
+      }),
+    )
+    .min(1),
+});
+
+export const submitBroadcastReviewActionsResponseDetailsReviewDecisionsSha256OneRegExp =
+  new RegExp("^[0-9a-f]{64}$");
+
+export const SubmitBroadcastReviewActionsResponse = zod.object({
+  run_id: zod.string(),
+  parent_run_id: zod.union([zod.string(), zod.null()]).optional(),
+  status: zod.enum(["ready", "queued", "completed", "needs_review"]),
+  reason: zod.union([zod.string(), zod.null()]).optional(),
+  artifact: zod.union([zod.string(), zod.null()]).optional(),
+  generation_id: zod.union([zod.string(), zod.null()]).optional(),
+  details: zod
+    .object({
+      review_decisions_sha256: zod
+        .union([
+          zod
+            .string()
+            .regex(
+              submitBroadcastReviewActionsResponseDetailsReviewDecisionsSha256OneRegExp,
+            ),
+          zod.null(),
+        ])
+        .optional(),
+      message: zod.union([zod.string(), zod.null()]).optional(),
+    })
+    .optional(),
+});
+
+/**
+ * @summary Get Broadcast Review Windows
+ */
+export const GetBroadcastReviewWindowsParams = zod.object({
+  run_id: zod.coerce.string(),
+});
+
+export const getBroadcastReviewWindowsResponseReviewItemCountDefault = 0;
+export const getBroadcastReviewWindowsResponseItemsItemStartFrameMin = 0;
+
+export const getBroadcastReviewWindowsResponseItemsItemEndFrameMin = 0;
+
+export const getBroadcastReviewWindowsResponseItemsItemDurationSecondsMin = 0;
+
+export const getBroadcastReviewWindowsResponseItemsItemPriorityMin = 0;
+
+export const getBroadcastReviewWindowsResponseItemsItemCandidatesItemCandidateFingerprintRegExp =
+  new RegExp("^[0-9a-f]{64}$");
+export const getBroadcastReviewWindowsResponseItemsItemCandidatesItemFrameIndexMin = 0;
+
+export const getBroadcastReviewWindowsResponseItemsItemCandidatesItemDetectorConfidenceMin = 0;
+export const getBroadcastReviewWindowsResponseItemsItemCandidatesItemDetectorConfidenceMax = 1;
+
+export const getBroadcastReviewWindowsResponseItemsItemCandidatesItemPredictionConfidenceMin = 0;
+export const getBroadcastReviewWindowsResponseItemsItemCandidatesItemPredictionConfidenceMax = 1;
+
+export const getBroadcastReviewWindowsResponseItemsItemCandidatesItemEvidenceSha256RegExp =
+  new RegExp("^[0-9a-f]{64}$");
+export const getBroadcastReviewWindowsResponseItemsItemCandidatesItemEvidenceDatasetVersionRegExp =
+  new RegExp("^[0-9a-f]{64}$");
+export const getBroadcastReviewWindowsResponseItemsItemCandidatesItemEvidenceArtifactsTightTensorSha256RegExp =
+  new RegExp("^[0-9a-f]{64}$");
+export const getBroadcastReviewWindowsResponseItemsItemCandidatesItemEvidenceArtifactsTightTensorSizeBytesMin = 0;
+
+export const getBroadcastReviewWindowsResponseItemsItemCandidatesItemEvidenceArtifactsContextTensorSha256RegExp =
+  new RegExp("^[0-9a-f]{64}$");
+export const getBroadcastReviewWindowsResponseItemsItemCandidatesItemEvidenceArtifactsContextTensorSizeBytesMin = 0;
+
+export const getBroadcastReviewWindowsResponseItemsItemCandidatesItemEvidenceArtifactsReviewMontageSha256RegExp =
+  new RegExp("^[0-9a-f]{64}$");
+export const getBroadcastReviewWindowsResponseItemsItemCandidatesItemEvidenceArtifactsReviewMontageSizeBytesMin = 0;
+
+export const GetBroadcastReviewWindowsResponse = zod.object({
+  run_id: zod.string(),
+  status: zod.enum(["ready", "needs_review"]),
+  reason: zod.union([zod.string(), zod.null()]).optional(),
+  queue_sha256: zod.union([zod.string(), zod.null()]).optional(),
+  review_item_count: zod
+    .number()
+    .default(getBroadcastReviewWindowsResponseReviewItemCountDefault),
+  items: zod
+    .array(
+      zod.object({
+        review_item_id: zod.string(),
+        variant_id: zod.string(),
+        start_frame: zod
+          .number()
+          .min(getBroadcastReviewWindowsResponseItemsItemStartFrameMin),
+        end_frame: zod
+          .number()
+          .min(getBroadcastReviewWindowsResponseItemsItemEndFrameMin),
+        duration_seconds: zod
+          .number()
+          .min(getBroadcastReviewWindowsResponseItemsItemDurationSecondsMin),
+        compliance: zod.literal("compliant"),
+        priority: zod
+          .number()
+          .min(getBroadcastReviewWindowsResponseItemsItemPriorityMin),
+        candidates: zod
+          .array(
+            zod.object({
+              candidate_id: zod.string(),
+              candidate_fingerprint: zod
+                .string()
+                .regex(
+                  getBroadcastReviewWindowsResponseItemsItemCandidatesItemCandidateFingerprintRegExp,
+                ),
+              variant_id: zod.string(),
+              frame_index: zod
+                .number()
+                .min(
+                  getBroadcastReviewWindowsResponseItemsItemCandidatesItemFrameIndexMin,
+                ),
+              bbox: zod.tuple([
+                zod.number(),
+                zod.number(),
+                zod.number(),
+                zod.number(),
+              ]),
+              detector_source: zod.string(),
+              detector_confidence: zod
+                .number()
+                .min(
+                  getBroadcastReviewWindowsResponseItemsItemCandidatesItemDetectorConfidenceMin,
+                )
+                .max(
+                  getBroadcastReviewWindowsResponseItemsItemCandidatesItemDetectorConfidenceMax,
+                ),
+              predicted_label: zod.string(),
+              prediction_confidence: zod
+                .number()
+                .min(
+                  getBroadcastReviewWindowsResponseItemsItemCandidatesItemPredictionConfidenceMin,
+                )
+                .max(
+                  getBroadcastReviewWindowsResponseItemsItemCandidatesItemPredictionConfidenceMax,
+                ),
+              selective_decision: zod.enum(["accept", "reject", "abstain"]),
+              decision_reasons: zod.array(zod.string()).optional(),
+              review_kind: zod.string(),
+              evidence: zod.object({
+                sample_id: zod.string(),
+                sha256: zod
+                  .string()
+                  .regex(
+                    getBroadcastReviewWindowsResponseItemsItemCandidatesItemEvidenceSha256RegExp,
+                  ),
+                dataset_version: zod
+                  .string()
+                  .regex(
+                    getBroadcastReviewWindowsResponseItemsItemCandidatesItemEvidenceDatasetVersionRegExp,
+                  ),
+                artifacts: zod.object({
+                  tight_tensor: zod.object({
+                    path: zod.string(),
+                    sha256: zod
+                      .string()
+                      .regex(
+                        getBroadcastReviewWindowsResponseItemsItemCandidatesItemEvidenceArtifactsTightTensorSha256RegExp,
+                      ),
+                    size_bytes: zod
+                      .number()
+                      .min(
+                        getBroadcastReviewWindowsResponseItemsItemCandidatesItemEvidenceArtifactsTightTensorSizeBytesMin,
+                      ),
+                    shape: zod
+                      .union([zod.array(zod.number()), zod.null()])
+                      .optional(),
+                    dtype: zod.union([zod.string(), zod.null()]).optional(),
+                    color_space: zod
+                      .union([zod.string(), zod.null()])
+                      .optional(),
+                  }),
+                  context_tensor: zod.object({
+                    path: zod.string(),
+                    sha256: zod
+                      .string()
+                      .regex(
+                        getBroadcastReviewWindowsResponseItemsItemCandidatesItemEvidenceArtifactsContextTensorSha256RegExp,
+                      ),
+                    size_bytes: zod
+                      .number()
+                      .min(
+                        getBroadcastReviewWindowsResponseItemsItemCandidatesItemEvidenceArtifactsContextTensorSizeBytesMin,
+                      ),
+                    shape: zod
+                      .union([zod.array(zod.number()), zod.null()])
+                      .optional(),
+                    dtype: zod.union([zod.string(), zod.null()]).optional(),
+                    color_space: zod
+                      .union([zod.string(), zod.null()])
+                      .optional(),
+                  }),
+                  review_montage: zod.object({
+                    path: zod.string(),
+                    sha256: zod
+                      .string()
+                      .regex(
+                        getBroadcastReviewWindowsResponseItemsItemCandidatesItemEvidenceArtifactsReviewMontageSha256RegExp,
+                      ),
+                    size_bytes: zod
+                      .number()
+                      .min(
+                        getBroadcastReviewWindowsResponseItemsItemCandidatesItemEvidenceArtifactsReviewMontageSizeBytesMin,
+                      ),
+                    shape: zod
+                      .union([zod.array(zod.number()), zod.null()])
+                      .optional(),
+                    dtype: zod.union([zod.string(), zod.null()]).optional(),
+                    color_space: zod
+                      .union([zod.string(), zod.null()])
+                      .optional(),
+                  }),
+                }),
+              }),
+            }),
+          )
+          .optional(),
+      }),
+    )
+    .optional(),
+});
+
+/**
+ * @summary Recompute Broadcast Trajectory
+ */
+export const RecomputeBroadcastTrajectoryParams = zod.object({
+  run_id: zod.coerce.string(),
+});
+
+export const recomputeBroadcastTrajectoryBodyReviewDecisionsSha256RegExp =
+  new RegExp("^[0-9a-f]{64}$");
+
+export const RecomputeBroadcastTrajectoryBody = zod.object({
+  review_decisions_sha256: zod
+    .string()
+    .regex(recomputeBroadcastTrajectoryBodyReviewDecisionsSha256RegExp),
+});
+
+/**
  * @summary Get Camera Path
  */
 export const GetCameraPathParams = zod.object({
@@ -2237,6 +3407,18 @@ export const CancelRunParams = zod.object({
   run_id: zod.coerce.string(),
 });
 
+export const cancelRunResponseBroadcastMaxManualReviewWindowsOneMax = 30;
+
+export const cancelRunResponseBroadcastPreflightOneCalibrationOneFieldPolygonMin = 3;
+
+export const cancelRunResponseBroadcastStatusGenerationOneRegExp = new RegExp(
+  "^[0-9a-f]{64}$",
+);
+export const cancelRunResponseBroadcastRequestOneTrajectoryGenerationIdOneRegExp =
+  new RegExp("^trajectory-[0-9a-f]{24}$");
+export const cancelRunResponseBroadcastCommitStartedDefault = false;
+export const cancelRunResponseBroadcastCancelRequestedDefault = false;
+export const cancelRunResponseBroadcastLastOperationOneRecoveredDefault = false;
 export const cancelRunResponseAiCandidateLifecycleSchemaVersionDefault = `1.0`;
 export const cancelRunResponseAiCandidateLifecycleSummaryStageDefault = `review_only`;
 export const cancelRunResponseAiCandidateLifecycleSummaryComparisonStatusDefault = `none`;
@@ -2277,6 +3459,179 @@ export const CancelRunResponse = zod.object({
     )
     .optional(),
   stats: zod.record(zod.string(), zod.unknown()).optional(),
+  broadcast: zod
+    .object({
+      status: zod.union([zod.string(), zod.null()]).optional(),
+      quality_profile: zod
+        .union([zod.literal("stable_broadcast"), zod.null()])
+        .optional(),
+      max_manual_review_windows: zod
+        .union([
+          zod
+            .number()
+            .min(1)
+            .max(cancelRunResponseBroadcastMaxManualReviewWindowsOneMax),
+          zod.null(),
+        ])
+        .optional(),
+      preflight: zod
+        .union([
+          zod.object({
+            input_video: zod.union([zod.string(), zod.null()]).optional(),
+            source_resolution: zod
+              .union([zod.tuple([zod.number(), zod.number()]), zod.null()])
+              .optional(),
+            source_frame_count: zod
+              .union([zod.number(), zod.null()])
+              .optional(),
+            fps: zod.union([zod.number(), zod.null()]).optional(),
+            source_size_bytes: zod.union([zod.number(), zod.null()]).optional(),
+            source_mtime_ns: zod.union([zod.number(), zod.null()]).optional(),
+            calibration: zod
+              .union([
+                zod
+                  .object({
+                    source_resolution: zod.tuple([zod.number(), zod.number()]),
+                    confirmed_sample_frames: zod.tuple([
+                      zod.number(),
+                      zod.number(),
+                      zod.number(),
+                    ]),
+                    field_polygon: zod
+                      .array(zod.tuple([zod.number(), zod.number()]))
+                      .min(
+                        cancelRunResponseBroadcastPreflightOneCalibrationOneFieldPolygonMin,
+                      ),
+                    exclusion_polygons: zod
+                      .array(zod.array(zod.tuple([zod.number(), zod.number()])))
+                      .optional(),
+                  })
+                  .describe(
+                    "Three-frame, per-source calibration required by the hybrid broadcast workflow.",
+                  ),
+                zod.null(),
+              ])
+              .optional(),
+            classifier_status: zod.union([zod.string(), zod.null()]).optional(),
+            selective_policy_status: zod
+              .union([zod.string(), zod.null()])
+              .optional(),
+          }),
+          zod.null(),
+        ])
+        .optional(),
+      blocking_reasons: zod.array(zod.string()).optional(),
+      limitations: zod.array(zod.string()).optional(),
+      status_generation: zod
+        .union([
+          zod
+            .string()
+            .regex(cancelRunResponseBroadcastStatusGenerationOneRegExp),
+          zod.null(),
+        ])
+        .optional(),
+      trajectory_generation_id: zod
+        .union([zod.string(), zod.null()])
+        .optional(),
+      camera_generation_id: zod.union([zod.string(), zod.null()]).optional(),
+      render_generation_id: zod.union([zod.string(), zod.null()]).optional(),
+      operation: zod
+        .union([zod.enum(["recompute", "render"]), zod.null()])
+        .optional(),
+      operation_status: zod
+        .union([
+          zod.enum([
+            "queued",
+            "running",
+            "committing",
+            "completed",
+            "failed",
+            "cancelled",
+            "metadata_conflict",
+          ]),
+          zod.null(),
+        ])
+        .optional(),
+      operation_report_status: zod
+        .union([
+          zod.enum(["available", "missing_after_ready_commit", "conflict"]),
+          zod.null(),
+        ])
+        .optional(),
+      parent_run_id: zod.union([zod.string(), zod.null()]).optional(),
+      owner_pid: zod.union([zod.number(), zod.null()]).optional(),
+      owner_instance_id: zod.union([zod.string(), zod.null()]).optional(),
+      request: zod
+        .union([
+          zod.object({
+            trajectory_generation_id: zod
+              .union([
+                zod
+                  .string()
+                  .regex(
+                    cancelRunResponseBroadcastRequestOneTrajectoryGenerationIdOneRegExp,
+                  ),
+                zod.null(),
+              ])
+              .optional(),
+            target_width: zod.union([zod.number(), zod.null()]).optional(),
+            target_height: zod.union([zod.number(), zod.null()]).optional(),
+          }),
+          zod.null(),
+        ])
+        .optional(),
+      result: zod
+        .union([
+          zod.object({
+            status: zod.union([zod.string(), zod.null()]).optional(),
+            trajectory_generation_id: zod
+              .union([zod.string(), zod.null()])
+              .optional(),
+            camera_generation_id: zod
+              .union([zod.string(), zod.null()])
+              .optional(),
+            render_generation_id: zod
+              .union([zod.string(), zod.null()])
+              .optional(),
+          }),
+          zod.null(),
+        ])
+        .optional(),
+      commit_started: zod
+        .boolean()
+        .default(cancelRunResponseBroadcastCommitStartedDefault),
+      cancel_requested: zod
+        .boolean()
+        .default(cancelRunResponseBroadcastCancelRequestedDefault),
+      last_operation: zod
+        .union([
+          zod.object({
+            operation_run_id: zod.string(),
+            operation: zod.enum(["recompute", "render"]),
+            status: zod.enum([
+              "queued",
+              "running",
+              "committing",
+              "completed",
+              "failed",
+              "cancelled",
+            ]),
+            recovered: zod
+              .boolean()
+              .default(
+                cancelRunResponseBroadcastLastOperationOneRecoveredDefault,
+              ),
+            error: zod.union([zod.string(), zod.null()]).optional(),
+          }),
+          zod.null(),
+        ])
+        .optional(),
+      metadata_warnings: zod.array(zod.string()).optional(),
+    })
+    .optional()
+    .describe(
+      "Stable public broadcast fields; extra lineage remains forward compatible.",
+    ),
   ai_candidate_lifecycle: zod
     .object({
       schema_version: zod

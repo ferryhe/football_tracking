@@ -6,6 +6,7 @@
  */
 import type { AICandidateLifecycleReport } from "./aICandidateLifecycleReport";
 import type { ArtifactSummary } from "./artifactSummary";
+import type { BroadcastRunState } from "./broadcastRunState";
 import type { RunProgress } from "./runProgress";
 import type { RunRecordModulesEnabled } from "./runRecordModulesEnabled";
 import type { RunRecordStats } from "./runRecordStats";
@@ -26,6 +27,7 @@ export interface RunRecord {
   modules_enabled?: RunRecordModulesEnabled;
   artifacts?: ArtifactSummary[];
   stats?: RunRecordStats;
+  broadcast?: BroadcastRunState;
   ai_candidate_lifecycle?: AICandidateLifecycleReport;
   progress?: RunProgress | null;
   notes?: string | null;

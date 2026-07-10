@@ -32,6 +32,11 @@ import type {
   ArtifactSummary,
   AssetGroup,
   BallAuditReport,
+  BroadcastOperationResponse,
+  BroadcastRenderRequest,
+  BroadcastReviewActionsRequest,
+  BroadcastReviewWindowsResponse,
+  BroadcastTrajectoryRecomputeRequest,
   CameraPathResponse,
   ConfigDetail,
   ConfigListItem,
@@ -2286,6 +2291,375 @@ export function useGetBallAuditReport<
 
   return { ...query, queryKey: queryOptions.queryKey };
 }
+
+/**
+ * @summary Render Broadcast Hybrid
+ */
+export const getRenderBroadcastHybridUrl = (runId: string) => {
+  return `/api/runs/${encodePathSegmented(runId)}/broadcast/render`;
+};
+
+export const renderBroadcastHybrid = async (
+  runId: string,
+  broadcastRenderRequest: BroadcastRenderRequest,
+  options?: RequestInit,
+): Promise<BroadcastOperationResponse> => {
+  return customFetch<BroadcastOperationResponse>(
+    getRenderBroadcastHybridUrl(runId),
+    {
+      ...options,
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...options?.headers },
+      body: JSON.stringify(broadcastRenderRequest),
+    },
+  );
+};
+
+export const getRenderBroadcastHybridMutationOptions = <
+  TError = ErrorType<void | HTTPValidationError>,
+  TContext = unknown,
+>(options?: {
+  mutation?: UseMutationOptions<
+    Awaited<ReturnType<typeof renderBroadcastHybrid>>,
+    TError,
+    { runId: string; data: BodyType<BroadcastRenderRequest> },
+    TContext
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}): UseMutationOptions<
+  Awaited<ReturnType<typeof renderBroadcastHybrid>>,
+  TError,
+  { runId: string; data: BodyType<BroadcastRenderRequest> },
+  TContext
+> => {
+  const mutationKey = ["renderBroadcastHybrid"];
+  const { mutation: mutationOptions, request: requestOptions } = options
+    ? options.mutation &&
+      "mutationKey" in options.mutation &&
+      options.mutation.mutationKey
+      ? options
+      : { ...options, mutation: { ...options.mutation, mutationKey } }
+    : { mutation: { mutationKey }, request: undefined };
+
+  const mutationFn: MutationFunction<
+    Awaited<ReturnType<typeof renderBroadcastHybrid>>,
+    { runId: string; data: BodyType<BroadcastRenderRequest> }
+  > = (props) => {
+    const { runId, data } = props ?? {};
+
+    return renderBroadcastHybrid(runId, data, requestOptions);
+  };
+
+  return { mutationFn, ...mutationOptions };
+};
+
+export type RenderBroadcastHybridMutationResult = NonNullable<
+  Awaited<ReturnType<typeof renderBroadcastHybrid>>
+>;
+export type RenderBroadcastHybridMutationBody =
+  BodyType<BroadcastRenderRequest>;
+export type RenderBroadcastHybridMutationError =
+  ErrorType<void | HTTPValidationError>;
+
+/**
+ * @summary Render Broadcast Hybrid
+ */
+export const useRenderBroadcastHybrid = <
+  TError = ErrorType<void | HTTPValidationError>,
+  TContext = unknown,
+>(options?: {
+  mutation?: UseMutationOptions<
+    Awaited<ReturnType<typeof renderBroadcastHybrid>>,
+    TError,
+    { runId: string; data: BodyType<BroadcastRenderRequest> },
+    TContext
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}): UseMutationResult<
+  Awaited<ReturnType<typeof renderBroadcastHybrid>>,
+  TError,
+  { runId: string; data: BodyType<BroadcastRenderRequest> },
+  TContext
+> => {
+  return useMutation(getRenderBroadcastHybridMutationOptions(options));
+};
+
+/**
+ * @summary Submit Broadcast Review Actions
+ */
+export const getSubmitBroadcastReviewActionsUrl = (runId: string) => {
+  return `/api/runs/${encodePathSegmented(runId)}/broadcast/review-actions`;
+};
+
+export const submitBroadcastReviewActions = async (
+  runId: string,
+  broadcastReviewActionsRequest: BroadcastReviewActionsRequest,
+  options?: RequestInit,
+): Promise<BroadcastOperationResponse> => {
+  return customFetch<BroadcastOperationResponse>(
+    getSubmitBroadcastReviewActionsUrl(runId),
+    {
+      ...options,
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...options?.headers },
+      body: JSON.stringify(broadcastReviewActionsRequest),
+    },
+  );
+};
+
+export const getSubmitBroadcastReviewActionsMutationOptions = <
+  TError = ErrorType<void | HTTPValidationError>,
+  TContext = unknown,
+>(options?: {
+  mutation?: UseMutationOptions<
+    Awaited<ReturnType<typeof submitBroadcastReviewActions>>,
+    TError,
+    { runId: string; data: BodyType<BroadcastReviewActionsRequest> },
+    TContext
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}): UseMutationOptions<
+  Awaited<ReturnType<typeof submitBroadcastReviewActions>>,
+  TError,
+  { runId: string; data: BodyType<BroadcastReviewActionsRequest> },
+  TContext
+> => {
+  const mutationKey = ["submitBroadcastReviewActions"];
+  const { mutation: mutationOptions, request: requestOptions } = options
+    ? options.mutation &&
+      "mutationKey" in options.mutation &&
+      options.mutation.mutationKey
+      ? options
+      : { ...options, mutation: { ...options.mutation, mutationKey } }
+    : { mutation: { mutationKey }, request: undefined };
+
+  const mutationFn: MutationFunction<
+    Awaited<ReturnType<typeof submitBroadcastReviewActions>>,
+    { runId: string; data: BodyType<BroadcastReviewActionsRequest> }
+  > = (props) => {
+    const { runId, data } = props ?? {};
+
+    return submitBroadcastReviewActions(runId, data, requestOptions);
+  };
+
+  return { mutationFn, ...mutationOptions };
+};
+
+export type SubmitBroadcastReviewActionsMutationResult = NonNullable<
+  Awaited<ReturnType<typeof submitBroadcastReviewActions>>
+>;
+export type SubmitBroadcastReviewActionsMutationBody =
+  BodyType<BroadcastReviewActionsRequest>;
+export type SubmitBroadcastReviewActionsMutationError =
+  ErrorType<void | HTTPValidationError>;
+
+/**
+ * @summary Submit Broadcast Review Actions
+ */
+export const useSubmitBroadcastReviewActions = <
+  TError = ErrorType<void | HTTPValidationError>,
+  TContext = unknown,
+>(options?: {
+  mutation?: UseMutationOptions<
+    Awaited<ReturnType<typeof submitBroadcastReviewActions>>,
+    TError,
+    { runId: string; data: BodyType<BroadcastReviewActionsRequest> },
+    TContext
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}): UseMutationResult<
+  Awaited<ReturnType<typeof submitBroadcastReviewActions>>,
+  TError,
+  { runId: string; data: BodyType<BroadcastReviewActionsRequest> },
+  TContext
+> => {
+  return useMutation(getSubmitBroadcastReviewActionsMutationOptions(options));
+};
+
+/**
+ * @summary Get Broadcast Review Windows
+ */
+export const getGetBroadcastReviewWindowsUrl = (runId: string) => {
+  return `/api/runs/${encodePathSegmented(runId)}/broadcast/review-windows`;
+};
+
+export const getBroadcastReviewWindows = async (
+  runId: string,
+  options?: RequestInit,
+): Promise<BroadcastReviewWindowsResponse> => {
+  return customFetch<BroadcastReviewWindowsResponse>(
+    getGetBroadcastReviewWindowsUrl(runId),
+    {
+      ...options,
+      method: "GET",
+    },
+  );
+};
+
+export const getGetBroadcastReviewWindowsQueryKey = (runId: string) => {
+  return [`/api/runs/${encodePathSegmented(runId)}/broadcast/review-windows`] as const;
+};
+
+export const getGetBroadcastReviewWindowsQueryOptions = <
+  TData = Awaited<ReturnType<typeof getBroadcastReviewWindows>>,
+  TError = ErrorType<HTTPValidationError>,
+>(
+  runId: string,
+  options?: {
+    query?: UseQueryOptions<
+      Awaited<ReturnType<typeof getBroadcastReviewWindows>>,
+      TError,
+      TData
+    >;
+    request?: SecondParameter<typeof customFetch>;
+  },
+) => {
+  const { query: queryOptions, request: requestOptions } = options ?? {};
+
+  const queryKey =
+    queryOptions?.queryKey ?? getGetBroadcastReviewWindowsQueryKey(runId);
+
+  const queryFn: QueryFunction<
+    Awaited<ReturnType<typeof getBroadcastReviewWindows>>
+  > = ({ signal }) =>
+    getBroadcastReviewWindows(runId, { signal, ...requestOptions });
+
+  return {
+    queryKey,
+    queryFn,
+    enabled: !!runId,
+    ...queryOptions,
+  } as UseQueryOptions<
+    Awaited<ReturnType<typeof getBroadcastReviewWindows>>,
+    TError,
+    TData
+  > & { queryKey: QueryKey };
+};
+
+export type GetBroadcastReviewWindowsQueryResult = NonNullable<
+  Awaited<ReturnType<typeof getBroadcastReviewWindows>>
+>;
+export type GetBroadcastReviewWindowsQueryError =
+  ErrorType<HTTPValidationError>;
+
+/**
+ * @summary Get Broadcast Review Windows
+ */
+
+export function useGetBroadcastReviewWindows<
+  TData = Awaited<ReturnType<typeof getBroadcastReviewWindows>>,
+  TError = ErrorType<HTTPValidationError>,
+>(
+  runId: string,
+  options?: {
+    query?: UseQueryOptions<
+      Awaited<ReturnType<typeof getBroadcastReviewWindows>>,
+      TError,
+      TData
+    >;
+    request?: SecondParameter<typeof customFetch>;
+  },
+): UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+  const queryOptions = getGetBroadcastReviewWindowsQueryOptions(runId, options);
+
+  const query = useQuery(queryOptions) as UseQueryResult<TData, TError> & {
+    queryKey: QueryKey;
+  };
+
+  return { ...query, queryKey: queryOptions.queryKey };
+}
+
+/**
+ * @summary Recompute Broadcast Trajectory
+ */
+export const getRecomputeBroadcastTrajectoryUrl = (runId: string) => {
+  return `/api/runs/${encodePathSegmented(runId)}/broadcast/trajectory-recompute`;
+};
+
+export const recomputeBroadcastTrajectory = async (
+  runId: string,
+  broadcastTrajectoryRecomputeRequest: BroadcastTrajectoryRecomputeRequest,
+  options?: RequestInit,
+): Promise<BroadcastOperationResponse> => {
+  return customFetch<BroadcastOperationResponse>(
+    getRecomputeBroadcastTrajectoryUrl(runId),
+    {
+      ...options,
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...options?.headers },
+      body: JSON.stringify(broadcastTrajectoryRecomputeRequest),
+    },
+  );
+};
+
+export const getRecomputeBroadcastTrajectoryMutationOptions = <
+  TError = ErrorType<void | HTTPValidationError>,
+  TContext = unknown,
+>(options?: {
+  mutation?: UseMutationOptions<
+    Awaited<ReturnType<typeof recomputeBroadcastTrajectory>>,
+    TError,
+    { runId: string; data: BodyType<BroadcastTrajectoryRecomputeRequest> },
+    TContext
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}): UseMutationOptions<
+  Awaited<ReturnType<typeof recomputeBroadcastTrajectory>>,
+  TError,
+  { runId: string; data: BodyType<BroadcastTrajectoryRecomputeRequest> },
+  TContext
+> => {
+  const mutationKey = ["recomputeBroadcastTrajectory"];
+  const { mutation: mutationOptions, request: requestOptions } = options
+    ? options.mutation &&
+      "mutationKey" in options.mutation &&
+      options.mutation.mutationKey
+      ? options
+      : { ...options, mutation: { ...options.mutation, mutationKey } }
+    : { mutation: { mutationKey }, request: undefined };
+
+  const mutationFn: MutationFunction<
+    Awaited<ReturnType<typeof recomputeBroadcastTrajectory>>,
+    { runId: string; data: BodyType<BroadcastTrajectoryRecomputeRequest> }
+  > = (props) => {
+    const { runId, data } = props ?? {};
+
+    return recomputeBroadcastTrajectory(runId, data, requestOptions);
+  };
+
+  return { mutationFn, ...mutationOptions };
+};
+
+export type RecomputeBroadcastTrajectoryMutationResult = NonNullable<
+  Awaited<ReturnType<typeof recomputeBroadcastTrajectory>>
+>;
+export type RecomputeBroadcastTrajectoryMutationBody =
+  BodyType<BroadcastTrajectoryRecomputeRequest>;
+export type RecomputeBroadcastTrajectoryMutationError =
+  ErrorType<void | HTTPValidationError>;
+
+/**
+ * @summary Recompute Broadcast Trajectory
+ */
+export const useRecomputeBroadcastTrajectory = <
+  TError = ErrorType<void | HTTPValidationError>,
+  TContext = unknown,
+>(options?: {
+  mutation?: UseMutationOptions<
+    Awaited<ReturnType<typeof recomputeBroadcastTrajectory>>,
+    TError,
+    { runId: string; data: BodyType<BroadcastTrajectoryRecomputeRequest> },
+    TContext
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}): UseMutationResult<
+  Awaited<ReturnType<typeof recomputeBroadcastTrajectory>>,
+  TError,
+  { runId: string; data: BodyType<BroadcastTrajectoryRecomputeRequest> },
+  TContext
+> => {
+  return useMutation(getRecomputeBroadcastTrajectoryMutationOptions(options));
+};
 
 /**
  * @summary Get Camera Path

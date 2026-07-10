@@ -790,6 +790,123 @@ export const RunRecordStatus = {
   cancelled: "cancelled",
 } as const;
 
+/**
+ * Three-frame, per-source calibration required by the hybrid broadcast workflow.
+ */
+export interface BroadcastCalibrationConfirmation {
+  /**
+   * @minItems 2
+   * @maxItems 2
+   */
+  source_resolution: [number, number];
+  /**
+   * @minItems 3
+   * @maxItems 3
+   */
+  confirmed_sample_frames: [number, number, number];
+  /** @minItems 3 */
+  field_polygon: [number, number][];
+  exclusion_polygons?: [number, number][][];
+}
+
+export interface BroadcastPreflightState {
+  input_video?: string | null;
+  source_resolution?: [number, number] | null;
+  source_frame_count?: number | null;
+  fps?: number | null;
+  source_size_bytes?: number | null;
+  source_mtime_ns?: number | null;
+  calibration?: BroadcastCalibrationConfirmation | null;
+  classifier_status?: string | null;
+  selective_policy_status?: string | null;
+  [key: string]: unknown;
+}
+
+export interface BroadcastOperationRequestState {
+  trajectory_generation_id?: string | null;
+  target_width?: number | null;
+  target_height?: number | null;
+  [key: string]: unknown;
+}
+
+export interface BroadcastOperationResultState {
+  status?: string | null;
+  trajectory_generation_id?: string | null;
+  camera_generation_id?: string | null;
+  render_generation_id?: string | null;
+  [key: string]: unknown;
+}
+
+export type BroadcastLastOperationStateOperation =
+  (typeof BroadcastLastOperationStateOperation)[keyof typeof BroadcastLastOperationStateOperation];
+
+export const BroadcastLastOperationStateOperation = {
+  recompute: "recompute",
+  render: "render",
+} as const;
+
+export type BroadcastLastOperationStateStatus =
+  (typeof BroadcastLastOperationStateStatus)[keyof typeof BroadcastLastOperationStateStatus];
+
+export const BroadcastLastOperationStateStatus = {
+  queued: "queued",
+  running: "running",
+  committing: "committing",
+  completed: "completed",
+  failed: "failed",
+  cancelled: "cancelled",
+} as const;
+
+export interface BroadcastLastOperationState {
+  operation_run_id: string;
+  operation: BroadcastLastOperationStateOperation;
+  status: BroadcastLastOperationStateStatus;
+  recovered?: boolean;
+  error?: string | null;
+  [key: string]: unknown;
+}
+
+/**
+ * Stable public broadcast fields; extra lineage remains forward compatible.
+ */
+export interface BroadcastRunState {
+  status?: string | null;
+  quality_profile?: "stable_broadcast" | null;
+  max_manual_review_windows?: number | null;
+  preflight?: BroadcastPreflightState | null;
+  blocking_reasons?: string[];
+  limitations?: string[];
+  status_generation?: string | null;
+  trajectory_generation_id?: string | null;
+  camera_generation_id?: string | null;
+  render_generation_id?: string | null;
+  operation?: "recompute" | "render" | null;
+  operation_status?:
+    | "queued"
+    | "running"
+    | "committing"
+    | "completed"
+    | "failed"
+    | "cancelled"
+    | "metadata_conflict"
+    | null;
+  operation_report_status?:
+    | "available"
+    | "missing_after_ready_commit"
+    | "conflict"
+    | null;
+  parent_run_id?: string | null;
+  owner_pid?: number | null;
+  owner_instance_id?: string | null;
+  request?: BroadcastOperationRequestState | null;
+  result?: BroadcastOperationResultState | null;
+  commit_started?: boolean;
+  cancel_requested?: boolean;
+  last_operation?: BroadcastLastOperationState | null;
+  metadata_warnings?: string[];
+  [key: string]: unknown;
+}
+
 export interface RunProgress {
   stage: string;
   current_frame?: number | null;
@@ -821,6 +938,7 @@ export interface RunRecord {
   modules_enabled?: RunRecordModulesEnabled;
   artifacts?: ArtifactSummary[];
   stats?: RunRecordStats;
+  broadcast?: BroadcastRunState;
   ai_candidate_lifecycle?: AICandidateLifecycleReport;
   progress?: RunProgress | null;
   notes?: string | null;
@@ -925,6 +1043,200 @@ export interface BallAuditReport {
   review_events?: BallAuditReviewEvent[];
 }
 
+export interface BroadcastOperationDetails {
+  review_decisions_sha256?: string | null;
+  message?: string | null;
+  [key: string]: unknown;
+}
+
+export type BroadcastOperationResponseStatus =
+  (typeof BroadcastOperationResponseStatus)[keyof typeof BroadcastOperationResponseStatus];
+
+export const BroadcastOperationResponseStatus = {
+  ready: "ready",
+  queued: "queued",
+  completed: "completed",
+  needs_review: "needs_review",
+} as const;
+
+export interface BroadcastOperationResponse {
+  run_id: string;
+  parent_run_id?: string | null;
+  status: BroadcastOperationResponseStatus;
+  reason?: string | null;
+  artifact?: string | null;
+  generation_id?: string | null;
+  details?: BroadcastOperationDetails;
+}
+
+export interface BroadcastRenderRequest {
+  /** @pattern ^trajectory-[0-9a-f]{24}$ */
+  trajectory_generation_id: string;
+  /**
+   * @minimum 320
+   * @maximum 7680
+   */
+  target_width?: number;
+  /**
+   * @minimum 180
+   * @maximum 4320
+   */
+  target_height?: number;
+}
+
+export type BroadcastReviewActionAction =
+  (typeof BroadcastReviewActionAction)[keyof typeof BroadcastReviewActionAction];
+
+export const BroadcastReviewActionAction = {
+  confirm_ball: "confirm_ball",
+  reject_noise: "reject_noise",
+  mark_unknown: "mark_unknown",
+} as const;
+
+export interface BroadcastReviewAction {
+  /**
+   * @minLength 1
+   * @maxLength 200
+   */
+  action_id: string;
+  /**
+   * @minLength 1
+   * @maxLength 200
+   */
+  review_item_id: string;
+  /**
+   * @minLength 1
+   * @maxLength 300
+   */
+  candidate_id: string;
+  /**
+   * @minLength 1
+   * @maxLength 200
+   */
+  reviewer_id: string;
+  created_at?: string | null;
+  action: BroadcastReviewActionAction;
+  noise_subtype?:
+    | "player_body_or_shoe"
+    | "field_line_or_mark"
+    | "sideline_or_spare_ball"
+    | "equipment_or_background"
+    | "lighting_shadow_or_blur"
+    | null;
+}
+
+export interface BroadcastReviewActionsRequest {
+  /** @minItems 1 */
+  actions: BroadcastReviewAction[];
+}
+
+export type BroadcastReviewCandidateSelectiveDecision =
+  (typeof BroadcastReviewCandidateSelectiveDecision)[keyof typeof BroadcastReviewCandidateSelectiveDecision];
+
+export const BroadcastReviewCandidateSelectiveDecision = {
+  accept: "accept",
+  reject: "reject",
+  abstain: "abstain",
+} as const;
+
+export interface BroadcastReviewEvidenceArtifact {
+  path: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  sha256: string;
+  /** @minimum 0 */
+  size_bytes: number;
+  shape?: number[] | null;
+  dtype?: string | null;
+  color_space?: string | null;
+  [key: string]: unknown;
+}
+
+export interface BroadcastReviewEvidenceArtifacts {
+  tight_tensor: BroadcastReviewEvidenceArtifact;
+  context_tensor: BroadcastReviewEvidenceArtifact;
+  review_montage: BroadcastReviewEvidenceArtifact;
+  [key: string]: unknown;
+}
+
+export interface BroadcastReviewEvidence {
+  sample_id: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  sha256: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  dataset_version: string;
+  artifacts: BroadcastReviewEvidenceArtifacts;
+  [key: string]: unknown;
+}
+
+export interface BroadcastReviewCandidate {
+  candidate_id: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  candidate_fingerprint: string;
+  variant_id: string;
+  /** @minimum 0 */
+  frame_index: number;
+  /**
+   * @minItems 4
+   * @maxItems 4
+   */
+  bbox: [number, number, number, number];
+  detector_source: string;
+  /**
+   * @minimum 0
+   * @maximum 1
+   */
+  detector_confidence: number;
+  predicted_label: string;
+  /**
+   * @minimum 0
+   * @maximum 1
+   */
+  prediction_confidence: number;
+  selective_decision: BroadcastReviewCandidateSelectiveDecision;
+  decision_reasons?: string[];
+  review_kind: string;
+  evidence: BroadcastReviewEvidence;
+  [key: string]: unknown;
+}
+
+export interface BroadcastReviewWindow {
+  review_item_id: string;
+  variant_id: string;
+  /** @minimum 0 */
+  start_frame: number;
+  /** @minimum 0 */
+  end_frame: number;
+  /** @minimum 0 */
+  duration_seconds: number;
+  compliance: "compliant";
+  /** @minimum 0 */
+  priority: number;
+  candidates?: BroadcastReviewCandidate[];
+  [key: string]: unknown;
+}
+
+export type BroadcastReviewWindowsResponseStatus =
+  (typeof BroadcastReviewWindowsResponseStatus)[keyof typeof BroadcastReviewWindowsResponseStatus];
+
+export const BroadcastReviewWindowsResponseStatus = {
+  ready: "ready",
+  needs_review: "needs_review",
+} as const;
+
+export interface BroadcastReviewWindowsResponse {
+  run_id: string;
+  status: BroadcastReviewWindowsResponseStatus;
+  reason?: string | null;
+  queue_sha256?: string | null;
+  review_item_count?: number;
+  items?: BroadcastReviewWindow[];
+}
+
+export interface BroadcastTrajectoryRecomputeRequest {
+  /** @pattern ^[0-9a-f]{64}$ */
+  review_decisions_sha256: string;
+}
+
 export type CameraPathResponseRowsItem = { [key: string]: unknown };
 
 export interface CameraPathResponse {
@@ -950,6 +1262,14 @@ export interface ConfigDetail {
 
 export type CreateRunRequestConfigPatch = { [key: string]: unknown };
 
+export type CreateRunRequestPipelineMode =
+  (typeof CreateRunRequestPipelineMode)[keyof typeof CreateRunRequestPipelineMode];
+
+export const CreateRunRequestPipelineMode = {
+  standard: "standard",
+  broadcast_hybrid: "broadcast_hybrid",
+} as const;
+
 export interface CreateRunRequest {
   config_name?: string | null;
   input_video?: string | null;
@@ -962,6 +1282,10 @@ export interface CreateRunRequest {
   max_frames?: number | null;
   approved_action_ids?: string[];
   approved_actions_artifact_name?: string | null;
+  pipeline_mode?: CreateRunRequestPipelineMode;
+  calibration_confirmation?: BroadcastCalibrationConfirmation | null;
+  quality_profile?: "stable_broadcast" | null;
+  max_manual_review_windows?: number | null;
   notes?: string | null;
 }
 

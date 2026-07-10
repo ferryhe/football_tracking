@@ -6,11 +6,17 @@ import hashlib
 import inspect
 import json
 import mimetypes
+import os
 import re
 import shutil
+import stat
+import tempfile
 import threading
 import unicodedata
+import weakref
+from collections.abc import Callable
 from concurrent.futures import CancelledError
+from contextlib import contextmanager
 from copy import deepcopy
 from dataclasses import asdict, is_dataclass
 from datetime import datetime, timezone
@@ -22,6 +28,15 @@ import cv2
 import numpy as np
 import yaml
 
+from football_tracking.action_signal import (
+    ACTION_SIGNAL_DIAGNOSTICS_NAME,
+    ACTION_SIGNAL_REPORT_NAME,
+    ACTION_SIGNAL_SUCCESS_STATUSES,
+    ACTION_TRACK_NAME,
+    ActionCalibration,
+    generate_action_track,
+    validate_calibration_for_video,
+)
 from football_tracking.ai_candidate_lifecycle import build_ai_candidate_lifecycle
 from football_tracking.ai_improvement import (
     APPROVED_ACTIONS_FILE_NAME,
@@ -33,7 +48,26 @@ from football_tracking.ai_improvement import (
 )
 from football_tracking.ai_review_triggers import compact_ai_review_trigger_summary
 from football_tracking.api.ai_provider import OpenAIResponsesClient, load_provider_settings
+from football_tracking.api.broadcast_api import (
+    BroadcastApiError,
+    build_review_action_envelope,
+    collect_review_evidence_paths,
+    load_bound_json,
+    publish_broadcast_facade,
+    publish_json_exclusive,
+    sha256_file,
+    validate_broadcast_quality_report,
+    validate_review_queue_bindings,
+)
 from football_tracking.ball_audit import compact_ball_audit_summary
+from football_tracking.broadcast_hybrid_orchestration import (
+    BroadcastHybridOrchestrationError,
+    preflight_recompute_reviewed_trajectory,
+    preflight_render_broadcast_trajectory,
+    recompute_reviewed_trajectory,
+    render_broadcast_trajectory,
+    rollback_uncommitted_final_public_artifacts,
+)
 from football_tracking.calibration import build_pitch_calibration_from_field_polygon
 from football_tracking.chunk_runner import run_high_recall_windows, run_temporal_chunks
 from football_tracking.config import DEFAULT_HIGH_RECALL_MAX_TOTAL_FRAMES, AppConfig, load_config
@@ -83,6 +117,8 @@ _WINDOWS_RESERVED_NAMES = {
     *(f"LPT{index}" for index in range(1, 10)),
 }
 
+_LIVE_SERVICE_INSTANCES: weakref.WeakValueDictionary[str, Any] = weakref.WeakValueDictionary()
+
 
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -127,9 +163,7 @@ def _normalize_config_explain_path(path: str) -> str:
 
 def _is_point_pair(value: Any) -> bool:
     return (
-        isinstance(value, (list, tuple))
-        and len(value) == 2
-        and all(isinstance(item, (int, float)) for item in value)
+        isinstance(value, (list, tuple)) and len(value) == 2 and all(isinstance(item, (int, float)) for item in value)
     )
 
 
@@ -391,13 +425,92 @@ class ApiService:
         self.run_outputs_dir = self.outputs_dir / "runs"
         self.data_dir = repo_root / "data"
         self.registry_path = repo_root / "data" / "run_registry.json"
+        self.registry_lock_path = repo_root / "data" / "run_registry.lock"
+        self.service_lease_dir = repo_root / "data" / "service_leases"
         self.generated_config_dir = self.config_dir / "generated"
         self._lock = threading.Lock()
+        self._instance_id = uuid4().hex
+        self._service_lease_path = self.service_lease_dir / f"{self._instance_id}.lock"
+        self._service_lease_handle = self._acquire_service_lease()
+        self._service_lease_finalizer = weakref.finalize(
+            self,
+            self._release_service_lease_resources,
+            self._service_lease_handle,
+            self._service_lease_path,
+        )
+        _LIVE_SERVICE_INSTANCES[self._instance_id] = self
         self._active_threads: dict[str, threading.Thread] = {}
         self._cancel_events: dict[str, threading.Event] = {}
-        self.provider_settings = load_provider_settings(repo_root)
-        self.ai_client = OpenAIResponsesClient(self.provider_settings)
-        self._ensure_registry_file()
+        self._starting_threads: set[str] = set()
+        self._closing = False
+        self._lease_waiter_started = False
+        self._broadcast_artifact_cache_lock = threading.Lock()
+        self._broadcast_artifact_validation_cache: dict[Path, dict[str, Any]] = {}
+        try:
+            self.provider_settings = load_provider_settings(repo_root)
+            self.ai_client = OpenAIResponsesClient(self.provider_settings)
+            self._ensure_registry_file()
+            self._recover_interrupted_broadcast_operations()
+        except BaseException:
+            self.close()
+            raise
+
+    def close(self, *, timeout: float = 5.0) -> None:
+        """Release this service instance's cross-process ownership lease."""
+
+        with self._lock:
+            self._closing = True
+            for cancel_event in self._cancel_events.values():
+                cancel_event.set()
+            registered_threads = list(self._active_threads.values())
+        current_thread = threading.current_thread()
+        for thread in registered_threads:
+            if thread is not current_thread and thread.is_alive():
+                thread.join(timeout=max(0.0, timeout))
+        with self._lock:
+            self._prune_inactive_registered_threads_locked()
+            if self._active_threads:
+                if not self._lease_waiter_started:
+                    self._lease_waiter_started = True
+                    waiter = threading.Thread(
+                        target=self._wait_for_workers_and_release_lease,
+                        name=f"football-tracking-service-close-{self._instance_id[:8]}",
+                        daemon=True,
+                    )
+                    waiter.start()
+                return
+        self._release_service_lease()
+
+    def _wait_for_workers_and_release_lease(self) -> None:
+        current_thread = threading.current_thread()
+        while True:
+            with self._lock:
+                self._prune_inactive_registered_threads_locked()
+                workers = list(self._active_threads.values())
+            if not workers:
+                break
+            joined_worker = False
+            for worker in workers:
+                if worker is not current_thread and worker.is_alive():
+                    worker.join()
+                    joined_worker = True
+            if not joined_worker:
+                threading.Event().wait(0.01)
+        self._release_service_lease()
+
+    def _prune_inactive_registered_threads_locked(self) -> None:
+        for run_id, thread in list(self._active_threads.items()):
+            if run_id in self._starting_threads:
+                continue
+            if getattr(thread, "ident", None) is None or not thread.is_alive():
+                self._active_threads.pop(run_id, None)
+                self._cancel_events.pop(run_id, None)
+
+    def _release_service_lease(self) -> None:
+        _LIVE_SERVICE_INSTANCES.pop(self._instance_id, None)
+        finalizer = getattr(self, "_service_lease_finalizer", None)
+        if finalizer is not None and finalizer.alive:
+            finalizer()
 
     def health_summary(self) -> dict[str, Any]:
         runs = self.list_runs()
@@ -463,7 +576,11 @@ class ApiService:
         frame_index: int | None = None,
     ) -> dict[str, Any]:
         video_path = self._resolve_input_video_path(input_video)
-        samples = [self._read_video_frame(video_path, frame_index)] if frame_index is not None else self._sample_video_frames(video_path)
+        samples = (
+            [self._read_video_frame(video_path, frame_index)]
+            if frame_index is not None
+            else self._sample_video_frames(video_path)
+        )
         if not samples:
             raise RuntimeError(f"Unable to read preview frames from input video: {video_path}")
 
@@ -700,17 +817,28 @@ class ApiService:
                 raise KeyError(run_id)
             if run.get("status") in {"queued", "running"}:
                 raise RuntimeError(f"Run is still active and cannot be deleted: {run_id}")
-            output_dir = Path(run["output_dir"]).resolve()
-            outputs_root = self.outputs_dir.resolve()
-            if output_dir == outputs_root or outputs_root not in output_dir.parents:
-                raise RuntimeError(f"Run output must live under {outputs_root}: {output_dir}")
+            child = next((item for item in registry["runs"] if item.get("parent_run_id") == run_id), None)
+            if child is not None:
+                raise RuntimeError(f"Run owns child operation output and cannot be deleted first: {child['run_id']}")
+            raw_output_dir = Path(run["output_dir"])
+            output_dir = self._resolve_safe_run_output(raw_output_dir, allow_missing=True)
             registry["runs"] = [item for item in registry["runs"] if item.get("run_id") != run_id]
             self._write_registry(registry)
         if output_dir.exists():
+            output_dir = self._resolve_safe_run_output(raw_output_dir)
             shutil.rmtree(output_dir)
             parent_dir = output_dir.parent
-            if parent_dir != self.outputs_dir.resolve() and parent_dir.exists() and not any(parent_dir.iterdir()):
-                parent_dir.rmdir()
+            if parent_dir != self.outputs_dir.resolve() and parent_dir.exists():
+                try:
+                    safe_parent = self._resolve_safe_descendant(
+                        self.outputs_dir,
+                        parent_dir,
+                        expected_kind="directory",
+                    )
+                except RuntimeError:
+                    safe_parent = None
+                if safe_parent is not None and not any(safe_parent.iterdir()):
+                    safe_parent.rmdir()
         return {
             "name": run_id,
             "path": str(output_dir),
@@ -737,9 +865,20 @@ class ApiService:
     def list_runs(self) -> list[dict[str, Any]]:
         with self._lock:
             registry = self._read_registry()
+            original = deepcopy(registry)
             self._refresh_discovered_runs_locked(registry)
+            registry["runs"] = [run for run in registry["runs"] if self._registry_run_has_safe_output(run)]
             self._normalize_registry_runs_locked(registry)
-            self._write_registry(registry)
+            if registry != original:
+                try:
+                    self._write_registry(registry)
+                except RuntimeError:
+                    # A read endpoint must not invalidate or fail an in-flight
+                    # cross-process state transition. The next read will refresh
+                    # any filesystem discoveries that lost this benign race.
+                    registry = self._read_registry()
+                    registry["runs"] = [run for run in registry["runs"] if self._registry_run_has_safe_output(run)]
+                    self._normalize_registry_runs_locked(registry)
             runs = sorted(
                 registry["runs"],
                 key=lambda item: self._timestamp_value(self._run_activity_at(item)),
@@ -811,9 +950,15 @@ class ApiService:
 
         prepared_groups: list[dict[str, Any]] = []
         for group in groups.values():
-            group["configs"] = sorted(group["configs"], key=lambda item: self._timestamp_value(item.get("created_at")), reverse=True)
-            group["runs"] = sorted(group["runs"], key=lambda item: self._timestamp_value(self._run_activity_at(item)), reverse=True)
-            group["outputs"] = sorted(group["outputs"], key=lambda item: self._timestamp_value(self._run_activity_at(item)), reverse=True)
+            group["configs"] = sorted(
+                group["configs"], key=lambda item: self._timestamp_value(item.get("created_at")), reverse=True
+            )
+            group["runs"] = sorted(
+                group["runs"], key=lambda item: self._timestamp_value(self._run_activity_at(item)), reverse=True
+            )
+            group["outputs"] = sorted(
+                group["outputs"], key=lambda item: self._timestamp_value(self._run_activity_at(item)), reverse=True
+            )
             group["run_count"] = len(group["runs"])
             group["config_count"] = len(group["configs"])
             group["output_count"] = len(group["outputs"])
@@ -824,16 +969,14 @@ class ApiService:
                 if isinstance(input_modified_at, str):
                     activity_candidates.append(input_modified_at)
             activity_candidates.extend(
-                value
-                for value in (item.get("created_at") for item in group["configs"])
-                if isinstance(value, str)
+                value for value in (item.get("created_at") for item in group["configs"]) if isinstance(value, str)
             )
             activity_candidates.extend(
-                value
-                for value in (self._run_activity_at(item) for item in group["runs"])
-                if isinstance(value, str)
+                value for value in (self._run_activity_at(item) for item in group["runs"]) if isinstance(value, str)
             )
-            normalized_candidates = [candidate for candidate in (_normalize_iso_timestamp(item) for item in activity_candidates) if candidate]
+            normalized_candidates = [
+                candidate for candidate in (_normalize_iso_timestamp(item) for item in activity_candidates) if candidate
+            ]
             group["last_activity_at"] = max(normalized_candidates, default=None)
 
             if group["is_unbound"] and not (group["runs"] or group["configs"] or group["outputs"]):
@@ -851,11 +994,33 @@ class ApiService:
     def get_run(self, run_id: str) -> dict[str, Any]:
         with self._lock:
             registry = self._read_registry()
-            self._refresh_discovered_runs_locked(registry)
-            self._write_registry(registry)
             for run in registry["runs"]:
                 if run["run_id"] == run_id:
-                    return run
+                    if not self._registry_run_has_safe_output(run):
+                        raise KeyError(run_id)
+                    snapshot = deepcopy(run)
+                    output_dir = (
+                        self._resolve_safe_run_output(Path(snapshot["output_dir"]), allow_missing=True)
+                        if snapshot.get("output_dir")
+                        else None
+                    )
+                    if output_dir is not None and output_dir.is_dir():
+                        snapshot["artifacts"] = self._collect_artifacts(output_dir)
+                        snapshot["stats"] = self._collect_stats(output_dir)
+                        self._attach_ai_candidate_lifecycle(snapshot)
+                    return snapshot
+            original = deepcopy(registry)
+            self._refresh_discovered_runs_locked(registry)
+            if registry != original:
+                try:
+                    self._write_registry(registry)
+                except RuntimeError:
+                    registry = self._read_registry()
+            for run in registry["runs"]:
+                if run["run_id"] == run_id:
+                    if not self._registry_run_has_safe_output(run):
+                        raise KeyError(run_id)
+                    return deepcopy(run)
         raise KeyError(run_id)
 
     def list_artifacts(self, run_id: str) -> list[dict[str, Any]]:
@@ -863,20 +1028,18 @@ class ApiService:
 
     def get_artifact_path(self, run_id: str, artifact_name: str) -> Path:
         run = self.get_run(run_id)
-        output_dir = Path(run["output_dir"]).resolve()
-        candidate = (output_dir / artifact_name).resolve()
-        if not candidate.exists():
+        try:
+            output_dir = self._resolve_safe_run_output(Path(run["output_dir"]))
+            candidate = self._resolve_safe_descendant(
+                output_dir,
+                output_dir / artifact_name,
+                expected_kind="file",
+            )
+        except RuntimeError as exc:
+            raise FileNotFoundError(artifact_name) from exc
+        allowed = set(self._iter_artifact_paths(output_dir))
+        if candidate not in allowed:
             raise FileNotFoundError(artifact_name)
-        if output_dir not in candidate.parents and candidate != output_dir:
-            raise FileNotFoundError(artifact_name)
-        if candidate.name == TRACKING_CONTRACT_REPORT_NAME and candidate.parent != output_dir:
-            allowed_nested_contracts = {
-                path.resolve()
-                for path in self._iter_artifact_paths(output_dir)
-                if path.name == TRACKING_CONTRACT_REPORT_NAME and path.parent != output_dir
-            }
-            if candidate not in allowed_nested_contracts:
-                raise FileNotFoundError(artifact_name)
         return candidate
 
     def get_cleanup_report(self, run_id: str) -> dict[str, Any]:
@@ -898,7 +1061,15 @@ class ApiService:
         return self._load_optional_json_artifact(run_id, "player_tracks.json")
 
     def get_camera_path(self, run_id: str, offset: int, limit: int) -> dict[str, Any]:
-        camera_path = self.get_artifact_path(run_id, "camera_path.csv")
+        camera_path: Path | None = None
+        for name in ("camera_target.csv", "camera_path.v2.csv", "camera_path.csv"):
+            try:
+                camera_path = self.get_artifact_path(run_id, name)
+                break
+            except FileNotFoundError:
+                continue
+        if camera_path is None:
+            raise FileNotFoundError("camera_target.csv")
         with camera_path.open("r", encoding="utf-8-sig", newline="") as handle:
             reader = csv.DictReader(handle)
             rows = list(reader)
@@ -991,21 +1162,33 @@ class ApiService:
         output_dir = Path(run["output_dir"]).resolve()
 
         artifacts, payloads = self._collect_ai_improvement_status_artifacts(output_dir)
-        ai_report = payloads.get("ai_improvement_report.json") if isinstance(payloads.get("ai_improvement_report.json"), dict) else {}
+        ai_report = (
+            payloads.get("ai_improvement_report.json")
+            if isinstance(payloads.get("ai_improvement_report.json"), dict)
+            else {}
+        )
         approved_actions_report = (
-            payloads.get(APPROVED_ACTIONS_FILE_NAME) if isinstance(payloads.get(APPROVED_ACTIONS_FILE_NAME), dict) else {}
+            payloads.get(APPROVED_ACTIONS_FILE_NAME)
+            if isinstance(payloads.get(APPROVED_ACTIONS_FILE_NAME), dict)
+            else {}
         )
         final_manifest = (
             payloads.get("final_ai_improvement_artifact_manifest.json")
             if isinstance(payloads.get("final_ai_improvement_artifact_manifest.json"), dict)
             else {}
         )
-        registry = payloads.get("ai_candidate_registry.json") if isinstance(payloads.get("ai_candidate_registry.json"), dict) else {}
+        registry = (
+            payloads.get("ai_candidate_registry.json")
+            if isinstance(payloads.get("ai_candidate_registry.json"), dict)
+            else {}
+        )
 
         approval_index = self._ai_status_approval_index(approved_actions_report)
         comparison_index = self._ai_status_comparison_index(registry, final_manifest, payloads)
         selected_artifacts = (
-            final_manifest.get("final_selected_artifacts") if isinstance(final_manifest.get("final_selected_artifacts"), list) else []
+            final_manifest.get("final_selected_artifacts")
+            if isinstance(final_manifest.get("final_selected_artifacts"), list)
+            else []
         )
         selected_candidate_ids = [
             str(item.get("candidate_id"))
@@ -1222,7 +1405,11 @@ class ApiService:
         return "available"
 
     def _ai_status_approval_index(self, approved_actions_report: dict[str, Any]) -> dict[str, Any]:
-        actions = approved_actions_report.get("approved_actions") if isinstance(approved_actions_report.get("approved_actions"), list) else []
+        actions = (
+            approved_actions_report.get("approved_actions")
+            if isinstance(approved_actions_report.get("approved_actions"), list)
+            else []
+        )
         by_improvement: dict[str, list[dict[str, Any]]] = {}
         by_candidate: dict[str, list[dict[str, Any]]] = {}
         by_approval: dict[str, list[dict[str, Any]]] = {}
@@ -1302,9 +1489,7 @@ class ApiService:
 
     def _ai_status_is_comparison_payload(self, payload: dict[str, Any]) -> bool:
         return bool(payload.get("candidate_id")) and (
-            "comparison_status" in payload
-            or "comparison_report" in payload
-            or isinstance(payload.get("summary"), dict)
+            "comparison_status" in payload or "comparison_report" in payload or isinstance(payload.get("summary"), dict)
         )
 
     def _ai_status_index_candidate_payload(
@@ -1380,9 +1565,13 @@ class ApiService:
             "evidence_ids": self._ai_status_evidence_ids(source, approvals),
             "confidence": source.get("confidence"),
             "false_positive_class": source.get("false_positive_class")
-            or next((action.get("false_positive_class") for action in approvals if action.get("false_positive_class")), None),
+            or next(
+                (action.get("false_positive_class") for action in approvals if action.get("false_positive_class")), None
+            ),
             "recommended_action": source.get("recommended_action") or source.get("approved_action"),
-            "approved_action": next((action.get("approved_action") for action in approvals if action.get("approved_action")), None),
+            "approved_action": next(
+                (action.get("approved_action") for action in approvals if action.get("approved_action")), None
+            ),
             "approval_status": "approved" if approvals else "none",
             "consumed_approval_ids": consumed_approval_ids,
             "comparison_status": comparison_status,
@@ -1429,7 +1618,9 @@ class ApiService:
             return "highlights"
         if action in {"adjust_follow_cam", "tracking_rerun_before_follow_cam", "human_review_camera_motion"}:
             return "camera_motion"
-        if action in {"noise_filter_adjustment", "tighten_noise_filter", "reject_noise"} or item.get("false_positive_class"):
+        if action in {"noise_filter_adjustment", "tighten_noise_filter", "reject_noise"} or item.get(
+            "false_positive_class"
+        ):
             return "noise"
         return "missing_ball"
 
@@ -1805,7 +1996,9 @@ class ApiService:
             )
             evidence.extend(
                 [
-                    _localized_text(language, en=f"Run status={run['status']}", zh=f"\u8fd0\u884c\u72b6\u6001={run['status']}"),
+                    _localized_text(
+                        language, en=f"Run status={run['status']}", zh=f"\u8fd0\u884c\u72b6\u6001={run['status']}"
+                    ),
                     _localized_text(
                         language,
                         en=f"Run config={run.get('config_name')}",
@@ -1816,7 +2009,11 @@ class ApiService:
                         en=f"Raw detected={raw_stats.get('detected')}",
                         zh=f"\u539f\u59cb\u68c0\u6d4b={raw_stats.get('detected')}",
                     ),
-                    _localized_text(language, en=f"Raw lost={raw_stats.get('lost')}", zh=f"\u539f\u59cb\u4e22\u5931={raw_stats.get('lost')}"),
+                    _localized_text(
+                        language,
+                        en=f"Raw lost={raw_stats.get('lost')}",
+                        zh=f"\u539f\u59cb\u4e22\u5931={raw_stats.get('lost')}",
+                    ),
                     _localized_text(
                         language,
                         en=f"Cleaned detected={cleaned_stats.get('detected')}",
@@ -1933,19 +2130,39 @@ class ApiService:
             ),
         ]
 
-        if any(token in objective_text for token in ["camera", "follow", "zoom", "pan", "\u955c\u5934", "\u8ddf\u968f", "\u8ddf\u62cd", "\u5e73\u79fb", "\u7f29\u653e", "\u76f8\u673a"]):
+        if any(
+            token in objective_text
+            for token in [
+                "camera",
+                "follow",
+                "zoom",
+                "pan",
+                "\u955c\u5934",
+                "\u8ddf\u968f",
+                "\u8ddf\u62cd",
+                "\u5e73\u79fb",
+                "\u7f29\u653e",
+                "\u76f8\u673a",
+            ]
+        ):
             current_follow = config["resolved"].get("follow_cam", {})
             patch = {
                 "follow_cam": {
-                    "glide_pan_smoothing": round(max(0.06, float(current_follow.get("glide_pan_smoothing", 0.10)) - 0.02), 2),
-                    "catch_up_pan_smoothing": round(max(0.16, float(current_follow.get("catch_up_pan_smoothing", 0.22)) - 0.02), 2),
+                    "glide_pan_smoothing": round(
+                        max(0.06, float(current_follow.get("glide_pan_smoothing", 0.10)) - 0.02), 2
+                    ),
+                    "catch_up_pan_smoothing": round(
+                        max(0.16, float(current_follow.get("catch_up_pan_smoothing", 0.22)) - 0.02), 2
+                    ),
                     "zoom_out_confirm_frames": int(current_follow.get("zoom_out_confirm_frames", 6)) + 2,
                     "zoom_in_confirm_frames": int(current_follow.get("zoom_in_confirm_frames", 12)) + 2,
                     "zoom_hold_frames_after_change": int(current_follow.get("zoom_hold_frames_after_change", 16)) + 4,
                 }
             }
             output_slug = "follow_cam_stabilization"
-            title = _localized_text(language, en="Follow-Cam Stabilization", zh="\u8ddf\u968f\u955c\u5934\u7a33\u5b9a\u5316")
+            title = _localized_text(
+                language, en="Follow-Cam Stabilization", zh="\u8ddf\u968f\u955c\u5934\u7a33\u5b9a\u5316"
+            )
             diagnosis = _localized_text(
                 language,
                 en=f"Mean crop height is {mean_crop_height:.1f}px. The fastest win is to make pan and zoom slower to react.",
@@ -1979,16 +2196,15 @@ class ApiService:
                 ]
             )
         elif lost_ratio > 0.18:
-            current_dynamic = (
-                config["resolved"]
-                .get("scene_bias", {})
-                .get("dynamic_air_recovery", {})
-            )
+            current_dynamic = config["resolved"].get("scene_bias", {}).get("dynamic_air_recovery", {})
             patch = {
                 "scene_bias": {
                     "dynamic_air_recovery": {
                         "tentative_reacquire_confidence_threshold": round(
-                            min(0.36, float(current_dynamic.get("tentative_reacquire_confidence_threshold", 0.30)) + 0.02),
+                            min(
+                                0.36,
+                                float(current_dynamic.get("tentative_reacquire_confidence_threshold", 0.30)) + 0.02,
+                            ),
                             2,
                         ),
                         "tentative_reacquire_score_threshold": round(
@@ -2125,7 +2341,8 @@ class ApiService:
         if not isinstance(patch_preview, list) or not patch_preview:
             patch_preview = _flatten_patch_lines(patch)
         output_name_suggestion = str(
-            response.get("output_name_suggestion") or f"{Path(config_name).stem}_{self._slugify(objective or 'ai_update')}"
+            response.get("output_name_suggestion")
+            or f"{Path(config_name).stem}_{self._slugify(objective or 'ai_update')}"
         )
         return {
             "title": str(response.get("title", "Model Recommendation")),
@@ -2138,7 +2355,9 @@ class ApiService:
             "output_name_suggestion": output_name_suggestion,
         }
 
-    def ai_config_diff(self, base_config_name: str, patch: dict[str, Any], output_name: str | None = None) -> dict[str, Any]:
+    def ai_config_diff(
+        self, base_config_name: str, patch: dict[str, Any], output_name: str | None = None
+    ) -> dict[str, Any]:
         resolved_output_name = output_name or f"{Path(base_config_name).stem}_ai_patch"
         return {
             "base_config_name": base_config_name,
@@ -2199,7 +2418,14 @@ class ApiService:
         return context
 
     def create_run(self, request: dict[str, Any]) -> dict[str, Any]:
+        self._assert_service_open()
+        pipeline_mode = str(request.get("pipeline_mode") or "standard")
+        broadcast_preflight = None
+        if pipeline_mode == "broadcast_hybrid":
+            broadcast_preflight = self._preflight_broadcast_request(request)
         if self._is_approved_child_run_request(request):
+            if pipeline_mode != "standard":
+                raise ValueError("approved child recovery cannot be combined with broadcast_hybrid")
             return self._create_approved_child_run(request)
         if not request.get("config_name"):
             raise ValueError("Create run requires config_name.")
@@ -2231,6 +2457,10 @@ class ApiService:
             config.runtime.start_frame = int(request["start_frame"])
         if request.get("max_frames") is not None:
             config.runtime.max_frames = int(request["max_frames"])
+        if pipeline_mode == "broadcast_hybrid":
+            # The hybrid workflow publishes its own audited camera generation and render.
+            # Running the legacy follow-cam here would create a second, misleading deliverable.
+            config.follow_cam.enabled = False
 
         config.output_dir = self._build_run_output_dir(run_id=run_id, input_video=config.input_video)
         if config.output_dir.exists() and any(config.output_dir.iterdir()):
@@ -2240,7 +2470,7 @@ class ApiService:
 
         run_record = {
             "run_id": run_id,
-            "source": "api",
+            "source": pipeline_mode if pipeline_mode == "broadcast_hybrid" else "api",
             "status": "queued",
             "created_at": _utc_now_iso(),
             "started_at": None,
@@ -2257,27 +2487,49 @@ class ApiService:
             },
             "artifacts": [],
             "stats": {},
+            "broadcast": (
+                {
+                    "status": "tracking",
+                    "quality_profile": "stable_broadcast",
+                    "max_manual_review_windows": int(request.get("max_manual_review_windows") or 30),
+                    "preflight": broadcast_preflight,
+                    "owner_pid": os.getpid(),
+                    "owner_instance_id": self._instance_id,
+                }
+                if broadcast_preflight is not None
+                else {}
+            ),
             "progress": self._initial_progress(),
             "notes": request.get("notes"),
             "error": None,
         }
         self._attach_ai_candidate_lifecycle(run_record)
 
-        with self._lock:
-            self._assert_no_active_run_locked()
-            registry = self._read_registry()
-            registry["runs"] = [run for run in registry["runs"] if run["run_id"] != run_id]
-            registry["runs"].append(run_record)
-            self._write_registry(registry)
-            cancel_event = threading.Event()
-            thread = threading.Thread(
-                target=self._execute_run,
-                args=(run_id, config, cancel_event),
-                name=f"football-tracking-run-{run_id}",
-                daemon=True,
-            )
-            self._active_threads[run_id] = thread
-            self._cancel_events[run_id] = cancel_event
+        try:
+            with self._lock:
+                self._assert_service_open_locked()
+                with self._registry_transaction() as registry:
+                    active = next(
+                        (item for item in registry["runs"] if item.get("status") in {"queued", "running"}),
+                        None,
+                    )
+                    if active is not None:
+                        raise RuntimeError(f"Another run is already active: {active.get('run_id')}")
+                    registry["runs"] = [run for run in registry["runs"] if run["run_id"] != run_id]
+                    registry["runs"].append(run_record)
+                cancel_event = threading.Event()
+                thread = threading.Thread(
+                    target=self._execute_run,
+                    args=(run_id, config, cancel_event, run_record["source"]),
+                    name=f"football-tracking-run-{run_id}",
+                    daemon=True,
+                )
+                self._active_threads[run_id] = thread
+                self._cancel_events[run_id] = cancel_event
+        except BaseException:
+            if output_created:
+                shutil.rmtree(config.output_dir, ignore_errors=True)
+            raise
         self._start_thread_or_cleanup(
             run_id,
             thread,
@@ -2290,6 +2542,98 @@ class ApiService:
         approved_ids = [str(item).strip() for item in request.get("approved_action_ids") or [] if str(item).strip()]
         artifact_name = str(request.get("approved_actions_artifact_name") or "").strip()
         return bool(approved_ids or artifact_name)
+
+    def _preflight_broadcast_request(self, request: dict[str, Any]) -> dict[str, Any]:
+        if self._is_approved_child_run_request(request):
+            raise ValueError("approved child recovery cannot be combined with broadcast_hybrid")
+        if request.get("quality_profile") != "stable_broadcast":
+            raise ValueError("broadcast_hybrid requires quality_profile='stable_broadcast'")
+        max_windows = request.get("max_manual_review_windows")
+        if not isinstance(max_windows, int) or isinstance(max_windows, bool) or not 1 <= max_windows <= 30:
+            raise ValueError("max_manual_review_windows must be an integer between 1 and 30")
+        calibration_raw = request.get("calibration_confirmation")
+        if not isinstance(calibration_raw, dict):
+            raise ValueError("broadcast_hybrid requires calibration_confirmation")
+        calibration = ActionCalibration.from_dict({"schema_version": "1.0", **calibration_raw})
+        config_name = request.get("config_name")
+        if not isinstance(config_name, str) or not config_name.strip():
+            raise ValueError("broadcast_hybrid requires config_name")
+        config_path, _ = self._resolve_config_path(config_name)
+        config = load_config(config_path)
+        config_patch = request.get("config_patch") or {}
+        if not isinstance(config_patch, dict):
+            raise ValueError("config_patch must be an object")
+        patched_input = config_patch.get("input_video", config.input_video)
+        input_video = request.get("input_video") or patched_input
+        raw_video_path = Path(str(input_video))
+        if not raw_video_path.is_absolute():
+            raw_video_path = self.repo_root / raw_video_path
+        video_path = self._resolve_input_video_path(str(raw_video_path))
+        output_patch = config_patch.get("output") or {}
+        if not isinstance(output_patch, dict):
+            raise ValueError("config_patch.output must be an object")
+        save_tracking_contract = output_patch.get(
+            "save_tracking_contract",
+            config.output.save_tracking_contract,
+        )
+        if save_tracking_contract is not True:
+            raise ValueError("broadcast_hybrid requires output.save_tracking_contract=true")
+        runtime_patch = config_patch.get("runtime") or {}
+        if not isinstance(runtime_patch, dict):
+            raise ValueError("config_patch.runtime must be an object")
+        effective_start_frame = (
+            request.get("start_frame")
+            if request.get("start_frame") is not None
+            else runtime_patch.get("start_frame", config.runtime.start_frame)
+        )
+        effective_max_frames = (
+            request.get("max_frames")
+            if request.get("max_frames") is not None
+            else runtime_patch.get("max_frames", config.runtime.max_frames)
+        )
+        if isinstance(effective_start_frame, bool) or not isinstance(effective_start_frame, int):
+            raise ValueError("broadcast_hybrid start_frame must be an integer")
+        if effective_start_frame != 0:
+            raise ValueError("broadcast_hybrid requires a full-video run with start_frame=0")
+        if effective_max_frames is not None and (
+            isinstance(effective_max_frames, bool) or not isinstance(effective_max_frames, int)
+        ):
+            raise ValueError("broadcast_hybrid max_frames must be an integer or null")
+
+        capture = cv2.VideoCapture(str(video_path))
+        try:
+            if not capture.isOpened():
+                raise ValueError(f"broadcast source video is not decodable: {video_path}")
+            source_width = int(capture.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
+            source_height = int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
+            source_frame_count = int(capture.get(cv2.CAP_PROP_FRAME_COUNT) or 0) or None
+            fps = float(capture.get(cv2.CAP_PROP_FPS) or 0.0)
+            if source_width <= 0 or source_height <= 0 or not np.isfinite(fps) or fps <= 0.0:
+                raise ValueError("broadcast source video metadata is invalid")
+            if effective_max_frames is not None and (
+                source_frame_count is None or effective_max_frames < source_frame_count
+            ):
+                raise ValueError("broadcast_hybrid max_frames must cover the complete source video")
+            validate_calibration_for_video(
+                calibration,
+                source_width=source_width,
+                source_height=source_height,
+                total_source_frames=source_frame_count,
+            )
+        finally:
+            capture.release()
+        stat = video_path.stat()
+        return {
+            "input_video": str(video_path),
+            "source_resolution": [source_width, source_height],
+            "source_frame_count": source_frame_count,
+            "fps": fps,
+            "source_size_bytes": stat.st_size,
+            "source_mtime_ns": stat.st_mtime_ns,
+            "calibration": calibration.to_dict(),
+            "classifier_status": "missing_until_hash_bound_predictions_are_supplied",
+            "selective_policy_status": "missing_until_qualified_evidence_is_supplied",
+        }
 
     def _create_approved_child_run(self, request: dict[str, Any]) -> dict[str, Any]:
         parent_run_id = str(request.get("parent_run_id") or "").strip()
@@ -2328,7 +2672,9 @@ class ApiService:
         if self._has_full_video_localize_window(executable_windows, source_total_frames):
             raise ValueError("Approved child recovery rejects full-video localize_ball_roi scope.")
         if self._has_source_clamped_invalid_localize_window(executable_windows, source_total_frames):
-            raise ValueError("Approved child recovery rejects localize_ball_roi outside the source-clamped frame window.")
+            raise ValueError(
+                "Approved child recovery rejects localize_ball_roi outside the source-clamped frame window."
+            )
         missing_candidate_ids = self._recovery_actions_without_candidate_id(selected_artifact)
         if missing_candidate_ids:
             raise ValueError(
@@ -2415,6 +2761,7 @@ class ApiService:
 
         thread: threading.Thread | None = None
         with self._lock:
+            self._assert_service_open_locked()
             self._assert_no_active_run_locked()
             output_created = False
             registry_written = False
@@ -2507,7 +2854,12 @@ class ApiService:
             localize_windows.append(window)
             start_frame = self._optional_int(window.get("start_frame"))
             end_frame = self._optional_int(window.get("end_frame"))
-            if start_frame is not None and end_frame is not None and start_frame <= 0 and end_frame >= source_total_frames - 1:
+            if (
+                start_frame is not None
+                and end_frame is not None
+                and start_frame <= 0
+                and end_frame >= source_total_frames - 1
+            ):
                 return True
         return self._localize_windows_cover_full_video(localize_windows, source_total_frames)
 
@@ -2584,7 +2936,11 @@ class ApiService:
         candidate_ids: set[str] = set()
         actions = artifact.get("approved_actions") if isinstance(artifact.get("approved_actions"), list) else []
         for action in actions:
-            if not isinstance(action, dict) or action.get("approved_action") not in {"localize_ball_roi", "targeted_rerun", "rerun_ball_window"}:
+            if not isinstance(action, dict) or action.get("approved_action") not in {
+                "localize_ball_roi",
+                "targeted_rerun",
+                "rerun_ball_window",
+            }:
                 continue
             candidate_id = action.get("candidate_id")
             if isinstance(candidate_id, str) and candidate_id.strip():
@@ -2595,7 +2951,11 @@ class ApiService:
         missing: list[str] = []
         actions = artifact.get("approved_actions") if isinstance(artifact.get("approved_actions"), list) else []
         for action in actions:
-            if not isinstance(action, dict) or action.get("approved_action") not in {"localize_ball_roi", "targeted_rerun", "rerun_ball_window"}:
+            if not isinstance(action, dict) or action.get("approved_action") not in {
+                "localize_ball_roi",
+                "targeted_rerun",
+                "rerun_ball_window",
+            }:
                 continue
             candidate_id = action.get("candidate_id")
             if not isinstance(candidate_id, str) or not candidate_id.strip():
@@ -2728,6 +3088,7 @@ class ApiService:
         return path.stat().st_size, digest.hexdigest()
 
     def create_follow_cam_render(self, source_run_id: str, request: dict[str, Any]) -> dict[str, Any]:
+        self._assert_service_open()
         source_run = self.get_run(source_run_id)
         if source_run.get("status") != "completed":
             raise RuntimeError(f"Run must be completed before rendering a deliverable: {source_run_id}")
@@ -2764,7 +3125,9 @@ class ApiService:
             default_name="deliverable_16x9.mp4",
         )
 
-        self._prepare_follow_cam_render_inputs(source_output_dir=source_output_dir, render_output_dir=config.output_dir, config=config)
+        self._prepare_follow_cam_render_inputs(
+            source_output_dir=source_output_dir, render_output_dir=config.output_dir, config=config
+        )
 
         render_notes = request.get("notes") or (
             f"Standalone 16:9 render from {source_run_id} | "
@@ -2796,6 +3159,7 @@ class ApiService:
         self._attach_ai_candidate_lifecycle(run_record)
 
         with self._lock:
+            self._assert_service_open_locked()
             self._assert_no_active_run_locked()
             registry = self._read_registry()
             registry["runs"] = [run for run in registry["runs"] if run["run_id"] != run_id]
@@ -2819,6 +3183,7 @@ class ApiService:
         return run_record
 
     def create_highlight_render(self, source_run_id: str, request: dict[str, Any]) -> dict[str, Any]:
+        self._assert_service_open()
         source_run = self.get_run(source_run_id)
         if source_run.get("status") != "completed":
             raise RuntimeError(f"Run must be completed before rendering a highlight: {source_run_id}")
@@ -2854,12 +3219,13 @@ class ApiService:
         )
 
         source_output_dir = Path(source_run["output_dir"]).resolve()
-        self._prepare_highlight_render_inputs(source_output_dir=source_output_dir, render_output_dir=config.output_dir, config=config)
+        self._prepare_highlight_render_inputs(
+            source_output_dir=source_output_dir, render_output_dir=config.output_dir, config=config
+        )
 
         window = highlight_selection["window"]
         render_notes = request.get("notes") or (
-            f"Highlight render from {source_run_id} | "
-            f"frames={window['start_frame']}-{window['end_frame']}"
+            f"Highlight render from {source_run_id} | frames={window['start_frame']}-{window['end_frame']}"
         )
         run_record = {
             "run_id": run_id,
@@ -2886,6 +3252,7 @@ class ApiService:
         self._attach_ai_candidate_lifecycle(run_record)
 
         with self._lock:
+            self._assert_service_open_locked()
             self._assert_no_active_run_locked()
             registry = self._read_registry()
             registry["runs"] = [run for run in registry["runs"] if run["run_id"] != run_id]
@@ -2910,40 +3277,931 @@ class ApiService:
 
     def cancel_run(self, run_id: str) -> dict[str, Any]:
         with self._lock:
-            registry = self._read_registry()
-            for run in registry["runs"]:
-                if run["run_id"] != run_id:
-                    continue
-                status = run.get("status")
-                if status not in {"queued", "running"}:
-                    raise RuntimeError(f"Run is not active: {run_id}")
-                cancel_event = self._cancel_events.get(run_id)
-                if cancel_event is not None:
-                    cancel_event.set()
-                    run["progress"] = self._cancelling_progress(run.get("progress"), run.get("started_at"))
-                else:
-                    completed_at = _utc_now_iso()
-                    run.update(
+            self._assert_service_open_locked()
+            with self._registry_transaction() as registry:
+                for run in registry["runs"]:
+                    if run["run_id"] != run_id:
+                        continue
+                    status = run.get("status")
+                    if status not in {"queued", "running"}:
+                        raise RuntimeError(f"Run is not active: {run_id}")
+                    broadcast = run.get("broadcast") if isinstance(run.get("broadcast"), dict) else {}
+                    if broadcast.get("commit_started") is True:
+                        raise RuntimeError(f"Run commit has already started and can no longer be cancelled: {run_id}")
+                    run["broadcast"] = {**broadcast, "cancel_requested": True}
+                    cancel_event = self._cancel_events.get(run_id)
+                    owner_active = self._owner_lease_is_active(
+                        broadcast.get("owner_pid"),
+                        broadcast.get("owner_instance_id"),
+                    )
+                    if cancel_event is not None:
+                        cancel_event.set()
+                    if cancel_event is not None or owner_active:
+                        run["progress"] = self._cancelling_progress(run.get("progress"), run.get("started_at"))
+                    else:
+                        completed_at = _utc_now_iso()
+                        run.update(
+                            {
+                                "status": "cancelled",
+                                "completed_at": completed_at,
+                                "progress": self._cancelled_progress(run.get("progress"), run.get("started_at")),
+                            }
+                        )
+                        output_dir = Path(run["output_dir"]).resolve()
+                        artifact_error = self._write_run_artifacts(output_dir, run)
+                        run["artifacts"] = self._collect_artifacts(output_dir)
+                        run["stats"] = self._collect_stats(output_dir)
+                        run["error"] = self._append_artifact_error(run.get("error"), artifact_error)
+                    return deepcopy(run)
+                raise KeyError(run_id)
+
+    def get_broadcast_review_windows(self, run_id: str) -> dict[str, Any]:
+        run, output_dir = self._broadcast_run_output(run_id)
+        queue_path = output_dir / "selective_review_queue.v1.json"
+        if not queue_path.is_file():
+            return self._broadcast_needs_review(run_id, "missing_qualified_selective_review_queue")
+        try:
+            queue, queue_sha256 = validate_review_queue_bindings(queue_path, trusted_root=output_dir)
+        except BroadcastApiError as exc:
+            return self._broadcast_needs_review(run_id, "invalid_or_stale_selective_review_evidence", message=str(exc))
+        items = queue.get("items")
+        if not isinstance(items, list):
+            return self._broadcast_needs_review(run_id, "invalid_selective_review_queue_items")
+        broadcast = run.get("broadcast")
+        if not isinstance(broadcast, dict):
+            broadcast = {}
+        configured_limit = broadcast.get("max_manual_review_windows", 30)
+        if not isinstance(configured_limit, int) or isinstance(configured_limit, bool):
+            configured_limit = 30
+        if len(items) > configured_limit or queue.get("review_item_count") != len(items):
+            return self._broadcast_needs_review(run_id, "invalid_selective_review_queue_window_count")
+        return {
+            "run_id": run_id,
+            "status": "ready",
+            "reason": None,
+            "queue_sha256": queue_sha256,
+            "review_item_count": len(items),
+            "items": items,
+        }
+
+    def submit_broadcast_review_actions(self, run_id: str, request: dict[str, Any]) -> dict[str, Any]:
+        self._assert_service_open()
+        _, output_dir = self._broadcast_run_output(run_id)
+        window_state = self.get_broadcast_review_windows(run_id)
+        if window_state.get("status") != "ready":
+            raise RuntimeError(str(window_state.get("reason") or "broadcast review windows are unavailable"))
+        queue_path = output_dir / "selective_review_queue.v1.json"
+        if not queue_path.is_file():
+            raise RuntimeError("missing qualified selective review queue")
+        raw_actions = request.get("actions")
+        if not isinstance(raw_actions, list) or not raw_actions:
+            raise ValueError("review action submission must contain actions")
+        if any(isinstance(action, dict) and action.get("action") == "correct_trajectory" for action in raw_actions):
+            raise RuntimeError("correct_trajectory is not supported by the global trajectory solver")
+        try:
+            validate_review_queue_bindings(queue_path, trusted_root=output_dir)
+            envelope = build_review_action_envelope(queue_path, raw_actions, trusted_root=output_dir)
+            decisions_path = output_dir / "review_decisions.json"
+            decisions_sha256 = publish_json_exclusive(decisions_path, envelope, trusted_root=output_dir)
+        except BroadcastApiError as exc:
+            raise RuntimeError(f"invalid or stale selective review evidence: {exc}") from exc
+        self._refresh_run_artifacts_and_stats(run_id, output_dir)
+        return {
+            "run_id": run_id,
+            "status": "completed",
+            "reason": "review_actions_accepted",
+            "artifact": "review_decisions.json",
+            "generation_id": None,
+            "details": {"review_decisions_sha256": decisions_sha256},
+        }
+
+    def recompute_broadcast_trajectory(self, run_id: str, request: dict[str, Any]) -> dict[str, Any]:
+        self._assert_service_open()
+        parent, output_dir = self._broadcast_run_output(run_id)
+        parent_broadcast = parent.get("broadcast")
+        if not isinstance(parent_broadcast, dict):
+            parent_broadcast = {}
+        if parent_broadcast.get("status") == "ready" or (output_dir / "broadcast_quality_report.json").is_file():
+            raise RuntimeError("ready broadcast artifacts are immutable; start a new run for revised review actions")
+        expected_decisions_sha256 = request.get("review_decisions_sha256")
+        if not isinstance(expected_decisions_sha256, str) or not re.fullmatch(
+            r"[0-9a-f]{64}", expected_decisions_sha256
+        ):
+            raise ValueError("review_decisions_sha256 must be a lowercase SHA-256")
+        try:
+            frozen_inputs = preflight_recompute_reviewed_trajectory(output_dir)
+        except BroadcastHybridOrchestrationError as exc:
+            raise RuntimeError(str(exc)) from exc
+        if frozen_inputs["review_decisions_sha256"] != expected_decisions_sha256:
+            raise RuntimeError("review decisions changed after they were accepted")
+        frozen_inputs = {
+            **frozen_inputs,
+            "parent_run_id": run_id,
+            "parent_output_dir": str(output_dir),
+        }
+        return self._queue_broadcast_operation(
+            parent=parent,
+            operation="recompute",
+            request={},
+            frozen_inputs=frozen_inputs,
+        )
+
+    def render_broadcast_hybrid(self, run_id: str, request: dict[str, Any]) -> dict[str, Any]:
+        self._assert_service_open()
+        parent, output_dir = self._broadcast_run_output(run_id)
+        parent_broadcast = parent.get("broadcast")
+        if not isinstance(parent_broadcast, dict):
+            parent_broadcast = {}
+        if parent_broadcast.get("status") == "ready" or (output_dir / "broadcast_quality_report.json").is_file():
+            raise RuntimeError("broadcast render is already ready and immutable")
+        generation_id = request.get("trajectory_generation_id")
+        if not isinstance(generation_id, str) or not re.fullmatch(r"trajectory-[0-9a-f]{24}", generation_id):
+            raise ValueError("trajectory_generation_id must identify a completed immutable trajectory generation")
+        target_width = request.get("target_width")
+        target_height = request.get("target_height")
+        if (
+            isinstance(target_width, bool)
+            or not isinstance(target_width, int)
+            or isinstance(target_height, bool)
+            or not isinstance(target_height, int)
+        ):
+            raise ValueError("target dimensions must be integers")
+        if not 320 <= target_width <= 7680 or not 180 <= target_height <= 4320:
+            raise ValueError("target dimensions are outside the supported render bounds")
+        try:
+            frozen_inputs = preflight_render_broadcast_trajectory(
+                output_dir,
+                generation_id,
+                target_width=target_width,
+                target_height=target_height,
+            )
+        except BroadcastHybridOrchestrationError as exc:
+            raise RuntimeError(str(exc)) from exc
+        frozen_inputs = {
+            **frozen_inputs,
+            "parent_run_id": run_id,
+            "parent_output_dir": str(output_dir),
+        }
+        return self._queue_broadcast_operation(
+            parent=parent,
+            operation="render",
+            request={
+                "trajectory_generation_id": generation_id,
+                "target_width": target_width,
+                "target_height": target_height,
+            },
+            frozen_inputs=frozen_inputs,
+        )
+
+    def _queue_broadcast_operation(
+        self,
+        *,
+        parent: dict[str, Any],
+        operation: str,
+        request: dict[str, Any],
+        frozen_inputs: dict[str, Any],
+    ) -> dict[str, Any]:
+        if operation not in {"recompute", "render"}:
+            raise ValueError(f"unsupported broadcast operation: {operation}")
+        parent_run_id = str(parent["run_id"])
+        operation_run_id = f"{parent_run_id}-{operation}-{uuid4().hex[:8]}"
+        input_video = Path(parent["input_video"]).resolve() if parent.get("input_video") else None
+        operation_output = self._build_run_output_dir(run_id=operation_run_id, input_video=input_video)
+        if operation_output.exists():
+            raise RuntimeError(f"broadcast operation output already exists: {operation_output}")
+        created_at = _utc_now_iso()
+        child = {
+            "run_id": operation_run_id,
+            "source": f"broadcast_hybrid_{operation}",
+            "status": "queued",
+            "created_at": created_at,
+            "started_at": None,
+            "completed_at": None,
+            "config_name": parent.get("config_name"),
+            "config_path": parent.get("config_path"),
+            "input_video": parent.get("input_video"),
+            "parent_run_id": parent_run_id,
+            "output_dir": str(operation_output),
+            "modules_enabled": {"broadcast_hybrid": True},
+            "artifacts": [],
+            "stats": {},
+            "broadcast": {
+                "operation": operation,
+                "operation_status": "queued",
+                "parent_run_id": parent_run_id,
+                "owner_pid": os.getpid(),
+                "owner_instance_id": self._instance_id,
+                "request": request,
+                "frozen_inputs": frozen_inputs,
+            },
+            "progress": self._initial_progress(),
+            "notes": f"Broadcast hybrid {operation} operation for {parent_run_id}",
+            "error": None,
+        }
+        self._attach_ai_candidate_lifecycle(child)
+        try:
+            operation_output.mkdir(parents=True, exist_ok=False)
+        except FileExistsError as exc:
+            raise RuntimeError(f"broadcast operation output already exists: {operation_output}") from exc
+        try:
+            with self._lock:
+                self._assert_service_open_locked()
+                with self._registry_transaction() as registry:
+                    active = next(
+                        (item for item in registry["runs"] if item.get("status") in {"queued", "running"}),
+                        None,
+                    )
+                    if active is not None:
+                        raise RuntimeError(f"Another run is already active: {active.get('run_id')}")
+                    current_parent = next(
+                        (item for item in registry["runs"] if item.get("run_id") == parent_run_id), None
+                    )
+                    if (
+                        current_parent is None
+                        or current_parent.get("source") != "broadcast_hybrid"
+                        or current_parent.get("status") != "completed"
+                    ):
+                        raise RuntimeError("broadcast operation parent must remain a completed broadcast_hybrid run")
+                    if any(item.get("run_id") == operation_run_id for item in registry["runs"]):
+                        raise RuntimeError(f"broadcast operation run already exists: {operation_run_id}")
+                    registry["runs"].append(child)
+                cancel_event = threading.Event()
+                thread = threading.Thread(
+                    target=self._execute_broadcast_operation,
+                    args=(operation_run_id, parent_run_id, operation, request, frozen_inputs, cancel_event),
+                    name=f"football-tracking-broadcast-{operation}-{operation_run_id}",
+                    daemon=True,
+                )
+                self._active_threads[operation_run_id] = thread
+                self._cancel_events[operation_run_id] = cancel_event
+        except BaseException:
+            shutil.rmtree(operation_output, ignore_errors=True)
+            raise
+        self._start_thread_or_cleanup(
+            operation_run_id,
+            thread,
+            output_dir=operation_output,
+            remove_output=True,
+        )
+        return {
+            "run_id": operation_run_id,
+            "parent_run_id": parent_run_id,
+            "status": "queued",
+            "reason": f"broadcast_{operation}_queued",
+            "artifact": None,
+            "generation_id": None,
+            "details": {},
+        }
+
+    def _begin_broadcast_operation_execution(
+        self,
+        *,
+        operation_run_id: str,
+        parent_run_id: str,
+        operation: str,
+        frozen_inputs: dict[str, Any],
+        cancel_event: threading.Event,
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        """Atomically claim a queued child without overwriting remote cancellation."""
+
+        with self._lock:
+            with self._registry_transaction() as registry:
+                child = next((item for item in registry["runs"] if item.get("run_id") == operation_run_id), None)
+                parent = next((item for item in registry["runs"] if item.get("run_id") == parent_run_id), None)
+                if child is None or parent is None:
+                    raise BroadcastHybridOrchestrationError("broadcast operation registry lineage disappeared")
+                metadata = child.get("broadcast") if isinstance(child.get("broadcast"), dict) else {}
+                if (
+                    child.get("source") != f"broadcast_hybrid_{operation}"
+                    or child.get("parent_run_id") != parent_run_id
+                    or metadata.get("operation") != operation
+                    or metadata.get("frozen_inputs") != frozen_inputs
+                ):
+                    raise BroadcastHybridOrchestrationError("broadcast operation queue lineage changed")
+                if cancel_event.is_set() or metadata.get("cancel_requested") is True:
+                    raise CancelledError()
+                if child.get("status") != "queued":
+                    raise BroadcastHybridOrchestrationError("broadcast operation is no longer queued")
+                started_at = _utc_now_iso()
+                child.update(
+                    {
+                        "status": "running",
+                        "started_at": started_at,
+                        "error": None,
+                        "broadcast": {
+                            **metadata,
+                            "owner_pid": os.getpid(),
+                            "owner_instance_id": self._instance_id,
+                            "operation_status": "running",
+                            "worker_exited": False,
+                        },
+                        "progress": {
+                            **self._initial_progress(),
+                            "stage": f"broadcast_{operation}",
+                        },
+                    }
+                )
+                return deepcopy(child), deepcopy(parent)
+
+    def _execute_broadcast_operation(
+        self,
+        operation_run_id: str,
+        parent_run_id: str,
+        operation: str,
+        request: dict[str, Any],
+        frozen_inputs: dict[str, Any],
+        cancel_event: threading.Event,
+    ) -> None:
+        operation_output: Path | None = None
+        parent_output: Path | None = None
+        result: dict[str, Any] | None = None
+        quality_report: dict[str, Any] | None = None
+        completed_child: dict[str, Any] | None = None
+        operation_report_published = False
+        ready_root_authoritative = False
+        try:
+            queued_child = self.get_run(operation_run_id)
+            operation_output = Path(queued_child["output_dir"]).resolve()
+            child, parent = self._begin_broadcast_operation_execution(
+                operation_run_id=operation_run_id,
+                parent_run_id=parent_run_id,
+                operation=operation,
+                frozen_inputs=frozen_inputs,
+                cancel_event=cancel_event,
+            )
+            parent_output = Path(parent["output_dir"]).resolve()
+            if frozen_inputs.get("parent_run_id") != parent_run_id or frozen_inputs.get("parent_output_dir") != str(
+                parent_output
+            ):
+                raise BroadcastHybridOrchestrationError("broadcast parent identity changed after queueing")
+
+            def cancellation_requested() -> bool:
+                if cancel_event.is_set():
+                    return True
+                with self._lock:
+                    registry = self._read_registry()
+                    current = next(
+                        (item for item in registry["runs"] if item.get("run_id") == operation_run_id),
+                        None,
+                    )
+                    metadata = current.get("broadcast") if isinstance(current, dict) else None
+                    return isinstance(metadata, dict) and metadata.get("cancel_requested") is True
+
+            if cancellation_requested():
+                raise CancelledError()
+
+            def begin_commit() -> None:
+                self._begin_broadcast_operation_commit(
+                    operation_run_id=operation_run_id,
+                    parent_run_id=parent_run_id,
+                    parent_output=parent_output,
+                    cancel_event=cancel_event,
+                )
+
+            if operation == "recompute":
+                current_inputs = preflight_recompute_reviewed_trajectory(parent_output)
+                current_inputs = {
+                    **current_inputs,
+                    "parent_run_id": parent_run_id,
+                    "parent_output_dir": str(parent_output),
+                }
+                if current_inputs != frozen_inputs:
+                    raise BroadcastHybridOrchestrationError(
+                        "broadcast recompute inputs changed after the operation was queued"
+                    )
+                result = recompute_reviewed_trajectory(
+                    parent_output,
+                    should_cancel=cancellation_requested,
+                    before_commit=begin_commit,
+                )
+                trajectory_generation_id = result.get("trajectory_generation_id")
+                if not isinstance(trajectory_generation_id, str):
+                    raise BroadcastHybridOrchestrationError("recompute did not return a trajectory generation")
+                preflight_render_broadcast_trajectory(parent_output, trajectory_generation_id)
+            else:
+                current_inputs = preflight_render_broadcast_trajectory(
+                    parent_output,
+                    request["trajectory_generation_id"],
+                    target_width=request["target_width"],
+                    target_height=request["target_height"],
+                )
+                current_inputs = {
+                    **current_inputs,
+                    "parent_run_id": parent_run_id,
+                    "parent_output_dir": str(parent_output),
+                }
+                if current_inputs != frozen_inputs:
+                    raise BroadcastHybridOrchestrationError(
+                        "broadcast render inputs changed after the operation was queued"
+                    )
+                result = render_broadcast_trajectory(
+                    parent_output,
+                    request["trajectory_generation_id"],
+                    target_width=request["target_width"],
+                    target_height=request["target_height"],
+                    should_cancel=cancellation_requested,
+                    before_commit=begin_commit,
+                )
+            try:
+                quality_report = publish_broadcast_facade(parent_output)
+            except Exception as exc:
+                if operation == "render" and (parent_output / "broadcast_artifact_bindings.v1.json").is_file():
+                    try:
+                        rollback_uncommitted_final_public_artifacts(parent_output)
+                    except Exception as rollback_exc:
+                        raise RuntimeError(
+                            f"{exc} | failed to quarantine unready final artifacts: {rollback_exc}"
+                        ) from exc
+                raise
+            if operation == "render" and quality_report.get("status") != "ready":
+                if (parent_output / "broadcast_artifact_bindings.v1.json").is_file():
+                    rollback_uncommitted_final_public_artifacts(parent_output)
+                raise BroadcastHybridOrchestrationError("render completed without a ready broadcast facade")
+            if operation == "recompute" and quality_report.get("status") != "needs_review":
+                raise BroadcastHybridOrchestrationError("recompute produced an unexpected final facade state")
+
+            existing = self.get_run(operation_run_id)
+            completed_at = _utc_now_iso()
+            existing_broadcast = existing.get("broadcast")
+            if not isinstance(existing_broadcast, dict):
+                existing_broadcast = {}
+            completed_child = {
+                **existing,
+                "status": "completed",
+                "completed_at": completed_at,
+                "error": None,
+                "broadcast": {
+                    **existing_broadcast,
+                    "operation_status": "completed",
+                    "commit_started": True,
+                    "result": _jsonable(result),
+                },
+                "progress": self._completed_progress(existing.get("progress"), existing.get("started_at")),
+            }
+            metadata_warnings: list[str] = []
+            artifact_error = self._write_run_artifacts(operation_output, completed_child)
+            if artifact_error is not None:
+                metadata_warnings.append(artifact_error)
+            operation_report = {
+                "schema_version": "1.0",
+                "artifact_type": "broadcast_operation_report",
+                "status": "succeeded",
+                "operation": operation,
+                "parent_run_id": parent_run_id,
+                "frozen_inputs": frozen_inputs,
+                "result": _jsonable(result),
+                "quality_status_generation": quality_report.get("status_generation"),
+                "metadata_warnings": metadata_warnings,
+            }
+            try:
+                publish_json_exclusive(
+                    operation_output / "broadcast_operation_report.v1.json",
+                    operation_report,
+                    trusted_root=operation_output,
+                )
+                operation_report_published = True
+                completed_child["broadcast"]["operation_report_status"] = "available"
+            except (OSError, BroadcastApiError) as report_exc:
+                if operation != "render" or quality_report.get("status") != "ready":
+                    raise
+                validated_quality = validate_broadcast_quality_report(
+                    parent_output,
+                    parent_output / "broadcast_quality_report.json",
+                )
+                if validated_quality.get("status_generation") != quality_report.get("status_generation"):
+                    raise BroadcastApiError("authoritative ready facade changed before registry commit") from report_exc
+                ready_root_authoritative = True
+                if isinstance(report_exc, BroadcastApiError):
+                    completed_child.update(
                         {
-                            "status": "cancelled",
-                            "completed_at": completed_at,
-                            "progress": self._cancelled_progress(run.get("progress"), run.get("started_at")),
+                            "status": "failed",
+                            "error": f"Ready render committed with conflicting operation metadata: {report_exc}",
+                            "progress": self._failed_progress(
+                                completed_child.get("progress"), completed_child.get("started_at")
+                            ),
                         }
                     )
-                    output_dir = Path(run["output_dir"]).resolve()
-                    artifact_error = self._write_run_artifacts(output_dir, run)
-                    run["artifacts"] = self._collect_artifacts(output_dir)
-                    run["stats"] = self._collect_stats(output_dir)
-                    run["error"] = self._append_artifact_error(run.get("error"), artifact_error)
-                self._write_registry(registry)
-                return run
-        raise KeyError(run_id)
+                    completed_child["broadcast"]["operation_status"] = "metadata_conflict"
+                    completed_child["broadcast"]["operation_report_status"] = "conflict"
+                else:
+                    metadata_warnings.append(
+                        f"Ready render is authoritative; operation report publication failed: {report_exc}"
+                    )
+                    completed_child["broadcast"]["operation_report_status"] = "missing_after_ready_commit"
+            if metadata_warnings:
+                completed_child["broadcast"]["metadata_warnings"] = metadata_warnings
+            completed_child["artifacts"] = self._collect_artifacts(operation_output)
+            completed_child["stats"] = self._collect_stats(operation_output)
+            self._attach_ai_candidate_lifecycle(completed_child)
+            self._commit_broadcast_operation_registry(
+                parent_run_id=parent_run_id,
+                operation_run_id=operation_run_id,
+                operation=operation,
+                result=result,
+                quality_report=quality_report,
+                parent_output=parent_output,
+                completed_child=completed_child,
+            )
+        except CancelledError:
+            if operation_output is not None:
+                try:
+                    self._finish_broadcast_operation_failure(
+                        operation_run_id,
+                        parent_run_id,
+                        operation,
+                        operation_output,
+                        status="cancelled",
+                        error=None,
+                    )
+                except Exception:
+                    pass
+        except BaseException as exc:
+            if (
+                parent_output is not None
+                and result is not None
+                and quality_report is not None
+                and completed_child is not None
+                and (operation_report_published or ready_root_authoritative)
+            ):
+                child_broadcast = completed_child.get("broadcast")
+                if isinstance(child_broadcast, dict):
+                    warnings = child_broadcast.setdefault("metadata_warnings", [])
+                    if isinstance(warnings, list):
+                        warnings.append(f"Post-commit registry update required retry: {exc}")
+                try:
+                    self._commit_broadcast_operation_registry(
+                        parent_run_id=parent_run_id,
+                        operation_run_id=operation_run_id,
+                        operation=operation,
+                        result=result,
+                        quality_report=quality_report,
+                        parent_output=parent_output,
+                        completed_child=completed_child,
+                    )
+                except Exception:
+                    try:
+                        if ready_root_authoritative:
+                            self._commit_broadcast_operation_registry_atomic(
+                                parent_run_id=parent_run_id,
+                                operation_run_id=operation_run_id,
+                                operation=operation,
+                                result=result,
+                                quality_report=quality_report,
+                                parent_output=parent_output,
+                                completed_child=completed_child,
+                            )
+                        else:
+                            self._reconcile_broadcast_operation_report(operation_run_id)
+                    except Exception as reconciliation_exc:
+                        if ready_root_authoritative:
+                            self._request_broadcast_reconciliation_retry(
+                                operation_run_id,
+                                error=str(reconciliation_exc),
+                                mode="ready_without_report",
+                            )
+            else:
+                if operation_output is not None:
+                    try:
+                        self._finish_broadcast_operation_failure(
+                            operation_run_id,
+                            parent_run_id,
+                            operation,
+                            operation_output,
+                            status="failed",
+                            error=str(exc),
+                        )
+                    except Exception:
+                        pass
+        finally:
+            with self._lock:
+                self._active_threads.pop(operation_run_id, None)
+                self._cancel_events.pop(operation_run_id, None)
 
-    def _execute_run(self, run_id: str, config: AppConfig, cancel_event: threading.Event) -> None:
+    def _begin_broadcast_operation_commit(
+        self,
+        *,
+        operation_run_id: str,
+        parent_run_id: str,
+        parent_output: Path,
+        cancel_event: threading.Event,
+    ) -> None:
+        with self._lock:
+            with self._registry_transaction() as registry:
+                child = next((item for item in registry["runs"] if item.get("run_id") == operation_run_id), None)
+                parent = next((item for item in registry["runs"] if item.get("run_id") == parent_run_id), None)
+                if child is None or parent is None:
+                    raise BroadcastHybridOrchestrationError("broadcast operation registry lineage disappeared")
+                child_broadcast = child.get("broadcast") if isinstance(child.get("broadcast"), dict) else {}
+                if cancel_event.is_set() or child_broadcast.get("cancel_requested") is True:
+                    raise CancelledError()
+                if child.get("status") != "running":
+                    raise BroadcastHybridOrchestrationError("broadcast operation is not running at commit")
+                if (
+                    parent.get("source") != "broadcast_hybrid"
+                    or parent.get("status") != "completed"
+                    or Path(parent["output_dir"]).resolve() != parent_output
+                ):
+                    raise BroadcastHybridOrchestrationError("broadcast parent changed before commit")
+                child["broadcast"] = {
+                    **child_broadcast,
+                    "operation_status": "committing",
+                    "commit_started": True,
+                }
+                progress = (
+                    child.get("progress") if isinstance(child.get("progress"), dict) else self._initial_progress()
+                )
+                child["progress"] = {**progress, "stage": "committing", "updated_at": _utc_now_iso()}
+
+    def _commit_broadcast_operation_registry(
+        self,
+        *,
+        parent_run_id: str,
+        operation_run_id: str,
+        operation: str,
+        result: dict[str, Any],
+        quality_report: dict[str, Any],
+        parent_output: Path,
+        completed_child: dict[str, Any],
+    ) -> None:
+        self._commit_broadcast_operation_registry_atomic(
+            parent_run_id=parent_run_id,
+            operation_run_id=operation_run_id,
+            operation=operation,
+            result=result,
+            quality_report=quality_report,
+            parent_output=parent_output,
+            completed_child=completed_child,
+        )
+
+    def _commit_broadcast_operation_registry_atomic(
+        self,
+        *,
+        parent_run_id: str,
+        operation_run_id: str,
+        operation: str,
+        result: dict[str, Any],
+        quality_report: dict[str, Any],
+        parent_output: Path,
+        completed_child: dict[str, Any],
+    ) -> None:
+        parent_update = self.get_run(parent_run_id)
+        self._apply_recovered_broadcast_parent(
+            parent_update,
+            operation_run_id=operation_run_id,
+            operation=operation,
+            result=result,
+            quality_report=quality_report,
+            parent_output=parent_output,
+        )
+        with self._lock:
+            with self._registry_transaction() as registry:
+                parent = next((item for item in registry["runs"] if item.get("run_id") == parent_run_id), None)
+                child_index = next(
+                    (index for index, item in enumerate(registry["runs"]) if item.get("run_id") == operation_run_id),
+                    None,
+                )
+                if parent is None or child_index is None:
+                    raise BroadcastHybridOrchestrationError(
+                        "broadcast operation registry lineage disappeared at commit"
+                    )
+                current_child = registry["runs"][child_index]
+                current_metadata = (
+                    current_child.get("broadcast") if isinstance(current_child.get("broadcast"), dict) else {}
+                )
+                if (
+                    current_child.get("status") != "running"
+                    or current_metadata.get("commit_started") is not True
+                    or current_metadata.get("cancel_requested") is True
+                ):
+                    raise BroadcastHybridOrchestrationError("broadcast child changed during commit")
+                if (
+                    parent.get("source") != "broadcast_hybrid"
+                    or parent.get("status") != "completed"
+                    or Path(parent["output_dir"]).resolve() != parent_output
+                ):
+                    raise BroadcastHybridOrchestrationError("broadcast parent changed during commit")
+                for key in ("broadcast", "artifacts", "stats", "ai_candidate_lifecycle"):
+                    if key in parent_update:
+                        parent[key] = deepcopy(parent_update[key])
+                replacement = deepcopy(completed_child)
+                replacement_metadata = (
+                    replacement.get("broadcast") if isinstance(replacement.get("broadcast"), dict) else {}
+                )
+                replacement["broadcast"] = {**current_metadata, **replacement_metadata}
+                registry["runs"][child_index] = replacement
+
+    def _finish_broadcast_operation_failure(
+        self,
+        operation_run_id: str,
+        parent_run_id: str,
+        operation: str,
+        operation_output: Path,
+        *,
+        status: str,
+        error: str | None,
+    ) -> None:
+        existing = self.get_run(operation_run_id)
+        completed_at = _utc_now_iso()
+        existing_broadcast = existing.get("broadcast")
+        if not isinstance(existing_broadcast, dict):
+            existing_broadcast = {}
+        partial = {
+            **existing,
+            "status": status,
+            "completed_at": completed_at,
+            "error": error,
+            "broadcast": {
+                **existing_broadcast,
+                "operation_status": status,
+            },
+            "progress": (
+                self._cancelled_progress(existing.get("progress"), existing.get("started_at"))
+                if status == "cancelled"
+                else self._failed_progress(existing.get("progress"), existing.get("started_at"))
+            ),
+        }
+        artifact_error = self._write_run_artifacts(operation_output, partial)
+        partial["error"] = self._append_artifact_error(error, artifact_error)
+        partial["artifacts"] = self._collect_artifacts(operation_output)
+        partial["stats"] = self._collect_stats(operation_output)
+        self._attach_ai_candidate_lifecycle(partial)
+        with self._lock:
+            with self._registry_transaction() as registry:
+                child_index = next(
+                    (index for index, item in enumerate(registry["runs"]) if item.get("run_id") == operation_run_id),
+                    None,
+                )
+                if child_index is None:
+                    raise KeyError(operation_run_id)
+                current = registry["runs"][child_index]
+                if current.get("status") == "completed":
+                    return
+                current_metadata = current.get("broadcast") if isinstance(current.get("broadcast"), dict) else {}
+                partial_metadata = partial.get("broadcast") if isinstance(partial.get("broadcast"), dict) else {}
+                partial["broadcast"] = {**current_metadata, **partial_metadata}
+                registry["runs"][child_index] = partial
+                parent = next((item for item in registry["runs"] if item.get("run_id") == parent_run_id), None)
+                if parent is not None:
+                    broadcast = parent.get("broadcast") if isinstance(parent.get("broadcast"), dict) else {}
+                    parent["broadcast"] = {
+                        **broadcast,
+                        "last_operation": {
+                            "operation_run_id": operation_run_id,
+                            "operation": operation,
+                            "status": status,
+                            "error": error,
+                        },
+                    }
+
+    def _broadcast_run_output(self, run_id: str) -> tuple[dict[str, Any], Path]:
+        run = self.get_run(run_id)
+        if run.get("source") != "broadcast_hybrid":
+            raise RuntimeError(f"Run is not a broadcast_hybrid run: {run_id}")
+        if run.get("status") != "completed":
+            raise RuntimeError(f"Broadcast run must be completed before review operations: {run_id}")
+        output_dir = Path(run["output_dir"]).resolve()
+        if self.outputs_dir.resolve() not in output_dir.parents:
+            raise RuntimeError(f"Broadcast run output is outside the outputs root: {run_id}")
+        return run, output_dir
+
+    def _broadcast_needs_review(
+        self,
+        run_id: str,
+        reason: str,
+        *,
+        artifact: str | None = None,
+        generation_id: str | None = None,
+        **details: Any,
+    ) -> dict[str, Any]:
+        return {
+            "run_id": run_id,
+            "status": "needs_review",
+            "reason": reason,
+            "artifact": artifact,
+            "generation_id": generation_id,
+            "details": details,
+        }
+
+    def _run_broadcast_action_signal(
+        self,
+        run_id: str,
+        config: AppConfig,
+        should_cancel: Callable[[], bool],
+        progress_plan: dict[str, tuple[float, float]],
+    ) -> None:
+        existing = self.get_run(run_id)
+        broadcast = existing.get("broadcast") if isinstance(existing.get("broadcast"), dict) else {}
+        preflight = broadcast.get("preflight") if isinstance(broadcast.get("preflight"), dict) else {}
+        calibration_raw = preflight.get("calibration")
+        if not isinstance(calibration_raw, dict):
+            raise RuntimeError("broadcast calibration preflight is unavailable")
+        calibration = ActionCalibration.from_dict(calibration_raw)
+
+        output_dir = Path(config.output_dir).resolve()
+        calibration_path = output_dir / "action_calibration.v1.json"
+        contract_path = output_dir / TRACKING_CONTRACT_REPORT_NAME
+        if not contract_path.is_file():
+            raise RuntimeError("broadcast tracking contract is unavailable after tracking")
+        contract, contract_sha256 = load_bound_json(contract_path, "broadcast tracking contract")
+        source = contract.get("source") if isinstance(contract.get("source"), dict) else {}
+        source_sha256 = source.get("video_sha256")
+        if (
+            not isinstance(source_sha256, str)
+            or len(source_sha256) != 64
+            or any(character not in "0123456789abcdef" for character in source_sha256)
+        ):
+            raise RuntimeError("broadcast tracking contract has no canonical source video sha256")
+
+        produced_paths = [
+            calibration_path,
+            output_dir / ACTION_TRACK_NAME,
+            output_dir / ACTION_SIGNAL_DIAGNOSTICS_NAME,
+            output_dir / ACTION_SIGNAL_REPORT_NAME,
+            output_dir / "action_signal_binding.v1.json",
+        ]
+        if any(path.exists() for path in produced_paths):
+            raise RuntimeError("broadcast action-signal artifacts already exist")
+
+        input_video = Path(config.input_video).resolve()
+        source_stat = self._broadcast_source_stat_token(input_video)
+        try:
+            publish_json_exclusive(calibration_path, calibration.to_dict(), trusted_root=output_dir)
+
+            def update_action_progress(update: dict[str, Any]) -> None:
+                self._update_run_progress(
+                    run_id,
+                    {
+                        "stage": "action_signal",
+                        "current_frame": update.get("frame_count", 0),
+                        "total_frames": update.get("expected_frame_count"),
+                        "percent": update.get("percent", 0.0),
+                    },
+                    progress_plan,
+                )
+
+            report = generate_action_track(
+                input_video=input_video,
+                calibration=calibration,
+                output_dir=output_dir,
+                start_frame=int(config.runtime.start_frame),
+                max_frames=config.runtime.max_frames,
+                calibration_source=calibration_path,
+                progress_callback=update_action_progress,
+                should_cancel=should_cancel,
+            )
+            if should_cancel():
+                raise CancelledError()
+            if report.get("status") not in ACTION_SIGNAL_SUCCESS_STATUSES:
+                raise RuntimeError(
+                    "broadcast action signal did not complete: "
+                    f"{report.get('termination_reason', report.get('status', 'unknown'))}"
+                )
+            if self._broadcast_source_stat_token(input_video) != source_stat:
+                raise RuntimeError("broadcast source video changed during action-signal generation")
+            if sha256_file(input_video) != source_sha256:
+                raise RuntimeError("broadcast action signal source does not match the tracking contract")
+
+            binding = {
+                "schema_version": "1.0",
+                "artifact_type": "broadcast_action_signal_binding",
+                "generated_at": _utc_now_iso(),
+                "source": {
+                    "video_sha256": source_sha256,
+                    "tracking_contract_sha256": contract_sha256,
+                },
+                "artifacts": {
+                    path.name: {"sha256": sha256_file(path), "size_bytes": path.stat().st_size}
+                    for path in produced_paths[:-1]
+                },
+            }
+            publish_json_exclusive(produced_paths[-1], binding, trusted_root=output_dir)
+        except BaseException:
+            for path in produced_paths:
+                path.unlink(missing_ok=True)
+            raise
+
+    def _broadcast_source_stat_token(self, path: Path) -> tuple[int, int, int, int, int]:
+        stat = Path(path).stat()
+        return (
+            int(stat.st_dev),
+            int(stat.st_ino),
+            int(stat.st_size),
+            int(stat.st_mtime_ns),
+            int(stat.st_ctime_ns),
+        )
+
+    def _execute_run(
+        self,
+        run_id: str,
+        config: AppConfig,
+        cancel_event: threading.Event,
+        source: str = "api",
+    ) -> None:
         progress_plan = self._progress_stage_plan(
             tracking=True,
             postprocess=bool(config.postprocess.enabled),
             render=bool(config.follow_cam.enabled),
+            action_signal=source == "broadcast_hybrid",
         )
         started_at = _utc_now_iso()
         self._update_run(
@@ -2960,16 +4218,38 @@ class ApiService:
             },
         )
         try:
+
+            def cancellation_requested() -> bool:
+                if cancel_event.is_set():
+                    return True
+                with self._lock:
+                    registry = self._read_registry()
+                    current = next((item for item in registry["runs"] if item.get("run_id") == run_id), None)
+                metadata = current.get("broadcast") if isinstance(current, dict) else None
+                requested = isinstance(metadata, dict) and metadata.get("cancel_requested") is True
+                if requested:
+                    cancel_event.set()
+                return requested
+
             runner = self._tracking_runner(config)
             self._run_with_optional_progress(
                 runner,
                 lambda update: self._update_run_progress(run_id, update, progress_plan),
-                cancel_event.is_set,
+                cancellation_requested,
             )
+            if cancellation_requested():
+                raise CancelledError()
+            if source == "broadcast_hybrid":
+                self._run_broadcast_action_signal(run_id, config, cancellation_requested, progress_plan)
+            if cancellation_requested():
+                raise CancelledError()
+            broadcast_report = publish_broadcast_facade(config.output_dir) if source == "broadcast_hybrid" else None
+            if cancellation_requested():
+                raise CancelledError()
             existing = self.get_run(run_id)
             updated = self._build_run_snapshot(
                 run_id=run_id,
-                source="api",
+                source=source,
                 status="completed",
                 created_at=existing["created_at"],
                 config_name=existing.get("config_name"),
@@ -2981,12 +4261,26 @@ class ApiService:
                     "postprocess": bool(config.postprocess.enabled),
                     "follow_cam": bool(config.follow_cam.enabled),
                     "temporal_chunks": bool(config.temporal_chunks.enabled),
+                    "broadcast_hybrid": source == "broadcast_hybrid",
                 },
                 notes=existing.get("notes"),
                 started_at=existing.get("started_at"),
                 completed_at=_utc_now_iso(),
                 progress=self._completed_progress(existing.get("progress"), existing.get("started_at")),
             )
+            if broadcast_report is not None:
+                previous_broadcast = existing.get("broadcast", {})
+                broadcast_status = {
+                    **(previous_broadcast if isinstance(previous_broadcast, dict) else {}),
+                    "status": broadcast_report.get("status"),
+                    "blocking_reasons": broadcast_report.get("blocking_reasons", []),
+                    "limitations": broadcast_report.get("limitations", []),
+                    "status_generation": broadcast_report.get("status_generation"),
+                }
+                updated["broadcast"] = broadcast_status
+                updated.setdefault("stats", {})["broadcast"] = {
+                    key: value for key, value in broadcast_status.items() if key != "preflight"
+                }
             self._replace_run(run_id, updated)
         except CancelledError:
             existing = self.get_run(run_id)
@@ -2998,16 +4292,22 @@ class ApiService:
                 "error": None,
             }
             artifact_error = self._write_run_artifacts(config.output_dir, partial_run)
+            cancelled_patch: dict[str, Any] = {
+                "status": "cancelled",
+                "completed_at": completed_at,
+                "error": self._append_artifact_error(None, artifact_error),
+                "artifacts": self._collect_artifacts(config.output_dir),
+                "stats": self._collect_stats(config.output_dir),
+                "progress": self._cancelled_progress(existing.get("progress"), existing.get("started_at")),
+            }
+            if source == "broadcast_hybrid":
+                cancelled_patch["broadcast"] = {
+                    **(existing.get("broadcast") if isinstance(existing.get("broadcast"), dict) else {}),
+                    "status": "cancelled",
+                }
             self._update_run(
                 run_id,
-                {
-                    "status": "cancelled",
-                    "completed_at": completed_at,
-                    "error": self._append_artifact_error(None, artifact_error),
-                    "artifacts": self._collect_artifacts(config.output_dir),
-                    "stats": self._collect_stats(config.output_dir),
-                    "progress": self._cancelled_progress(existing.get("progress"), existing.get("started_at")),
-                },
+                cancelled_patch,
             )
         except Exception as exc:
             existing = self.get_run(run_id)
@@ -3019,16 +4319,23 @@ class ApiService:
                 "error": str(exc),
             }
             artifact_error = self._write_run_artifacts(config.output_dir, partial_run)
+            failed_patch: dict[str, Any] = {
+                "status": "failed",
+                "completed_at": completed_at,
+                "error": self._append_artifact_error(str(exc), artifact_error),
+                "artifacts": self._collect_artifacts(config.output_dir),
+                "stats": self._collect_stats(config.output_dir),
+                "progress": self._failed_progress(existing.get("progress"), existing.get("started_at")),
+            }
+            if source == "broadcast_hybrid":
+                failed_patch["broadcast"] = {
+                    **(existing.get("broadcast") if isinstance(existing.get("broadcast"), dict) else {}),
+                    "status": "failed",
+                    "error": str(exc),
+                }
             self._update_run(
                 run_id,
-                {
-                    "status": "failed",
-                    "completed_at": completed_at,
-                    "error": self._append_artifact_error(str(exc), artifact_error),
-                    "artifacts": self._collect_artifacts(config.output_dir),
-                    "stats": self._collect_stats(config.output_dir),
-                    "progress": self._failed_progress(existing.get("progress"), existing.get("started_at")),
-                },
+                failed_patch,
             )
         finally:
             with self._lock:
@@ -3260,7 +4567,12 @@ class ApiService:
         for action in recovery_actions:
             if action.get("approved_action") != "localize_ball_roi":
                 continue
-            effective_roi = action.get("effective_roi") or action.get("padded_roi") or action.get("approved_roi") or action.get("local_search_roi")
+            effective_roi = (
+                action.get("effective_roi")
+                or action.get("padded_roi")
+                or action.get("approved_roi")
+                or action.get("local_search_roi")
+            )
             temp_output = candidate_track.with_name(f".{candidate_track.name}.stitch.tmp")
             report = stitch_recovery_window(baseline_track, candidate_track, temp_output, dict(action), effective_roi)
             summary = report.get("summary") if isinstance(report.get("summary"), dict) else {}
@@ -3333,7 +4645,9 @@ class ApiService:
     def _write_approved_child_candidate_audit(self, config: AppConfig) -> None:
         write_candidate_audit(config.output_dir, csv_name=config.output.csv_name)
 
-    def _write_run_manifest_and_metrics_preserving_candidate_audit(self, output_dir: Path, run: dict[str, Any]) -> str | None:
+    def _write_run_manifest_and_metrics_preserving_candidate_audit(
+        self, output_dir: Path, run: dict[str, Any]
+    ) -> str | None:
         try:
             write_run_manifest_and_metrics_preserving_candidate_audit(output_dir, run)
             return None
@@ -3563,6 +4877,14 @@ class ApiService:
         if running:
             raise RuntimeError(f"Another run is already active: {running[0]}")
 
+    def _assert_service_open(self) -> None:
+        with self._lock:
+            self._assert_service_open_locked()
+
+    def _assert_service_open_locked(self) -> None:
+        if self._closing:
+            raise RuntimeError("API service is closed and cannot accept mutations or queue new work")
+
     def _start_thread_or_cleanup(
         self,
         run_id: str,
@@ -3572,20 +4894,26 @@ class ApiService:
         remove_output: bool = False,
     ) -> None:
         try:
-            thread.start()
+            with self._lock:
+                self._assert_service_open_locked()
+                self._starting_threads.add(run_id)
+            try:
+                thread.start()
+            finally:
+                with self._lock:
+                    self._starting_threads.discard(run_id)
         except Exception as exc:
             cleanup_error: str | None = None
             with self._lock:
-                self._active_threads.pop(run_id, None)
-                self._cancel_events.pop(run_id, None)
                 try:
-                    registry = self._read_registry()
-                    registry["runs"] = [run for run in registry["runs"] if run["run_id"] != run_id]
-                    self._write_registry(registry)
+                    with self._registry_transaction() as registry:
+                        registry["runs"] = [run for run in registry["runs"] if run["run_id"] != run_id]
                 except Exception as registry_exc:
                     cleanup_error = f"Failed to clean queued run registry after thread start failure: {registry_exc}"
-            if remove_output and output_dir is not None and output_dir.exists():
-                shutil.rmtree(output_dir, ignore_errors=True)
+                if remove_output and output_dir is not None and output_dir.exists():
+                    shutil.rmtree(output_dir, ignore_errors=True)
+                self._active_threads.pop(run_id, None)
+                self._cancel_events.pop(run_id, None)
             if cleanup_error:
                 raise RuntimeError(f"{exc} | {cleanup_error}") from exc
             raise
@@ -3610,36 +4938,45 @@ class ApiService:
 
     def _update_run(self, run_id: str, patch: dict[str, Any]) -> None:
         with self._lock:
-            registry = self._read_registry()
-            for run in registry["runs"]:
-                if run["run_id"] == run_id:
-                    run.update(patch)
-                    if "stats" in patch or "artifacts" in patch:
-                        self._attach_ai_candidate_lifecycle(run)
-                    self._write_registry(registry)
-                    return
-        raise KeyError(run_id)
+            with self._registry_transaction() as registry:
+                for run in registry["runs"]:
+                    if run["run_id"] == run_id:
+                        run.update(patch)
+                        if "stats" in patch or "artifacts" in patch:
+                            self._attach_ai_candidate_lifecycle(run)
+                        return
+                raise KeyError(run_id)
 
-    def _update_run_progress(self, run_id: str, update: dict[str, Any], progress_plan: dict[str, tuple[float, float]]) -> None:
+    def _update_run_progress(
+        self, run_id: str, update: dict[str, Any], progress_plan: dict[str, tuple[float, float]]
+    ) -> None:
         with self._lock:
-            registry = self._read_registry()
-            for run in registry["runs"]:
-                if run["run_id"] == run_id:
-                    run["progress"] = self._build_progress_payload(
-                        update,
-                        progress_plan,
-                        started_at=run.get("started_at"),
-                    )
-                    self._write_registry(registry)
-                    return
-        raise KeyError(run_id)
+            with self._registry_transaction() as registry:
+                for run in registry["runs"]:
+                    if run["run_id"] == run_id:
+                        run["progress"] = self._build_progress_payload(
+                            update,
+                            progress_plan,
+                            started_at=run.get("started_at"),
+                        )
+                        return
+                raise KeyError(run_id)
 
-    def _progress_stage_plan(self, *, tracking: bool, postprocess: bool, render: bool) -> dict[str, tuple[float, float]]:
+    def _progress_stage_plan(
+        self,
+        *,
+        tracking: bool,
+        postprocess: bool,
+        render: bool,
+        action_signal: bool = False,
+    ) -> dict[str, tuple[float, float]]:
         weights: list[tuple[str, float]] = []
         if tracking:
             weights.append(("tracking", 1.0))
         if postprocess:
             weights.append(("postprocess", 0.12))
+        if action_signal:
+            weights.append(("action_signal", 0.25))
         if render:
             weights.append(("render", 0.45))
         if not weights:
@@ -3770,60 +5107,1136 @@ class ApiService:
     def _replace_run(self, run_id: str, replacement: dict[str, Any]) -> None:
         self._attach_ai_candidate_lifecycle(replacement)
         with self._lock:
-            registry = self._read_registry()
-            for index, run in enumerate(registry["runs"]):
-                if run["run_id"] == run_id:
+            with self._registry_transaction() as registry:
+                for index, run in enumerate(registry["runs"]):
+                    if run["run_id"] != run_id:
+                        continue
+                    metadata = run.get("broadcast") if isinstance(run.get("broadcast"), dict) else {}
+                    if (
+                        replacement.get("source") == "broadcast_hybrid"
+                        and replacement.get("status") == "completed"
+                        and metadata.get("cancel_requested") is True
+                    ):
+                        raise CancelledError()
                     registry["runs"][index] = replacement
-                    self._write_registry(registry)
                     return
         raise KeyError(run_id)
 
     def _refresh_run_artifacts_and_stats(self, run_id: str, output_dir: Path) -> None:
         with self._lock:
-            registry = self._read_registry()
-            for run in registry["runs"]:
-                if run["run_id"] != run_id:
-                    continue
-                run["artifacts"] = self._collect_artifacts(output_dir)
-                run["stats"] = self._collect_stats(output_dir)
-                self._attach_ai_candidate_lifecycle(run)
-                self._write_registry(registry)
-                return
-        raise KeyError(run_id)
+            with self._registry_transaction() as registry:
+                for run in registry["runs"]:
+                    if run["run_id"] != run_id:
+                        continue
+                    run["artifacts"] = self._collect_artifacts(output_dir)
+                    run["stats"] = self._collect_stats(output_dir)
+                    self._attach_ai_candidate_lifecycle(run)
+                    return
+                raise KeyError(run_id)
 
     def _ensure_registry_file(self) -> None:
         self.registry_path.parent.mkdir(parents=True, exist_ok=True)
         if not self.registry_path.exists():
             self._write_registry({"runs": []})
 
+    def _recover_interrupted_broadcast_operations(self) -> None:
+        """Resolve orphaned broadcast children left queued/running by a service restart."""
+
+        recovered_threads: list[tuple[str, str, str, Path, threading.Thread]] = []
+        with self._lock:
+            with self._registry_file_lock():
+                registry = self._read_registry()
+                changed = False
+                for run in registry["runs"]:
+                    source = run.get("source")
+                    if source == "broadcast_hybrid" and run.get("status") in {"queued", "running"}:
+                        broadcast_metadata = run.get("broadcast")
+                        if not isinstance(broadcast_metadata, dict):
+                            broadcast_metadata = {}
+                        if self._owner_lease_is_active(
+                            broadcast_metadata.get("owner_pid"),
+                            broadcast_metadata.get("owner_instance_id"),
+                        ):
+                            continue
+                        changed = True
+                        cancel_requested = broadcast_metadata.get("cancel_requested") is True
+                        completed_at = _utc_now_iso()
+                        error = (
+                            None
+                            if cancel_requested
+                            else "Initial broadcast run was interrupted by a service restart and cannot be resumed safely."
+                        )
+                        run.update(
+                            {
+                                "status": "cancelled" if cancel_requested else "failed",
+                                "completed_at": completed_at,
+                                "error": error,
+                                "broadcast": {
+                                    **broadcast_metadata,
+                                    "status": "cancelled" if cancel_requested else "failed",
+                                    "recovered": False,
+                                    "recovery_status": "interrupted_initial_run",
+                                },
+                                "progress": (
+                                    self._cancelled_progress(run.get("progress"), run.get("started_at"))
+                                    if cancel_requested
+                                    else self._failed_progress(run.get("progress"), run.get("started_at"))
+                                ),
+                            }
+                        )
+                        output_dir = Path(run["output_dir"]).resolve()
+                        artifact_error = self._write_run_artifacts(output_dir, run)
+                        run["error"] = self._append_artifact_error(error, artifact_error)
+                        run["artifacts"] = self._collect_artifacts(output_dir)
+                        run["stats"] = self._collect_stats(output_dir)
+                        self._attach_ai_candidate_lifecycle(run)
+                        continue
+                    if source not in {"broadcast_hybrid_recompute", "broadcast_hybrid_render"}:
+                        continue
+                    if run.get("status") not in {"queued", "running"}:
+                        continue
+                    broadcast_metadata = run.get("broadcast")
+                    if not isinstance(broadcast_metadata, dict):
+                        broadcast_metadata = {}
+                    output_dir = Path(run["output_dir"]).resolve()
+                    report_path = output_dir / "broadcast_operation_report.v1.json"
+                    report_exists = report_path.is_file()
+                    report = self._read_optional_json(report_path)
+                    has_commit_report = (
+                        isinstance(report, dict)
+                        and report.get("artifact_type") == "broadcast_operation_report"
+                        and report.get("status") == "succeeded"
+                    )
+                    owner_pid = broadcast_metadata.get("owner_pid")
+                    owner_alive = self._owner_lease_is_active(
+                        owner_pid,
+                        broadcast_metadata.get("owner_instance_id"),
+                    )
+                    if (
+                        owner_alive
+                        and broadcast_metadata.get("worker_exited") is not True
+                        and (not has_commit_report or broadcast_metadata.get("operation_status") == "reconciling")
+                    ):
+                        continue
+                    changed = True
+                    parent = next(
+                        (item for item in registry["runs"] if item.get("run_id") == run.get("parent_run_id")),
+                        None,
+                    )
+                    cancel_requested = broadcast_metadata.get("cancel_requested") is True
+                    report_operation = report.get("operation") if isinstance(report, dict) else None
+                    report_frozen_inputs = broadcast_metadata.get("frozen_inputs")
+                    parent_run_id = str(run.get("parent_run_id") or "")
+                    if (
+                        has_commit_report
+                        and not cancel_requested
+                        and parent is not None
+                        and parent_run_id
+                        and report_operation in {"recompute", "render"}
+                        and source == f"broadcast_hybrid_{report_operation}"
+                        and isinstance(report_frozen_inputs, dict)
+                    ):
+                        cancel_event = threading.Event()
+                        run.update(
+                            {
+                                "status": "running",
+                                "completed_at": None,
+                                "error": None,
+                                "broadcast": {
+                                    **broadcast_metadata,
+                                    "owner_pid": os.getpid(),
+                                    "owner_instance_id": self._instance_id,
+                                    "operation_status": "reconciling",
+                                    "commit_started": True,
+                                    "recovered": True,
+                                    "worker_exited": False,
+                                },
+                            }
+                        )
+                        thread = threading.Thread(
+                            target=self._reconcile_broadcast_operation_report,
+                            args=(str(run["run_id"]),),
+                            name=f"football-tracking-broadcast-reconcile-{report_operation}-{run['run_id']}",
+                            daemon=True,
+                        )
+                        self._active_threads[str(run["run_id"])] = thread
+                        self._cancel_events[str(run["run_id"])] = cancel_event
+                        recovered_threads.append(
+                            (str(run["run_id"]), parent_run_id, report_operation, output_dir, thread)
+                        )
+                        continue
+                    if (
+                        not report_exists
+                        and not cancel_requested
+                        and source == "broadcast_hybrid_render"
+                        and broadcast_metadata.get("commit_started") is True
+                        and parent is not None
+                        and parent_run_id
+                        and (Path(parent["output_dir"]).resolve() / "broadcast_quality_report.json").is_file()
+                    ):
+                        cancel_event = threading.Event()
+                        run.update(
+                            {
+                                "status": "running",
+                                "completed_at": None,
+                                "error": None,
+                                "broadcast": {
+                                    **broadcast_metadata,
+                                    "owner_pid": os.getpid(),
+                                    "owner_instance_id": self._instance_id,
+                                    "operation_status": "reconciling",
+                                    "commit_started": True,
+                                    "recovered": True,
+                                    "worker_exited": False,
+                                },
+                            }
+                        )
+                        thread = threading.Thread(
+                            target=self._reconcile_ready_render_without_operation_report,
+                            args=(str(run["run_id"]),),
+                            name=f"football-tracking-broadcast-ready-reconcile-{run['run_id']}",
+                            daemon=True,
+                        )
+                        self._active_threads[str(run["run_id"])] = thread
+                        self._cancel_events[str(run["run_id"])] = cancel_event
+                        recovered_threads.append((str(run["run_id"]), parent_run_id, "render", output_dir, thread))
+                        continue
+                    if not report_exists and not cancel_requested and parent is not None:
+                        operation = broadcast_metadata.get("operation")
+                        request = broadcast_metadata.get("request")
+                        frozen_inputs = broadcast_metadata.get("frozen_inputs")
+                        parent_run_id = str(run.get("parent_run_id") or "")
+                        if (
+                            operation in {"recompute", "render"}
+                            and source == f"broadcast_hybrid_{operation}"
+                            and isinstance(request, dict)
+                            and isinstance(frozen_inputs, dict)
+                            and parent_run_id
+                        ):
+                            cancel_event = threading.Event()
+                            run.update(
+                                {
+                                    "status": "queued",
+                                    "started_at": None,
+                                    "completed_at": None,
+                                    "error": None,
+                                    "broadcast": {
+                                        **broadcast_metadata,
+                                        "owner_pid": os.getpid(),
+                                        "owner_instance_id": self._instance_id,
+                                        "operation_status": "queued",
+                                        "commit_started": broadcast_metadata.get("commit_started") is True,
+                                        "recovered": True,
+                                        "worker_exited": False,
+                                    },
+                                    "progress": self._initial_progress(),
+                                }
+                            )
+                            thread = threading.Thread(
+                                target=self._execute_broadcast_operation,
+                                args=(
+                                    str(run["run_id"]),
+                                    parent_run_id,
+                                    operation,
+                                    deepcopy(request),
+                                    deepcopy(frozen_inputs),
+                                    cancel_event,
+                                ),
+                                name=f"football-tracking-broadcast-recovery-{operation}-{run['run_id']}",
+                                daemon=True,
+                            )
+                            self._active_threads[str(run["run_id"])] = thread
+                            self._cancel_events[str(run["run_id"])] = cancel_event
+                            recovered_threads.append((str(run["run_id"]), parent_run_id, operation, output_dir, thread))
+                            continue
+                    recovered = False
+                    if (
+                        isinstance(report, dict)
+                        and report.get("artifact_type") == "broadcast_operation_report"
+                        and report.get("status") == "succeeded"
+                        and report.get("parent_run_id") == run.get("parent_run_id")
+                        and parent is not None
+                        and parent.get("source") == "broadcast_hybrid"
+                        and parent.get("status") == "completed"
+                    ):
+                        operation = report.get("operation")
+                        expected_source = f"broadcast_hybrid_{operation}"
+                        frozen_inputs = (
+                            run.get("broadcast", {}).get("frozen_inputs")
+                            if isinstance(run.get("broadcast"), dict)
+                            else None
+                        )
+                        if (
+                            operation in {"recompute", "render"}
+                            and source == expected_source
+                            and report.get("frozen_inputs") == frozen_inputs
+                        ):
+                            try:
+                                parent_output = Path(parent["output_dir"]).resolve()
+                                quality_report = publish_broadcast_facade(parent_output)
+                                if quality_report.get("status_generation") != report.get("quality_status_generation"):
+                                    raise BroadcastApiError("recovered broadcast quality generation changed")
+                                result = report.get("result")
+                                if not isinstance(result, dict) or result.get("status") != "completed":
+                                    raise BroadcastApiError("recovered broadcast operation result is invalid")
+                                trajectory_generation_id = result.get("trajectory_generation_id")
+                                if not isinstance(trajectory_generation_id, str):
+                                    raise BroadcastApiError("recovered trajectory generation id is invalid")
+                                preflight_render_broadcast_trajectory(parent_output, trajectory_generation_id)
+                                if operation == "render":
+                                    final_manifest, _ = load_bound_json(
+                                        parent_output / "broadcast_artifact_bindings.v1.json",
+                                        "recovered final artifact bindings",
+                                    )
+                                    final_ids = final_manifest.get("generation_ids")
+                                    if not isinstance(final_ids, dict) or any(
+                                        result.get(key) != final_ids.get(key.removesuffix("_generation_id"))
+                                        for key in (
+                                            "trajectory_generation_id",
+                                            "camera_generation_id",
+                                            "render_generation_id",
+                                        )
+                                    ):
+                                        raise BroadcastApiError("recovered final generation ids are invalid")
+                                    if quality_report.get("status") != "ready":
+                                        raise BroadcastApiError("recovered render facade is not ready")
+                                elif quality_report.get("status") != "needs_review":
+                                    raise BroadcastApiError("recovered recompute facade state is invalid")
+                                self._apply_recovered_broadcast_parent(
+                                    parent,
+                                    operation_run_id=str(run["run_id"]),
+                                    operation=operation,
+                                    result=result,
+                                    quality_report=quality_report,
+                                    parent_output=parent_output,
+                                    recovered=True,
+                                )
+                                recovered = True
+                            except (OSError, ValueError, BroadcastApiError, BroadcastHybridOrchestrationError):
+                                recovered = False
+                    completed_at = _utc_now_iso()
+                    broadcast = run.get("broadcast") if isinstance(run.get("broadcast"), dict) else {}
+                    if recovered:
+                        run.update(
+                            {
+                                "status": "completed",
+                                "completed_at": completed_at,
+                                "error": None,
+                                "broadcast": {**broadcast, "operation_status": "completed", "recovered": True},
+                                "progress": self._completed_progress(run.get("progress"), run.get("started_at")),
+                            }
+                        )
+                    elif cancel_requested:
+                        error = None
+                        run.update(
+                            {
+                                "status": "cancelled",
+                                "completed_at": completed_at,
+                                "error": None,
+                                "broadcast": {**broadcast, "operation_status": "cancelled", "recovered": False},
+                                "progress": self._cancelled_progress(run.get("progress"), run.get("started_at")),
+                            }
+                        )
+                    else:
+                        error = "Broadcast operation was interrupted by a service restart before a valid commit report."
+                        run.update(
+                            {
+                                "status": "failed",
+                                "completed_at": completed_at,
+                                "error": error,
+                                "broadcast": {**broadcast, "operation_status": "failed", "recovered": False},
+                                "progress": self._failed_progress(run.get("progress"), run.get("started_at")),
+                            }
+                        )
+                        if parent is not None:
+                            parent_broadcast = (
+                                parent.get("broadcast") if isinstance(parent.get("broadcast"), dict) else {}
+                            )
+                            parent["broadcast"] = {
+                                **parent_broadcast,
+                                "last_operation": {
+                                    "operation_run_id": run["run_id"],
+                                    "operation": str(source).removeprefix("broadcast_hybrid_"),
+                                    "status": "failed",
+                                    "error": error,
+                                },
+                            }
+                    artifact_error = self._write_run_artifacts(output_dir, run)
+                    run["error"] = self._append_artifact_error(run.get("error"), artifact_error)
+                    run["artifacts"] = self._collect_artifacts(output_dir)
+                    run["stats"] = self._collect_stats(output_dir)
+                    self._attach_ai_candidate_lifecycle(run)
+                if changed:
+                    self._write_registry_under_file_lock(registry)
+        for operation_run_id, parent_run_id, operation, output_dir, thread in recovered_threads:
+            try:
+                thread.start()
+            except Exception as exc:
+                with self._lock:
+                    self._active_threads.pop(operation_run_id, None)
+                    self._cancel_events.pop(operation_run_id, None)
+                self._finish_broadcast_operation_failure(
+                    operation_run_id,
+                    parent_run_id,
+                    operation,
+                    output_dir,
+                    status="failed",
+                    error=f"Unable to restart interrupted broadcast operation: {exc}",
+                )
+
+    def _reconcile_ready_render_without_operation_report(self, operation_run_id: str) -> None:
+        operation_output: Path | None = None
+        parent_run_id = ""
+        authoritative_ready_validated = False
+        try:
+            child = self.get_run(operation_run_id)
+            operation_output = Path(child["output_dir"]).resolve()
+            metadata = child.get("broadcast") if isinstance(child.get("broadcast"), dict) else {}
+            parent_run_id = str(child.get("parent_run_id") or "")
+            request = metadata.get("request")
+            frozen_inputs = metadata.get("frozen_inputs")
+            if (
+                child.get("source") != "broadcast_hybrid_render"
+                or metadata.get("operation") != "render"
+                or metadata.get("commit_started") is not True
+                or not isinstance(request, dict)
+                or not isinstance(frozen_inputs, dict)
+            ):
+                raise BroadcastApiError("ready render recovery metadata is incomplete")
+            parent = self.get_run(parent_run_id)
+            if parent.get("source") != "broadcast_hybrid" or parent.get("status") != "completed":
+                raise BroadcastApiError("ready render recovery parent is unavailable")
+            parent_output = Path(parent["output_dir"]).resolve()
+            quality_report = validate_broadcast_quality_report(
+                parent_output,
+                parent_output / "broadcast_quality_report.json",
+            )
+            if quality_report.get("status") != "ready":
+                raise BroadcastApiError("ready render recovery quality report is not ready")
+            trajectory_generation_id = request.get("trajectory_generation_id")
+            target_width = request.get("target_width")
+            target_height = request.get("target_height")
+            if (
+                not isinstance(trajectory_generation_id, str)
+                or not isinstance(target_width, int)
+                or isinstance(target_width, bool)
+                or not isinstance(target_height, int)
+                or isinstance(target_height, bool)
+            ):
+                raise BroadcastApiError("ready render recovery request is invalid")
+            current_inputs = preflight_render_broadcast_trajectory(
+                parent_output,
+                trajectory_generation_id,
+                target_width=target_width,
+                target_height=target_height,
+            )
+            current_inputs = {
+                **current_inputs,
+                "parent_run_id": parent_run_id,
+                "parent_output_dir": str(parent_output),
+            }
+            if current_inputs != frozen_inputs:
+                raise BroadcastApiError("ready render recovery inputs changed")
+            final_manifest, _ = load_bound_json(
+                parent_output / "broadcast_artifact_bindings.v1.json",
+                "ready render final artifact bindings",
+            )
+            final_ids = final_manifest.get("generation_ids")
+            if not isinstance(final_ids, dict) or final_ids.get("trajectory") != trajectory_generation_id:
+                raise BroadcastApiError("ready render recovery generation lineage is invalid")
+            camera_generation_id = final_ids.get("camera")
+            render_generation_id = final_ids.get("render")
+            if not isinstance(camera_generation_id, str) or not isinstance(render_generation_id, str):
+                raise BroadcastApiError("ready render recovery final generation ids are invalid")
+            result = {
+                "status": "completed",
+                "trajectory_generation_id": trajectory_generation_id,
+                "camera_generation_id": camera_generation_id,
+                "render_generation_id": render_generation_id,
+                "broadcast_video": str(parent_output / "broadcast.mp4"),
+                "final_bindings": final_manifest,
+                "limitations": quality_report.get("limitations", []),
+            }
+            operation_report = {
+                "schema_version": "1.0",
+                "artifact_type": "broadcast_operation_report",
+                "status": "succeeded",
+                "operation": "render",
+                "parent_run_id": parent_run_id,
+                "frozen_inputs": frozen_inputs,
+                "result": result,
+                "quality_status_generation": quality_report.get("status_generation"),
+                "metadata_warnings": ["Recovered from authoritative ready facade after operation report loss."],
+            }
+            metadata_warnings = list(operation_report["metadata_warnings"])
+            current_metadata = child.get("broadcast") if isinstance(child.get("broadcast"), dict) else {}
+            completed_at = _utc_now_iso()
+            completed_child = {
+                **child,
+                "status": "completed",
+                "completed_at": completed_at,
+                "error": None,
+                "broadcast": {
+                    **current_metadata,
+                    "operation_status": "completed",
+                    "operation_report_status": "available",
+                    "commit_started": True,
+                    "recovered": True,
+                    "result": result,
+                    "metadata_warnings": metadata_warnings,
+                },
+                "progress": self._completed_progress(child.get("progress"), child.get("started_at")),
+            }
+            artifact_error = self._write_run_artifacts(operation_output, completed_child)
+            if artifact_error is not None:
+                metadata_warnings.append(artifact_error)
+                operation_report["metadata_warnings"] = metadata_warnings
+            authoritative_ready_validated = True
+
+            report_status = "available"
+            metadata_conflict: str | None = None
+            try:
+                publish_json_exclusive(
+                    operation_output / "broadcast_operation_report.v1.json",
+                    operation_report,
+                    trusted_root=operation_output,
+                )
+            except OSError as exc:
+                report_status = "missing_after_ready_commit"
+                metadata_warnings.append(f"Operation report repair failed: {exc}")
+            except BroadcastApiError as exc:
+                report_status = "conflict"
+                metadata_conflict = str(exc)
+
+            if report_status != "available":
+                completed_child.update(
+                    {
+                        "status": "failed" if metadata_conflict is not None else "completed",
+                        "error": (
+                            f"Ready render recovered with conflicting operation metadata: {metadata_conflict}"
+                            if metadata_conflict is not None
+                            else None
+                        ),
+                        "broadcast": {
+                            **completed_child["broadcast"],
+                            "operation_status": ("metadata_conflict" if metadata_conflict is not None else "completed"),
+                            "operation_report_status": report_status,
+                            "metadata_warnings": metadata_warnings,
+                        },
+                        "progress": (
+                            self._failed_progress(child.get("progress"), child.get("started_at"))
+                            if metadata_conflict is not None
+                            else completed_child["progress"]
+                        ),
+                    }
+                )
+                artifact_error = self._write_run_artifacts(operation_output, completed_child)
+                if artifact_error is not None:
+                    completed_child["broadcast"]["metadata_warnings"].append(artifact_error)
+            completed_child["artifacts"] = self._collect_artifacts(operation_output)
+            completed_child["stats"] = self._collect_stats(operation_output)
+            self._attach_ai_candidate_lifecycle(completed_child)
+            self._commit_broadcast_operation_registry_atomic(
+                parent_run_id=parent_run_id,
+                operation_run_id=operation_run_id,
+                operation="render",
+                result=result,
+                quality_report=quality_report,
+                parent_output=parent_output,
+                completed_child=completed_child,
+            )
+        except BaseException as exc:
+            if operation_output is not None and parent_run_id:
+                try:
+                    if authoritative_ready_validated:
+                        self._request_broadcast_reconciliation_retry(
+                            operation_run_id,
+                            error=str(exc),
+                            mode="ready_without_report",
+                        )
+                    else:
+                        self._finish_broadcast_operation_failure(
+                            operation_run_id,
+                            parent_run_id,
+                            "render",
+                            operation_output,
+                            status="failed",
+                            error=str(exc),
+                        )
+                except Exception:
+                    pass
+        finally:
+            with self._lock:
+                self._active_threads.pop(operation_run_id, None)
+                self._cancel_events.pop(operation_run_id, None)
+
+    def _reconcile_broadcast_operation_report(self, operation_run_id: str) -> None:
+        operation_output: Path | None = None
+        parent_run_id = ""
+        operation = "recovery"
+        commit_report_validated = False
+        try:
+            child = self.get_run(operation_run_id)
+            if child.get("status") == "completed":
+                return
+            operation_output = Path(child["output_dir"]).resolve()
+            metadata = child.get("broadcast") if isinstance(child.get("broadcast"), dict) else {}
+            parent_run_id = str(child.get("parent_run_id") or "")
+            operation = str(metadata.get("operation") or "")
+            frozen_inputs = metadata.get("frozen_inputs")
+            report, _ = load_bound_json(
+                operation_output / "broadcast_operation_report.v1.json",
+                "broadcast operation commit report",
+            )
+            if (
+                report.get("schema_version") != "1.0"
+                or report.get("artifact_type") != "broadcast_operation_report"
+                or report.get("status") != "succeeded"
+                or report.get("parent_run_id") != parent_run_id
+                or report.get("operation") != operation
+                or report.get("frozen_inputs") != frozen_inputs
+                or operation not in {"recompute", "render"}
+            ):
+                raise BroadcastApiError("broadcast operation commit report lineage is invalid")
+            parent = self.get_run(parent_run_id)
+            if parent.get("source") != "broadcast_hybrid" or parent.get("status") != "completed":
+                raise BroadcastApiError("broadcast operation parent is unavailable during reconciliation")
+            parent_output = Path(parent["output_dir"]).resolve()
+            quality_report = publish_broadcast_facade(parent_output)
+            if quality_report.get("status_generation") != report.get("quality_status_generation"):
+                raise BroadcastApiError("recovered broadcast quality generation changed")
+            result = report.get("result")
+            if not isinstance(result, dict) or result.get("status") != "completed":
+                raise BroadcastApiError("recovered broadcast operation result is invalid")
+            trajectory_generation_id = result.get("trajectory_generation_id")
+            if not isinstance(trajectory_generation_id, str):
+                raise BroadcastApiError("recovered trajectory generation id is invalid")
+            preflight_render_broadcast_trajectory(parent_output, trajectory_generation_id)
+            if operation == "render":
+                final_manifest, _ = load_bound_json(
+                    parent_output / "broadcast_artifact_bindings.v1.json",
+                    "recovered final artifact bindings",
+                )
+                final_ids = final_manifest.get("generation_ids")
+                if not isinstance(final_ids, dict) or any(
+                    result.get(key) != final_ids.get(key.removesuffix("_generation_id"))
+                    for key in (
+                        "trajectory_generation_id",
+                        "camera_generation_id",
+                        "render_generation_id",
+                    )
+                ):
+                    raise BroadcastApiError("recovered final generation ids are invalid")
+                if quality_report.get("status") != "ready":
+                    raise BroadcastApiError("recovered render facade is not ready")
+            elif quality_report.get("status") != "needs_review":
+                raise BroadcastApiError("recovered recompute facade state is invalid")
+            commit_report_validated = True
+
+            completed_at = _utc_now_iso()
+            current_metadata = child.get("broadcast") if isinstance(child.get("broadcast"), dict) else {}
+            raw_warnings = report.get("metadata_warnings", [])
+            metadata_warnings = (
+                [item for item in raw_warnings if isinstance(item, str)] if isinstance(raw_warnings, list) else []
+            )
+            completed_child = {
+                **child,
+                "status": "completed",
+                "completed_at": completed_at,
+                "error": None,
+                "broadcast": {
+                    **current_metadata,
+                    "operation_status": "completed",
+                    "commit_started": True,
+                    "recovered": True,
+                    "result": _jsonable(result),
+                },
+                "progress": self._completed_progress(child.get("progress"), child.get("started_at")),
+            }
+            artifact_error = self._write_run_artifacts(operation_output, completed_child)
+            if artifact_error is not None:
+                metadata_warnings.append(artifact_error)
+            if metadata_warnings:
+                completed_child["broadcast"]["metadata_warnings"] = metadata_warnings
+            completed_child["artifacts"] = self._collect_artifacts(operation_output)
+            completed_child["stats"] = self._collect_stats(operation_output)
+            self._attach_ai_candidate_lifecycle(completed_child)
+            self._commit_broadcast_operation_registry_atomic(
+                parent_run_id=parent_run_id,
+                operation_run_id=operation_run_id,
+                operation=operation,
+                result=result,
+                quality_report=quality_report,
+                parent_output=parent_output,
+                completed_child=completed_child,
+            )
+        except BaseException as exc:
+            if operation_output is not None and parent_run_id:
+                try:
+                    if commit_report_validated:
+                        self._request_broadcast_reconciliation_retry(
+                            operation_run_id,
+                            error=str(exc),
+                            mode="operation_report",
+                        )
+                    else:
+                        self._finish_broadcast_operation_failure(
+                            operation_run_id,
+                            parent_run_id,
+                            operation,
+                            operation_output,
+                            status="failed",
+                            error=str(exc),
+                        )
+                except Exception:
+                    pass
+        finally:
+            with self._lock:
+                self._active_threads.pop(operation_run_id, None)
+                self._cancel_events.pop(operation_run_id, None)
+
+    def _mark_broadcast_operation_reconciliation_required(self, operation_run_id: str, error: str) -> None:
+        with self._lock:
+            with self._registry_transaction() as registry:
+                child = next((item for item in registry["runs"] if item.get("run_id") == operation_run_id), None)
+                if child is None:
+                    raise KeyError(operation_run_id)
+                if child.get("status") == "completed":
+                    return
+                metadata = child.get("broadcast") if isinstance(child.get("broadcast"), dict) else {}
+                progress = (
+                    child.get("progress") if isinstance(child.get("progress"), dict) else self._initial_progress()
+                )
+                child.update(
+                    {
+                        "status": "running",
+                        "completed_at": None,
+                        "error": error,
+                        "broadcast": {
+                            **metadata,
+                            "operation_status": "reconciling",
+                            "commit_started": True,
+                            "worker_exited": True,
+                            "reconciliation_error": error,
+                        },
+                        "progress": {**progress, "stage": "reconciling", "updated_at": _utc_now_iso()},
+                    }
+                )
+
+    def _request_broadcast_reconciliation_retry(self, operation_run_id: str, *, error: str, mode: str) -> None:
+        try:
+            self._mark_broadcast_operation_reconciliation_required(operation_run_id, error)
+        except Exception:
+            pass
+        try:
+            self._schedule_broadcast_reconciliation_retry(operation_run_id, mode=mode)
+        except Exception:
+            pass
+
+    def _schedule_broadcast_reconciliation_retry(self, operation_run_id: str, *, mode: str) -> None:
+        if mode not in {"operation_report", "ready_without_report"}:
+            raise ValueError(f"unsupported reconciliation retry mode: {mode}")
+        retry_key = f"{operation_run_id}:reconciliation-retry"
+        with self._lock:
+            if self._closing or retry_key in self._active_threads:
+                return
+            cancel_event = threading.Event()
+            thread = threading.Thread(
+                target=self._retry_broadcast_reconciliation,
+                args=(retry_key, operation_run_id, mode, cancel_event),
+                name=f"football-tracking-broadcast-retry-{operation_run_id}",
+                daemon=True,
+            )
+            self._active_threads[retry_key] = thread
+            self._cancel_events[retry_key] = cancel_event
+            self._starting_threads.add(retry_key)
+        try:
+            thread.start()
+        except Exception:
+            with self._lock:
+                self._active_threads.pop(retry_key, None)
+                self._cancel_events.pop(retry_key, None)
+            raise
+        finally:
+            with self._lock:
+                self._starting_threads.discard(retry_key)
+
+    def _retry_broadcast_reconciliation(
+        self,
+        retry_key: str,
+        operation_run_id: str,
+        mode: str,
+        cancel_event: threading.Event,
+    ) -> None:
+        delay_seconds = 0.05
+        try:
+            while not cancel_event.wait(delay_seconds):
+                if mode == "operation_report":
+                    self._reconcile_broadcast_operation_report(operation_run_id)
+                else:
+                    self._reconcile_ready_render_without_operation_report(operation_run_id)
+                try:
+                    child = self.get_run(operation_run_id)
+                except KeyError:
+                    return
+                except Exception:
+                    delay_seconds = min(5.0, delay_seconds * 2.0)
+                    continue
+                if child.get("status") in {"completed", "failed", "cancelled"}:
+                    return
+                delay_seconds = min(5.0, delay_seconds * 2.0)
+        finally:
+            with self._lock:
+                self._active_threads.pop(retry_key, None)
+                self._cancel_events.pop(retry_key, None)
+
+    def _resume_interrupted_broadcast_operation(
+        self,
+        *,
+        run: dict[str, Any],
+        parent: dict[str, Any],
+        operation_output: Path,
+    ) -> dict[str, Any]:
+        metadata = run.get("broadcast")
+        if not isinstance(metadata, dict):
+            metadata = {}
+        operation = metadata.get("operation")
+        request = metadata.get("request")
+        frozen_inputs = metadata.get("frozen_inputs")
+        if (
+            operation not in {"recompute", "render"}
+            or not isinstance(request, dict)
+            or not isinstance(frozen_inputs, dict)
+        ):
+            raise BroadcastApiError("interrupted broadcast operation metadata is incomplete")
+        parent_run_id = str(parent.get("run_id") or "")
+        parent_output = Path(parent["output_dir"]).resolve()
+        if (
+            parent.get("source") != "broadcast_hybrid"
+            or parent.get("status") != "completed"
+            or frozen_inputs.get("parent_run_id") != parent_run_id
+            or frozen_inputs.get("parent_output_dir") != str(parent_output)
+        ):
+            raise BroadcastApiError("interrupted broadcast parent lineage changed")
+        if operation == "recompute":
+            current_inputs = preflight_recompute_reviewed_trajectory(parent_output)
+            current_inputs = {
+                **current_inputs,
+                "parent_run_id": parent_run_id,
+                "parent_output_dir": str(parent_output),
+            }
+            if current_inputs != frozen_inputs:
+                raise BroadcastApiError("interrupted recompute inputs changed")
+            result = recompute_reviewed_trajectory(parent_output)
+            trajectory_generation_id = result.get("trajectory_generation_id")
+            if not isinstance(trajectory_generation_id, str):
+                raise BroadcastApiError("resumed recompute generation is invalid")
+            preflight_render_broadcast_trajectory(parent_output, trajectory_generation_id)
+        else:
+            generation_id = request.get("trajectory_generation_id")
+            target_width = request.get("target_width")
+            target_height = request.get("target_height")
+            if (
+                not isinstance(generation_id, str)
+                or not isinstance(target_width, int)
+                or not isinstance(target_height, int)
+            ):
+                raise BroadcastApiError("interrupted render request is invalid")
+            current_inputs = preflight_render_broadcast_trajectory(
+                parent_output,
+                generation_id,
+                target_width=target_width,
+                target_height=target_height,
+            )
+            current_inputs = {
+                **current_inputs,
+                "parent_run_id": parent_run_id,
+                "parent_output_dir": str(parent_output),
+            }
+            if current_inputs != frozen_inputs:
+                raise BroadcastApiError("interrupted render inputs changed")
+            result = render_broadcast_trajectory(
+                parent_output,
+                generation_id,
+                target_width=target_width,
+                target_height=target_height,
+            )
+        try:
+            quality_report = publish_broadcast_facade(parent_output)
+        except Exception:
+            if operation == "render" and (parent_output / "broadcast_artifact_bindings.v1.json").is_file():
+                rollback_uncommitted_final_public_artifacts(parent_output)
+            raise
+        if operation == "render" and quality_report.get("status") != "ready":
+            if (parent_output / "broadcast_artifact_bindings.v1.json").is_file():
+                rollback_uncommitted_final_public_artifacts(parent_output)
+            raise BroadcastApiError("resumed render facade is not ready")
+        if operation == "recompute" and quality_report.get("status") != "needs_review":
+            raise BroadcastApiError("resumed recompute facade state is invalid")
+        report = {
+            "schema_version": "1.0",
+            "artifact_type": "broadcast_operation_report",
+            "status": "succeeded",
+            "operation": operation,
+            "parent_run_id": parent_run_id,
+            "frozen_inputs": frozen_inputs,
+            "result": _jsonable(result),
+            "quality_status_generation": quality_report.get("status_generation"),
+            "recovered_after_restart": True,
+        }
+        publish_json_exclusive(
+            operation_output / "broadcast_operation_report.v1.json",
+            report,
+            trusted_root=operation_output,
+        )
+        return report
+
+    def _apply_recovered_broadcast_parent(
+        self,
+        parent: dict[str, Any],
+        *,
+        operation_run_id: str,
+        operation: str,
+        result: dict[str, Any],
+        quality_report: dict[str, Any],
+        parent_output: Path,
+        recovered: bool = False,
+    ) -> None:
+        broadcast = parent.get("broadcast")
+        if not isinstance(broadcast, dict):
+            broadcast = {}
+        broadcast = {
+            **broadcast,
+            "status": quality_report.get("status") if operation == "render" else "trajectory_ready",
+            "blocking_reasons": quality_report.get("blocking_reasons", []),
+            "limitations": quality_report.get("limitations", []),
+            "status_generation": quality_report.get("status_generation"),
+            "last_operation": {
+                "operation_run_id": operation_run_id,
+                "operation": operation,
+                "status": "completed",
+                "recovered": recovered,
+            },
+        }
+        for key in ("trajectory_generation_id", "camera_generation_id", "render_generation_id"):
+            if result.get(key):
+                broadcast[key] = result[key]
+        parent["broadcast"] = broadcast
+        parent["artifacts"] = self._collect_artifacts(parent_output)
+        parent["stats"] = self._collect_stats(parent_output)
+        parent.setdefault("stats", {})["broadcast"] = {
+            key: value for key, value in broadcast.items() if key != "preflight"
+        }
+        self._attach_ai_candidate_lifecycle(parent)
+
+    def _acquire_service_lease(self):
+        self.service_lease_dir.mkdir(parents=True, exist_ok=True)
+        path = self._service_lease_path
+        handle = path.open("a+b")
+        handle.seek(0, os.SEEK_END)
+        if handle.tell() == 0:
+            handle.write(b"0")
+            handle.flush()
+        handle.seek(0)
+        try:
+            self._lock_file_handle(handle, blocking=False)
+        except BaseException:
+            handle.close()
+            raise
+        return handle
+
+    @staticmethod
+    def _release_service_lease_resources(handle: Any, path: Path) -> None:
+        try:
+            if not handle.closed:
+                try:
+                    ApiService._unlock_file_handle(handle)
+                except (OSError, ValueError):
+                    pass
+                handle.close()
+        finally:
+            try:
+                Path(path).unlink(missing_ok=True)
+            except OSError:
+                pass
+
+    def _owner_lease_is_active(self, owner_pid: Any, owner_instance_id: Any) -> bool:
+        if isinstance(owner_instance_id, str) and owner_instance_id:
+            if owner_instance_id in _LIVE_SERVICE_INSTANCES:
+                return True
+            path = self.service_lease_dir / f"{owner_instance_id}.lock"
+            if not path.is_file():
+                return False
+            with path.open("a+b") as handle:
+                handle.seek(0)
+                try:
+                    self._lock_file_handle(handle, blocking=False)
+                except OSError:
+                    return True
+                else:
+                    self._unlock_file_handle(handle)
+                    return False
+        return isinstance(owner_pid, int) and not isinstance(owner_pid, bool) and self._process_is_alive(owner_pid)
+
+    @staticmethod
+    def _lock_file_handle(handle, *, blocking: bool) -> None:
+        handle.seek(0)
+        if os.name == "nt":
+            import msvcrt
+
+            mode = msvcrt.LK_LOCK if blocking else msvcrt.LK_NBLCK
+            msvcrt.locking(handle.fileno(), mode, 1)
+        else:
+            import fcntl
+
+            flags = fcntl.LOCK_EX if blocking else fcntl.LOCK_EX | fcntl.LOCK_NB
+            fcntl.flock(handle.fileno(), flags)
+
+    @staticmethod
+    def _unlock_file_handle(handle) -> None:
+        handle.seek(0)
+        if os.name == "nt":
+            import msvcrt
+
+            msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+    @staticmethod
+    def _process_is_alive(pid: int) -> bool:
+        if pid <= 0:
+            return False
+        if pid == os.getpid():
+            return True
+        if os.name == "nt":
+            import ctypes
+
+            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            handle = kernel32.OpenProcess(0x1000, False, pid)
+            if not handle:
+                return False
+            kernel32.CloseHandle(handle)
+            return True
+        try:
+            os.kill(pid, 0)
+        except OSError:
+            return False
+        return True
+
     def _read_registry(self) -> dict[str, Any]:
         if not self.registry_path.exists():
-            return {"runs": []}
+            return {"runs": [], "_revision": 0}
         with self.registry_path.open("r", encoding="utf-8") as handle:
             raw = json.load(handle)
         if not isinstance(raw, dict) or "runs" not in raw:
             return {"runs": []}
         if not isinstance(raw["runs"], list):
             raw["runs"] = []
+        revision = raw.get("_revision", 0)
+        raw["_revision"] = revision if isinstance(revision, int) and not isinstance(revision, bool) else 0
         return raw
 
     def _write_registry(self, registry: dict[str, Any]) -> None:
-        with self.registry_path.open("w", encoding="utf-8") as handle:
-            json.dump(registry, handle, ensure_ascii=False, indent=2)
+        self.registry_path.parent.mkdir(parents=True, exist_ok=True)
+        with self._registry_file_lock():
+            self._write_registry_under_file_lock(registry)
+
+    def _write_registry_under_file_lock(self, registry: dict[str, Any]) -> None:
+        current_revision = 0
+        if self.registry_path.exists():
+            try:
+                with self.registry_path.open("r", encoding="utf-8") as handle:
+                    current = json.load(handle)
+                raw_revision = current.get("_revision", 0) if isinstance(current, dict) else 0
+                if isinstance(raw_revision, int) and not isinstance(raw_revision, bool):
+                    current_revision = raw_revision
+            except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+                current_revision = 0
+        expected_revision = registry.get("_revision")
+        if (
+            isinstance(expected_revision, int)
+            and not isinstance(expected_revision, bool)
+            and expected_revision != current_revision
+        ):
+            raise RuntimeError("Run registry changed concurrently; retry the operation")
+        registry["_revision"] = current_revision + 1
+        descriptor, raw_temp = tempfile.mkstemp(
+            prefix=f".{self.registry_path.name}.",
+            suffix=".tmp",
+            dir=self.registry_path.parent,
+        )
+        temp_path = Path(raw_temp)
+        try:
+            with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+                json.dump(registry, handle, ensure_ascii=False, indent=2)
+                handle.write("\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temp_path, self.registry_path)
+        finally:
+            temp_path.unlink(missing_ok=True)
+
+    @contextmanager
+    def _registry_transaction(self):
+        """Read, mutate, and replace the registry under one cross-process lock."""
+
+        self.registry_path.parent.mkdir(parents=True, exist_ok=True)
+        with self._registry_file_lock():
+            registry = self._read_registry()
+            yield registry
+            self._write_registry_under_file_lock(registry)
+
+    @contextmanager
+    def _registry_file_lock(self):
+        self.registry_lock_path.parent.mkdir(parents=True, exist_ok=True)
+        with self.registry_lock_path.open("a+b") as handle:
+            handle.seek(0, os.SEEK_END)
+            if handle.tell() == 0:
+                handle.write(b"0")
+                handle.flush()
+            handle.seek(0)
+            if os.name == "nt":
+                import msvcrt
+
+                msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                handle.seek(0)
+                if os.name == "nt":
+                    import msvcrt
+
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+                else:
+                    import fcntl
+
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
     def _refresh_discovered_runs_locked(self, registry: dict[str, Any]) -> None:
-        known_by_output = {Path(run["output_dir"]).resolve(): run for run in registry["runs"] if run.get("output_dir")}
+        known_by_output: dict[Path, dict[str, Any]] = {}
+        for run in registry["runs"]:
+            if not self._registry_run_has_safe_output(run):
+                continue
+            safe_output = self._resolve_safe_run_output(Path(run["output_dir"]), allow_missing=True)
+            known_by_output[safe_output] = run
         config_index = self._build_config_output_index()
         for output_dir in self._iter_output_run_dirs():
-            if not output_dir.is_dir():
+            try:
+                resolved_output_dir = self._resolve_safe_run_output(output_dir)
+            except RuntimeError:
                 continue
             if not any(output_dir.iterdir()):
                 continue
-            resolved_output_dir = output_dir.resolve()
             if resolved_output_dir in known_by_output:
                 run = known_by_output[resolved_output_dir]
-                run["artifacts"] = self._collect_artifacts(output_dir)
-                run["stats"] = self._collect_stats(output_dir)
+                run["artifacts"] = self._collect_artifacts(resolved_output_dir)
+                run["stats"] = self._collect_stats(resolved_output_dir)
                 self._attach_ai_candidate_lifecycle(run)
                 continue
 
@@ -3833,13 +6246,13 @@ class ApiService:
                     run_id=f"scan_{output_dir.name}",
                     source="filesystem_scan",
                     status="completed",
-                    created_at=datetime.fromtimestamp(output_dir.stat().st_mtime, tz=timezone.utc).isoformat(),
+                    created_at=datetime.fromtimestamp(resolved_output_dir.stat().st_mtime, tz=timezone.utc).isoformat(),
                     config_name=None if config_meta is None else config_meta["name"],
                     config_path=None if config_meta is None else str(config_meta["path"]),
                     input_video=None if config_meta is None else config_meta["input_video"],
                     parent_run_id=None,
-                    output_dir=output_dir,
-                    modules_enabled=self._collect_module_flags(output_dir, config_meta),
+                    output_dir=resolved_output_dir,
+                    modules_enabled=self._collect_module_flags(resolved_output_dir, config_meta),
                     notes=None,
                     write_artifacts=False,
                 )
@@ -3850,7 +6263,9 @@ class ApiService:
             created_at = _normalize_iso_timestamp(run.get("created_at"))
             started_at = _normalize_iso_timestamp(run.get("started_at"))
             completed_at = _normalize_iso_timestamp(run.get("completed_at"))
-            output_dir = Path(run["output_dir"]).resolve() if run.get("output_dir") else None
+            output_dir = None
+            if self._registry_run_has_safe_output(run):
+                output_dir = self._resolve_safe_run_output(Path(run["output_dir"]), allow_missing=True)
             output_mtime = None
             if output_dir is not None and output_dir.exists():
                 output_mtime = datetime.fromtimestamp(output_dir.stat().st_mtime, tz=timezone.utc).isoformat()
@@ -4226,11 +6641,7 @@ class ApiService:
         )
         warnings = self._highlight_window_warnings(candidate, window)
         if validation.get("tail_status") == "source_end_clamped":
-            warnings = [
-                warning
-                for warning in warnings
-                if "minimum post-event tail" not in warning
-            ]
+            warnings = [warning for warning in warnings if "minimum post-event tail" not in warning]
         if validation.get("status") == "pass" and not warnings:
             return validation
         validation_reasons = [
@@ -4241,8 +6652,7 @@ class ApiService:
         reasons = warnings or validation_reasons
         if reasons:
             raise RuntimeError(
-                f"Approved highlight action has invalid suggested_window: {approved_action_id}. "
-                + " ".join(reasons)
+                f"Approved highlight action has invalid suggested_window: {approved_action_id}. " + " ".join(reasons)
             )
         return validation
 
@@ -4308,7 +6718,9 @@ class ApiService:
                 )
         return warnings
 
-    def _prepare_highlight_render_inputs(self, source_output_dir: Path, render_output_dir: Path, config: AppConfig) -> None:
+    def _prepare_highlight_render_inputs(
+        self, source_output_dir: Path, render_output_dir: Path, config: AppConfig
+    ) -> None:
         self._prepare_follow_cam_render_inputs(
             source_output_dir=source_output_dir,
             render_output_dir=render_output_dir,
@@ -4335,9 +6747,7 @@ class ApiService:
             "output_video": output_video_name,
             "candidate_id": selection.get("candidate_id"),
             "candidate_type": (
-                None
-                if not isinstance(selection.get("candidate"), dict)
-                else selection["candidate"].get("type")
+                None if not isinstance(selection.get("candidate"), dict) else selection["candidate"].get("type")
             ),
             "window": selection["window"],
             "selection_source": selection.get("selection_source"),
@@ -4368,7 +6778,9 @@ class ApiService:
             f"run the approved tracking rerun first.{scope_text}"
         )
 
-    def _prepare_follow_cam_render_inputs(self, source_output_dir: Path, render_output_dir: Path, config: AppConfig) -> None:
+    def _prepare_follow_cam_render_inputs(
+        self, source_output_dir: Path, render_output_dir: Path, config: AppConfig
+    ) -> None:
         raw_csv = source_output_dir / config.output.csv_name
         cleaned_csv = source_output_dir / config.postprocess.cleaned_csv_name
         copied_any = False
@@ -4509,8 +6921,12 @@ class ApiService:
         coverage = float(cv2.countNonZero(content_mask)) / float(content_width * content_height)
 
         band_height = max(6, int(round(content_height * 0.03)))
-        top_span = self._mask_row_span(mask, content_x1, content_x2, int(round(content_y1 + content_height * 0.18)), band_height)
-        bottom_span = self._mask_row_span(mask, content_x1, content_x2, int(round(content_y1 + content_height * 0.92)), band_height)
+        top_span = self._mask_row_span(
+            mask, content_x1, content_x2, int(round(content_y1 + content_height * 0.18)), band_height
+        )
+        bottom_span = self._mask_row_span(
+            mask, content_x1, content_x2, int(round(content_y1 + content_height * 0.92)), band_height
+        )
         upper_contour = self._estimate_upper_field_contour(mask, content_bounds, point_count=7)
 
         if coverage >= 0.08 and upper_contour and bottom_span:
@@ -4627,10 +7043,10 @@ class ApiService:
         if width / float(height) >= 2.6:
             return self._polygon_to_nine_point_field(
                 [
-                (int(round(x1 + width * 0.18)), int(round(y1 + height * 0.18))),
-                (int(round(x1 + width * 0.82)), int(round(y1 + height * 0.18))),
-                (int(round(x1 + width * 0.98)), int(round(y1 + height * 0.96))),
-                (int(round(x1 + width * 0.02)), int(round(y1 + height * 0.96))),
+                    (int(round(x1 + width * 0.18)), int(round(y1 + height * 0.18))),
+                    (int(round(x1 + width * 0.82)), int(round(y1 + height * 0.18))),
+                    (int(round(x1 + width * 0.98)), int(round(y1 + height * 0.96))),
+                    (int(round(x1 + width * 0.02)), int(round(y1 + height * 0.96))),
                 ]
             )
         return self._polygon_to_nine_point_field(
@@ -4908,7 +7324,12 @@ class ApiService:
 
     def _build_run_output_dir(self, *, run_id: str, input_video: Path | None) -> Path:
         input_group = self._input_group_slug(input_video)
-        return (self.run_outputs_dir / input_group / run_id).resolve()
+        return self._resolve_safe_descendant(
+            self.outputs_dir,
+            self.run_outputs_dir / input_group / run_id,
+            expected_kind="directory",
+            allow_missing=True,
+        )
 
     def _resolve_render_video_name(self, requested_name: Any, *, default_name: str) -> str:
         raw_name = str(requested_name or default_name).strip() or default_name
@@ -4959,24 +7380,159 @@ class ApiService:
             return 0.0
         return datetime.fromisoformat(normalized).timestamp()
 
+    @staticmethod
+    def _is_link_or_reparse_point(path: Path) -> bool:
+        try:
+            metadata = Path(path).lstat()
+        except FileNotFoundError:
+            return False
+        except OSError:
+            return True
+        reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x0400)
+        return stat.S_ISLNK(metadata.st_mode) or bool(getattr(metadata, "st_file_attributes", 0) & reparse_flag)
+
+    def _resolve_safe_descendant(
+        self,
+        root: Path,
+        candidate: Path,
+        *,
+        expected_kind: str,
+        direct: bool = False,
+        allow_missing: bool = False,
+    ) -> Path:
+        """Resolve a non-reparse descendant while preserving lexical containment checks."""
+
+        lexical_root = Path(os.path.abspath(root))
+        lexical_candidate = Path(os.path.abspath(candidate))
+        if self._is_link_or_reparse_point(lexical_root):
+            raise RuntimeError(f"Artifact root cannot be a link or reparse point: {lexical_root}")
+        try:
+            relative = lexical_candidate.relative_to(lexical_root)
+        except ValueError as exc:
+            raise RuntimeError(f"Path must stay under {lexical_root}: {lexical_candidate}") from exc
+        if not relative.parts or (direct and len(relative.parts) != 1):
+            raise RuntimeError(f"Path must be a direct descendant of {lexical_root}: {lexical_candidate}")
+
+        current = lexical_root
+        for part in relative.parts:
+            current = current / part
+            if self._is_link_or_reparse_point(current):
+                raise RuntimeError(f"Path cannot traverse a link or reparse point: {current}")
+
+        resolved_root = lexical_root.resolve()
+        resolved_candidate = lexical_candidate.resolve()
+        if resolved_root not in resolved_candidate.parents:
+            raise RuntimeError(f"Resolved path must stay under {resolved_root}: {resolved_candidate}")
+        current = lexical_root
+        if self._is_link_or_reparse_point(current):
+            raise RuntimeError(f"Artifact root cannot be a link or reparse point: {current}")
+        for part in relative.parts:
+            current = current / part
+            if self._is_link_or_reparse_point(current):
+                raise RuntimeError(f"Path cannot traverse a link or reparse point: {current}")
+        if not allow_missing or resolved_candidate.exists():
+            if expected_kind == "directory" and not resolved_candidate.is_dir():
+                raise RuntimeError(f"Expected an artifact directory: {resolved_candidate}")
+            if expected_kind == "file" and not resolved_candidate.is_file():
+                raise RuntimeError(f"Expected an artifact file: {resolved_candidate}")
+        return resolved_candidate
+
+    def _resolve_safe_run_output(self, output_dir: Path, *, allow_missing: bool = False) -> Path:
+        return self._resolve_safe_descendant(
+            self.outputs_dir,
+            output_dir,
+            expected_kind="directory",
+            allow_missing=allow_missing,
+        )
+
+    def _registry_run_has_safe_output(self, run: dict[str, Any]) -> bool:
+        raw_output_dir = run.get("output_dir")
+        if not isinstance(raw_output_dir, str) or not raw_output_dir:
+            return False
+        try:
+            self._resolve_safe_run_output(Path(raw_output_dir), allow_missing=True)
+        except RuntimeError:
+            return False
+        return True
+
     def _iter_output_run_dirs(self) -> list[Path]:
-        if not self.outputs_dir.exists():
+        if not self.outputs_dir.is_dir() or self._is_link_or_reparse_point(self.outputs_dir):
             return []
         discovered: list[Path] = []
         for child in sorted(self.outputs_dir.iterdir(), key=lambda item: item.name):
-            if not child.is_dir():
+            try:
+                self._resolve_safe_descendant(
+                    self.outputs_dir,
+                    child,
+                    expected_kind="directory",
+                    direct=True,
+                )
+            except RuntimeError:
                 continue
             if child.name == "api_runs":
-                discovered.extend(sorted((item for item in child.iterdir() if item.is_dir()), key=lambda item: item.name))
+                discovered.extend(
+                    sorted(
+                        (item for item in child.iterdir() if self._is_safe_direct_directory(child, item)),
+                        key=lambda item: item.name,
+                    )
+                )
                 continue
             if child.name == "runs":
-                for input_group_dir in sorted((item for item in child.iterdir() if item.is_dir()), key=lambda item: item.name):
-                    discovered.extend(sorted((item for item in input_group_dir.iterdir() if item.is_dir()), key=lambda item: item.name))
+                for input_group_dir in sorted(
+                    (item for item in child.iterdir() if self._is_safe_direct_directory(child, item)),
+                    key=lambda item: item.name,
+                ):
+                    discovered.extend(
+                        sorted(
+                            (
+                                item
+                                for item in input_group_dir.iterdir()
+                                if self._is_safe_direct_directory(input_group_dir, item)
+                            ),
+                            key=lambda item: item.name,
+                        )
+                    )
                 continue
             if child.name == "_scratch":
                 continue
             discovered.append(child)
         return discovered
+
+    def _is_safe_direct_directory(self, root: Path, candidate: Path) -> bool:
+        try:
+            self._resolve_safe_descendant(
+                root,
+                candidate,
+                expected_kind="directory",
+                direct=True,
+            )
+        except RuntimeError:
+            return False
+        return True
+
+    def _is_safe_direct_file(self, root: Path, candidate: Path) -> bool:
+        try:
+            self._resolve_safe_descendant(
+                root,
+                candidate,
+                expected_kind="file",
+                direct=True,
+            )
+        except RuntimeError:
+            return False
+        return True
+
+    def _read_safe_direct_json(self, root: Path, name: str) -> dict[str, Any] | None:
+        try:
+            path = self._resolve_safe_descendant(
+                root,
+                root / name,
+                expected_kind="file",
+                direct=True,
+            )
+        except RuntimeError:
+            return None
+        return self._read_optional_json(path)
 
     def _load_raw_yaml(self, config_path: Path) -> dict[str, Any]:
         with config_path.open("r", encoding="utf-8") as handle:
@@ -4991,19 +7547,29 @@ class ApiService:
                 "postprocess": bool(config_meta.get("postprocess_enabled", False)),
                 "follow_cam": bool(config_meta.get("follow_cam_enabled", False)),
                 "temporal_chunks": (output_dir / "temporal_chunks_report.json").exists(),
+                "broadcast_hybrid": (output_dir / "action_signal_binding.v1.json").exists(),
             }
         return {
             "postprocess": (output_dir / "cleanup_report.json").exists(),
             "follow_cam": (output_dir / "follow_cam_report.json").exists(),
             "temporal_chunks": (output_dir / "temporal_chunks_report.json").exists(),
+            "broadcast_hybrid": (output_dir / "action_signal_binding.v1.json").exists(),
         }
 
     def _collect_artifacts(self, output_dir: Path) -> list[dict[str, Any]]:
-        if not output_dir.exists():
+        try:
+            output_dir = self._resolve_safe_run_output(output_dir)
+        except RuntimeError:
             return []
         artifacts: list[dict[str, Any]] = []
         for artifact_path in self._iter_artifact_paths(output_dir):
-            if not artifact_path.is_file():
+            try:
+                artifact_path = self._resolve_safe_descendant(
+                    output_dir,
+                    artifact_path,
+                    expected_kind="file",
+                )
+            except RuntimeError:
                 continue
             relative_name = artifact_path.relative_to(output_dir).as_posix()
             content_type, _ = mimetypes.guess_type(str(artifact_path))
@@ -5020,19 +7586,23 @@ class ApiService:
         return artifacts
 
     def _iter_artifact_paths(self, output_dir: Path) -> list[Path]:
-        artifact_paths = [item for item in output_dir.iterdir() if item.is_file()]
+        try:
+            output_dir = self._resolve_safe_run_output(output_dir)
+        except RuntimeError:
+            return []
+        artifact_paths = [
+            item.resolve() for item in output_dir.iterdir() if self._is_safe_direct_file(output_dir, item)
+        ]
         chunk_names = self._temporal_chunk_names(output_dir)
         chunk_roots, allow_nested_contracts = self._temporal_chunk_artifact_roots(output_dir)
         for chunk_root in chunk_roots:
             artifact_paths.extend(
-                item
+                item.resolve()
                 for chunk_dir in sorted(
                     (
                         item
                         for item in chunk_root.iterdir()
-                        if item.is_dir()
-                        and item.name in chunk_names
-                        and item.resolve().parent == chunk_root.resolve()
+                        if item.name in chunk_names and self._is_safe_direct_directory(chunk_root, item)
                     ),
                     key=lambda item: item.name,
                 )
@@ -5043,10 +7613,285 @@ class ApiService:
                     allow_tracking_contract=allow_nested_contracts,
                 )
             )
+        artifact_paths.extend(self._broadcast_nested_artifact_paths(output_dir))
         return sorted(artifact_paths, key=lambda item: item.relative_to(output_dir).as_posix())
 
+    def _broadcast_nested_artifact_paths(self, output_dir: Path) -> list[Path]:
+        """Expand only status and source-report files named by trusted broadcast manifests."""
+
+        try:
+            output_dir = self._resolve_safe_run_output(output_dir)
+        except RuntimeError:
+            return []
+        cached_paths = self._cached_broadcast_nested_artifact_paths(output_dir)
+        if cached_paths is not None:
+            return cached_paths
+        paths: set[Path] = set()
+        try:
+            queue_path = self._resolve_safe_descendant(
+                output_dir,
+                output_dir / "selective_review_queue.v1.json",
+                expected_kind="file",
+                direct=True,
+            )
+            for evidence_path in collect_review_evidence_paths(queue_path, output_dir):
+                paths.add(
+                    self._resolve_safe_descendant(
+                        output_dir,
+                        evidence_path,
+                        expected_kind="file",
+                    )
+                )
+        except (RuntimeError, BroadcastApiError):
+            pass
+
+        try:
+            status_root = self._resolve_safe_descendant(
+                output_dir,
+                output_dir / "broadcast_status",
+                expected_kind="directory",
+                direct=True,
+            )
+        except RuntimeError:
+            status_root = None
+        if status_root is not None:
+            for generation in status_root.iterdir():
+                if len(generation.name) != 64 or any(
+                    character not in "0123456789abcdef" for character in generation.name
+                ):
+                    continue
+                try:
+                    safe_generation = self._resolve_safe_descendant(
+                        status_root,
+                        generation,
+                        expected_kind="directory",
+                        direct=True,
+                    )
+                    report_path = self._resolve_safe_descendant(
+                        safe_generation,
+                        safe_generation / "broadcast_quality_report.json",
+                        expected_kind="file",
+                        direct=True,
+                    )
+                    report = validate_broadcast_quality_report(output_dir, report_path)
+                except (RuntimeError, BroadcastApiError):
+                    continue
+                if report.get("status_generation") == generation.name:
+                    paths.add(report_path)
+
+        try:
+            quality_path = self._resolve_safe_descendant(
+                output_dir,
+                output_dir / "broadcast_quality_report.json",
+                expected_kind="file",
+                direct=True,
+            )
+            manifest_path = self._resolve_safe_descendant(
+                output_dir,
+                output_dir / "broadcast_artifact_bindings.v1.json",
+                expected_kind="file",
+                direct=True,
+            )
+            quality, _ = load_bound_json(quality_path, "broadcast quality report")
+            manifest, manifest_sha256 = load_bound_json(manifest_path, "broadcast final artifact bindings")
+        except (RuntimeError, BroadcastApiError):
+            return sorted(paths)
+        stable_quality = {
+            key: value for key, value in quality.items() if key not in {"generated_at", "status_generation"}
+        }
+        expected_status_generation = hashlib.sha256(
+            json.dumps(
+                stable_quality,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            ).encode("utf-8")
+        ).hexdigest()
+        if (
+            quality.get("artifact_type") != "broadcast_quality_report"
+            or quality.get("status") != "ready"
+            or quality.get("status_generation") != expected_status_generation
+            or quality.get("final_bindings")
+            != {"path": "broadcast_artifact_bindings.v1.json", "sha256": manifest_sha256}
+            or manifest.get("artifact_type") != "broadcast_artifact_bindings"
+        ):
+            return sorted(paths)
+        bindings = manifest.get("artifacts")
+        if not isinstance(bindings, dict):
+            return sorted(paths)
+        for raw_binding in bindings.values():
+            if not isinstance(raw_binding, dict):
+                continue
+            raw_report = raw_binding.get("source_report")
+            if not isinstance(raw_report, dict):
+                continue
+            raw_path = raw_report.get("path")
+            expected_sha256 = raw_report.get("sha256")
+            if (
+                not isinstance(raw_path, str)
+                or not raw_path
+                or not isinstance(expected_sha256, str)
+                or len(expected_sha256) != 64
+            ):
+                continue
+            relative = Path(raw_path)
+            if relative.is_absolute() or ".." in relative.parts:
+                continue
+            try:
+                candidate = self._resolve_safe_descendant(
+                    output_dir,
+                    output_dir / relative,
+                    expected_kind="file",
+                )
+            except RuntimeError:
+                continue
+            if sha256_file(candidate) == expected_sha256:
+                paths.add(candidate)
+        sorted_paths = sorted(paths)
+        ready_status_path = output_dir / "broadcast_status" / str(quality.get("status_generation")) / quality_path.name
+        if ready_status_path in paths:
+            self._cache_broadcast_nested_artifact_paths(
+                output_dir=output_dir,
+                nested_paths=sorted_paths,
+                quality_path=quality_path,
+                manifest_path=manifest_path,
+                manifest_bindings=bindings,
+                queue_path=output_dir / "selective_review_queue.v1.json",
+            )
+        return sorted_paths
+
+    def _cached_broadcast_nested_artifact_paths(self, output_dir: Path) -> list[Path] | None:
+        with self._broadcast_artifact_cache_lock:
+            entry = deepcopy(self._broadcast_artifact_validation_cache.get(output_dir))
+        if not isinstance(entry, dict):
+            return None
+        try:
+            for relative_text, expected_token in entry.get("contained_tokens", []):
+                relative = Path(relative_text)
+                path = self._resolve_safe_descendant(
+                    output_dir,
+                    output_dir / relative,
+                    expected_kind="file",
+                )
+                if self._artifact_identity_token(path) != tuple(expected_token):
+                    raise RuntimeError("cached broadcast artifact changed")
+            for raw_path, expected_token in entry.get("external_tokens", []):
+                path = Path(raw_path)
+                if self._is_link_or_reparse_point(path) or not path.is_file():
+                    raise RuntimeError("cached external broadcast source is unavailable")
+                if self._artifact_identity_token(path) != tuple(expected_token):
+                    raise RuntimeError("cached external broadcast source changed")
+            return [
+                self._resolve_safe_descendant(
+                    output_dir,
+                    output_dir / Path(relative_text),
+                    expected_kind="file",
+                )
+                for relative_text in entry.get("nested_paths", [])
+            ]
+        except (OSError, RuntimeError, TypeError, ValueError):
+            with self._broadcast_artifact_cache_lock:
+                self._broadcast_artifact_validation_cache.pop(output_dir, None)
+            return None
+
+    def _cache_broadcast_nested_artifact_paths(
+        self,
+        *,
+        output_dir: Path,
+        nested_paths: list[Path],
+        quality_path: Path,
+        manifest_path: Path,
+        manifest_bindings: dict[str, Any],
+        queue_path: Path,
+    ) -> None:
+        contained_paths = {quality_path, manifest_path, *nested_paths}
+        try:
+            for public_name in manifest_bindings:
+                contained_paths.add(
+                    self._resolve_safe_descendant(
+                        output_dir,
+                        output_dir / public_name,
+                        expected_kind="file",
+                        direct=True,
+                    )
+                )
+            queue, _ = validate_review_queue_bindings(queue_path, trusted_root=output_dir)
+            contained_paths.add(
+                self._resolve_safe_descendant(
+                    output_dir,
+                    queue_path,
+                    expected_kind="file",
+                    direct=True,
+                )
+            )
+            queue_bindings = queue.get("bindings")
+            if not isinstance(queue_bindings, dict):
+                return
+            for raw_binding in queue_bindings.values():
+                if not isinstance(raw_binding, dict) or not isinstance(raw_binding.get("path"), str):
+                    return
+                raw_path = Path(raw_binding["path"])
+                candidate = raw_path if raw_path.is_absolute() else queue_path.parent / raw_path
+                contained_paths.add(
+                    self._resolve_safe_descendant(
+                        output_dir,
+                        candidate,
+                        expected_kind="file",
+                    )
+                )
+
+            external_paths: set[Path] = set()
+            registry = self._read_registry()
+            for run in registry.get("runs", []):
+                if not isinstance(run, dict) or not isinstance(run.get("output_dir"), str):
+                    continue
+                try:
+                    run_output = self._resolve_safe_run_output(Path(run["output_dir"]), allow_missing=True)
+                except RuntimeError:
+                    continue
+                if run_output != output_dir or not isinstance(run.get("input_video"), str):
+                    continue
+                raw_input_video = Path(run["input_video"])
+                if self._is_link_or_reparse_point(raw_input_video):
+                    return
+                input_video = raw_input_video.resolve()
+                if input_video.is_file() and not self._is_link_or_reparse_point(input_video):
+                    external_paths.add(input_video)
+                break
+
+            contained_tokens = []
+            for path in sorted(contained_paths, key=lambda item: item.relative_to(output_dir).as_posix()):
+                safe_path = self._resolve_safe_descendant(output_dir, path, expected_kind="file")
+                contained_tokens.append(
+                    (safe_path.relative_to(output_dir).as_posix(), self._artifact_identity_token(safe_path))
+                )
+            external_tokens = [
+                (str(path), self._artifact_identity_token(path)) for path in sorted(external_paths, key=str)
+            ]
+            entry = {
+                "nested_paths": [path.relative_to(output_dir).as_posix() for path in nested_paths],
+                "contained_tokens": contained_tokens,
+                "external_tokens": external_tokens,
+            }
+        except (OSError, RuntimeError, TypeError, ValueError):
+            return
+        with self._broadcast_artifact_cache_lock:
+            self._broadcast_artifact_validation_cache[output_dir] = entry
+
+    @staticmethod
+    def _artifact_identity_token(path: Path) -> tuple[int, int, int, int, int]:
+        metadata = Path(path).stat()
+        return (
+            int(metadata.st_dev),
+            int(metadata.st_ino),
+            int(metadata.st_size),
+            int(metadata.st_mtime_ns),
+            int(metadata.st_ctime_ns),
+        )
+
     def _temporal_chunk_artifact_roots(self, output_dir: Path) -> tuple[list[Path], bool]:
-        report = self._read_optional_json(output_dir / "temporal_chunks_report.json")
+        report = self._read_safe_direct_json(output_dir, "temporal_chunks_report.json")
         if report is None:
             return [], False
         if "chunks_root_name" not in report:
@@ -5061,36 +7906,42 @@ class ApiService:
             or Path(root_name).name != root_name
         ):
             return [], False
-        resolved_output_dir = output_dir.resolve()
-        root = (output_dir / root_name).resolve()
-        if root.parent != resolved_output_dir or not root.is_dir():
+        try:
+            root = self._resolve_safe_descendant(
+                output_dir,
+                output_dir / root_name,
+                expected_kind="directory",
+                direct=True,
+            )
+        except RuntimeError:
             return [], False
         stitch = report.get("stitch")
         allow_nested_contracts = isinstance(stitch, dict) and stitch.get("status") == "succeeded"
         return [root], allow_nested_contracts
 
     def _legacy_temporal_chunk_artifact_roots(self, output_dir: Path) -> list[Path]:
-        resolved_output_dir = output_dir.resolve()
         chunk_names = self._temporal_chunk_names(output_dir)
         if not chunk_names:
             return []
         roots: dict[Path, Path] = {}
         for candidate_root in output_dir.iterdir():
-            if not candidate_root.is_dir():
-                continue
-            resolved_root = candidate_root.resolve()
-            if resolved_root.parent != resolved_output_dir:
+            try:
+                resolved_root = self._resolve_safe_descendant(
+                    output_dir,
+                    candidate_root,
+                    expected_kind="directory",
+                    direct=True,
+                )
+            except RuntimeError:
                 continue
             if any(
-                (candidate_root / chunk_name).is_dir()
-                and (candidate_root / chunk_name).resolve().parent == resolved_root
-                for chunk_name in chunk_names
+                self._is_safe_direct_directory(resolved_root, resolved_root / chunk_name) for chunk_name in chunk_names
             ):
-                roots[resolved_root] = candidate_root
+                roots[resolved_root] = resolved_root
         return sorted(roots.values(), key=lambda item: item.relative_to(output_dir).as_posix())
 
     def _temporal_chunk_names(self, output_dir: Path) -> set[str]:
-        report = self._read_optional_json(output_dir / "temporal_chunks_report.json")
+        report = self._read_safe_direct_json(output_dir, "temporal_chunks_report.json")
         if report is None:
             return set()
         names: set[str] = set()
@@ -5124,8 +7975,6 @@ class ApiService:
         *,
         allow_tracking_contract: bool,
     ) -> bool:
-        if not artifact_path.is_file():
-            return False
         try:
             relative = artifact_path.relative_to(chunk_root)
         except ValueError:
@@ -5135,9 +7984,20 @@ class ApiService:
         chunk_name = relative.parts[0]
         if not chunk_name.startswith("chunk_"):
             return False
-        resolved_chunk_root = chunk_root.resolve()
-        resolved_chunk_dir = (chunk_root / chunk_name).resolve()
-        if resolved_chunk_dir.parent != resolved_chunk_root or artifact_path.resolve().parent != resolved_chunk_dir:
+        try:
+            resolved_chunk_dir = self._resolve_safe_descendant(
+                chunk_root,
+                chunk_root / chunk_name,
+                expected_kind="directory",
+                direct=True,
+            )
+            self._resolve_safe_descendant(
+                resolved_chunk_dir,
+                artifact_path,
+                expected_kind="file",
+                direct=True,
+            )
+        except RuntimeError:
             return False
         if artifact_path.suffix.lower() in {".csv", ".jsonl"}:
             return True
@@ -5175,17 +8035,27 @@ class ApiService:
         return build_ai_candidate_lifecycle(output_dir)
 
     def _collect_stats(self, output_dir: Path) -> dict[str, Any]:
-        metrics_report = self._read_optional_json(output_dir / "metrics_report.json")
+        try:
+            output_dir = self._resolve_safe_run_output(output_dir)
+        except RuntimeError:
+            return {}
+        metrics_report = self._read_safe_direct_json(output_dir, "metrics_report.json")
         stats = stats_from_metrics_report(metrics_report) if metrics_report is not None else {}
-        raw_summary = stats.get("raw") or self._summarize_track_csv(output_dir / "ball_track.csv")
-        cleaned_summary = stats.get("cleaned") or self._summarize_track_csv(output_dir / "ball_track.cleaned.csv")
-        cleanup_report = self._read_optional_json(output_dir / "cleanup_report.json")
-        follow_cam_report = self._read_optional_json(output_dir / "follow_cam_report.json")
-        ball_audit_report = self._read_optional_json(output_dir / "ball_audit.json")
-        ai_review_trigger_report = self._read_optional_json(output_dir / "ai_review_triggers.json")
-        event_candidate_report = self._read_optional_json(output_dir / "event_candidates.json")
-        player_tracks_report = self._read_optional_json(output_dir / "player_tracks.json")
-        ai_improvement_report = self._read_optional_json(output_dir / "ai_improvement_report.json")
+        raw_track = output_dir / "ball_track.csv"
+        cleaned_track = output_dir / "ball_track.cleaned.csv"
+        raw_summary = stats.get("raw") or (
+            self._summarize_track_csv(raw_track) if self._is_safe_direct_file(output_dir, raw_track) else None
+        )
+        cleaned_summary = stats.get("cleaned") or (
+            self._summarize_track_csv(cleaned_track) if self._is_safe_direct_file(output_dir, cleaned_track) else None
+        )
+        cleanup_report = self._read_safe_direct_json(output_dir, "cleanup_report.json")
+        follow_cam_report = self._read_safe_direct_json(output_dir, "follow_cam_report.json")
+        ball_audit_report = self._read_safe_direct_json(output_dir, "ball_audit.json")
+        ai_review_trigger_report = self._read_safe_direct_json(output_dir, "ai_review_triggers.json")
+        event_candidate_report = self._read_safe_direct_json(output_dir, "event_candidates.json")
+        player_tracks_report = self._read_safe_direct_json(output_dir, "player_tracks.json")
+        ai_improvement_report = self._read_safe_direct_json(output_dir, "ai_improvement_report.json")
         if raw_summary is not None:
             stats["raw"] = raw_summary
         if cleaned_summary is not None:

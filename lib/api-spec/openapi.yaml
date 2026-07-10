@@ -659,6 +659,140 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/HTTPValidationError'
+  /runs/{run_id}/broadcast/render:
+    post:
+      tags:
+      - broadcast
+      summary: Render Broadcast Hybrid
+      operationId: render_broadcast_hybrid
+      parameters:
+      - name: run_id
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Run Id
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BroadcastRenderRequest'
+      responses:
+        '202':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BroadcastOperationResponse'
+        '404':
+          description: Run not found
+        '409':
+          description: Evidence or run state conflict
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /runs/{run_id}/broadcast/review-actions:
+    post:
+      tags:
+      - broadcast
+      summary: Submit Broadcast Review Actions
+      operationId: submit_broadcast_review_actions
+      parameters:
+      - name: run_id
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Run Id
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BroadcastReviewActionsRequest'
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BroadcastOperationResponse'
+        '404':
+          description: Run not found
+        '409':
+          description: Evidence or run state conflict
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /runs/{run_id}/broadcast/review-windows:
+    get:
+      tags:
+      - broadcast
+      summary: Get Broadcast Review Windows
+      operationId: get_broadcast_review_windows
+      parameters:
+      - name: run_id
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Run Id
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BroadcastReviewWindowsResponse'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /runs/{run_id}/broadcast/trajectory-recompute:
+    post:
+      tags:
+      - broadcast
+      summary: Recompute Broadcast Trajectory
+      operationId: recompute_broadcast_trajectory
+      parameters:
+      - name: run_id
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Run Id
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BroadcastTrajectoryRecomputeRequest'
+      responses:
+        '202':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BroadcastOperationResponse'
+        '404':
+          description: Run not found
+        '409':
+          description: Evidence or run state conflict
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
   /runs/{run_id}/camera-path:
     get:
       tags:
@@ -2655,6 +2789,705 @@ components:
       - end_point
       - suspicion_score
       title: BallAuditTracklet
+    BroadcastCalibrationConfirmation:
+      properties:
+        source_resolution:
+          prefixItems:
+          - type: integer
+          - type: integer
+          type: array
+          maxItems: 2
+          minItems: 2
+          title: Source Resolution
+        confirmed_sample_frames:
+          prefixItems:
+          - type: integer
+          - type: integer
+          - type: integer
+          type: array
+          maxItems: 3
+          minItems: 3
+          title: Confirmed Sample Frames
+        field_polygon:
+          items:
+            prefixItems:
+            - type: number
+            - type: number
+            type: array
+            maxItems: 2
+            minItems: 2
+          type: array
+          minItems: 3
+          title: Field Polygon
+        exclusion_polygons:
+          items:
+            items:
+              prefixItems:
+              - type: number
+              - type: number
+              type: array
+              maxItems: 2
+              minItems: 2
+            type: array
+          type: array
+          title: Exclusion Polygons
+      type: object
+      required:
+      - source_resolution
+      - confirmed_sample_frames
+      - field_polygon
+      title: BroadcastCalibrationConfirmation
+      description: Three-frame, per-source calibration required by the hybrid broadcast
+        workflow.
+    BroadcastLastOperationState:
+      properties:
+        operation_run_id:
+          type: string
+          title: Operation Run Id
+        operation:
+          type: string
+          enum:
+          - recompute
+          - render
+          title: Operation
+        status:
+          type: string
+          enum:
+          - queued
+          - running
+          - committing
+          - completed
+          - failed
+          - cancelled
+          title: Status
+        recovered:
+          type: boolean
+          title: Recovered
+          default: false
+        error:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Error
+      additionalProperties: true
+      type: object
+      required:
+      - operation_run_id
+      - operation
+      - status
+      title: BroadcastLastOperationState
+    BroadcastOperationDetails:
+      properties:
+        review_decisions_sha256:
+          anyOf:
+          - type: string
+            pattern: ^[0-9a-f]{64}$
+          - type: 'null'
+          title: Review Decisions Sha256
+        message:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Message
+      additionalProperties: true
+      type: object
+      title: BroadcastOperationDetails
+    BroadcastOperationRequestState:
+      properties:
+        trajectory_generation_id:
+          anyOf:
+          - type: string
+            pattern: ^trajectory-[0-9a-f]{24}$
+          - type: 'null'
+          title: Trajectory Generation Id
+        target_width:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          title: Target Width
+        target_height:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          title: Target Height
+      additionalProperties: true
+      type: object
+      title: BroadcastOperationRequestState
+    BroadcastOperationResponse:
+      properties:
+        run_id:
+          type: string
+          title: Run Id
+        parent_run_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Parent Run Id
+        status:
+          type: string
+          enum:
+          - ready
+          - queued
+          - completed
+          - needs_review
+          title: Status
+        reason:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Reason
+        artifact:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Artifact
+        generation_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Generation Id
+        details:
+          $ref: '#/components/schemas/BroadcastOperationDetails'
+      type: object
+      required:
+      - run_id
+      - status
+      title: BroadcastOperationResponse
+    BroadcastOperationResultState:
+      properties:
+        status:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Status
+        trajectory_generation_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Trajectory Generation Id
+        camera_generation_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Camera Generation Id
+        render_generation_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Render Generation Id
+      additionalProperties: true
+      type: object
+      title: BroadcastOperationResultState
+    BroadcastPreflightState:
+      properties:
+        input_video:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Input Video
+        source_resolution:
+          anyOf:
+          - prefixItems:
+            - type: integer
+            - type: integer
+            type: array
+            maxItems: 2
+            minItems: 2
+          - type: 'null'
+          title: Source Resolution
+        source_frame_count:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          title: Source Frame Count
+        fps:
+          anyOf:
+          - type: number
+          - type: 'null'
+          title: Fps
+        source_size_bytes:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          title: Source Size Bytes
+        source_mtime_ns:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          title: Source Mtime Ns
+        calibration:
+          anyOf:
+          - $ref: '#/components/schemas/BroadcastCalibrationConfirmation'
+          - type: 'null'
+        classifier_status:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Classifier Status
+        selective_policy_status:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Selective Policy Status
+      additionalProperties: true
+      type: object
+      title: BroadcastPreflightState
+    BroadcastRenderRequest:
+      properties:
+        trajectory_generation_id:
+          type: string
+          pattern: ^trajectory-[0-9a-f]{24}$
+          title: Trajectory Generation Id
+        target_width:
+          type: integer
+          maximum: 7680.0
+          minimum: 320.0
+          title: Target Width
+          default: 1920
+        target_height:
+          type: integer
+          maximum: 4320.0
+          minimum: 180.0
+          title: Target Height
+          default: 1080
+      type: object
+      required:
+      - trajectory_generation_id
+      title: BroadcastRenderRequest
+    BroadcastReviewAction:
+      properties:
+        action_id:
+          type: string
+          maxLength: 200
+          minLength: 1
+          title: Action Id
+        review_item_id:
+          type: string
+          maxLength: 200
+          minLength: 1
+          title: Review Item Id
+        candidate_id:
+          type: string
+          maxLength: 300
+          minLength: 1
+          title: Candidate Id
+        reviewer_id:
+          type: string
+          maxLength: 200
+          minLength: 1
+          title: Reviewer Id
+        created_at:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Created At
+        action:
+          type: string
+          enum:
+          - confirm_ball
+          - reject_noise
+          - mark_unknown
+          title: Action
+        noise_subtype:
+          anyOf:
+          - type: string
+            enum:
+            - player_body_or_shoe
+            - field_line_or_mark
+            - sideline_or_spare_ball
+            - equipment_or_background
+            - lighting_shadow_or_blur
+          - type: 'null'
+          title: Noise Subtype
+      additionalProperties: false
+      type: object
+      required:
+      - action_id
+      - review_item_id
+      - candidate_id
+      - reviewer_id
+      - action
+      title: BroadcastReviewAction
+    BroadcastReviewActionsRequest:
+      properties:
+        actions:
+          items:
+            $ref: '#/components/schemas/BroadcastReviewAction'
+          type: array
+          minItems: 1
+          title: Actions
+      type: object
+      required:
+      - actions
+      title: BroadcastReviewActionsRequest
+    BroadcastReviewCandidate:
+      properties:
+        candidate_id:
+          type: string
+          title: Candidate Id
+        candidate_fingerprint:
+          type: string
+          pattern: ^[0-9a-f]{64}$
+          title: Candidate Fingerprint
+        variant_id:
+          type: string
+          title: Variant Id
+        frame_index:
+          type: integer
+          minimum: 0.0
+          title: Frame Index
+        bbox:
+          prefixItems:
+          - type: number
+          - type: number
+          - type: number
+          - type: number
+          type: array
+          maxItems: 4
+          minItems: 4
+          title: Bbox
+        detector_source:
+          type: string
+          title: Detector Source
+        detector_confidence:
+          type: number
+          maximum: 1.0
+          minimum: 0.0
+          title: Detector Confidence
+        predicted_label:
+          type: string
+          title: Predicted Label
+        prediction_confidence:
+          type: number
+          maximum: 1.0
+          minimum: 0.0
+          title: Prediction Confidence
+        selective_decision:
+          type: string
+          enum:
+          - accept
+          - reject
+          - abstain
+          title: Selective Decision
+        decision_reasons:
+          items:
+            type: string
+          type: array
+          title: Decision Reasons
+        review_kind:
+          type: string
+          title: Review Kind
+        evidence:
+          $ref: '#/components/schemas/BroadcastReviewEvidence'
+      additionalProperties: true
+      type: object
+      required:
+      - candidate_id
+      - candidate_fingerprint
+      - variant_id
+      - frame_index
+      - bbox
+      - detector_source
+      - detector_confidence
+      - predicted_label
+      - prediction_confidence
+      - selective_decision
+      - review_kind
+      - evidence
+      title: BroadcastReviewCandidate
+    BroadcastReviewEvidence:
+      properties:
+        sample_id:
+          type: string
+          title: Sample Id
+        sha256:
+          type: string
+          pattern: ^[0-9a-f]{64}$
+          title: Sha256
+        dataset_version:
+          type: string
+          pattern: ^[0-9a-f]{64}$
+          title: Dataset Version
+        artifacts:
+          $ref: '#/components/schemas/BroadcastReviewEvidenceArtifacts'
+      additionalProperties: true
+      type: object
+      required:
+      - sample_id
+      - sha256
+      - dataset_version
+      - artifacts
+      title: BroadcastReviewEvidence
+    BroadcastReviewEvidenceArtifact:
+      properties:
+        path:
+          type: string
+          title: Path
+        sha256:
+          type: string
+          pattern: ^[0-9a-f]{64}$
+          title: Sha256
+        size_bytes:
+          type: integer
+          minimum: 0.0
+          title: Size Bytes
+        shape:
+          anyOf:
+          - items:
+              type: integer
+            type: array
+          - type: 'null'
+          title: Shape
+        dtype:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Dtype
+        color_space:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Color Space
+      additionalProperties: true
+      type: object
+      required:
+      - path
+      - sha256
+      - size_bytes
+      title: BroadcastReviewEvidenceArtifact
+    BroadcastReviewEvidenceArtifacts:
+      properties:
+        tight_tensor:
+          $ref: '#/components/schemas/BroadcastReviewEvidenceArtifact'
+        context_tensor:
+          $ref: '#/components/schemas/BroadcastReviewEvidenceArtifact'
+        review_montage:
+          $ref: '#/components/schemas/BroadcastReviewEvidenceArtifact'
+      additionalProperties: true
+      type: object
+      required:
+      - tight_tensor
+      - context_tensor
+      - review_montage
+      title: BroadcastReviewEvidenceArtifacts
+    BroadcastReviewWindow:
+      properties:
+        review_item_id:
+          type: string
+          title: Review Item Id
+        variant_id:
+          type: string
+          title: Variant Id
+        start_frame:
+          type: integer
+          minimum: 0.0
+          title: Start Frame
+        end_frame:
+          type: integer
+          minimum: 0.0
+          title: End Frame
+        duration_seconds:
+          type: number
+          minimum: 0.0
+          title: Duration Seconds
+        compliance:
+          type: string
+          const: compliant
+          title: Compliance
+        priority:
+          type: integer
+          minimum: 0.0
+          title: Priority
+        candidates:
+          items:
+            $ref: '#/components/schemas/BroadcastReviewCandidate'
+          type: array
+          title: Candidates
+      additionalProperties: true
+      type: object
+      required:
+      - review_item_id
+      - variant_id
+      - start_frame
+      - end_frame
+      - duration_seconds
+      - compliance
+      - priority
+      title: BroadcastReviewWindow
+    BroadcastReviewWindowsResponse:
+      properties:
+        run_id:
+          type: string
+          title: Run Id
+        status:
+          type: string
+          enum:
+          - ready
+          - needs_review
+          title: Status
+        reason:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Reason
+        queue_sha256:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Queue Sha256
+        review_item_count:
+          type: integer
+          title: Review Item Count
+          default: 0
+        items:
+          items:
+            $ref: '#/components/schemas/BroadcastReviewWindow'
+          type: array
+          title: Items
+      type: object
+      required:
+      - run_id
+      - status
+      title: BroadcastReviewWindowsResponse
+    BroadcastRunState:
+      properties:
+        status:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Status
+        quality_profile:
+          anyOf:
+          - type: string
+            const: stable_broadcast
+          - type: 'null'
+          title: Quality Profile
+        max_manual_review_windows:
+          anyOf:
+          - type: integer
+            maximum: 30.0
+            minimum: 1.0
+          - type: 'null'
+          title: Max Manual Review Windows
+        preflight:
+          anyOf:
+          - $ref: '#/components/schemas/BroadcastPreflightState'
+          - type: 'null'
+        blocking_reasons:
+          items:
+            type: string
+          type: array
+          title: Blocking Reasons
+        limitations:
+          items:
+            type: string
+          type: array
+          title: Limitations
+        status_generation:
+          anyOf:
+          - type: string
+            pattern: ^[0-9a-f]{64}$
+          - type: 'null'
+          title: Status Generation
+        trajectory_generation_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Trajectory Generation Id
+        camera_generation_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Camera Generation Id
+        render_generation_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Render Generation Id
+        operation:
+          anyOf:
+          - type: string
+            enum:
+            - recompute
+            - render
+          - type: 'null'
+          title: Operation
+        operation_status:
+          anyOf:
+          - type: string
+            enum:
+            - queued
+            - running
+            - committing
+            - completed
+            - failed
+            - cancelled
+            - metadata_conflict
+          - type: 'null'
+          title: Operation Status
+        operation_report_status:
+          anyOf:
+          - type: string
+            enum:
+            - available
+            - missing_after_ready_commit
+            - conflict
+          - type: 'null'
+          title: Operation Report Status
+        parent_run_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Parent Run Id
+        owner_pid:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          title: Owner Pid
+        owner_instance_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Owner Instance Id
+        request:
+          anyOf:
+          - $ref: '#/components/schemas/BroadcastOperationRequestState'
+          - type: 'null'
+        result:
+          anyOf:
+          - $ref: '#/components/schemas/BroadcastOperationResultState'
+          - type: 'null'
+        commit_started:
+          type: boolean
+          title: Commit Started
+          default: false
+        cancel_requested:
+          type: boolean
+          title: Cancel Requested
+          default: false
+        last_operation:
+          anyOf:
+          - $ref: '#/components/schemas/BroadcastLastOperationState'
+          - type: 'null'
+        metadata_warnings:
+          items:
+            type: string
+          type: array
+          title: Metadata Warnings
+      additionalProperties: true
+      type: object
+      title: BroadcastRunState
+      description: Stable public broadcast fields; extra lineage remains forward compatible.
+    BroadcastTrajectoryRecomputeRequest:
+      properties:
+        review_decisions_sha256:
+          type: string
+          pattern: ^[0-9a-f]{64}$
+          title: Review Decisions Sha256
+      type: object
+      required:
+      - review_decisions_sha256
+      title: BroadcastTrajectoryRecomputeRequest
     CameraPathResponse:
       properties:
         columns:
@@ -2818,6 +3651,30 @@ components:
           - type: string
           - type: 'null'
           title: Approved Actions Artifact Name
+        pipeline_mode:
+          type: string
+          enum:
+          - standard
+          - broadcast_hybrid
+          title: Pipeline Mode
+          default: standard
+        calibration_confirmation:
+          anyOf:
+          - $ref: '#/components/schemas/BroadcastCalibrationConfirmation'
+          - type: 'null'
+        quality_profile:
+          anyOf:
+          - type: string
+            const: stable_broadcast
+          - type: 'null'
+          title: Quality Profile
+        max_manual_review_windows:
+          anyOf:
+          - type: integer
+            maximum: 30.0
+            minimum: 1.0
+          - type: 'null'
+          title: Max Manual Review Windows
         notes:
           anyOf:
           - type: string
@@ -3957,6 +4814,8 @@ components:
           additionalProperties: true
           type: object
           title: Stats
+        broadcast:
+          $ref: '#/components/schemas/BroadcastRunState'
         ai_candidate_lifecycle:
           $ref: '#/components/schemas/AICandidateLifecycleReport'
         progress:

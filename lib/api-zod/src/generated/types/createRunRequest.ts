@@ -4,7 +4,9 @@
  * Api
  * OpenAPI spec version: 0.1.0
  */
+import type { BroadcastCalibrationConfirmation } from "./broadcastCalibrationConfirmation";
 import type { CreateRunRequestConfigPatch } from "./createRunRequestConfigPatch";
+import type { CreateRunRequestPipelineMode } from "./createRunRequestPipelineMode";
 
 export interface CreateRunRequest {
   config_name?: string | null;
@@ -18,5 +20,9 @@ export interface CreateRunRequest {
   max_frames?: number | null;
   approved_action_ids?: string[];
   approved_actions_artifact_name?: string | null;
+  pipeline_mode?: CreateRunRequestPipelineMode;
+  calibration_confirmation?: BroadcastCalibrationConfirmation | null;
+  quality_profile?: "stable_broadcast" | null;
+  max_manual_review_windows?: number | null;
   notes?: string | null;
 }

@@ -3,6 +3,8 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import os
+import subprocess
 import tempfile
 import threading
 import unittest
@@ -85,6 +87,7 @@ class ApiServiceSmokeTests(unittest.TestCase):
         self.service = ApiService(self.repo_root)
 
     def tearDown(self) -> None:
+        self.service.close()
         self.temp_dir.cleanup()
 
     def write_text(self, relative_path: str, content: str) -> Path:
@@ -92,6 +95,32 @@ class ApiServiceSmokeTests(unittest.TestCase):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(content, encoding="utf-8")
         return path
+
+    def create_directory_link(self, link: Path, target: Path) -> None:
+        link.parent.mkdir(parents=True, exist_ok=True)
+        if os.name == "nt":
+            completed = subprocess.run(
+                ["cmd", "/c", "mklink", "/J", str(link), str(target)],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if completed.returncode != 0:
+                self.skipTest(f"Directory junction unavailable: {completed.stderr or completed.stdout}")
+            return
+        try:
+            link.symlink_to(target, target_is_directory=True)
+        except OSError as exc:
+            self.skipTest(f"Directory symlink unavailable: {exc}")
+
+    @staticmethod
+    def remove_directory_link(link: Path) -> None:
+        if not os.path.lexists(link):
+            return
+        if os.name == "nt":
+            os.rmdir(link)
+        else:
+            link.unlink()
 
     def write_json(self, relative_path: str, payload: object) -> Path:
         path = self.repo_root / relative_path
@@ -304,9 +333,7 @@ class ApiServiceSmokeTests(unittest.TestCase):
                     "priority": "medium",
                     "reason": "medium_priority_triggers",
                     "trigger_count": 1,
-                    "recommended_review_windows": [
-                        {"start_frame": 2, "end_frame": 2, "reason": "postprocess_action"}
-                    ],
+                    "recommended_review_windows": [{"start_frame": 2, "end_frame": 2, "reason": "postprocess_action"}],
                 },
                 "triggers": [
                     {
@@ -793,7 +820,7 @@ class ApiServiceSmokeTests(unittest.TestCase):
         self.assertEqual(400, raised.exception.status_code)
 
     def test_create_app_registers_quality_check_route(self) -> None:
-        app = create_app(self.repo_root)
+        app = create_app(self.repo_root, initialize_service=False)
         route_paths = {route.path for route in app.routes}
 
         self.assertIn("/api/v1/inputs/quality-check", route_paths)
@@ -1089,14 +1116,22 @@ class ApiServiceSmokeTests(unittest.TestCase):
             "outputs/ai_status_baseline/ai_improvement_approved_actions.json",
             {
                 "approved_actions": [
-                    {"approval_id": "approval_missing", "improvement_id": "imp_missing", "approved_action": "localize_ball_roi"},
+                    {
+                        "approval_id": "approval_missing",
+                        "improvement_id": "imp_missing",
+                        "approved_action": "localize_ball_roi",
+                    },
                     {
                         "approval_id": "approval_noise",
                         "improvement_id": "imp_noise",
                         "approved_action": "tighten_noise_filter",
                         "false_positive_class": "foot_confusion",
                     },
-                    {"approval_id": "approval_camera", "improvement_id": "imp_camera", "approved_action": "adjust_follow_cam"},
+                    {
+                        "approval_id": "approval_camera",
+                        "improvement_id": "imp_camera",
+                        "approved_action": "adjust_follow_cam",
+                    },
                     {
                         "approval_id": "approval_highlight",
                         "improvement_id": "imp_highlight",
@@ -1106,7 +1141,10 @@ class ApiServiceSmokeTests(unittest.TestCase):
                 ]
             },
         )
-        self.write_json("outputs/ai_status_baseline/stable_ai_improvement_workflow_report.json", {"summary": {"status": "completed"}})
+        self.write_json(
+            "outputs/ai_status_baseline/stable_ai_improvement_workflow_report.json",
+            {"summary": {"status": "completed"}},
+        )
         self.write_json("outputs/ai_status_baseline/ai_improvement_quality_gate.json", {"summary": {"status": "warn"}})
         self.write_json("outputs/ai_status_baseline/camera_motion_audit.json", {"summary": {"status": "warn"}})
         self.write_json("outputs/ai_status_baseline/follow_cam_rerender_plan.json", {"requires_tracking_rerun": False})
@@ -1127,17 +1165,28 @@ class ApiServiceSmokeTests(unittest.TestCase):
                 "summary": {"status": "pass"},
                 "quality_gate_status": {"status": "warn"},
                 "final_selected_artifacts": [
-                    {"candidate_id": "missing-candidate-1", "path": "final/ball_track.csv", "role": "missing_ball_track"},
+                    {
+                        "candidate_id": "missing-candidate-1",
+                        "path": "final/ball_track.csv",
+                        "role": "missing_ball_track",
+                    },
                     {"candidate_id": "highlight-candidate-1", "path": "final/highlight.mp4", "role": "highlight_clip"},
                 ],
-                "comparison_reports": [missing_comparison, noise_comparison, follow_cam_comparison, highlight_comparison],
+                "comparison_reports": [
+                    missing_comparison,
+                    noise_comparison,
+                    follow_cam_comparison,
+                    highlight_comparison,
+                ],
             },
         )
         self.write_json(
             "outputs/ai_status_baseline/ai_candidates/missing_ball/missing-candidate-1/missing_ball_recovery_comparison.json",
             missing_comparison,
         )
-        self.write_text("outputs/ai_status_baseline/ai_candidates/missing_ball/missing-candidate-1/ball_track.csv", "Frame,X,Y\n")
+        self.write_text(
+            "outputs/ai_status_baseline/ai_candidates/missing_ball/missing-candidate-1/ball_track.csv", "Frame,X,Y\n"
+        )
         self.write_json(
             "outputs/ai_status_baseline/ai_candidates/noise/noise-candidate-1/noise_candidate_comparison.json",
             noise_comparison,
@@ -1154,14 +1203,18 @@ class ApiServiceSmokeTests(unittest.TestCase):
             "outputs/ai_status_baseline/ai_candidates/highlight/highlight-candidate-1/highlight_report.json",
             {"candidate_id": "highlight-candidate-1"},
         )
-        self.write_text("outputs/ai_status_baseline/ai_candidates/highlight/highlight-candidate-1/highlight.mp4", "clip")
+        self.write_text(
+            "outputs/ai_status_baseline/ai_candidates/highlight/highlight-candidate-1/highlight.mp4", "clip"
+        )
 
         status = self.service.get_ai_improvement_status("scan_ai_status_baseline")
         route_response = run_routes.get_ai_improvement_status("scan_ai_status_baseline", service=self.service)
 
         self.assertEqual("scan_ai_status_baseline", status["run_id"])
         self.assertEqual("pass", status["final_manifest_status"]["status"])
-        self.assertEqual(["missing-candidate-1", "highlight-candidate-1"], status["final_selected_artifact_candidate_ids"])
+        self.assertEqual(
+            ["missing-candidate-1", "highlight-candidate-1"], status["final_selected_artifact_candidate_ids"]
+        )
         self.assertEqual(2, len(status["final_selected_artifacts"]))
 
         groups = status["items_by_problem_type"]
@@ -1510,7 +1563,13 @@ class ApiServiceSmokeTests(unittest.TestCase):
             "approval_id": "approval_api",
             "consumed_approval_ids": ["approval_api"],
             "candidate_artifacts": ["ai_candidates/missing_ball/candidate_api/ball_track.csv"],
-            "summary": {"status": "pass", "check_count": 1, "failed_check_count": 0, "warning_count": 0, "unavailable_count": 0},
+            "summary": {
+                "status": "pass",
+                "check_count": 1,
+                "failed_check_count": 0,
+                "warning_count": 0,
+                "unavailable_count": 0,
+            },
             "checks": [{"name": "comparison", "status": "pass"}],
         }
         self.write_json(
@@ -1563,6 +1622,81 @@ class ApiServiceSmokeTests(unittest.TestCase):
         self.assertEqual("promoted", response["lifecycle"]["summary"]["promotion_status"])
         self.assertEqual("promoted", run["ai_candidate_lifecycle"]["summary"]["promotion_status"])
         self.assertEqual("promoted", run["stats"]["ai_candidate_lifecycle"]["promotion_status"])
+
+    def test_run_discovery_and_registry_reject_directory_link_escapes(self) -> None:
+        external_dir = self.repo_root / "outside_outputs"
+        external_dir.mkdir()
+        secret = external_dir / "secret.txt"
+        secret.write_text("outside-secret", encoding="utf-8")
+        links = [
+            self.repo_root / "outputs" / "junction_legacy",
+            self.repo_root / "outputs" / "api_runs" / "junction_api",
+            self.repo_root / "outputs" / "runs" / "safe_group" / "junction_run",
+            self.repo_root / "outputs" / "runs" / "junction_input_group",
+            self.repo_root / "outputs" / "runs" / "input",
+        ]
+        created_links: list[Path] = []
+        try:
+            for link in links:
+                self.create_directory_link(link, external_dir)
+                created_links.append(link)
+
+            runs = self.service.list_runs()
+            self.assertFalse(any(Path(run["output_dir"]).resolve() == external_dir.resolve() for run in runs))
+            with self.assertRaisesRegex(RuntimeError, "link or reparse"):
+                self.service._build_run_output_dir(
+                    run_id="unsafe-new-run",
+                    input_video=self.repo_root / "data" / "input.mp4",
+                )
+
+            unsafe_run = {
+                "run_id": "external-registry-run",
+                "source": "test",
+                "status": "completed",
+                "created_at": "2026-01-01T00:00:00+00:00",
+                "parent_run_id": None,
+                "output_dir": str(external_dir.resolve()),
+            }
+            registry = self.service._read_registry()
+            registry["runs"].append(unsafe_run)
+            self.service._write_registry(registry)
+            self.assertNotIn("external-registry-run", {run["run_id"] for run in self.service.list_runs()})
+
+            registry = self.service._read_registry()
+            registry["runs"].append(unsafe_run)
+            self.service._write_registry(registry)
+            with self.assertRaises(KeyError):
+                self.service.get_artifact_path("external-registry-run", "secret.txt")
+            with self.assertRaisesRegex(RuntimeError, "must stay under"):
+                self.service.delete_run_output("external-registry-run")
+            self.assertEqual("outside-secret", secret.read_text(encoding="utf-8"))
+        finally:
+            for link in reversed(created_links):
+                self.remove_directory_link(link)
+
+    def test_artifact_listing_and_download_reject_direct_file_symlink(self) -> None:
+        output_dir = self.repo_root / "outputs" / "symlink_artifact"
+        output_dir.mkdir()
+        safe_artifact = output_dir / "safe.txt"
+        safe_artifact.write_text("safe", encoding="utf-8")
+        secret = self.repo_root / "outside-secret.txt"
+        secret.write_text("outside-secret", encoding="utf-8")
+        link = output_dir / "leak.txt"
+        try:
+            link.symlink_to(secret)
+        except OSError as exc:
+            self.skipTest(f"File symlink unavailable: {exc}")
+
+        try:
+            run = next(run for run in self.service.list_runs() if run["run_id"] == "scan_symlink_artifact")
+            artifact_names = {artifact["name"] for artifact in run["artifacts"]}
+            self.assertIn("safe.txt", artifact_names)
+            self.assertNotIn("leak.txt", artifact_names)
+            self.assertEqual(safe_artifact.resolve(), self.service.get_artifact_path(run["run_id"], "safe.txt"))
+            with self.assertRaises(FileNotFoundError):
+                self.service.get_artifact_path(run["run_id"], "leak.txt")
+        finally:
+            link.unlink(missing_ok=True)
 
     def test_list_runs_collects_metrics_artifacts_and_stats(self) -> None:
         output_dir = self.create_output_bundle("kept_baseline")
@@ -1689,7 +1823,10 @@ class ApiServiceSmokeTests(unittest.TestCase):
             if artifact["name"] == "chunks/chunk_0000/ball_track.csv"
         )
 
-        self.assertTrue(str(response.path).endswith("chunks\\chunk_0000\\ball_track.csv") or str(response.path).endswith("chunks/chunk_0000/ball_track.csv"))
+        self.assertTrue(
+            str(response.path).endswith("chunks\\chunk_0000\\ball_track.csv")
+            or str(response.path).endswith("chunks/chunk_0000/ball_track.csv")
+        )
         self.assertEqual(expected_content_type, response.media_type)
         self.assertEqual("ball_track.csv", response.filename)
 
@@ -1900,7 +2037,9 @@ class ApiServiceSmokeTests(unittest.TestCase):
 
         groups = self.service.list_asset_groups()
 
-        input_group = next(group for group in groups if group["input_video"] and group["input_video"]["name"] == "input.mp4")
+        input_group = next(
+            group for group in groups if group["input_video"] and group["input_video"]["name"] == "input.mp4"
+        )
         self.assertEqual(1, input_group["run_count"])
         self.assertGreaterEqual(input_group["config_count"], 1)
         self.assertEqual(1, input_group["output_count"])
@@ -2092,7 +2231,9 @@ class ApiServiceSmokeTests(unittest.TestCase):
 
         child = self.service.get_run(created["run_id"])
         child_output_dir = Path(child["output_dir"])
-        selected_artifact = json.loads((child_output_dir / "ai_improvement_approved_actions.json").read_text(encoding="utf-8"))
+        selected_artifact = json.loads(
+            (child_output_dir / "ai_improvement_approved_actions.json").read_text(encoding="utf-8")
+        )
         child_config = yaml.safe_load((child_output_dir / "approved_recovery_config.yaml").read_text(encoding="utf-8"))
         runner_config = rerun.call_args.args[0]
 
@@ -2256,7 +2397,9 @@ class ApiServiceSmokeTests(unittest.TestCase):
             config.mock.enabled = True
             config.mock.frame_width = 5760
             config.mock.frame_height = 1440
-            selected_artifact = json.loads((config.output_dir / "ai_improvement_approved_actions.json").read_text(encoding="utf-8"))
+            selected_artifact = json.loads(
+                (config.output_dir / "ai_improvement_approved_actions.json").read_text(encoding="utf-8")
+            )
             windows = approved_action_windows_from_report(selected_artifact, mode="sahi")
             window_config = build_high_recall_window_config(
                 config,
@@ -2275,7 +2418,9 @@ class ApiServiceSmokeTests(unittest.TestCase):
 
         with (
             mock.patch("football_tracking.api.service.threading.Thread", ImmediateThread),
-            mock.patch("football_tracking.api.service.run_high_recall_windows", side_effect=fake_high_recall_runner) as rerun,
+            mock.patch(
+                "football_tracking.api.service.run_high_recall_windows", side_effect=fake_high_recall_runner
+            ) as rerun,
         ):
             created = self.service.create_run(
                 {
@@ -2288,7 +2433,9 @@ class ApiServiceSmokeTests(unittest.TestCase):
         child = self.service.get_run(created["run_id"])
         child_output_dir = Path(child["output_dir"])
         expected_candidate_dir = parent_output_dir / "ai_candidates" / "missing_ball" / "candidate_keep"
-        selected_artifact = json.loads((child_output_dir / "ai_improvement_approved_actions.json").read_text(encoding="utf-8"))
+        selected_artifact = json.loads(
+            (child_output_dir / "ai_improvement_approved_actions.json").read_text(encoding="utf-8")
+        )
         child_config = yaml.safe_load((child_output_dir / "approved_recovery_config.yaml").read_text(encoding="utf-8"))
         runner_config = rerun.call_args.args[0]
 
@@ -2298,7 +2445,9 @@ class ApiServiceSmokeTests(unittest.TestCase):
         self.assertEqual("candidate_keep", selected_artifact["approved_actions"][0]["candidate_id"])
         self.assertEqual("localize_ball_roi", selected_artifact["approved_actions"][0]["approved_action"])
         self.assertTrue((child_output_dir / "custom_track.csv").exists())
-        self.assertEqual((child_output_dir / "approved_recovery_config.yaml").resolve(), Path(child["config_path"]).resolve())
+        self.assertEqual(
+            (child_output_dir / "approved_recovery_config.yaml").resolve(), Path(child["config_path"]).resolve()
+        )
         self.assertTrue(child_config["high_recall_windows"]["approved_only"])
         self.assertEqual(496, runner_config.high_recall_windows.max_total_frames)
         self.assertEqual(3000, rerun.call_args.kwargs["source_total_frames"])
@@ -2347,7 +2496,9 @@ class ApiServiceSmokeTests(unittest.TestCase):
             "ai_candidates/missing_ball/candidate_keep/recovery_stitch_report.json",
             candidate_manifest["stitch_report"],
         )
-        comparison = json.loads((child_output_dir / "missing_ball_recovery_comparison.json").read_text(encoding="utf-8"))
+        comparison = json.loads(
+            (child_output_dir / "missing_ball_recovery_comparison.json").read_text(encoding="utf-8")
+        )
         self.assertEqual("pass", comparison["summary"]["status"], comparison["checks"])
         roi_check = next(check for check in comparison["checks"] if check["name"] == "localize_roi_plausibility")
         self.assertEqual({"x": 5668.0, "y": 1358.0, "right": 5760.0, "bottom": 1440.0}, roi_check["results"][0]["roi"])
@@ -2489,7 +2640,9 @@ class ApiServiceSmokeTests(unittest.TestCase):
                 }
             )
 
-        self.assertFalse((self.repo_root / "outputs" / "runs" / "input" / "approved_split_full_video_localize").exists())
+        self.assertFalse(
+            (self.repo_root / "outputs" / "runs" / "input" / "approved_split_full_video_localize").exists()
+        )
 
     def test_approved_child_run_rejects_localize_roi_frame_outside_source_clamped_window_before_output(self) -> None:
         self.create_output_bundle("kept_baseline")
@@ -3363,8 +3516,9 @@ class ApiServiceSmokeTests(unittest.TestCase):
                     encoding="utf-8",
                 )
 
-        with mock.patch("football_tracking.api.service.threading.Thread", ImmediateThread), mock.patch(
-            "football_tracking.api.service.FollowCamGenerator", FakeFollowCamGenerator
+        with (
+            mock.patch("football_tracking.api.service.threading.Thread", ImmediateThread),
+            mock.patch("football_tracking.api.service.FollowCamGenerator", FakeFollowCamGenerator),
         ):
             created_run = self.service.create_follow_cam_render(source_run["run_id"], {})
 
@@ -3468,9 +3622,12 @@ class ApiServiceSmokeTests(unittest.TestCase):
             output_path.write_text("highlight", encoding="utf-8")
             return {"frame_count": end_frame - start_frame + 1, "fps": 6.0}
 
-        with mock.patch("football_tracking.api.service.threading.Thread", ImmediateThread), mock.patch(
-            "football_tracking.api.service.render_highlight_clip",
-            fake_render_highlight_clip,
+        with (
+            mock.patch("football_tracking.api.service.threading.Thread", ImmediateThread),
+            mock.patch(
+                "football_tracking.api.service.render_highlight_clip",
+                fake_render_highlight_clip,
+            ),
         ):
             created_run = self.service.create_highlight_render(
                 source_run["run_id"],
@@ -3538,9 +3695,12 @@ class ApiServiceSmokeTests(unittest.TestCase):
             output_path.write_text("highlight", encoding="utf-8")
             return {"frame_count": end_frame - start_frame + 1, "fps": 6.0}
 
-        with mock.patch("football_tracking.api.service.threading.Thread", ImmediateThread), mock.patch(
-            "football_tracking.api.service.render_highlight_clip",
-            fake_render_highlight_clip,
+        with (
+            mock.patch("football_tracking.api.service.threading.Thread", ImmediateThread),
+            mock.patch(
+                "football_tracking.api.service.render_highlight_clip",
+                fake_render_highlight_clip,
+            ),
         ):
             created_run = self.service.create_highlight_render(
                 source_run["run_id"],
@@ -3616,9 +3776,12 @@ class ApiServiceSmokeTests(unittest.TestCase):
             output_path.write_text("highlight", encoding="utf-8")
             return {"frame_count": end_frame - start_frame + 1, "fps": 6.0}
 
-        with mock.patch("football_tracking.api.service.threading.Thread", ImmediateThread), mock.patch(
-            "football_tracking.api.service.render_highlight_clip",
-            fake_render_highlight_clip,
+        with (
+            mock.patch("football_tracking.api.service.threading.Thread", ImmediateThread),
+            mock.patch(
+                "football_tracking.api.service.render_highlight_clip",
+                fake_render_highlight_clip,
+            ),
         ):
             created_run = self.service.create_highlight_render(
                 source_run["run_id"],
@@ -3692,9 +3855,12 @@ class ApiServiceSmokeTests(unittest.TestCase):
             output_path.write_text("highlight", encoding="utf-8")
             return {"frame_count": end_frame - start_frame + 1, "fps": 6.0}
 
-        with mock.patch("football_tracking.api.service.threading.Thread", ImmediateThread), mock.patch(
-            "football_tracking.api.service.render_highlight_clip",
-            fake_render_highlight_clip,
+        with (
+            mock.patch("football_tracking.api.service.threading.Thread", ImmediateThread),
+            mock.patch(
+                "football_tracking.api.service.render_highlight_clip",
+                fake_render_highlight_clip,
+            ),
         ):
             created_run = self.service.create_highlight_render(
                 source_run["run_id"],
@@ -3765,9 +3931,12 @@ class ApiServiceSmokeTests(unittest.TestCase):
             output_path.write_text("highlight", encoding="utf-8")
             return {"frame_count": end_frame - start_frame + 1, "fps": 6.0}
 
-        with mock.patch("football_tracking.api.service.threading.Thread", ImmediateThread), mock.patch(
-            "football_tracking.api.service.render_highlight_clip",
-            fake_render_highlight_clip,
+        with (
+            mock.patch("football_tracking.api.service.threading.Thread", ImmediateThread),
+            mock.patch(
+                "football_tracking.api.service.render_highlight_clip",
+                fake_render_highlight_clip,
+            ),
         ):
             created_run = self.service.create_highlight_render(
                 source_run["run_id"],
@@ -3878,7 +4047,9 @@ class ApiServiceSmokeTests(unittest.TestCase):
                 },
             )
 
-        self.assertFalse((self.repo_root / "outputs" / "runs" / "input" / "bad_approved_post_buffer_highlight").exists())
+        self.assertFalse(
+            (self.repo_root / "outputs" / "runs" / "input" / "bad_approved_post_buffer_highlight").exists()
+        )
 
     def test_create_highlight_render_creates_child_task_from_frame_window(self) -> None:
         self.create_output_bundle("kept_baseline")
@@ -3922,9 +4093,12 @@ class ApiServiceSmokeTests(unittest.TestCase):
             output_path.write_text("highlight", encoding="utf-8")
             return {"frame_count": end_frame - start_frame + 1, "fps": 6.0}
 
-        with mock.patch("football_tracking.api.service.threading.Thread", ImmediateThread), mock.patch(
-            "football_tracking.api.service.render_highlight_clip",
-            fake_render_highlight_clip,
+        with (
+            mock.patch("football_tracking.api.service.threading.Thread", ImmediateThread),
+            mock.patch(
+                "football_tracking.api.service.render_highlight_clip",
+                fake_render_highlight_clip,
+            ),
         ):
             created_run = self.service.create_highlight_render(
                 source_run["run_id"],
@@ -4257,9 +4431,14 @@ class ApiServiceSmokeTests(unittest.TestCase):
         config.output_dir = output_dir
         config.temporal_chunks.enabled = True
         config.follow_cam.enabled = False
-        with mock.patch("football_tracking.api.service.run_temporal_chunks", side_effect=fake_run_temporal_chunks, create=True), mock.patch(
-            "football_tracking.api.service.BallTrackingPipeline",
-            ForbiddenPipeline,
+        with (
+            mock.patch(
+                "football_tracking.api.service.run_temporal_chunks", side_effect=fake_run_temporal_chunks, create=True
+            ),
+            mock.patch(
+                "football_tracking.api.service.BallTrackingPipeline",
+                ForbiddenPipeline,
+            ),
         ):
             self.service._execute_run("chunked_api_demo", config, threading.Event())
 
@@ -4469,7 +4648,9 @@ class ApiServiceSmokeTests(unittest.TestCase):
         self.assertEqual({"adjust_follow_cam": 1}, response.summary.camera_action_counts)
         self.assertEqual("cam_event_001", response.improvements[0].camera_motion_event_id)
         self.assertEqual("warn", response.improvements[0].camera_motion_severity)
-        self.assertEqual("stable_detected", response.improvements[0].evidence_payload["nearby_ball_track"]["classification"])
+        self.assertEqual(
+            "stable_detected", response.improvements[0].evidence_payload["nearby_ball_track"]["classification"]
+        )
 
     def test_ai_improvement_approve_writes_approved_actions(self) -> None:
         output_dir = self.create_output_bundle("approve_baseline")
@@ -4538,7 +4719,9 @@ class ApiServiceSmokeTests(unittest.TestCase):
         self.assertTrue(response["summary"]["requires_execution"])
         self.assertTrue(response["summary"]["requires_high_recall_rerun"])
         self.assertFalse(response["summary"]["requires_tracking_rerun"])
-        self.assertEqual("ai_improvement_approved_actions.json", response["summary"]["artifacts"]["approved_actions"]["name"])
+        self.assertEqual(
+            "ai_improvement_approved_actions.json", response["summary"]["artifacts"]["approved_actions"]["name"]
+        )
         self.assertIn("ai_improvement_approved_actions.json", artifact_names)
 
     def test_ai_improvement_approve_route_validates_config_patch_overrides(self) -> None:
@@ -4550,7 +4733,12 @@ class ApiServiceSmokeTests(unittest.TestCase):
                 "packets": [
                     {
                         "packet_id": "packet_001",
-                        "source": {"kind": "trigger", "type": "candidate_ambiguity", "start_frame": 40, "end_frame": 52},
+                        "source": {
+                            "kind": "trigger",
+                            "type": "candidate_ambiguity",
+                            "start_frame": 40,
+                            "end_frame": 52,
+                        },
                         "window": {"start_frame": 40, "end_frame": 52},
                     }
                 ],
@@ -4648,7 +4836,10 @@ class ApiServiceSmokeTests(unittest.TestCase):
         artifact_names = {artifact["name"] for artifact in refreshed["artifacts"]}
         plan = json.loads((output_dir / "follow_cam_rerender_plan.json").read_text(encoding="utf-8"))
         self.assertEqual("follow_cam_rerender_plan.json", response["follow_cam_rerender_plan_artifact_name"])
-        self.assertEqual(str((output_dir / "follow_cam_rerender_plan.json").resolve()), response["follow_cam_rerender_plan_artifact_path"])
+        self.assertEqual(
+            str((output_dir / "follow_cam_rerender_plan.json").resolve()),
+            response["follow_cam_rerender_plan_artifact_path"],
+        )
         self.assertIn("follow_cam_rerender_plan.json", artifact_names)
         self.assertFalse(plan["requires_tracking_rerun"])
         self.assertEqual({"follow_cam": {"glide_pan_smoothing": 0.2}}, plan["recommended_config_patch"])
@@ -4740,7 +4931,7 @@ class ApiServiceSmokeTests(unittest.TestCase):
             AIFrameWindow(start_frame=30, end_frame=10)
 
     def test_create_app_registers_expected_routes(self) -> None:
-        app = create_app(self.repo_root)
+        app = create_app(self.repo_root, initialize_service=False)
         route_paths = {route.path for route in app.routes}
 
         expected_paths = {
@@ -4776,15 +4967,24 @@ class ApiServiceSmokeTests(unittest.TestCase):
         self.assertTrue(expected_paths.issubset(route_paths))
 
     def test_create_app_documents_quality_check_domain_errors(self) -> None:
-        app = create_app(self.repo_root)
+        app = create_app(self.repo_root, initialize_service=False)
         operation = app.openapi()["paths"]["/api/v1/inputs/quality-check"]["post"]
 
-        self.assertEqual("#/components/schemas/ApiErrorResponse", operation["responses"]["400"]["content"]["application/json"]["schema"]["$ref"])
-        self.assertEqual("#/components/schemas/ApiErrorResponse", operation["responses"]["404"]["content"]["application/json"]["schema"]["$ref"])
-        self.assertEqual("#/components/schemas/HTTPValidationError", operation["responses"]["422"]["content"]["application/json"]["schema"]["$ref"])
+        self.assertEqual(
+            "#/components/schemas/ApiErrorResponse",
+            operation["responses"]["400"]["content"]["application/json"]["schema"]["$ref"],
+        )
+        self.assertEqual(
+            "#/components/schemas/ApiErrorResponse",
+            operation["responses"]["404"]["content"]["application/json"]["schema"]["$ref"],
+        )
+        self.assertEqual(
+            "#/components/schemas/HTTPValidationError",
+            operation["responses"]["422"]["content"]["application/json"]["schema"]["$ref"],
+        )
 
     def test_create_app_documents_ball_audit_response_schema(self) -> None:
-        app = create_app(self.repo_root)
+        app = create_app(self.repo_root, initialize_service=False)
         operation = app.openapi()["paths"]["/api/v1/runs/{run_id}/ball-audit"]["get"]
 
         self.assertEqual(
@@ -4797,7 +4997,7 @@ class ApiServiceSmokeTests(unittest.TestCase):
         )
 
     def test_create_app_documents_ai_review_triggers_response_schema(self) -> None:
-        app = create_app(self.repo_root)
+        app = create_app(self.repo_root, initialize_service=False)
         operation = app.openapi()["paths"]["/api/v1/runs/{run_id}/ai-review-triggers"]["get"]
 
         self.assertEqual(
@@ -4810,7 +5010,7 @@ class ApiServiceSmokeTests(unittest.TestCase):
         )
 
     def test_create_app_documents_player_tracks_response_schema(self) -> None:
-        app = create_app(self.repo_root)
+        app = create_app(self.repo_root, initialize_service=False)
         operation = app.openapi()["paths"]["/api/v1/runs/{run_id}/player-tracks"]["get"]
 
         self.assertEqual(
@@ -4823,7 +5023,7 @@ class ApiServiceSmokeTests(unittest.TestCase):
         )
 
     def test_create_app_documents_event_candidates_response_schema(self) -> None:
-        app = create_app(self.repo_root)
+        app = create_app(self.repo_root, initialize_service=False)
         openapi = app.openapi()
         operation = openapi["paths"]["/api/v1/runs/{run_id}/event-candidates"]["get"]
 
@@ -4850,7 +5050,7 @@ class ApiServiceSmokeTests(unittest.TestCase):
         self.assertIn("min_tail_frames", buffer_schema["required"])
 
     def test_create_app_documents_highlight_render_request_schema(self) -> None:
-        app = create_app(self.repo_root)
+        app = create_app(self.repo_root, initialize_service=False)
         openapi = app.openapi()
         operation = openapi["paths"]["/api/v1/runs/{run_id}/highlight-render"]["post"]
 
@@ -4875,7 +5075,7 @@ class ApiServiceSmokeTests(unittest.TestCase):
         )
 
     def test_create_app_documents_ai_improvement_status_response_schema(self) -> None:
-        app = create_app(self.repo_root)
+        app = create_app(self.repo_root, initialize_service=False)
         operation = app.openapi()["paths"]["/api/v1/runs/{run_id}/ai-improvement-status"]["get"]
 
         self.assertEqual(
@@ -4891,7 +5091,7 @@ class ApiServiceSmokeTests(unittest.TestCase):
         self.assertIn("final_selected_artifacts", response_schema["required"])
 
     def test_create_app_documents_ai_improve_schema(self) -> None:
-        app = create_app(self.repo_root)
+        app = create_app(self.repo_root, initialize_service=False)
         operation = app.openapi()["paths"]["/api/v1/ai/improve"]["post"]
 
         self.assertEqual(
@@ -4904,7 +5104,7 @@ class ApiServiceSmokeTests(unittest.TestCase):
         )
 
     def test_create_app_documents_ai_improve_approval_schema(self) -> None:
-        app = create_app(self.repo_root)
+        app = create_app(self.repo_root, initialize_service=False)
         operation = app.openapi()["paths"]["/api/v1/ai/improve/{run_id}/approve"]["post"]
 
         self.assertEqual(
