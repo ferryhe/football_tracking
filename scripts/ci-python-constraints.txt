@@ -6,3 +6,4 @@
 fastapi==0.136.1
 starlette==1.0.0
 ijson==3.5.1
+imageio-ffmpeg==0.6.0

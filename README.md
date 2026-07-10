@@ -34,7 +34,7 @@ Browser
 ```
 .
 ├── artifacts/
-│   ├── web/                 React frontend (5 pages, shadcn/ui, i18n, dark mode)
+│   ├── web/                 React frontend (6 pages, shadcn/ui, i18n, dark mode)
 │   ├── api-server/          Express reverse proxy to Python backend
 │   └── mockup-sandbox/      Component preview sandbox (unused for this app)
 ├── python_backend/          FastAPI tracking pipeline (standalone Python project)
@@ -56,6 +56,7 @@ Browser
 | `/`           | Dashboard    | System status (backend / configs / runs), recent runs, available configs                                 |
 | `/baseline`   | Baseline     | Pick video + config, **preview field & accept AI field setup**, set frame range, launch baseline run     |
 | `/ai`         | AI Analysis  | For any finished run (completed or failed), request AI tracking improvement suggestions with overlays    |
+| `/broadcast`  | Broadcast    | Run the P3 full-match setup, evidence review, trajectory recompute, render, and verified delivery flow    |
 | `/deliverable`| Deliverable  | Render a follow-cam 16:9 deliverable and create short highlight clips from event candidates              |
 | `/history`    | History      | Filter & search past runs, including baseline, deliverable, highlight, failed, and stopped jobs          |
 
@@ -75,6 +76,19 @@ Review, improvement, and highlight outputs:
 - **Stable AI improvement workflow** — use [`docs/operations/ai-improvement-workflow.md`](./docs/operations/ai-improvement-workflow.md) to rerun review/improvement checks against an existing output directory. AI audit explains issues; AI improvement creates bounded candidates for missing balls, dense noise, follow-cam motion, or highlight boundaries and then compares them before final selection. The recipe favors temporal chunks for full-video speed, reserves SAHI/ROI for explicit bounded approvals, and never executes approval files just because they exist.
 - **Real-video validation record** — use [`docs/operations/real-video-ai-improvement-validation.md`](./docs/operations/real-video-ai-improvement-validation.md) to record the exact command, video, output directory, model/mode, timing, produced artifacts, visual checks, and final playable tracking/follow-cam/highlight outputs.
 
+### Official repository commands
+
+Run these commands from the repository root. They select the root virtual environment, set the backend import path, and keep the working directory consistent; callers must not set `PYTHONPATH` manually.
+
+```bash
+pnpm start
+pnpm test
+pnpm train -- --help
+pnpm validate:full-video -- --run-dir python_backend/outputs/runs/<video>/<run-id> --resume
+```
+
+Use `pnpm check`, `pnpm status`, and `pnpm stop` for the managed local UI lifecycle. The browser URL printed by `pnpm start` is the only local URL operators need. The low-level Python and workspace commands below are implementation details, not alternate operator entrypoints. See the [operation guide](./python_backend/docs/operation-guide.en.md) for recovery and delivery checks.
+
 ### Workflows (managed automatically on Replit)
 
 | Workflow                                       | Command                                                                          |
@@ -87,20 +101,10 @@ Review, improvement, and highlight outputs:
 ### Verification
 
 ```bash
-# Type-check the whole monorepo (libs + leaf packages)
-pnpm run typecheck
-
-# Type-check just the frontend or api-server
-pnpm --filter @workspace/web run typecheck
-pnpm --filter @workspace/api-server run typecheck
-
-# Quick proxy smoke-tests
-curl -s localhost:80/api/healthz                              # Node-side health
-curl -s localhost:80/api/health                               # Python-side health
-curl -s localhost:80/api/inputs                               # List source videos
-curl -s -X POST -H "Content-Type: application/json" \
-     -d '{}' localhost:80/api/inputs/field-suggestion         # Should return 422 (validation)
+pnpm test
 ```
+
+This official gate checks the backend suite and OpenAPI contract without a caller-managed import path, then runs the broadcast UI tests, workspace type-check, and production build. Full-match media is intentionally outside ordinary CI; validate a completed P3 run with `pnpm validate:full-video`.
 
 ### Environment variables
 
@@ -118,9 +122,9 @@ These are stored as Replit Secrets. **Do not** create `.env` files for them.
 
 1. Put one or more `.mp4` videos under `python_backend/data/`.
 2. Make sure a YOLO detector checkpoint is available at `python_backend/weights/football_ball_yolo.pt` (or update `detector.model_path` in your YAML).
-3. Open the web preview, go to **Baseline**, pick a video & config, optionally request an AI field suggestion, set a frame range for a quick test, then **Start Baseline Run**.
-4. Watch progress in **History**.
-5. After a run completes, visit **Deliverable** to render a 16:9 follow-cam video or create short highlight clips from event candidates; use **AI Analysis** to ask for tuning suggestions.
+3. Run `pnpm start`, open the printed URL, and use **Broadcast** for the P3 full-match delivery flow.
+4. Confirm three real frames and the field, review every candidate (or explicitly continue a zero-candidate queue), then recompute and render.
+5. After the UI reports `ready`, run `pnpm validate:full-video -- --run-dir <run-directory> --resume`; `ready` proves immutable lineage, while this separate gate proves media integrity and records the declared audio limitation.
 
 ### What changed vs. upstream
 
@@ -202,7 +206,7 @@ python python_backend/scripts/render_hybrid_camera_path.py `
 ```
 .
 ├── artifacts/
-│   ├── web/                 React 前端（5 个页面、shadcn/ui、国际化、暗黑模式）
+│   ├── web/                 React 前端（6 个页面、shadcn/ui、国际化、暗黑模式）
 │   ├── api-server/          Express 反向代理
 │   └── mockup-sandbox/      组件预览沙箱（本项目暂未使用）
 ├── python_backend/          FastAPI 追踪流水线（独立 Python 项目）
@@ -224,6 +228,7 @@ python python_backend/scripts/render_hybrid_camera_path.py `
 | `/`            | 概览     | 系统状态（后端 / 配置 / 任务）、近期任务、可用配置                                  |
 | `/baseline`    | 跑基线   | 选视频 + 配置，**预览球场并接受 AI 球场设置**，设置帧范围，启动基线任务             |
 | `/ai`          | AI 分析  | 针对任意已结束（完成或失败）的任务，向 AI 请求改进建议，并叠加可视化标注           |
+| `/broadcast`   | 广播成片 | P3 全场设置、证据复核、轨迹重算、成片渲染和可验证交付的一体化三步流程              |
 | `/deliverable` | 成品任务 | 渲染 16:9 跟随裁剪视频，并基于事件候选生成集锦短片                                  |
 | `/history`     | 历史     | 过滤 / 搜索基线、成品、集锦、失败、已停止任务，删除输出                             |
 
@@ -242,6 +247,19 @@ python python_backend/scripts/render_hybrid_camera_path.py `
 - **稳定 AI improvement 工作流** —— 见 [`docs/operations/ai-improvement-workflow.md`](./docs/operations/ai-improvement-workflow.md)。AI audit 只解释问题；AI improvement 会为丢球、密集噪声、follow-cam 抖动或集锦边界创建有界候选，并在最终选择前比较质量。整视频提速默认走 temporal chunk；SAHI/ROI 只用于显式批准的有界恢复窗口；approval 文件不会因为存在就自动执行。
 - **真实视频验证记录** —— 见 [`docs/operations/real-video-ai-improvement-validation.md`](./docs/operations/real-video-ai-improvement-validation.md)，记录命令、视频、输出目录、模型/模式、耗时、关键产物、视觉检查和最终 tracking/follow-cam/highlight 是否可播放。
 
+### 仓库唯一正式命令
+
+以下命令都从仓库根目录运行。入口会自行选择根 `.venv`、设置后端导入路径并固定工作目录，不要再手工设置 `PYTHONPATH`。
+
+```powershell
+pnpm start
+pnpm test
+pnpm train -- --help
+pnpm validate:full-video -- --run-dir python_backend/outputs/runs/<视频>/<run-id> --resume
+```
+
+托管界面的环境检查、状态查看和停止分别使用 `pnpm check`、`pnpm status`、`pnpm stop`。`pnpm start` 打印的浏览器地址是本地操作唯一需要打开的地址。底层 Python 与 workspace 命令仅供内部实现，不是第二套操作入口。恢复、故障处理和交付清单见[中文操作指南](./python_backend/docs/operation-guide.zh.md)。
+
 ### Replit 工作流（自动管理）
 
 | 工作流                                     | 命令                                                                                |
@@ -253,21 +271,11 @@ python python_backend/scripts/render_hybrid_camera_path.py `
 
 ### 验证命令
 
-```bash
-# 类型检查整库
-pnpm run typecheck
-
-# 单独检查前端或代理
-pnpm --filter @workspace/web run typecheck
-pnpm --filter @workspace/api-server run typecheck
-
-# 代理冒烟测试
-curl -s localhost:80/api/healthz                              # Node 自身健康
-curl -s localhost:80/api/health                               # Python 端健康
-curl -s localhost:80/api/inputs                               # 列源视频
-curl -s -X POST -H "Content-Type: application/json" \
-     -d '{}' localhost:80/api/inputs/field-suggestion         # 应当返回 422（校验失败）
+```powershell
+pnpm test
 ```
+
+这个正式检查会在无需手工导入路径的情况下验证后端全量测试和 OpenAPI，再执行广播页测试、整库类型检查和生产构建。普通 CI 不处理整场媒体；已完成的 P3 run 必须另用 `pnpm validate:full-video` 验收。
 
 ### 环境变量
 
@@ -285,15 +293,15 @@ curl -s -X POST -H "Content-Type: application/json" \
 
 1. 把你的 `.mp4` 视频放进 `python_backend/data/`。
 2. 确认 `python_backend/weights/football_ball_yolo.pt` 存在（或在 YAML 里改 `detector.model_path`）。
-3. 打开网页预览，进入「跑基线」，选视频和配置，可以让 AI 给球场建议，可以填一个帧范围先试跑一小段，然后点「启动基线任务」。
-4. 在「历史」页看进度。
-5. 完成后到「成品任务」渲染 16:9 跟随视频，或从事件候选生成集锦短片；也可以到「AI 分析」获取调参建议。
+3. 运行 `pnpm start`，打开命令打印的地址，P3 全场交付统一进入「广播成片」。
+4. 确认三个真实帧和球场区域；逐个复核候选（零候选时也要明确确认继续），再重算并渲染。
+5. 页面进入 `ready` 后运行 `pnpm validate:full-video -- --run-dir <run 目录> --resume`。`ready` 证明不可变血缘完整，独立验收才证明媒体可解码、时长一致并记录音频限制。
 
 ### 与上游的差异
 
 - 上游 `python_backend/frontend/` 的旧 UI 已被 `artifacts/web/` 取代；归档副本已移除，以保持仓库目录精简。
 - 在 FastAPI 前面加了一个 Node.js Express **反向代理**，匹配 Replit 的路径路由模型，也方便本地调用。
-- 前端新增了：5 个页面 + 侧边栏、概览页、暗黑/明亮主题、中英切换、移动端响应式布局。
+- 前端新增了：6 个页面 + 侧边栏、P3 广播三步流、暗黑/明亮主题、中英切换、移动端响应式布局。
 - 「跑基线」UI 增加了 `start_frame` / `max_frames` 帧范围（后端早已支持，只是 UI 没暴露）。
 - 后端新增审核产物（`ball_audit.json`、`ai_review_triggers.json`、`camera_motion_audit.json`、`event_candidates.json`，以及可用时的 `player_tracks.json` 等球员产物），并支持跟随镜头成品和集锦短片两类子渲染任务。
 

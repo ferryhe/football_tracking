@@ -1,8 +1,8 @@
 @echo off
 setlocal
 
-set "ROOT_DIR=%~dp0"
-set "PYTHON_EXE=%ROOT_DIR%.venv\Scripts\python.exe"
+for %%I in ("%~dp0..") do set "ROOT_DIR=%%~fI"
+set "PYTHON_EXE=%ROOT_DIR%\.venv\Scripts\python.exe"
 
 if not exist "%PYTHON_EXE%" (
   echo [ERROR] Missing virtual environment Python: %PYTHON_EXE%
@@ -10,5 +10,5 @@ if not exist "%PYTHON_EXE%" (
   exit /b 1
 )
 
-"%PYTHON_EXE%" "%ROOT_DIR%scripts\start_ui.py" %*
+"%PYTHON_EXE%" "%ROOT_DIR%\python_backend\scripts\project.py" start %*
 exit /b %errorlevel%
