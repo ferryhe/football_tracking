@@ -62,6 +62,32 @@ class ProjectEntrypointTests(unittest.TestCase):
         for name in ("start", "stop", "status", "check", "test", "train", "validate:full-video"):
             self.assertTrue(package["scripts"][name].startswith("node scripts/project.mjs "))
 
+    def test_node_bootstraps_preserve_child_exit_and_signal_codes(self) -> None:
+        node = shutil.which("node")
+        if node is None:
+            self.skipTest("Node.js is unavailable")
+        helper = (project.repo_root() / "scripts" / "child-process-result.mjs").as_uri()
+        program = (
+            f'import {{ childExitCode }} from "{helper}"; '
+            "console.log(JSON.stringify(["
+            "childExitCode({status: 7, signal: null}),"
+            "childExitCode({status: null, signal: 'SIGINT'}),"
+            "childExitCode({status: null, signal: 'SIGTERM'}),"
+            "childExitCode({status: null, signal: 'UNKNOWN'})"
+            "]));"
+        )
+
+        completed = subprocess.run(
+            [node, "--input-type=module", "--eval", program],
+            cwd=project.repo_root(),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        self.assertEqual([7, 130, 143, 1], json.loads(completed.stdout))
+
     def test_node_bootstrap_does_not_require_system_python_on_path(self) -> None:
         node = shutil.which("node")
         if node is None:

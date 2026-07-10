@@ -1,9 +1,11 @@
 import { existsSync } from "node:fs";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
+import { childExitCode } from "./child-process-result.mjs";
 
 function findExecutable(name) {
-  const extensions = process.platform === "win32" ? [".cmd", ".exe", ".bat", ""] : [""];
+  const extensions =
+    process.platform === "win32" ? [".cmd", ".exe", ".bat", ""] : [""];
   for (const directory of (process.env.PATH ?? "").split(path.delimiter)) {
     if (!directory) continue;
     for (const extension of extensions) {
@@ -40,4 +42,4 @@ if (result.error) {
   process.exit(1);
 }
 
-process.exit(result.status ?? 1);
+process.exit(childExitCode(result));
