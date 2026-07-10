@@ -21,7 +21,7 @@ sys.path.insert(0, str(PYTHON_BACKEND_ROOT))
 def build_openapi_document() -> dict[str, Any]:
     from football_tracking.api.app import create_app
 
-    app = create_app(PYTHON_BACKEND_ROOT)
+    app = create_app(PYTHON_BACKEND_ROOT, initialize_service=False)
     document = deepcopy(app.openapi())
 
     document["info"] = {

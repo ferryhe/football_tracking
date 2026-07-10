@@ -8,6 +8,7 @@ import os
 import tempfile
 import uuid
 from collections.abc import Callable
+from concurrent.futures import CancelledError
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -468,6 +469,7 @@ def generate_action_track(
     max_frames: int | None = None,
     calibration_source: Path | None = None,
     progress_callback: Callable[[dict[str, Any]], None] | None = None,
+    should_cancel: Callable[[], bool] | None = None,
     progress_interval_frames: int = 250,
 ) -> dict[str, Any]:
     settings = settings or ActionSignalSettings()
@@ -479,6 +481,7 @@ def generate_action_track(
     temporary_paths: list[Path] = []
     capture = cv2.VideoCapture(str(input_video))
     try:
+        _raise_if_cancelled(should_cancel)
         if not capture.isOpened():
             raise RuntimeError(f"Unable to open input video: {input_video}")
         source_width = _capture_dimension(capture, cv2.CAP_PROP_FRAME_WIDTH, "width")
@@ -545,6 +548,7 @@ def generate_action_track(
                 ]
             )
             while expected_frame_count is None or frame_count < expected_frame_count:
+                _raise_if_cancelled(should_cancel)
                 ok, frame = capture.read()
                 if not ok:
                     read_failed = True
@@ -627,6 +631,7 @@ def generate_action_track(
             json.dumps(report, ensure_ascii=False, indent=2, allow_nan=False) + "\n",
             encoding="utf-8",
         )
+        _raise_if_cancelled(should_cancel)
         _publish_artifact_set(
             [
                 (track_temp, track_path),
@@ -750,6 +755,11 @@ def _emit_progress(callback: Callable[[dict[str, Any]], None] | None, payload: d
         callback(payload)
     except Exception:
         return
+
+
+def _raise_if_cancelled(should_cancel: Callable[[], bool] | None) -> None:
+    if should_cancel is not None and should_cancel():
+        raise CancelledError()
 
 
 def _failure_reason(exc: Exception) -> str:

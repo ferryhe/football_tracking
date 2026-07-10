@@ -83,9 +83,7 @@ class ExportOpenApiTests(unittest.TestCase):
         react_schemas = Path("lib/api-client-react/src/generated/api.schemas.ts").read_text(encoding="utf-8")
         zod_api = Path("lib/api-zod/src/generated/api.ts").read_text(encoding="utf-8")
         zod_candidate = Path("lib/api-zod/src/generated/types/eventCandidate.ts").read_text(encoding="utf-8")
-        zod_policy = Path("lib/api-zod/src/generated/types/eventCandidateBufferPolicy.ts").read_text(
-            encoding="utf-8"
-        )
+        zod_policy = Path("lib/api-zod/src/generated/types/eventCandidateBufferPolicy.ts").read_text(encoding="utf-8")
 
         for field in ("core_window", "render_window", "buffer_policy", "EventCandidateBufferPolicy"):
             self.assertIn(field, react_schemas)
@@ -115,6 +113,90 @@ class ExportOpenApiTests(unittest.TestCase):
         for field in ("approved_action_ids", "approved_actions_artifact_name"):
             self.assertIn(field, react_schemas)
             self.assertIn(field, zod_api)
+
+    def test_openapi_exposes_broadcast_hybrid_workflow_contracts(self) -> None:
+        document = build_openapi_document()
+        paths = document["paths"]
+        for path in (
+            "/runs/{run_id}/broadcast/review-windows",
+            "/runs/{run_id}/broadcast/review-actions",
+            "/runs/{run_id}/broadcast/trajectory-recompute",
+            "/runs/{run_id}/broadcast/render",
+        ):
+            self.assertIn(path, paths)
+        self.assertIn("202", paths["/runs/{run_id}/broadcast/trajectory-recompute"]["post"]["responses"])
+        self.assertIn("202", paths["/runs/{run_id}/broadcast/render"]["post"]["responses"])
+
+        create_run = document["components"]["schemas"]["CreateRunRequest"]
+        for field in (
+            "pipeline_mode",
+            "quality_profile",
+            "calibration_confirmation",
+            "max_manual_review_windows",
+        ):
+            self.assertIn(field, create_run["properties"])
+        recompute = document["components"]["schemas"]["BroadcastTrajectoryRecomputeRequest"]
+        self.assertIn("review_decisions_sha256", recompute["required"])
+        render = document["components"]["schemas"]["BroadcastRenderRequest"]
+        self.assertIn("trajectory_generation_id", render["required"])
+        action = document["components"]["schemas"]["BroadcastReviewAction"]
+        self.assertNotIn("correct_trajectory", action["properties"]["action"]["enum"])
+        operation_response = document["components"]["schemas"]["BroadcastOperationResponse"]
+        self.assertIn("parent_run_id", operation_response["properties"])
+        self.assertEqual(
+            "#/components/schemas/BroadcastOperationDetails",
+            operation_response["properties"]["details"]["$ref"],
+        )
+        review_windows = document["components"]["schemas"]["BroadcastReviewWindowsResponse"]
+        self.assertEqual(
+            "#/components/schemas/BroadcastReviewWindow",
+            review_windows["properties"]["items"]["items"]["$ref"],
+        )
+        run_record = document["components"]["schemas"]["RunRecord"]
+        self.assertEqual(
+            "#/components/schemas/BroadcastRunState",
+            run_record["properties"]["broadcast"]["$ref"],
+        )
+
+    def test_generated_clients_expose_broadcast_hybrid_workflow_contracts(self) -> None:
+        react_api = Path("lib/api-client-react/src/generated/api.ts").read_text(encoding="utf-8")
+        react_schemas = Path("lib/api-client-react/src/generated/api.schemas.ts").read_text(encoding="utf-8")
+        zod_api = Path("lib/api-zod/src/generated/api.ts").read_text(encoding="utf-8")
+
+        for operation in (
+            "getBroadcastReviewWindows",
+            "submitBroadcastReviewActions",
+            "recomputeBroadcastTrajectory",
+            "renderBroadcastHybrid",
+        ):
+            self.assertIn(operation, react_api)
+        for schema in (
+            "BroadcastCalibrationConfirmation",
+            "BroadcastOperationDetails",
+            "BroadcastReviewActionsRequest",
+            "BroadcastReviewWindow",
+            "BroadcastRunState",
+            "BroadcastTrajectoryRecomputeRequest",
+            "BroadcastRenderRequest",
+        ):
+            self.assertIn(schema, react_schemas)
+        for operation in (
+            "renderBroadcastHybridBody",
+            "submitBroadcastReviewActionsBody",
+            "getBroadcastReviewWindowsResponse",
+            "recomputeBroadcastTrajectoryBody",
+        ):
+            self.assertIn(operation, zod_api)
+        for filename in (
+            "broadcastCalibrationConfirmation.ts",
+            "broadcastOperationDetails.ts",
+            "broadcastReviewActionsRequest.ts",
+            "broadcastReviewWindow.ts",
+            "broadcastRunState.ts",
+            "broadcastTrajectoryRecomputeRequest.ts",
+            "broadcastRenderRequest.ts",
+        ):
+            self.assertTrue((Path("lib/api-zod/src/generated/types") / filename).is_file())
 
     def test_openapi_run_record_exposes_ai_candidate_lifecycle_schema(self) -> None:
         document = build_openapi_document()

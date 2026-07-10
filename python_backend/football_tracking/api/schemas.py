@@ -150,6 +150,43 @@ class FieldCalibrationPayload(BaseModel):
     source: str
 
 
+class BroadcastCalibrationConfirmation(BaseModel):
+    """Three-frame, per-source calibration required by the hybrid broadcast workflow."""
+
+    source_resolution: tuple[int, int]
+    confirmed_sample_frames: tuple[int, int, int]
+    field_polygon: list[Point2DPayload] = Field(min_length=3)
+    exclusion_polygons: list[list[Point2DPayload]] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def validate_confirmation(self) -> "BroadcastCalibrationConfirmation":
+        width, height = self.source_resolution
+        if width <= 0 or height <= 0:
+            raise ValueError("source_resolution values must be positive")
+        if any(frame < 0 for frame in self.confirmed_sample_frames):
+            raise ValueError("confirmed_sample_frames must be non-negative")
+        if tuple(sorted(self.confirmed_sample_frames)) != self.confirmed_sample_frames:
+            raise ValueError("confirmed_sample_frames must be strictly increasing")
+        if len(set(self.confirmed_sample_frames)) != 3:
+            raise ValueError("confirmed_sample_frames must contain three distinct frames")
+        for name, polygon in (
+            ("field_polygon", self.field_polygon),
+            *((f"exclusion_polygons[{index}]", polygon) for index, polygon in enumerate(self.exclusion_polygons)),
+        ):
+            if len(polygon) < 3:
+                raise ValueError(f"{name} must contain at least three points")
+            for x, y in polygon:
+                if not 0.0 <= x < width or not 0.0 <= y < height:
+                    raise ValueError(f"{name} points must lie inside source_resolution")
+            doubled_area = sum(
+                current[0] * following[1] - following[0] * current[1]
+                for current, following in zip(polygon, polygon[1:] + polygon[:1], strict=True)
+            )
+            if abs(doubled_area) <= 1e-9:
+                raise ValueError(f"{name} must have non-zero area")
+        return self
+
+
 class FieldSuggestionResponse(BaseModel):
     input_video: str
     preview_data_url: str
@@ -509,6 +546,87 @@ class RunProgress(BaseModel):
     updated_at: str | None = None
 
 
+class BroadcastPreflightState(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    input_video: str | None = None
+    source_resolution: tuple[int, int] | None = None
+    source_frame_count: int | None = None
+    fps: float | None = None
+    source_size_bytes: int | None = None
+    source_mtime_ns: int | None = None
+    calibration: BroadcastCalibrationConfirmation | None = None
+    classifier_status: str | None = None
+    selective_policy_status: str | None = None
+
+
+class BroadcastLastOperationState(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    operation_run_id: str
+    operation: Literal["recompute", "render"]
+    status: Literal["queued", "running", "committing", "completed", "failed", "cancelled"]
+    recovered: bool = False
+    error: str | None = None
+
+
+class BroadcastOperationRequestState(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    trajectory_generation_id: str | None = Field(default=None, pattern=r"^trajectory-[0-9a-f]{24}$")
+    target_width: int | None = None
+    target_height: int | None = None
+
+
+class BroadcastOperationResultState(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    status: str | None = None
+    trajectory_generation_id: str | None = None
+    camera_generation_id: str | None = None
+    render_generation_id: str | None = None
+
+
+class BroadcastRunState(BaseModel):
+    """Stable public broadcast fields; extra lineage remains forward compatible."""
+
+    model_config = ConfigDict(extra="allow")
+
+    status: str | None = None
+    quality_profile: Literal["stable_broadcast"] | None = None
+    max_manual_review_windows: int | None = Field(default=None, ge=1, le=30)
+    preflight: BroadcastPreflightState | None = None
+    blocking_reasons: list[str] = Field(default_factory=list)
+    limitations: list[str] = Field(default_factory=list)
+    status_generation: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    trajectory_generation_id: str | None = None
+    camera_generation_id: str | None = None
+    render_generation_id: str | None = None
+    operation: Literal["recompute", "render"] | None = None
+    operation_status: (
+        Literal[
+            "queued",
+            "running",
+            "committing",
+            "completed",
+            "failed",
+            "cancelled",
+            "metadata_conflict",
+        ]
+        | None
+    ) = None
+    operation_report_status: Literal["available", "missing_after_ready_commit", "conflict"] | None = None
+    parent_run_id: str | None = None
+    owner_pid: int | None = None
+    owner_instance_id: str | None = None
+    request: BroadcastOperationRequestState | None = None
+    result: BroadcastOperationResultState | None = None
+    commit_started: bool = False
+    cancel_requested: bool = False
+    last_operation: BroadcastLastOperationState | None = None
+    metadata_warnings: list[str] = Field(default_factory=list)
+
+
 class RunRecord(BaseModel):
     run_id: str
     source: str
@@ -524,6 +642,7 @@ class RunRecord(BaseModel):
     modules_enabled: dict[str, bool] = Field(default_factory=dict)
     artifacts: list[ArtifactSummary] = Field(default_factory=list)
     stats: dict[str, Any] = Field(default_factory=dict)
+    broadcast: BroadcastRunState = Field(default_factory=BroadcastRunState)
     ai_candidate_lifecycle: AICandidateLifecycleReport = Field(default_factory=AICandidateLifecycleReport)
     progress: RunProgress | None = None
     notes: str | None = None
@@ -544,6 +663,146 @@ class AssetGroup(BaseModel):
     is_unbound: bool = False
 
 
+BroadcastReviewActionName = Literal["confirm_ball", "reject_noise", "mark_unknown"]
+BroadcastNoiseSubtype = Literal[
+    "player_body_or_shoe",
+    "field_line_or_mark",
+    "sideline_or_spare_ball",
+    "equipment_or_background",
+    "lighting_shadow_or_blur",
+]
+
+
+class BroadcastReviewAction(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    action_id: str = Field(min_length=1, max_length=200)
+    review_item_id: str = Field(min_length=1, max_length=200)
+    candidate_id: str = Field(min_length=1, max_length=300)
+    reviewer_id: str = Field(min_length=1, max_length=200)
+    created_at: str | None = None
+    action: BroadcastReviewActionName
+    noise_subtype: BroadcastNoiseSubtype | None = None
+
+    @model_validator(mode="after")
+    def validate_action_payload(self) -> "BroadcastReviewAction":
+        if self.action == "reject_noise":
+            if self.noise_subtype is None:
+                raise ValueError("reject_noise requires noise_subtype")
+        elif self.noise_subtype is not None:
+            raise ValueError("noise_subtype is only valid for reject_noise")
+        return self
+
+
+class BroadcastReviewActionsRequest(BaseModel):
+    actions: list[BroadcastReviewAction] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def validate_unique_actions(self) -> "BroadcastReviewActionsRequest":
+        action_ids = [action.action_id for action in self.actions]
+        if len(action_ids) != len(set(action_ids)):
+            raise ValueError("review action_id values must be unique")
+        candidates = [action.candidate_id for action in self.actions]
+        if len(candidates) != len(set(candidates)):
+            raise ValueError("each review candidate may be submitted only once")
+        return self
+
+
+class BroadcastTrajectoryRecomputeRequest(BaseModel):
+    review_decisions_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+class BroadcastRenderRequest(BaseModel):
+    trajectory_generation_id: str = Field(pattern=r"^trajectory-[0-9a-f]{24}$")
+    target_width: int = Field(default=1920, ge=320, le=7680)
+    target_height: int = Field(default=1080, ge=180, le=4320)
+
+
+class BroadcastOperationDetails(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    review_decisions_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    message: str | None = None
+
+
+class BroadcastOperationResponse(BaseModel):
+    run_id: str
+    parent_run_id: str | None = None
+    status: Literal["ready", "queued", "completed", "needs_review"]
+    reason: str | None = None
+    artifact: str | None = None
+    generation_id: str | None = None
+    details: BroadcastOperationDetails = Field(default_factory=BroadcastOperationDetails)
+
+
+class BroadcastReviewEvidenceArtifact(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    path: str
+    sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    size_bytes: int = Field(ge=0)
+    shape: list[int] | None = None
+    dtype: str | None = None
+    color_space: str | None = None
+
+
+class BroadcastReviewEvidenceArtifacts(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    tight_tensor: BroadcastReviewEvidenceArtifact
+    context_tensor: BroadcastReviewEvidenceArtifact
+    review_montage: BroadcastReviewEvidenceArtifact
+
+
+class BroadcastReviewEvidence(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    sample_id: str
+    sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    dataset_version: str = Field(pattern=r"^[0-9a-f]{64}$")
+    artifacts: BroadcastReviewEvidenceArtifacts
+
+
+class BroadcastReviewCandidate(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    candidate_id: str
+    candidate_fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
+    variant_id: str
+    frame_index: int = Field(ge=0)
+    bbox: tuple[float, float, float, float]
+    detector_source: str
+    detector_confidence: float = Field(ge=0.0, le=1.0)
+    predicted_label: str
+    prediction_confidence: float = Field(ge=0.0, le=1.0)
+    selective_decision: Literal["accept", "reject", "abstain"]
+    decision_reasons: list[str] = Field(default_factory=list)
+    review_kind: str
+    evidence: BroadcastReviewEvidence
+
+
+class BroadcastReviewWindow(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    review_item_id: str
+    variant_id: str
+    start_frame: int = Field(ge=0)
+    end_frame: int = Field(ge=0)
+    duration_seconds: float = Field(ge=0.0)
+    compliance: Literal["compliant"]
+    priority: int = Field(ge=0)
+    candidates: list[BroadcastReviewCandidate] = Field(default_factory=list)
+
+
+class BroadcastReviewWindowsResponse(BaseModel):
+    run_id: str
+    status: Literal["ready", "needs_review"]
+    reason: str | None = None
+    queue_sha256: str | None = None
+    review_item_count: int = 0
+    items: list[BroadcastReviewWindow] = Field(default_factory=list)
+
+
 class CreateRunRequest(BaseModel):
     config_name: str | None = None
     input_video: str | None = None
@@ -556,6 +815,10 @@ class CreateRunRequest(BaseModel):
     max_frames: int | None = None
     approved_action_ids: list[str] = Field(default_factory=list)
     approved_actions_artifact_name: str | None = None
+    pipeline_mode: Literal["standard", "broadcast_hybrid"] = "standard"
+    calibration_confirmation: BroadcastCalibrationConfirmation | None = None
+    quality_profile: Literal["stable_broadcast"] | None = None
+    max_manual_review_windows: int | None = Field(default=None, ge=1, le=30)
     notes: str | None = None
 
     @model_validator(mode="after")
@@ -571,11 +834,31 @@ class CreateRunRequest(BaseModel):
         has_approved_artifact = bool(self.approved_actions_artifact_name)
         is_approved_child = bool(approved_ids or has_approved_artifact)
         if is_approved_child:
+            if (
+                self.pipeline_mode != "standard"
+                or self.calibration_confirmation is not None
+                or self.quality_profile is not None
+                or self.max_manual_review_windows is not None
+            ):
+                raise ValueError("approved child recovery cannot be combined with broadcast_hybrid fields")
             if not self.parent_run_id:
                 raise ValueError("Approved child recovery requires parent_run_id.")
             return self
         if not self.config_name:
             raise ValueError("Create run requires config_name unless approved child recovery fields are provided.")
+        if self.pipeline_mode == "broadcast_hybrid":
+            if self.quality_profile != "stable_broadcast":
+                raise ValueError("broadcast_hybrid requires quality_profile='stable_broadcast'")
+            if self.calibration_confirmation is None:
+                raise ValueError("broadcast_hybrid requires calibration_confirmation")
+            if self.max_manual_review_windows is None:
+                self.max_manual_review_windows = 30
+        elif (
+            self.calibration_confirmation is not None
+            or self.quality_profile is not None
+            or self.max_manual_review_windows is not None
+        ):
+            raise ValueError("broadcast calibration/profile fields require pipeline_mode='broadcast_hybrid'")
         return self
 
 
@@ -653,7 +936,13 @@ class HighlightRenderRequest(BaseModel):
             )
         if has_start != has_end:
             raise ValueError("Highlight render frame window requires both start_frame and end_frame.")
-        if has_start and has_end and self.end_frame is not None and self.start_frame is not None and self.end_frame < self.start_frame:
+        if (
+            has_start
+            and has_end
+            and self.end_frame is not None
+            and self.start_frame is not None
+            and self.end_frame < self.start_frame
+        ):
             raise ValueError("Highlight render requires end_frame to be greater than or equal to start_frame.")
         return self
 
