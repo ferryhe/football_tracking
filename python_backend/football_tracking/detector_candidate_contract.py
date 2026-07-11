@@ -616,15 +616,14 @@ def _acquire_contract_output_lock(output_dir: Path):
     lock_path = lock_root / f"{hashlib.sha256(lock_scope).hexdigest()}.lock"
     handle = lock_path.open("a+b")
     try:
-        handle.seek(0)
-        if not handle.read(1):
-            handle.seek(0)
+        handle.seek(0, os.SEEK_END)
+        if handle.tell() == 0:
             handle.write(b"\0")
             handle.flush()
         handle.seek(0)
     except BaseException as exc:
         handle.close()
-        raise RuntimeError(f"another tracking contract writer is active in {output_dir}") from exc
+        raise RuntimeError(f"failed to initialize tracking contract lock file {lock_path}") from exc
     try:
         if os.name == "nt":
             import msvcrt

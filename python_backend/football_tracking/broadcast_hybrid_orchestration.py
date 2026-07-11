@@ -785,6 +785,8 @@ def _resolve_queue_bindings(queue_path: Path, queue: dict[str, Any]) -> dict[str
 
 def _source_video_from_dataset(dataset_path: Path) -> tuple[Path, str]:
     dataset, _ = _load_json_snapshot(dataset_path, "candidate dataset")
+    if dataset.get("artifact_type") != "candidate_dataset":
+        raise BroadcastHybridOrchestrationError("candidate dataset artifact_type is invalid")
     sources = dataset.get("sources")
     if not isinstance(sources, list) or len(sources) != 1 or not isinstance(sources[0], dict):
         raise BroadcastHybridOrchestrationError("broadcast orchestration requires exactly one dataset source video")

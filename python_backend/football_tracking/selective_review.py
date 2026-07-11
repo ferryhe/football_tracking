@@ -449,20 +449,23 @@ def _selection_report(
     selected_ids = {row["candidate_id"] for row in selected}
 
     def grouped(fields: tuple[str, ...]) -> list[dict[str, Any]]:
-        keys = sorted({tuple(row[field] for field in fields) for row in eligible})
-        result = []
-        for key in keys:
-            rows = [row for row in eligible if tuple(row[field] for field in fields) == key]
-            selected_count = sum(row["candidate_id"] in selected_ids for row in rows)
-            result.append(
-                {
-                    **dict(zip(fields, key)),
-                    "eligible": len(rows),
-                    "selected": selected_count,
-                    "dropped": len(rows) - selected_count,
-                }
+        counts: dict[tuple[Any, ...], tuple[int, int]] = {}
+        for row in eligible:
+            key = tuple(row[field] for field in fields)
+            eligible_count, selected_count = counts.get(key, (0, 0))
+            counts[key] = (
+                eligible_count + 1,
+                selected_count + int(row["candidate_id"] in selected_ids),
             )
-        return result
+        return [
+            {
+                **dict(zip(fields, key)),
+                "eligible": eligible_count,
+                "selected": selected_count,
+                "dropped": eligible_count - selected_count,
+            }
+            for key, (eligible_count, selected_count) in sorted(counts.items())
+        ]
 
     dropped_ids = sorted(row["candidate_id"] for row in eligible if row["candidate_id"] not in selected_ids)
     decision_variant = grouped(("selective_decision", "variant_id"))

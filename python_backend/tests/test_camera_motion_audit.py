@@ -47,6 +47,25 @@ class CameraMotionAuditTests(unittest.TestCase):
             self.assertIn("missing required columns", payload["summary"]["reason"])
             self.assertEqual([], payload["review_events"])
 
+    def test_duplicate_column_headers_are_rejected_by_both_audit_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            self.write_rows(
+                output_dir,
+                ["Frame", "Frame", "CenterX", "CenterY", "CropWidth", "CropHeight", "Status", "PanMode"],
+                [["0", "0", "100", "100", "960", "540", "Detected", "glide"]],
+            )
+
+            regular = write_camera_motion_audit_report(output_dir)
+            streamed = write_streaming_camera_motion_audit_report(output_dir)
+
+            for payload in (regular, streamed):
+                self.assertEqual("unavailable", payload["summary"]["status"])
+                self.assertEqual(
+                    "camera_path.csv contains duplicate column headers",
+                    payload["summary"]["reason"],
+                )
+
     def test_invalid_numeric_value_writes_unavailable_report(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:
             output_dir = Path(temp_name)

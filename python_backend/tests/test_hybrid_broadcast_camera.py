@@ -26,6 +26,7 @@ from football_tracking.hybrid_broadcast_camera import (
     _estimate_camera_motion,
     _initial_state,
     _plan_frame,
+    _rejected_motion,
     solve_hybrid_broadcast_camera,
 )
 
@@ -239,6 +240,38 @@ class HybridBroadcastCameraTests(unittest.TestCase):
         self.assertFalse(flash.cut_before)
         self.assertIsNone(flash.dx)
         self.assertEqual("low_texture_or_photometric_change", flash.reject_reason)
+
+    def test_rejected_motion_keeps_inlier_ratio_separate_from_confidence(self) -> None:
+        rejected = _rejected_motion(1, 0.1, "implausible_affine", tracked=4, inlier_ratio=0.25)
+
+        self.assertIsNone(rejected.confidence)
+        self.assertEqual(0.25, rejected.inlier_ratio)
+
+        points = np.asarray([[[10.0, 10.0]], [[20.0, 10.0]], [[10.0, 20.0]], [[20.0, 20.0]]], dtype=np.float32)
+        statuses = np.ones((4, 1), dtype=np.uint8)
+        config = replace(HybridCameraConfig(), min_features=4, min_inliers=3)
+        frame = np.zeros((32, 32), dtype=np.uint8)
+        with (
+            mock.patch(
+                "football_tracking.hybrid_broadcast_camera._structural_cut_score",
+                return_value=(0.1, 10.0, 10.0),
+            ),
+            mock.patch("football_tracking.hybrid_broadcast_camera.cv2.goodFeaturesToTrack", return_value=points),
+            mock.patch(
+                "football_tracking.hybrid_broadcast_camera.cv2.calcOpticalFlowPyrLK",
+                return_value=(points.copy(), statuses, None),
+            ),
+            mock.patch(
+                "football_tracking.hybrid_broadcast_camera.cv2.estimateAffinePartial2D",
+                return_value=(np.eye(2, 3, dtype=np.float32), np.asarray([[1], [0], [0], [0]], dtype=np.uint8)),
+            ),
+            mock.patch("football_tracking.hybrid_broadcast_camera._phase_translation_motion", return_value=None),
+        ):
+            too_few_inliers = _estimate_camera_motion(2, frame, frame, 32, 32, config)
+
+        self.assertIsNone(too_few_inliers.confidence)
+        self.assertEqual(0.25, too_few_inliers.inlier_ratio)
+        self.assertEqual("too_few_affine_inliers", too_few_inliers.reject_reason)
 
     def test_source_zoom_moves_world_relative_crop_in_same_scale_direction(self) -> None:
         config = HybridCameraConfig()

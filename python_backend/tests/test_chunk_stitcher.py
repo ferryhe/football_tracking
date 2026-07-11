@@ -263,8 +263,12 @@ class ChunkStitcherTests(unittest.TestCase):
             with self.subTest(label=label), tempfile.TemporaryDirectory() as temp_name:
                 temp_dir = Path(temp_name)
                 chunks = [
-                    make_chunk(0, decode_start_frame=0, start_frame=0, end_frame=0, core_start_frame=0, core_end_frame=0),
-                    make_chunk(1, decode_start_frame=1, start_frame=1, end_frame=1, core_start_frame=1, core_end_frame=1),
+                    make_chunk(
+                        0, decode_start_frame=0, start_frame=0, end_frame=0, core_start_frame=0, core_end_frame=0
+                    ),
+                    make_chunk(
+                        1, decode_start_frame=1, start_frame=1, end_frame=1, core_start_frame=1, core_end_frame=1
+                    ),
                 ]
                 chunk_dirs = [temp_dir / chunk.output_dir_name for chunk in chunks]
                 write_chunk_outputs(chunk_dirs[0], frame_start=0, frame_end=0)
@@ -396,6 +400,26 @@ class ChunkStitcherTests(unittest.TestCase):
                     Path(temp_name) / "merged",
                     candidate_source_sha256=TEST_SOURCE_SHA256,
                 )
+
+    def test_stitch_chunk_outputs_rejects_unsorted_chunks_before_creating_output(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            temp_dir = Path(temp_name)
+            chunks = [
+                make_chunk(0, decode_start_frame=0, start_frame=0, end_frame=2, core_start_frame=0, core_end_frame=1),
+                make_chunk(1, decode_start_frame=1, start_frame=1, end_frame=3, core_start_frame=2, core_end_frame=3),
+            ]
+            chunk_dirs = [temp_dir / chunk.output_dir_name for chunk in chunks]
+            output_dir = temp_dir / "merged"
+
+            with self.assertRaisesRegex(ValueError, "strictly increasing core start frames"):
+                stitch_chunk_outputs(
+                    list(reversed(chunks)),
+                    list(reversed(chunk_dirs)),
+                    output_dir,
+                    candidate_source_sha256=TEST_SOURCE_SHA256,
+                )
+
+            self.assertFalse(output_dir.exists())
 
     def test_stitch_chunk_outputs_rejects_candidate_with_absent_contract_frame(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:
