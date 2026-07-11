@@ -26,6 +26,9 @@ def stitch_chunk_outputs(
         raise ValueError("chunks and chunk_dirs must have the same length")
     if not chunks:
         raise ValueError("No temporal chunks to stitch")
+    for previous, current in zip(chunks, chunks[1:]):
+        if current.core_start_frame <= previous.core_start_frame:
+            raise ValueError("temporal chunks must be ordered by strictly increasing core start frames")
 
     config = output_config or OutputConfig()
     selected_csv_rows: dict[int, list[str]] = {}
@@ -59,9 +62,7 @@ def stitch_chunk_outputs(
             output_dir,
             candidate_source_sha256,
             source_metadata={
-                key: value
-                for key, value in (expected_contract_source or {}).items()
-                if key != "video_sha256"
+                key: value for key, value in (expected_contract_source or {}).items() if key != "video_sha256"
             },
         )
         if save_tracking_contract and candidate_source_sha256 is not None

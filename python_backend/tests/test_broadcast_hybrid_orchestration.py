@@ -88,7 +88,7 @@ class _BoundRun:
             "model": {"artifact_type": "candidate_classifier_model", "model_version": "fixture-v1"},
             "training_report": {"artifact_type": "candidate_classifier_training_report"},
             "dataset": {
-                "artifact_type": "candidate_dataset_manifest",
+                "artifact_type": "candidate_dataset",
                 "sources": [
                     {
                         "path": str(self.source_video.resolve()),
@@ -925,6 +925,23 @@ class BroadcastHybridOrchestrationTests(unittest.TestCase):
         with (
             mock.patch.object(orchestration, "materialize_selective_review_actions") as materialize,
             self.assertRaisesRegex(orchestration.BroadcastHybridOrchestrationError, "run root tracking contract"),
+        ):
+            orchestration.recompute_reviewed_trajectory(self.fixture.run_dir)
+
+        materialize.assert_not_called()
+        self.assertFalse((self.fixture.run_dir / "broadcast_generations").exists())
+
+    def test_invalid_dataset_artifact_type_is_rejected_before_materialization(self) -> None:
+        dataset = json.loads(self.fixture.paths["dataset"].read_text(encoding="utf-8"))
+        dataset["artifact_type"] = "candidate_dataset_manifest"
+        _write_json(self.fixture.paths["dataset"], dataset)
+        queue = json.loads(self.fixture.queue_path.read_text(encoding="utf-8"))
+        queue["bindings"]["dataset"]["sha256"] = _sha256(self.fixture.paths["dataset"])
+        _write_json(self.fixture.queue_path, queue)
+
+        with (
+            mock.patch.object(orchestration, "materialize_selective_review_actions") as materialize,
+            self.assertRaisesRegex(orchestration.BroadcastHybridOrchestrationError, "artifact_type is invalid"),
         ):
             orchestration.recompute_reviewed_trajectory(self.fixture.run_dir)
 

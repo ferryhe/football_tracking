@@ -11,6 +11,7 @@ import unittest
 from copy import deepcopy
 from dataclasses import asdict
 from pathlib import Path
+from typing import Any
 from unittest.mock import patch
 
 from test_selective_policy import _write_inputs
@@ -39,6 +40,7 @@ from football_tracking.selective_policy import (
 from football_tracking.selective_review import (
     SelectiveReviewError,
     _select_review_candidates,
+    _selection_report,
     build_review_windows,
     build_selective_review_queue,
     materialize_selective_review_actions,
@@ -1029,6 +1031,32 @@ def _integerize_policy_source_identity(inputs: dict[str, Path]) -> None:
 
 
 class SelectiveReviewWindowTests(unittest.TestCase):
+    def test_selection_report_grouping_scales_linearly_with_population(self) -> None:
+        class CountingRow(dict[str, Any]):
+            accesses = 0
+
+            def __getitem__(self, key: str) -> Any:
+                type(self).accesses += 1
+                return super().__getitem__(key)
+
+        eligible: list[dict[str, Any]] = [
+            CountingRow(
+                candidate_id=f"candidate-{index:04d}",
+                selective_decision="accept" if index % 2 == 0 else "reject",
+                review_kind="audit_accept" if index % 2 == 0 else "audit_reject",
+                variant_id=f"variant-{index:04d}",
+            )
+            for index in range(1000)
+        ]
+        selected = eligible[::2]
+        CountingRow.accesses = 0
+
+        report = _selection_report(eligible, selected, max_windows=30, mandatory_window_count=0)
+
+        self.assertEqual(1000, len(report["by_variant"]))
+        self.assertEqual(500, report["counts"]["selected"])
+        self.assertLess(CountingRow.accesses, 20_000)
+
     def test_windows_are_fps_aware_edge_shifted_merged_and_split(self) -> None:
         timings = {
             "20": {"fps": 20.0, "frame_count": 400},

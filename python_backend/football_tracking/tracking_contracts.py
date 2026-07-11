@@ -269,6 +269,7 @@ def _normalize_records(
 
 
 def _normalize_source(value: Any, validation_errors: list[str]) -> dict[str, Any] | None:
+    initial_error_count = len(validation_errors)
     if value is None:
         return None
     if not isinstance(value, dict):
@@ -297,7 +298,7 @@ def _normalize_source(value: Any, validation_errors: list[str]) -> dict[str, Any
                 validation_errors.append("source.fps: must be positive")
         else:
             normalized["fps"] = fps
-    return None if unexpected else normalized
+    return None if len(validation_errors) > initial_error_count else normalized
 
 
 def _envelope_errors(raw: dict[str, Any]) -> list[str]:

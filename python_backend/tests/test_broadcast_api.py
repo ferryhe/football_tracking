@@ -22,6 +22,7 @@ from football_tracking.action_signal import ActionCalibration, generate_action_t
 from football_tracking.api.app import create_app
 from football_tracking.api.broadcast_api import (
     BroadcastApiError,
+    _safe_status_generation_dir,
     build_review_action_envelope,
     collect_review_evidence_paths,
     publish_broadcast_facade,
@@ -454,7 +455,7 @@ class BroadcastReviewBindingTests(unittest.TestCase):
                 payload: object = {"name": name}
                 if name == "dataset":
                     payload = {
-                        "artifact_type": "candidate_dataset_manifest",
+                        "artifact_type": "candidate_dataset",
                         "samples": [
                             {
                                 "sample_id": "sample-1",
@@ -489,8 +490,81 @@ class BroadcastReviewBindingTests(unittest.TestCase):
             with self.assertRaisesRegex(BroadcastApiError, "hash changed"):
                 validate_review_queue_bindings(queue_path, trusted_root=root)
 
+            evidence.write_bytes(b"original-evidence")
+            dataset_path = inputs / "dataset.json"
+            dataset = json.loads(dataset_path.read_text(encoding="utf-8"))
+            dataset["artifact_type"] = "candidate_dataset_manifest"
+            _write_json(dataset_path, dataset)
+            bindings["dataset"]["sha256"] = _sha256(dataset_path)
+            _write_json(queue_path, {"artifact_type": "selective_review_queue", "bindings": bindings})
+
+            with self.assertRaisesRegex(BroadcastApiError, "artifact_type 'candidate_dataset'"):
+                validate_review_queue_bindings(queue_path, trusted_root=root)
+
 
 class BroadcastFacadeTests(unittest.TestCase):
+    def test_status_root_creation_tolerates_a_concurrent_creator(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output_dir = Path(temp_dir)
+            raced_path = output_dir / "broadcast_status"
+            original_mkdir = Path.mkdir
+
+            def mkdir_after_concurrent_creation(
+                path: Path,
+                mode: int = 0o777,
+                parents: bool = False,
+                exist_ok: bool = False,
+            ) -> None:
+                if path == raced_path and not path.exists():
+                    original_mkdir(path, mode=mode, parents=parents, exist_ok=False)
+                original_mkdir(path, mode=mode, parents=parents, exist_ok=exist_ok)
+
+            with mock.patch.object(Path, "mkdir", mkdir_after_concurrent_creation):
+                generation = _safe_status_generation_dir(output_dir, "a" * 64)
+
+            self.assertTrue(generation.is_dir())
+
+    def test_status_generation_creation_tolerates_a_concurrent_creator(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output_dir = Path(temp_dir)
+            status_root = output_dir / "broadcast_status"
+            status_root.mkdir()
+            raced_path = status_root / ("a" * 64)
+            original_mkdir = Path.mkdir
+
+            def mkdir_after_concurrent_creation(
+                path: Path,
+                mode: int = 0o777,
+                parents: bool = False,
+                exist_ok: bool = False,
+            ) -> None:
+                if path == raced_path and not path.exists():
+                    original_mkdir(path, mode=mode, parents=parents, exist_ok=False)
+                original_mkdir(path, mode=mode, parents=parents, exist_ok=exist_ok)
+
+            with mock.patch.object(Path, "mkdir", mkdir_after_concurrent_creation):
+                generation = _safe_status_generation_dir(output_dir, "a" * 64)
+
+            self.assertEqual(raced_path, generation)
+
+    def test_status_paths_reject_regular_files_with_domain_errors(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output_dir = Path(temp_dir)
+            status_root = output_dir / "broadcast_status"
+            status_root.write_text("not a directory", encoding="utf-8")
+
+            with self.assertRaisesRegex(BroadcastApiError, "status root"):
+                _safe_status_generation_dir(output_dir, "a" * 64)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output_dir = Path(temp_dir)
+            status_root = output_dir / "broadcast_status"
+            status_root.mkdir()
+            (status_root / ("a" * 64)).write_text("not a directory", encoding="utf-8")
+
+            with self.assertRaisesRegex(BroadcastApiError, "status generation"):
+                _safe_status_generation_dir(output_dir, "a" * 64)
+
     def test_facade_withholds_mutable_candidate_aliases_until_final_publication(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             output_dir = Path(temp_dir)
@@ -855,7 +929,10 @@ class BroadcastApiServiceTests(unittest.TestCase):
         )
         for name in names:
             path = output_dir / f"{name}.json"
-            path.write_text(json.dumps({"name": name}), encoding="utf-8")
+            payload: object = {"name": name}
+            if name == "dataset":
+                payload = {"artifact_type": "candidate_dataset", "samples": []}
+            path.write_text(json.dumps(payload), encoding="utf-8")
             bindings[name] = {"path": path.name, "sha256": _sha256(path)}
         queue_path = output_dir / "selective_review_queue.v1.json"
         _write_json(
@@ -2944,7 +3021,7 @@ class BroadcastApiServiceTests(unittest.TestCase):
             payload: object = {"name": name}
             if name == "dataset":
                 payload = {
-                    "artifact_type": "candidate_dataset_manifest",
+                    "artifact_type": "candidate_dataset",
                     "sources": [{"path": str(self.video), "sha256": _sha256(self.video)}],
                     "samples": [],
                 }

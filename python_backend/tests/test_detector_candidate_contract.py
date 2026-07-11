@@ -10,6 +10,7 @@ from unittest.mock import patch
 from football_tracking.detector_candidate_contract import (
     CandidateSourceChangedError,
     RuntimeTrackingContractWriter,
+    _acquire_contract_output_lock,
     assign_candidate_ids,
     candidate_to_contract_record,
     capture_candidate_source_snapshot,
@@ -281,6 +282,26 @@ class RuntimeTrackingContractWriterTests(unittest.TestCase):
             self.assertTrue(writer.frames_path.exists())
             self.assertTrue(writer.candidates_path.exists())
             writer.close(publish=False)
+
+    def test_lock_file_initialization_failure_is_not_reported_as_contention(self) -> None:
+        class BrokenLockHandle:
+            closed = False
+
+            def seek(self, _offset: int, _whence: int = 0) -> None:
+                raise OSError("lock file seek failed")
+
+            def close(self) -> None:
+                self.closed = True
+
+        handle = BrokenLockHandle()
+        with tempfile.TemporaryDirectory() as temp_name:
+            with (
+                patch.object(Path, "open", return_value=handle),
+                self.assertRaisesRegex(RuntimeError, r"failed to initialize tracking contract lock file .*\.lock"),
+            ):
+                _acquire_contract_output_lock(Path(temp_name))
+
+        self.assertTrue(handle.closed)
 
     def test_atomic_replace_failure_leaves_no_contract_or_temporary_file(self) -> None:
         source_sha256 = TEST_SOURCE_SHA256

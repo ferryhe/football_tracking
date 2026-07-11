@@ -170,6 +170,8 @@ def _stream_camera_path_audit(
             reader = csv.DictReader(handle)
             if reader.fieldnames is None:
                 raise CameraMotionAuditUnavailable(f"{csv_path.name} is empty")
+            if len(reader.fieldnames) != len(set(reader.fieldnames)):
+                raise CameraMotionAuditUnavailable(f"{csv_path.name} contains duplicate column headers")
             if missing_columns := REQUIRED_COLUMNS.difference(reader.fieldnames):
                 missing = ", ".join(sorted(missing_columns))
                 raise CameraMotionAuditUnavailable(f"{csv_path.name} missing required columns: {missing}")
@@ -343,6 +345,8 @@ def _read_camera_path_rows(csv_path: Path) -> list[CameraMotionRow]:
             reader = csv.DictReader(handle)
             if reader.fieldnames is None:
                 raise CameraMotionAuditUnavailable(f"{csv_path.name} is empty")
+            if len(reader.fieldnames) != len(set(reader.fieldnames)):
+                raise CameraMotionAuditUnavailable(f"{csv_path.name} contains duplicate column headers")
             if missing_columns := REQUIRED_COLUMNS.difference(reader.fieldnames):
                 missing = ", ".join(sorted(missing_columns))
                 raise CameraMotionAuditUnavailable(f"{csv_path.name} missing required columns: {missing}")

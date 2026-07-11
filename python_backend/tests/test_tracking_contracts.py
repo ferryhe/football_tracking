@@ -109,6 +109,17 @@ class TrackingContractsTests(unittest.TestCase):
         self.assertIsNone(payload["source"])
         self.assertTrue(any("unexpected fields" in error for error in payload["validation_errors"]))
 
+    def test_invalid_known_source_lineage_fields_do_not_leave_partial_source(self) -> None:
+        payload = build_tracking_contract(
+            source={"video_sha256": "a" * 64, "fps": 0.0, "width": -1, "height": 720},
+            frames=[{"frame_index": 0, "status": "unknown"}],
+        )
+
+        self.assertEqual("invalid", payload["summary"]["status"])
+        self.assertIsNone(payload["source"])
+        self.assertTrue(any("source.width" in error for error in payload["validation_errors"]))
+        self.assertTrue(any("source.fps" in error for error in payload["validation_errors"]))
+
     def test_rejects_present_source_or_reason_that_is_not_a_non_empty_string(self) -> None:
         payload = build_tracking_contract(
             frames=[
@@ -121,8 +132,12 @@ class TrackingContractsTests(unittest.TestCase):
 
         self.assertEqual("invalid", payload["summary"]["status"])
         self.assertEqual([], payload["frames"])
-        self.assertEqual(2, sum("source: must be a non-empty string" in error for error in payload["validation_errors"]))
-        self.assertEqual(2, sum("reason: must be a non-empty string" in error for error in payload["validation_errors"]))
+        self.assertEqual(
+            2, sum("source: must be a non-empty string" in error for error in payload["validation_errors"])
+        )
+        self.assertEqual(
+            2, sum("reason: must be a non-empty string" in error for error in payload["validation_errors"])
+        )
 
     def test_rejects_duplicate_frames_candidates_and_dangling_references(self) -> None:
         payload = build_tracking_contract(
