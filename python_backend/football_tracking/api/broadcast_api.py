@@ -248,7 +248,7 @@ def _validate_bound_dataset_sample_artifacts(
     if dataset_sha256 != _required_sha256(binding.get("sha256"), "review queue dataset sha256"):
         raise BroadcastApiError("candidate dataset manifest changed after queue validation")
     if dataset.get("artifact_type") != "candidate_dataset":
-        raise BroadcastApiError("review queue dataset binding requires a candidate_dataset manifest")
+        raise BroadcastApiError("review queue dataset binding requires artifact_type 'candidate_dataset'")
 
     raw_samples = dataset.get("samples", [])
     if not isinstance(raw_samples, list):

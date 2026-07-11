@@ -498,7 +498,7 @@ class BroadcastReviewBindingTests(unittest.TestCase):
             bindings["dataset"]["sha256"] = _sha256(dataset_path)
             _write_json(queue_path, {"artifact_type": "selective_review_queue", "bindings": bindings})
 
-            with self.assertRaisesRegex(BroadcastApiError, "requires a candidate_dataset"):
+            with self.assertRaisesRegex(BroadcastApiError, "artifact_type 'candidate_dataset'"):
                 validate_review_queue_bindings(queue_path, trusted_root=root)
 
 
