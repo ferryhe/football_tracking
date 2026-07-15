@@ -6,8 +6,19 @@ import {
   type ProductionCalibrationSuggestion,
 } from "./productionCalibration";
 import type { FieldPoint, FieldResolution } from "./fieldGeometry";
+import {
+  isProductionTrialState,
+  productionTrialMatchesContext,
+  type ProductionTrialState,
+} from "./productionTrial";
+import {
+  isProductionConfigEvidence,
+  isProductionPendingConfigConfirmation,
+  type ProductionConfigEvidence,
+  type ProductionPendingConfigConfirmation,
+} from "./productionConfigFreeze";
 
-export const PRODUCTION_DRAFT_SCHEMA_VERSION = 2 as const;
+export const PRODUCTION_DRAFT_SCHEMA_VERSION = 3 as const;
 export const PRODUCTION_DRAFT_STORAGE_KEY =
   "football-tracking.production-draft.v1";
 
@@ -40,16 +51,6 @@ export interface SourceSignature {
   modified_at: string;
 }
 
-export interface ProductionTrialEvidence {
-  latest_run_id: string;
-  accepted_run_id: string | null;
-}
-
-export interface ProductionConfigEvidence {
-  name: string;
-  sha256: string;
-}
-
 export type ProductionFullRunStatus =
   | "queued"
   | "running"
@@ -80,7 +81,8 @@ export interface ProductionDraft {
   status: ProductionDraftStatus;
   source: SourceSignature | null;
   calibration: ProductionCalibrationDraft | null;
-  trial: ProductionTrialEvidence | null;
+  trial: ProductionTrialState | null;
+  pending_config_confirmation: ProductionPendingConfigConfirmation | null;
   confirmed_config: ProductionConfigEvidence | null;
   full_run: ProductionFullRunEvidence | null;
   verified_product: ProductionProductEvidence | null;
@@ -235,19 +237,6 @@ function isCalibrationEvidence(
   );
 }
 
-function isTrialEvidence(value: unknown): value is ProductionTrialEvidence {
-  if (!isRecord(value)) return false;
-  return (
-    isNonEmptyString(value.latest_run_id) &&
-    (value.accepted_run_id === null || isNonEmptyString(value.accepted_run_id))
-  );
-}
-
-function isConfigEvidence(value: unknown): value is ProductionConfigEvidence {
-  if (!isRecord(value)) return false;
-  return isNonEmptyString(value.name) && isSha256(value.sha256);
-}
-
 function isFullRunEvidence(value: unknown): value is ProductionFullRunEvidence {
   if (!isRecord(value)) return false;
   return (
@@ -275,23 +264,83 @@ function isNullable<T>(
 
 function isProductionDraft(value: unknown): value is ProductionDraft {
   if (!isRecord(value)) return false;
-  return (
-    value.schema_version === PRODUCTION_DRAFT_SCHEMA_VERSION &&
-    isNonEmptyString(value.workflow_id) &&
-    isNonEmptyString(value.created_at) &&
-    isNonEmptyString(value.updated_at) &&
-    typeof value.status === "string" &&
-    DRAFT_STATUSES.has(value.status as ProductionDraftStatus) &&
-    isNullable(value.source, isSourceSignature) &&
-    isNullable(value.calibration, isCalibrationEvidence) &&
-    isNullable(value.trial, isTrialEvidence) &&
-    isNullable(value.confirmed_config, isConfigEvidence) &&
-    isNullable(value.full_run, isFullRunEvidence) &&
-    isNullable(value.verified_product, isProductEvidence)
-  );
+  if (
+    !(
+      value.schema_version === PRODUCTION_DRAFT_SCHEMA_VERSION &&
+      isNonEmptyString(value.workflow_id) &&
+      isNonEmptyString(value.created_at) &&
+      isNonEmptyString(value.updated_at) &&
+      typeof value.status === "string" &&
+      DRAFT_STATUSES.has(value.status as ProductionDraftStatus) &&
+      isNullable(value.source, isSourceSignature) &&
+      isNullable(value.calibration, isCalibrationEvidence) &&
+      isNullable(value.trial, isProductionTrialState) &&
+      isNullable(
+        value.pending_config_confirmation,
+        isProductionPendingConfigConfirmation,
+      ) &&
+      isNullable(value.confirmed_config, isProductionConfigEvidence) &&
+      isNullable(value.full_run, isFullRunEvidence) &&
+      isNullable(value.verified_product, isProductEvidence)
+    )
+  )
+    return false;
+
+  const source = value.source;
+  const calibration = value.calibration;
+  const trial = value.trial;
+  const pendingConfig = value.pending_config_confirmation;
+  const confirmedConfig = value.confirmed_config;
+  const fullRun = value.full_run;
+  const product = value.verified_product;
+  if (calibration !== null && source === null) return false;
+  if (
+    trial !== null &&
+    (!source ||
+      !calibration ||
+      !calibrationIsComplete(calibration, source.path) ||
+      !productionTrialMatchesContext(trial, {
+        workflow_id: value.workflow_id,
+        source,
+        calibration,
+      }))
+  )
+    return false;
+  if (pendingConfig !== null) {
+    if (
+      !trial?.accepted ||
+      pendingConfig.workflow_id !== value.workflow_id ||
+      pendingConfig.accepted_trial_run_id !== trial.accepted.run_id ||
+      pendingConfig.trial_intent_sha256 !== trial.accepted.intent_sha256 ||
+      pendingConfig.trial_request_sha256 !== trial.accepted.request_sha256 ||
+      pendingConfig.calibration_digest !== calibration?.polygon_digest ||
+      !sourceSignaturesMatch(pendingConfig.source_signature, source)
+    )
+      return false;
+  }
+  if (confirmedConfig !== null) {
+    if (
+      !trial?.accepted ||
+      confirmedConfig.workflow_id !== value.workflow_id ||
+      confirmedConfig.accepted_trial_run_id !== trial.accepted.run_id ||
+      confirmedConfig.trial_intent_sha256 !== trial.accepted.intent_sha256 ||
+      confirmedConfig.trial_request_sha256 !== trial.accepted.request_sha256 ||
+      confirmedConfig.calibration_digest !== calibration?.polygon_digest ||
+      !sourceSignaturesMatch(confirmedConfig.source_signature, source)
+    )
+      return false;
+  }
+  if (fullRun !== null && confirmedConfig === null) return false;
+  if (
+    product !== null &&
+    (fullRun === null || product.run_id !== fullRun.run_id)
+  ) {
+    return false;
+  }
+  return true;
 }
 
-function migrateLegacyDraft(
+function migrateV0OrV1Draft(
   value: Record<string, unknown>,
 ): ProductionDraft | null {
   if (
@@ -318,6 +367,40 @@ function migrateLegacyDraft(
     source: value.source,
     calibration: null,
     trial: null,
+    pending_config_confirmation: null,
+    confirmed_config: null,
+    full_run: null,
+    verified_product: null,
+  };
+}
+
+function migrateV2Draft(
+  value: Record<string, unknown>,
+): ProductionDraft | null {
+  if (
+    !isNonEmptyString(value.workflow_id) ||
+    !isNonEmptyString(value.created_at) ||
+    !isNonEmptyString(value.updated_at) ||
+    !isNullable(value.source, isSourceSignature) ||
+    typeof value.status !== "string" ||
+    !DRAFT_STATUSES.has(value.status as ProductionDraftStatus)
+  ) {
+    return null;
+  }
+  const calibration =
+    value.source && isCalibrationEvidence(value.calibration)
+      ? value.calibration
+      : null;
+  return {
+    schema_version: PRODUCTION_DRAFT_SCHEMA_VERSION,
+    workflow_id: value.workflow_id,
+    created_at: value.created_at,
+    updated_at: value.updated_at,
+    status: "active",
+    source: value.source,
+    calibration,
+    trial: null,
+    pending_config_confirmation: null,
     confirmed_config: null,
     full_run: null,
     verified_product: null,
@@ -331,7 +414,7 @@ function hasConfirmedCalibration(draft: ProductionDraft): boolean {
 }
 
 function hasAcceptedTrial(draft: ProductionDraft): boolean {
-  return Boolean(draft.trial?.accepted_run_id);
+  return Boolean(draft.trial?.accepted?.run_id);
 }
 
 function hasConfirmedConfig(draft: ProductionDraft): boolean {
@@ -377,6 +460,7 @@ export function createProductionDraft(
     source: null,
     calibration: null,
     trial: null,
+    pending_config_confirmation: null,
     confirmed_config: null,
     full_run: null,
     verified_product: null,
@@ -535,8 +619,15 @@ export function invalidateProductionDraft(
 
   if (from === "source") updated.source = null;
   if (from === "source" || from === "calibration") updated.calibration = null;
-  if (from === "source" || from === "calibration" || from === "trial") {
+  if (from === "source" || from === "calibration") {
     updated.trial = null;
+  } else if (from === "trial" && updated.trial) {
+    updated.trial = {
+      ...updated.trial,
+      pending_submission: null,
+      active_run_id: null,
+      accepted: null,
+    };
   }
   if (
     from === "source" ||
@@ -544,6 +635,7 @@ export function invalidateProductionDraft(
     from === "trial" ||
     from === "config_confirmation"
   ) {
+    updated.pending_config_confirmation = null;
     updated.confirmed_config = null;
   }
   updated.full_run = null;
@@ -584,10 +676,109 @@ export function updateProductionCalibration(
     status: "active",
     calibration,
     trial: approvedChanged ? null : draft.trial,
+    pending_config_confirmation: approvedChanged
+      ? null
+      : draft.pending_config_confirmation,
     confirmed_config: approvedChanged ? null : draft.confirmed_config,
     full_run: approvedChanged ? null : draft.full_run,
     verified_product: approvedChanged ? null : draft.verified_product,
   };
+}
+
+export function productionTrialRequiresStop(
+  trial: ProductionTrialState | null,
+): boolean {
+  if (!trial) return false;
+  return (
+    trial.pending_submission !== null ||
+    (typeof trial.active_run_id === "string" &&
+      trial.active_run_id.trim().length > 0) ||
+    trial.attempts.some(
+      (attempt) =>
+        attempt.last_observed.status === "queued" ||
+        attempt.last_observed.status === "running",
+    )
+  );
+}
+
+export function updateProductionTrial(
+  draft: ProductionDraft,
+  trial: ProductionTrialState,
+  now = new Date().toISOString(),
+): ProductionDraft {
+  if (!isProductionTrialState(trial)) {
+    throw new TypeError("Invalid production trial state");
+  }
+  const acceptanceChanged =
+    draft.trial?.accepted?.run_id !== trial.accepted?.run_id ||
+    draft.trial?.accepted?.intent_sha256 !== trial.accepted?.intent_sha256 ||
+    draft.trial?.accepted?.readiness.evidence_generation !==
+      trial.accepted?.readiness.evidence_generation;
+  const candidate: ProductionDraft = {
+    ...draft,
+    updated_at: now,
+    status: "active",
+    trial,
+    pending_config_confirmation: acceptanceChanged
+      ? null
+      : draft.pending_config_confirmation,
+    confirmed_config: acceptanceChanged ? null : draft.confirmed_config,
+    full_run: acceptanceChanged ? null : draft.full_run,
+    verified_product: acceptanceChanged ? null : draft.verified_product,
+  };
+  if (!isProductionDraft(candidate)) {
+    throw new TypeError("Production trial does not match the current draft");
+  }
+  return candidate;
+}
+
+export function updatePendingConfigConfirmation(
+  draft: ProductionDraft,
+  pending: ProductionPendingConfigConfirmation | null,
+  now = new Date().toISOString(),
+): ProductionDraft {
+  if (pending !== null && !isProductionPendingConfigConfirmation(pending)) {
+    throw new TypeError("Invalid pending configuration confirmation");
+  }
+  const candidate: ProductionDraft = {
+    ...draft,
+    updated_at: now,
+    pending_config_confirmation: pending,
+    confirmed_config: pending ? null : draft.confirmed_config,
+    full_run: pending ? null : draft.full_run,
+    verified_product: pending ? null : draft.verified_product,
+  };
+  if (!isProductionDraft(candidate)) {
+    throw new TypeError(
+      "Pending configuration does not match the current draft",
+    );
+  }
+  return candidate;
+}
+
+export function updateConfirmedProductionConfig(
+  draft: ProductionDraft,
+  confirmedConfig: ProductionConfigEvidence,
+  now = new Date().toISOString(),
+): ProductionDraft {
+  if (!isProductionConfigEvidence(confirmedConfig)) {
+    throw new TypeError("Invalid confirmed configuration evidence");
+  }
+  const candidate: ProductionDraft = {
+    ...draft,
+    updated_at: now,
+    status: "active",
+    pending_config_confirmation: null,
+    confirmed_config: confirmedConfig,
+    full_run: null,
+    verified_product: null,
+  };
+  if (!isProductionDraft(candidate)) {
+    throw new TypeError(
+      "Confirmed configuration does not match the current draft",
+    );
+  }
+  return candidate;
 }
 
 export function loadProductionDraft(
@@ -614,10 +805,16 @@ export function loadProductionDraft(
     return { status: "unsupported", version: value.schema_version };
   }
   if (value.schema_version === 0 || value.schema_version === 1) {
-    const migrated = migrateLegacyDraft(value);
+    const migrated = migrateV0OrV1Draft(value);
     return migrated
       ? { status: "restored", draft: migrated, migrated: true }
       : { status: "corrupt", message: "Legacy draft is invalid." };
+  }
+  if (value.schema_version === 2) {
+    const migrated = migrateV2Draft(value);
+    return migrated
+      ? { status: "restored", draft: migrated, migrated: true }
+      : { status: "corrupt", message: "Version 2 draft is invalid." };
   }
   if (!isProductionDraft(value)) {
     return { status: "corrupt", message: "Draft data is invalid." };
@@ -629,6 +826,9 @@ export function saveProductionDraft(
   storage: DraftStorage,
   draft: ProductionDraft,
 ): ProductionDraftStorageResult {
+  if (!isProductionDraft(draft)) {
+    return { ok: false, message: "Draft data is invalid." };
+  }
   try {
     storage.setItem(
       PRODUCTION_DRAFT_STORAGE_KEY,

@@ -25,17 +25,38 @@ import {
 import {
   clearProductionDraft,
   createProductionDraft,
+  invalidateProductionDraft,
   loadProductionDraft,
+  productionTrialRequiresStop,
   requiresDraftReplacementConfirmation,
   saveProductionDraft,
   sourceSignaturesMatch,
+  updateConfirmedProductionConfig,
+  updatePendingConfigConfirmation,
   updateProductionCalibration,
   updateProductionSource,
+  updateProductionTrial,
   type ProductionDraft,
   type ProductionDraftLoadResult,
   type SourceSignature,
 } from "@/lib/productionWorkflow";
 import type { ProductionCalibrationDraft } from "@/lib/productionCalibration";
+import type {
+  ProductionConfigEvidence,
+  ProductionPendingConfigConfirmation,
+} from "@/lib/productionConfigFreeze";
+import {
+  canonicalJson,
+  type ProductionTrialState,
+} from "@/lib/productionTrial";
+
+function sameSnapshot(left: unknown, right: unknown): boolean {
+  try {
+    return canonicalJson(left) === canonicalJson(right);
+  } catch {
+    return false;
+  }
+}
 
 function queryErrorMessage(error: unknown): string | null {
   return error instanceof Error && error.message ? error.message : null;
@@ -46,6 +67,8 @@ type ProductionNotice =
   | "restored"
   | "savedLocally"
   | "sourceReset"
+  | "activeTrialMustStop"
+  | "pendingTrialMustReconcile"
   | "storageFallback";
 
 interface ProductionError {
@@ -81,6 +104,8 @@ export function ProductionPageContent({
       ? initialLoad.draft
       : createProductionDraft(),
   );
+  const draftRef = useRef(draft);
+  draftRef.current = draft;
   const [notice, setNotice] = useState<ProductionNotice | null>(() => {
     if (!storage.isPersistent) return "storageFallback";
     if (initialLoad.status !== "restored") return null;
@@ -119,12 +144,33 @@ export function ProductionPageContent({
     return true;
   }
 
-  function handleSourceChange(source: SourceSignature) {
-    const resetsDownstream =
-      draft.source !== null && !sourceSignaturesMatch(draft.source, source);
-    const nextDraft = updateProductionSource(draft, source);
+  function commitDraft(
+    updater: (current: ProductionDraft) => ProductionDraft,
+  ): boolean {
+    const nextDraft = updater(draftRef.current);
+    if (!persist(nextDraft)) return false;
+    draftRef.current = nextDraft;
     setDraft(nextDraft);
-    if (persist(nextDraft)) {
+    setNotice(storage.isPersistent ? "savedLocally" : "storageFallback");
+    return true;
+  }
+
+  function blockActiveTrialDiscard(): boolean {
+    if (!productionTrialRequiresStop(draftRef.current.trial)) return false;
+    setNotice(
+      draftRef.current.trial?.pending_submission
+        ? "pendingTrialMustReconcile"
+        : "activeTrialMustStop",
+    );
+    return true;
+  }
+
+  function handleSourceChange(source: SourceSignature) {
+    if (blockActiveTrialDiscard()) return;
+    const resetsDownstream =
+      draftRef.current.source !== null &&
+      !sourceSignaturesMatch(draftRef.current.source, source);
+    if (commitDraft((current) => updateProductionSource(current, source))) {
       setNotice(
         !storage.isPersistent
           ? "storageFallback"
@@ -136,19 +182,62 @@ export function ProductionPageContent({
   }
 
   function handleCalibrationChange(calibration: ProductionCalibrationDraft) {
-    const nextDraft = updateProductionCalibration(draft, calibration);
-    setDraft(nextDraft);
-    if (persist(nextDraft)) {
-      setNotice(storage.isPersistent ? "savedLocally" : "storageFallback");
-    }
+    if (blockActiveTrialDiscard()) return;
+    commitDraft((current) => updateProductionCalibration(current, calibration));
+  }
+
+  function handleTrialChange(
+    trial: ProductionTrialState,
+    expected: ProductionTrialState | null,
+  ): boolean {
+    if (!sameSnapshot(draftRef.current.trial, expected)) return false;
+    return commitDraft((current) => updateProductionTrial(current, trial));
+  }
+
+  function handlePendingConfigChange(
+    pending: ProductionPendingConfigConfirmation | null,
+    expected: ProductionPendingConfigConfirmation | null,
+    expectedAcceptedRunId: string,
+  ): boolean {
+    if (
+      !sameSnapshot(draftRef.current.pending_config_confirmation, expected) ||
+      draftRef.current.trial?.accepted?.run_id !== expectedAcceptedRunId
+    )
+      return false;
+    return commitDraft((current) =>
+      updatePendingConfigConfirmation(current, pending),
+    );
+  }
+
+  function handleConfirmedConfigChange(
+    confirmed: ProductionConfigEvidence,
+    expectedPending: ProductionPendingConfigConfirmation,
+  ): boolean {
+    if (
+      !sameSnapshot(
+        draftRef.current.pending_config_confirmation,
+        expectedPending,
+      )
+    )
+      return false;
+    return commitDraft((current) =>
+      updateConfirmedProductionConfig(current, confirmed),
+    );
+  }
+
+  function handleInvalidate(from: "calibration"): boolean {
+    if (blockActiveTrialDiscard()) return false;
+    return commitDraft((current) => invalidateProductionDraft(current, from));
   }
 
   function handleSaveExit() {
-    if (persist(draft)) setLocation("/");
+    if (persist(draftRef.current)) setLocation("/");
   }
 
   function replaceWith(nextDraft: ProductionDraft) {
+    if (blockActiveTrialDiscard()) return;
     const result = clearProductionDraft(storage);
+    draftRef.current = nextDraft;
     setDraft(nextDraft);
     setReplacement(null);
     setRecovery(null);
@@ -157,8 +246,14 @@ export function ProductionPageContent({
   }
 
   function handleStartNew() {
+    if (blockActiveTrialDiscard()) return;
     const nextDraft = createProductionDraft();
-    if (requiresDraftReplacementConfirmation(draft, nextDraft.workflow_id)) {
+    if (
+      requiresDraftReplacementConfirmation(
+        draftRef.current,
+        nextDraft.workflow_id,
+      )
+    ) {
       setReplacement(nextDraft);
       return;
     }
@@ -264,6 +359,10 @@ export function ProductionPageContent({
         error={errorText}
         onSourceChange={handleSourceChange}
         onCalibrationChange={handleCalibrationChange}
+        onTrialChange={handleTrialChange}
+        onPendingConfigChange={handlePendingConfigChange}
+        onConfirmedConfigChange={handleConfirmedConfigChange}
+        onInvalidate={handleInvalidate}
         onSaveExit={handleSaveExit}
         onStartNew={handleStartNew}
         startNewButtonRef={startNewButtonRef}

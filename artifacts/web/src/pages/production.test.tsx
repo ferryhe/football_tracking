@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { act, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -12,8 +12,15 @@ import {
   createProductionDraft,
   saveProductionDraft,
   updateProductionSource,
+  updateProductionTrial,
   type SourceSignature,
 } from "@/lib/productionWorkflow";
+import {
+  appendProductionTrialAttempt,
+  buildProductionTrialSubmission,
+  createProductionTrialState,
+  setPendingProductionTrial,
+} from "@/lib/productionTrial";
 
 const source: SourceSignature = {
   path: "data/match-a.mp4",
@@ -23,6 +30,15 @@ const source: SourceSignature = {
 
 const refetch = vi.fn();
 let queryResult: Record<string, unknown>;
+const trialStepCapture = vi.hoisted(() => ({
+  props: null as null | {
+    onTrialChange: (
+      trial: ReturnType<typeof createProductionTrialState>,
+      expected: ReturnType<typeof createProductionTrialState> | null,
+    ) => boolean;
+    stopButtonRef?: React.Ref<HTMLButtonElement>;
+  },
+}));
 
 vi.mock("@workspace/api-client-react", () => ({
   useListInputVideos: () => queryResult,
@@ -30,6 +46,26 @@ vi.mock("@workspace/api-client-react", () => ({
 
 vi.mock("@/components/production/ProductionCalibrationStep", () => ({
   ProductionCalibrationStep: () => <div>interactive calibration</div>,
+}));
+
+vi.mock("@/components/production/ProductionTrialStep", () => ({
+  ProductionTrialStep: (props: {
+    onTrialChange: (
+      trial: ReturnType<typeof createProductionTrialState>,
+      expected: ReturnType<typeof createProductionTrialState> | null,
+    ) => boolean;
+    stopButtonRef?: React.Ref<HTMLButtonElement>;
+  }) => {
+    trialStepCapture.props = props;
+    return (
+      <div>
+        interactive trial
+        <button ref={props.stopButtonRef} type="button">
+          Cancel trial
+        </button>
+      </div>
+    );
+  },
 }));
 
 import { ProductionPageContent } from "./production";
@@ -68,9 +104,118 @@ beforeEach(() => {
     refetch,
   };
   refetch.mockReset();
+  trialStepCapture.props = null;
 });
 
+function completedCalibrationDraft() {
+  const draft = updateProductionSource(
+    createProductionDraft("2026-07-14T12:00:00Z", "workflow-a"),
+    source,
+  );
+  draft.calibration = {
+    source_resolution: { width: 1_920, height: 1_080 },
+    suggestion: null,
+    approved_polygon: [
+      [0, 0],
+      [1_919, 0],
+      [1_919, 1_079],
+    ],
+    exclusions: [],
+    polygon_digest: "c".repeat(64),
+    confirmed_frames: [1, 2, 3].map((frame_index, sample_index) => ({
+      input_video: source.path,
+      frame_index,
+      frame_time_seconds: frame_index / 25,
+      sample_index,
+      source_resolution: { width: 1_920, height: 1_080 },
+      polygon_digest: "c".repeat(64),
+    })),
+  };
+  return draft;
+}
+
+async function draftWithUnsettledTrial(kind: "pending" | "running") {
+  const draft = completedCalibrationDraft();
+  const settings = createProductionTrialState().settings;
+  const submission = await buildProductionTrialSubmission({
+    workflow_id: draft.workflow_id,
+    source,
+    calibration: draft.calibration!,
+    settings,
+    parent_run_id: null,
+    submission_id: "submission-unsettled",
+    output_id: "output-unsettled",
+    generation: 1,
+    created_at: "2026-07-14T12:05:00Z",
+  });
+  const pending = setPendingProductionTrial(
+    createProductionTrialState(settings),
+    submission.pending,
+  );
+  const trial =
+    kind === "pending"
+      ? pending
+      : appendProductionTrialAttempt(pending, {
+          run: {
+            run_id: `production_trial_${submission.pending.output_id}`,
+            status: "running",
+          },
+          pending: submission.pending,
+          observed_at: "2026-07-14T12:06:00Z",
+        });
+  return updateProductionTrial(draft, trial);
+}
+
 describe("ProductionPage", () => {
+  it("applies sequential async trial callbacks to the latest persisted draft", () => {
+    saveProductionDraft(localStorage, completedCalibrationDraft());
+    renderPage();
+    expect(trialStepCapture.props).not.toBeNull();
+    const callback = trialStepCapture.props!.onTrialChange;
+    const first = createProductionTrialState({
+      base_config_name: "default.yaml",
+      start_frame: 0,
+      max_frames: 100,
+      enable_postprocess: true,
+      enable_follow_cam: true,
+      tuning_patch: {},
+    });
+    const second = {
+      ...first,
+      settings: { ...first.settings, start_frame: 50, max_frames: 200 },
+    };
+    act(() => {
+      expect(callback(first, null)).toBe(true);
+      expect(callback(second, first)).toBe(true);
+    });
+    const persisted = JSON.parse(
+      localStorage.getItem(PRODUCTION_DRAFT_STORAGE_KEY) ?? "null",
+    );
+    expect(persisted.trial.settings).toMatchObject({
+      start_frame: 50,
+      max_frames: 200,
+    });
+    expect(persisted.calibration.polygon_digest).toBe("c".repeat(64));
+  });
+
+  it("rejects a stale trial callback whose expected snapshot was replaced", () => {
+    saveProductionDraft(localStorage, completedCalibrationDraft());
+    renderPage();
+    const callback = trialStepCapture.props!.onTrialChange;
+    const current = createProductionTrialState();
+    const staleResult = {
+      ...current,
+      settings: { ...current.settings, start_frame: 99 },
+    };
+    act(() => {
+      expect(callback(current, null)).toBe(true);
+      expect(callback(staleResult, null)).toBe(false);
+    });
+    const persisted = JSON.parse(
+      localStorage.getItem(PRODUCTION_DRAFT_STORAGE_KEY) ?? "null",
+    );
+    expect(persisted.trial.settings.start_frame).toBe(0);
+  });
   it("renders loading, error, and empty catalog states", async () => {
     queryResult = { ...queryResult, data: undefined, isLoading: true };
     const loading = renderPage();
@@ -264,6 +409,65 @@ describe("ProductionPage", () => {
       screen.getByRole("heading", { name: "Choose the original video" }),
     ).toBeVisible();
     expect(localStorage.getItem(PRODUCTION_DRAFT_STORAGE_KEY)).toBeNull();
+  });
+
+  it("preserves an active trial when Back or Start New is attempted", async () => {
+    const active = await draftWithUnsettledTrial("running");
+    saveProductionDraft(localStorage, active);
+    const { user } = renderPage();
+    const cancel = screen.getByRole("button", { name: "Cancel trial" });
+
+    await user.click(screen.getByRole("button", { name: "Back" }));
+    expect(screen.getByText(/still queued or running/i)).toBeVisible();
+    expect(cancel).toHaveFocus();
+    await user.click(
+      screen.getByRole("button", { name: "Start new production" }),
+    );
+    expect(
+      screen.queryByText("Replace unfinished production?"),
+    ).not.toBeInTheDocument();
+    expect(cancel).toHaveFocus();
+
+    const persisted = JSON.parse(
+      localStorage.getItem(PRODUCTION_DRAFT_STORAGE_KEY) ?? "null",
+    );
+    expect(persisted.trial.active_run_id).toBe(
+      "production_trial_output-unsettled",
+    );
+  });
+
+  it("preserves a pending slow submission through upstream and Start New attempts", async () => {
+    const pending = await draftWithUnsettledTrial("pending");
+    saveProductionDraft(localStorage, pending);
+    queryResult = {
+      ...queryResult,
+      data: {
+        root_dir: "data",
+        videos: [{ ...source, size_bytes: source.size_bytes + 1 }],
+      },
+    };
+    const { user } = renderPage();
+    const heading = screen.getByRole("heading", { name: "Trial and tuning" });
+    expect(
+      screen.queryByTestId("production-source-select"),
+    ).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Back" }));
+    expect(screen.getByText(/still being checked/i)).toBeVisible();
+    expect(heading).toHaveFocus();
+    await user.click(
+      screen.getByRole("button", { name: "Start new production" }),
+    );
+    expect(
+      screen.queryByText("Replace unfinished production?"),
+    ).not.toBeInTheDocument();
+
+    const persisted = JSON.parse(
+      localStorage.getItem(PRODUCTION_DRAFT_STORAGE_KEY) ?? "null",
+    );
+    expect(persisted.trial.pending_submission.submission_id).toBe(
+      "submission-unsettled",
+    );
   });
 
   it("renders with an unsaved fallback when the localStorage getter throws", async () => {

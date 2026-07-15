@@ -3,24 +3,24 @@
 - Program: Production Workflow frontend consolidation
 - Canonical plan: docs/superpowers/plans/2026-07-14-production-workflow-final-managed-pr-plan.md
 - Program status: in_progress
-- Current PR: PR2 · Interactive Field Calibration
-- Current branch: codex/interactive-field-calibration
-- Current phase: remote_feedback_window_2
-- Checks: the valid Copilot aria-live comment is fixed, independently re-reviewed SAFE TO PUSH, and revalidated with web 125 plus legacy 80+4 and Playwright 14/14; a new full 10-minute window starts from the latest fix push at 2026-07-15T12:17:50.174Z
+- Current PR: PR3 · Trial, Tuning, and Configuration Freeze
+- Current branch: codex/trial-tuning-and-config-freeze
+- Current phase: remote_feedback_window
+- Checks: spec COMPLIANT and quality SAFE with 0 findings; root gates pass with Python 1450, Broadcast 80+4, Vitest 267, Playwright 24, coverage, typechecks/build/frozen lock/diff; mandatory 10-minute remote feedback window starts after the status push
 - Blockers: none
 - Heartbeat: ACTIVE
 - Heartbeat automation id: production-workflow-multi-pr-heartbeat
 - Heartbeat interval: 15 minutes
 - Heartbeat scope: Continue and report this six-PR program until PR1–PR6 are merged; then delete the heartbeat and verify removal.
-- Last updated: 2026-07-15 08:17 ET
+- Last updated: 2026-07-15 11:35 ET
 
 ## PR Ledger
 
 | PR | Branch | Status | Pull request | Remote feedback started | Merge |
 | --- | --- | --- | --- | --- | --- |
 | PR1 | codex/production-workflow-foundation | completed | https://github.com/ferryhe/football_tracking/pull/104 | Final window started 2026-07-15T10:32:54.4422764Z | Merged 2026-07-15T10:43:22Z · ea52548 |
-| PR2 | codex/interactive-field-calibration | remote_feedback_window_2 | https://github.com/ferryhe/football_tracking/pull/105 | Restarting after feedback fix at 2026-07-15T12:17:50.174Z | Pending |
-| PR3 | codex/trial-tuning-and-config-freeze | pending | Pending | Pending | Pending |
+| PR2 | codex/interactive-field-calibration | completed | https://github.com/ferryhe/football_tracking/pull/105 | Final window completed 2026-07-15T12:29:00.338Z | Merged 2026-07-15T12:29:09Z · c781b34 |
+| PR3 | codex/trial-tuning-and-config-freeze | remote_feedback_window | https://github.com/ferryhe/football_tracking/pull/106 | Starts after status push | Pending |
 | PR4 | codex/full-production-review-render | pending | Pending | Pending | Pending |
 | PR5 | codex/grouped-production-history | pending | Pending | Pending | Pending |
 | PR6 | codex/production-workflow-cutover | pending | Pending | Pending | Pending |

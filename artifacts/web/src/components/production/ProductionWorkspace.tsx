@@ -1,7 +1,17 @@
-import { useState, type Ref } from "react";
+import { useEffect, useRef, useState, type Ref } from "react";
 import { Check, ChevronLeft, ChevronRight, Save } from "lucide-react";
 
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -14,14 +24,21 @@ import {
 } from "@/components/ui/card";
 import { useLanguage } from "@/contexts/LanguageContext";
 import type { ProductionCalibrationDraft } from "@/lib/productionCalibration";
+import type {
+  ProductionConfigEvidence,
+  ProductionPendingConfigConfirmation,
+} from "@/lib/productionConfigFreeze";
+import type { ProductionTrialState } from "@/lib/productionTrial";
 import {
   canEnterProductionStage,
   deriveProductionWorkflow,
+  productionTrialRequiresStop,
   type ProductionDraft,
   type ProductionUserStage,
   type SourceSignature,
 } from "@/lib/productionWorkflow";
 import { ProductionCalibrationStep } from "./ProductionCalibrationStep";
+import { ProductionTrialStep } from "./ProductionTrialStep";
 
 const USER_STAGES: ProductionUserStage[] = [
   "source",
@@ -39,6 +56,20 @@ export interface ProductionWorkspaceProps {
   error?: string | null;
   onSourceChange: (source: SourceSignature) => void;
   onCalibrationChange: (calibration: ProductionCalibrationDraft) => void;
+  onTrialChange: (
+    trial: ProductionTrialState,
+    expected: ProductionTrialState | null,
+  ) => boolean;
+  onPendingConfigChange: (
+    pending: ProductionPendingConfigConfirmation | null,
+    expected: ProductionPendingConfigConfirmation | null,
+    expectedAcceptedRunId: string,
+  ) => boolean;
+  onConfirmedConfigChange: (
+    confirmed: ProductionConfigEvidence,
+    expectedPending: ProductionPendingConfigConfirmation,
+  ) => boolean;
+  onInvalidate: (from: "calibration") => boolean;
   onSaveExit: () => void;
   onStartNew: () => void;
   startNewButtonRef?: Ref<HTMLButtonElement>;
@@ -58,17 +89,41 @@ export function ProductionWorkspace({
   error = null,
   onSourceChange,
   onCalibrationChange,
+  onTrialChange,
+  onPendingConfigChange,
+  onConfirmedConfigChange,
+  onInvalidate,
   onSaveExit,
   onStartNew,
   startNewButtonRef,
 }: ProductionWorkspaceProps) {
   const { t } = useLanguage();
   const derived = deriveProductionWorkflow(draft);
+  const trialDiscardBlocked = productionTrialRequiresStop(draft.trial);
+  const pendingTrialNeedsReconcile = Boolean(draft.trial?.pending_submission);
+  const activeTrialNeedsStop =
+    trialDiscardBlocked && !pendingTrialNeedsReconcile;
   const [viewStage, setViewStage] = useState<ProductionUserStage>(() =>
-    sourceIssue ? "source" : derived.user_stage,
+    trialDiscardBlocked
+      ? "trial"
+      : sourceIssue
+        ? "source"
+        : draft.confirmed_config && !draft.full_run
+          ? "trial"
+          : derived.user_stage,
   );
   const [calibrationPreviewUsable, setCalibrationPreviewUsable] =
     useState(false);
+  const [trialUsable, setTrialUsable] = useState(false);
+  const [pendingUpstreamEdit, setPendingUpstreamEdit] = useState<
+    { kind: "calibration" } | { kind: "source"; source: SourceSignature } | null
+  >(null);
+  const [activeStopFocusRequest, setActiveStopFocusRequest] = useState(0);
+  const backButtonRef = useRef<HTMLButtonElement>(null);
+  const sourceSelectRef = useRef<HTMLSelectElement>(null);
+  const stopButtonRef = useRef<HTMLButtonElement>(null);
+  const trialHeadingRef = useRef<HTMLHeadingElement>(null);
+  const upstreamFocusTargetRef = useRef<"source" | "back">("back");
   const sourceInCatalog = videos.find(
     (video) => video.path === draft.source?.path,
   );
@@ -98,11 +153,30 @@ export function ProductionWorkspace({
   };
 
   const derivedStageIndex = USER_STAGES.indexOf(derived.user_stage);
-  const reachableStageIndex = sourceIssue ? 0 : derivedStageIndex;
+  const reachableStageIndex = trialDiscardBlocked
+    ? USER_STAGES.indexOf("trial")
+    : sourceIssue
+      ? 0
+      : derivedStageIndex;
   const requestedStageIndex = USER_STAGES.indexOf(viewStage);
   const currentIndex = Math.min(requestedStageIndex, reachableStageIndex);
   const effectiveStage = USER_STAGES[currentIndex];
   const nextStage = USER_STAGES[currentIndex + 1] ?? null;
+
+  useEffect(() => {
+    if (!trialDiscardBlocked || activeStopFocusRequest === 0) return;
+    if (effectiveStage === "trial") {
+      (activeTrialNeedsStop
+        ? stopButtonRef.current
+        : trialHeadingRef.current
+      )?.focus();
+    }
+  }, [
+    activeStopFocusRequest,
+    activeTrialNeedsStop,
+    effectiveStage,
+    trialDiscardBlocked,
+  ]);
 
   function canEnterUserStage(stage: ProductionUserStage): boolean {
     switch (stage) {
@@ -120,15 +194,41 @@ export function ProductionWorkspace({
   }
 
   const canContinue =
+    !trialDiscardBlocked &&
     sourceIssue === null &&
     nextStage !== null &&
     currentIndex + 1 <= reachableStageIndex &&
     (effectiveStage !== "calibration" || calibrationPreviewUsable) &&
+    (effectiveStage !== "trial" || trialUsable) &&
     canEnterUserStage(nextStage);
 
+  function blockActiveTrialDiscard(): boolean {
+    if (!trialDiscardBlocked) return false;
+    setPendingUpstreamEdit(null);
+    setViewStage("trial");
+    setActiveStopFocusRequest((request) => request + 1);
+    return true;
+  }
+
   function handleSourceSelection(path: string) {
+    if (blockActiveTrialDiscard()) return;
     const source = videos.find((video) => video.path === path);
     if (!source) return;
+    if (
+      draft.trial?.attempts.length ||
+      draft.trial?.pending_submission ||
+      draft.confirmed_config ||
+      draft.pending_config_confirmation ||
+      draft.full_run
+    ) {
+      upstreamFocusTargetRef.current = "source";
+      setPendingUpstreamEdit({ kind: "source", source });
+      return;
+    }
+    applySourceSelection(source);
+  }
+
+  function applySourceSelection(source: SourceSignature) {
     setCalibrationPreviewUsable(false);
     onSourceChange(source);
     setViewStage("source");
@@ -140,7 +240,20 @@ export function ProductionWorkspace({
   }
 
   function handleBack() {
-    if (currentIndex > 0) setViewStage(USER_STAGES[currentIndex - 1]);
+    if (currentIndex <= 0) return;
+    if (blockActiveTrialDiscard()) return;
+    if (
+      effectiveStage === "trial" &&
+      (draft.trial?.attempts.length ||
+        draft.trial?.pending_submission ||
+        draft.confirmed_config ||
+        draft.pending_config_confirmation)
+    ) {
+      upstreamFocusTargetRef.current = "back";
+      setPendingUpstreamEdit({ kind: "calibration" });
+      return;
+    }
+    setViewStage(USER_STAGES[currentIndex - 1]);
   }
 
   function summaryDetail(stage: ProductionUserStage): string {
@@ -155,7 +268,7 @@ export function ProductionWorkspace({
           : t.common.notAvailable;
       case "trial":
         return (
-          [draft.trial?.accepted_run_id, draft.confirmed_config?.name]
+          [draft.trial?.accepted?.run_id, draft.confirmed_config?.name]
             .filter(Boolean)
             .join(" · ") || t.common.notAvailable
         );
@@ -199,7 +312,11 @@ export function ProductionWorkspace({
     <Card data-testid={`production-step-${effectiveStage}`}>
       <CardHeader>
         <CardTitle>
-          <h2 className="text-lg">
+          <h2
+            ref={trialHeadingRef}
+            tabIndex={effectiveStage === "trial" ? -1 : undefined}
+            className="text-lg"
+          >
             {effectiveStage === "source"
               ? t.production.sourceTitle
               : stageLabels[effectiveStage]}
@@ -245,6 +362,7 @@ export function ProductionWorkspace({
                 {t.production.sourceLabel}
               </label>
               <select
+                ref={sourceSelectRef}
                 id="production-source"
                 value={sourceInCatalog?.path ?? ""}
                 onChange={(event) => handleSourceSelection(event.target.value)}
@@ -272,6 +390,20 @@ export function ProductionWorkspace({
             onChange={onCalibrationChange}
             onUsabilityChange={setCalibrationPreviewUsable}
           />
+        ) : effectiveStage === "trial" && draft.source && draft.calibration ? (
+          <ProductionTrialStep
+            workflowId={draft.workflow_id}
+            source={draft.source}
+            calibration={draft.calibration}
+            trial={draft.trial}
+            pendingConfig={draft.pending_config_confirmation}
+            confirmedConfig={draft.confirmed_config}
+            onTrialChange={onTrialChange}
+            onPendingConfigChange={onPendingConfigChange}
+            onConfirmedConfigChange={onConfirmedConfigChange}
+            onUsabilityChange={setTrialUsable}
+            stopButtonRef={stopButtonRef}
+          />
         ) : (
           <Alert>
             <AlertDescription>
@@ -283,7 +415,12 @@ export function ProductionWorkspace({
       <CardFooter className="flex flex-col-reverse gap-2 border-t pt-5 sm:flex-row sm:justify-between">
         <div>
           {currentIndex > 0 && (
-            <Button type="button" variant="outline" onClick={handleBack}>
+            <Button
+              ref={backButtonRef}
+              type="button"
+              variant="outline"
+              onClick={handleBack}
+            >
               <ChevronLeft className="mr-2 h-4 w-4" aria-hidden="true" />
               {t.production.back}
             </Button>
@@ -329,7 +466,9 @@ export function ProductionWorkspace({
           ref={startNewButtonRef}
           type="button"
           variant="outline"
-          onClick={onStartNew}
+          onClick={() => {
+            if (!blockActiveTrialDiscard()) onStartNew();
+          }}
         >
           {t.production.startNew}
         </Button>
@@ -353,6 +492,15 @@ export function ProductionWorkspace({
           <AlertDescription>{error}</AlertDescription>
         </Alert>
       )}
+      {trialDiscardBlocked && activeStopFocusRequest > 0 && (
+        <Alert role="status">
+          <AlertDescription>
+            {pendingTrialNeedsReconcile
+              ? t.production.pendingTrialMustReconcile
+              : t.production.activeTrialMustStop}
+          </AlertDescription>
+        </Alert>
+      )}
 
       <div className="space-y-4">
         {USER_STAGES.slice(0, reachableStageIndex + 1).map((stage, index) => {
@@ -364,6 +512,59 @@ export function ProductionWorkspace({
             : null;
         })}
       </div>
+
+      <AlertDialog
+        open={pendingUpstreamEdit !== null}
+        onOpenChange={(open) => {
+          if (!open) setPendingUpstreamEdit(null);
+        }}
+      >
+        <AlertDialogContent
+          onCloseAutoFocus={(event) => {
+            event.preventDefault();
+            if (upstreamFocusTargetRef.current === "source") {
+              sourceSelectRef.current?.focus();
+            } else {
+              backButtonRef.current?.focus();
+            }
+          }}
+        >
+          <AlertDialogHeader>
+            <AlertDialogTitle>
+              {t.production.upstreamUnlockTitle}
+            </AlertDialogTitle>
+            <AlertDialogDescription>
+              {t.production.upstreamUnlockDescription}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>
+              {t.production.upstreamKeepLocked}
+            </AlertDialogCancel>
+            <AlertDialogAction
+              onClick={(event) => {
+                const pending = pendingUpstreamEdit;
+                if (!pending) return;
+                if (pending.kind === "source") {
+                  applySourceSelection(pending.source);
+                  setPendingUpstreamEdit(null);
+                  return;
+                }
+                if (!onInvalidate("calibration")) {
+                  event.preventDefault();
+                  return;
+                }
+                setPendingUpstreamEdit(null);
+                setCalibrationPreviewUsable(false);
+                setTrialUsable(false);
+                setViewStage("calibration");
+              }}
+            >
+              {t.production.upstreamUnlockConfirm}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </section>
   );
 }

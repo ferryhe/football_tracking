@@ -17,6 +17,8 @@ export default defineConfig({
       "src/lib/productionWorkflow.test.ts",
       "src/lib/fieldGeometry.test.ts",
       "src/lib/productionCalibration.test.ts",
+      "src/lib/productionTrial.test.ts",
+      "src/lib/productionConfigFreeze.test.ts",
       "src/components/production/**/*.test.tsx",
       "src/pages/production.test.tsx",
     ],
@@ -30,6 +32,8 @@ export default defineConfig({
         "src/lib/productionWorkflow.ts",
         "src/lib/fieldGeometry.ts",
         "src/lib/productionCalibration.ts",
+        "src/lib/productionTrial.ts",
+        "src/lib/productionConfigFreeze.ts",
       ],
       thresholds: {
         branches: 90,
