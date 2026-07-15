@@ -5,20 +5,20 @@
 - Program status: in_progress
 - Current PR: PR1 · Production Workflow Foundation
 - Current branch: codex/production-workflow-foundation
-- Current phase: ready_to_republish
+- Current phase: waiting_remote_feedback_2
 - Checks: valid Copilot comment fixed; independent feedback spec review compliant and quality review safe to publish; Web tests, test/runtime typechecks, 5 Playwright tests, and build pass
 - Blockers: none
 - Heartbeat: ACTIVE
 - Heartbeat automation id: production-workflow-multi-pr-heartbeat
 - Heartbeat interval: 15 minutes
 - Heartbeat scope: Continue and report this six-PR program until PR1–PR6 are merged; then delete the heartbeat and verify removal.
-- Last updated: 2026-07-15 06:10 ET
+- Last updated: 2026-07-15 06:11 ET
 
 ## PR Ledger
 
 | PR | Branch | Status | Pull request | Remote feedback started | Merge |
 | --- | --- | --- | --- | --- | --- |
-| PR1 | codex/production-workflow-foundation | ready_to_republish | https://github.com/ferryhe/football_tracking/pull/104 | Reset after feedback-fix push | Pending |
+| PR1 | codex/production-workflow-foundation | waiting_remote_feedback_2 | https://github.com/ferryhe/football_tracking/pull/104 | Resets after this status update push | Pending |
 | PR2 | codex/interactive-field-calibration | pending | Pending | Pending | Pending |
 | PR3 | codex/trial-tuning-and-config-freeze | pending | Pending | Pending | Pending |
 | PR4 | codex/full-production-review-render | pending | Pending | Pending | Pending |
