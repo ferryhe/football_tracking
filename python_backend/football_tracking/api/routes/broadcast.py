@@ -8,6 +8,7 @@ from football_tracking.api.schemas import (
     BroadcastRenderRequest,
     BroadcastReviewActionsRequest,
     BroadcastReviewWindowsResponse,
+    BroadcastTerminalTailReviewRequest,
     BroadcastTrajectoryRecomputeRequest,
 )
 from football_tracking.api.service import ApiService
@@ -41,6 +42,28 @@ def submit_broadcast_review_actions(
     try:
         return BroadcastOperationResponse(
             **service.submit_broadcast_review_actions(run_id, request.model_dump(mode="json"))
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=f"Run not found: {run_id}") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@router.post(
+    "/runs/{run_id}/broadcast/terminal-tail-review",
+    response_model=BroadcastOperationResponse,
+    responses={404: {"description": "Run not found"}, 409: {"description": "Evidence or run state conflict"}},
+)
+def submit_broadcast_terminal_tail_review(
+    run_id: str,
+    request: BroadcastTerminalTailReviewRequest,
+    service: ApiService = Depends(get_service),
+) -> BroadcastOperationResponse:
+    try:
+        return BroadcastOperationResponse(
+            **service.submit_broadcast_terminal_tail_review(run_id, request.model_dump(mode="json"))
         )
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=f"Run not found: {run_id}") from exc

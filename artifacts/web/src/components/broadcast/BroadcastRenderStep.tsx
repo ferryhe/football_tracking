@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, type Ref } from "react";
 import type {
   BroadcastRenderRequest,
   BroadcastRunState,
@@ -92,6 +92,7 @@ export interface BroadcastRenderStepProps {
   disabled?: boolean;
   error?: string | null;
   onCancel?: () => void;
+  cancelButtonRef?: Ref<HTMLButtonElement>;
   labels?: Partial<BroadcastRenderStepLabels>;
   artifactLabels?: Partial<Record<BroadcastDeliveryArtifact, string>>;
 }
@@ -141,7 +142,12 @@ const DEFAULT_ARTIFACT_LABELS: Record<BroadcastDeliveryArtifact, string> = {
 };
 
 const TRAJECTORY_ID_PATTERN = /^trajectory-[0-9a-f]{24}$/;
-const ACTIVE_OPERATION_STATUSES = new Set(["queued", "running", "committing"]);
+const ACTIVE_OPERATION_STATUSES = new Set([
+  "queued",
+  "running",
+  "reconciling",
+  "committing",
+]);
 
 function clampedProgress(value: number | null | undefined): number {
   if (typeof value !== "number" || !Number.isFinite(value)) return 0;
@@ -170,6 +176,7 @@ export function BroadcastRenderStep({
   disabled = false,
   error,
   onCancel,
+  cancelButtonRef,
   labels: labelOverrides,
   artifactLabels: artifactLabelOverrides,
 }: BroadcastRenderStepProps) {
@@ -250,7 +257,9 @@ export function BroadcastRenderStep({
     <Card data-testid="broadcast-render-step">
       <CardHeader>
         <CardTitle>{labels.title}</CardTitle>
-        <CardDescription>{labels.description}</CardDescription>
+        <CardDescription className="text-foreground">
+          {labels.description}
+        </CardDescription>
       </CardHeader>
 
       <CardContent className="space-y-5">
@@ -264,7 +273,7 @@ export function BroadcastRenderStep({
                 <CircleDashed className="h-4 w-4 text-muted-foreground" />
               )}
             </div>
-            <p className="mt-1 text-xs text-muted-foreground">
+            <p className="mt-1 text-xs text-foreground">
               {trajectoryReady
                 ? labels.trajectoryReady
                 : labels.trajectoryMissing}
@@ -283,7 +292,7 @@ export function BroadcastRenderStep({
                 <CircleDashed className="h-4 w-4 text-muted-foreground" />
               )}
             </div>
-            <p className="mt-1 text-xs text-muted-foreground">
+            <p className="mt-1 text-xs text-foreground">
               {effectiveOperationStatus ?? labels.waiting}
             </p>
           </div>
@@ -296,7 +305,7 @@ export function BroadcastRenderStep({
                 <CircleDashed className="h-4 w-4 text-muted-foreground" />
               )}
             </div>
-            <p className="mt-1 text-xs text-muted-foreground">
+            <p className="mt-1 text-xs text-foreground">
               {ready ? labels.ready : labels.waiting}
             </p>
           </div>
@@ -361,7 +370,7 @@ export function BroadcastRenderStep({
               </Badge>
             </div>
             <Progress value={progress} aria-label={labels.operationProgress} />
-            <p className="text-right text-xs text-muted-foreground">
+            <p className="text-right text-xs text-foreground">
               {progress.toFixed(1)}%
             </p>
           </div>
@@ -397,9 +406,7 @@ export function BroadcastRenderStep({
                 />
               </div>
             </div>
-            <p className="text-xs text-muted-foreground">
-              {labels.resolutionHint}
-            </p>
+            <p className="text-xs text-foreground">{labels.resolutionHint}</p>
           </div>
         )}
 
@@ -480,6 +487,7 @@ export function BroadcastRenderStep({
         <CardFooter className="justify-end gap-2 border-t pt-4">
           {operationActive && onCancel && (
             <Button
+              ref={cancelButtonRef}
               type="button"
               variant="outline"
               onClick={onCancel}

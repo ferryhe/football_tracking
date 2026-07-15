@@ -1,23 +1,5 @@
-import { useEffect, useMemo, useRef, useState } from "react";
-import { useQueryClient } from "@tanstack/react-query";
-import {
-  getGetArtifactUrl,
-  getGetBroadcastReviewWindowsQueryKey,
-  getGetRunQueryKey,
-  getListArtifactsQueryKey,
-  getListRunsQueryKey,
-  useCancelRun,
-  useCreateRun,
-  useGetBroadcastReviewWindows,
-  useGetRun,
-  useListArtifacts,
-  useListRuns,
-  useRecomputeBroadcastTrajectory,
-  useRenderBroadcastHybrid,
-  useSubmitBroadcastReviewActions,
-  type ArtifactSummary,
-  type BroadcastRenderRequest,
-} from "@workspace/api-client-react";
+import { useEffect, useMemo, useState } from "react";
+import { useCreateRun } from "@workspace/api-client-react";
 import {
   AlertCircle,
   CheckCircle2,
@@ -27,11 +9,7 @@ import {
 } from "lucide-react";
 import { useLocation, useSearch } from "wouter";
 
-import {
-  BroadcastRenderStep,
-  BROADCAST_DELIVERY_ARTIFACTS,
-  type BroadcastDeliveryArtifact,
-} from "@/components/broadcast/BroadcastRenderStep";
+import { BroadcastRenderStep } from "@/components/broadcast/BroadcastRenderStep";
 import {
   BroadcastReviewStep,
   type BroadcastReviewDecision,
@@ -48,23 +26,14 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { useLanguage } from "@/contexts/LanguageContext";
 import {
-  broadcastArtifactQueryIdentity,
-  broadcastCancellationTarget,
-  broadcastRecomputeRecoveryMode,
+  useBroadcastWorkflowController,
+  type BroadcastControllerError,
+} from "@/hooks/useBroadcastWorkflowController";
+import {
   buildBroadcastCreateRequest,
   localizeBroadcastWorkflowMessage,
-  mergeBroadcastArtifacts,
-  recoverBroadcastWorkflowRun,
-  resolveBroadcastMontageArtifact,
-  validateAndBuildBroadcastReviewActions,
   type BroadcastWorkflowStateName,
 } from "@/lib/broadcastWorkflow";
-
-const ACTIVE_STATES = new Set<BroadcastWorkflowStateName>([
-  "tracking",
-  "recomputing",
-  "rendering",
-]);
 
 function runIdFromSearch(search: string): string | null {
   const value = new URLSearchParams(search).get("run")?.trim();
@@ -76,48 +45,12 @@ function errorMessage(error: unknown, fallback: string): string {
   return fallback;
 }
 
-function statusCode(error: unknown): number | null {
-  if (!error || typeof error !== "object") return null;
-  const value = (error as { status?: unknown }).status;
-  return typeof value === "number" ? value : null;
-}
-
-function exactArtifact(
-  artifacts: readonly ArtifactSummary[],
-  name: string,
-): ArtifactSummary | null {
-  const matches = artifacts.filter(
-    (artifact) =>
-      artifact.exists &&
-      artifact.name === name &&
-      Number.isInteger(artifact.size_bytes) &&
-      Number(artifact.size_bytes) >= 0,
-  );
-  return matches.length === 1 ? matches[0] : null;
-}
-
-async function sha256Artifact(
-  runId: string,
-  artifact: ArtifactSummary,
-  signal?: AbortSignal,
-): Promise<string> {
-  const response = await fetch(getGetArtifactUrl(runId, artifact.name), {
-    cache: "no-store",
-    headers: { Accept: "application/octet-stream, application/json" },
-    signal,
-  });
-  if (!response.ok)
-    throw new Error(`HTTP ${response.status} while reading ${artifact.name}`);
-  const bytes = await response.arrayBuffer();
-  if (artifact.size_bytes != null && bytes.byteLength !== artifact.size_bytes) {
-    throw new Error(
-      `${artifact.name} changed while its review state was being recovered.`,
-    );
-  }
-  const digest = await crypto.subtle.digest("SHA-256", bytes);
-  return [...new Uint8Array(digest)]
-    .map((byte) => byte.toString(16).padStart(2, "0"))
-    .join("");
+function controllerErrorMessage(
+  error: BroadcastControllerError,
+  fallback: Record<BroadcastControllerError["code"], string>,
+): string {
+  if (error.message) return error.message;
+  return errorMessage(error.cause, fallback[error.code]);
 }
 
 function stepIndex(state: BroadcastWorkflowStateName): number {
@@ -130,166 +63,31 @@ export default function BroadcastPage() {
   const { language, t } = useLanguage();
   const [, navigate] = useLocation();
   const search = useSearch();
-  const queryClient = useQueryClient();
   const runId = useMemo(() => runIdFromSearch(search), [search]);
-  const [pollActive, setPollActive] = useState(Boolean(runId));
-  const [pageError, setPageError] = useState<string | null>(null);
+  const [setupError, setSetupError] = useState<string | null>(null);
   const [reviewerId, setReviewerId] = useState("operator");
-  const [recoveryNonce, setRecoveryNonce] = useState(0);
-  const [recoveryAttemptState, setRecoveryAttemptState] = useState<
-    "idle" | "pending" | "failed"
-  >("idle");
   const [reviewDecisions, setReviewDecisions] = useState<
     BroadcastReviewDecision[]
   >([]);
-  const recoveredArtifactRef = useRef<string | null>(null);
-  const recoveryAttemptKeyRef = useRef<string | null>(null);
-
-  const requestedRunQuery = useGetRun(runId ?? "", {
-    query: {
-      queryKey: getGetRunQueryKey(runId ?? ""),
-      enabled: Boolean(runId),
-      refetchInterval: pollActive ? 2_000 : false,
-    },
-  });
-  const runsQuery = useListRuns({
-    query: {
-      queryKey: getListRunsQueryKey(),
-      enabled: Boolean(runId),
-      refetchInterval: pollActive ? 2_000 : false,
-    },
-  });
-
-  const recovery = useMemo(
-    () =>
-      recoverBroadcastWorkflowRun(
-        requestedRunQuery.data ?? runId,
-        runsQuery.data ?? [],
-      ),
-    [requestedRunQuery.data, runId, runsQuery.data],
-  );
-  const parentRun = recovery.parentRun;
-  const parentRunId = parentRun?.run_id ?? "";
-  const parentRunIdRef = useRef(parentRunId);
-  parentRunIdRef.current = parentRunId;
-  const artifactQueryIdentity = useMemo(
-    () =>
-      broadcastArtifactQueryIdentity(
-        recovery.state,
-        parentRun?.broadcast?.status_generation,
-      ),
-    [parentRun?.broadcast?.status_generation, recovery.state],
-  );
-
-  const artifactsQuery = useListArtifacts(parentRunId, {
-    query: {
-      queryKey: [
-        ...getListArtifactsQueryKey(parentRunId),
-        artifactQueryIdentity.scope,
-      ],
-      enabled: Boolean(parentRunId),
-      refetchInterval: pollActive ? 2_000 : false,
-    },
-  });
-  const artifacts = useMemo(
-    () => mergeBroadcastArtifacts(parentRun?.artifacts, artifactsQuery.data),
-    [artifactsQuery.data, parentRun?.artifacts],
-  );
-  const reviewDecisionsArtifact = useMemo(
-    () => exactArtifact(artifacts, "review_decisions.json"),
-    [artifacts],
-  );
-  const recomputeRecoveryMode = broadcastRecomputeRecoveryMode(
-    parentRun,
-    reviewDecisionsArtifact !== null,
-  );
-  const reviewEnabled = Boolean(
-    parentRunId && recovery.state === "needs_review",
-  );
-  const reviewQuery = useGetBroadcastReviewWindows(parentRunId, {
-    query: {
-      queryKey: getGetBroadcastReviewWindowsQueryKey(parentRunId),
-      enabled: reviewEnabled,
-      retry: false,
-    },
-  });
-
   const createRun = useCreateRun();
-  const submitReview = useSubmitBroadcastReviewActions();
-  const recompute = useRecomputeBroadcastTrajectory();
-  const render = useRenderBroadcastHybrid();
-  const cancel = useCancelRun();
-
-  useEffect(() => {
-    setPollActive(
-      Boolean(runId) &&
-        (ACTIVE_STATES.has(recovery.state) || recovery.pollRunIds.length > 0),
-    );
-  }, [recovery.pollRunIds.length, recovery.state, runId]);
-
-  useEffect(() => {
-    if (
-      !parentRunId ||
-      ACTIVE_STATES.has(recovery.state) ||
-      recovery.state === "setup"
-    ) {
-      return;
-    }
-    void queryClient.invalidateQueries({
-      queryKey: getListArtifactsQueryKey(parentRunId),
-    });
-  }, [parentRunId, queryClient, recovery.state]);
+  const controller = useBroadcastWorkflowController({
+    parentRunId: runId,
+    enabled: Boolean(runId),
+    language,
+  });
+  const { recovery, parent: parentRun } = controller;
+  const recomputeRecoveryMode = controller.review.recomputeRecoveryMode;
+  const recoveryAttemptState = controller.review.recoveryAttemptState;
 
   useEffect(() => {
     setReviewDecisions([]);
-    recoveredArtifactRef.current = null;
-    recoveryAttemptKeyRef.current = null;
-    setRecoveryAttemptState("idle");
-  }, [parentRunId]);
-
-  useEffect(() => {
-    setReviewDecisions([]);
-  }, [reviewQuery.data?.queue_sha256]);
-
-  async function refreshWorkflow(extraRunId?: string) {
-    const invalidations: Promise<unknown>[] = [
-      queryClient.invalidateQueries({ queryKey: getListRunsQueryKey() }),
-      queryClient.invalidateQueries({ queryKey: ["runs"] }),
-      queryClient.invalidateQueries({ queryKey: ["health"] }),
-    ];
-    if (parentRunId) {
-      invalidations.push(
-        queryClient.invalidateQueries({
-          queryKey: getGetRunQueryKey(parentRunId),
-        }),
-        queryClient.invalidateQueries({
-          queryKey: getListArtifactsQueryKey(parentRunId),
-        }),
-        queryClient.invalidateQueries({
-          queryKey: getGetBroadcastReviewWindowsQueryKey(parentRunId),
-        }),
-      );
-    }
-    if (runId && runId !== parentRunId) {
-      invalidations.push(
-        queryClient.invalidateQueries({ queryKey: getGetRunQueryKey(runId) }),
-      );
-    }
-    if (extraRunId) {
-      invalidations.push(
-        queryClient.invalidateQueries({
-          queryKey: getGetRunQueryKey(extraRunId),
-        }),
-      );
-    }
-    await Promise.all(invalidations);
-  }
+  }, [controller.review.data?.queue_sha256]);
 
   async function handleSetup(input: BroadcastSetupInput) {
-    setPageError(null);
+    setSetupError(null);
     const request = buildBroadcastCreateRequest(input);
     if (!request.ok) {
-      setPageError(
+      setSetupError(
         request.messages
           .map((message) => localizeBroadcastWorkflowMessage(message, language))
           .join(" "),
@@ -298,302 +96,11 @@ export default function BroadcastPage() {
     }
     try {
       const created = await createRun.mutateAsync({ data: request.value });
-      setPollActive(true);
       navigate(`/broadcast?run=${encodeURIComponent(created.run_id)}`);
     } catch (error) {
-      setPageError(errorMessage(error, t.broadcast.startFailed));
+      setSetupError(errorMessage(error, t.broadcast.startFailed));
     }
   }
-
-  async function queueRecompute(reviewDecisionsSha256: string) {
-    if (!parentRunId) return;
-    const queued = await recompute.mutateAsync({
-      runId: parentRunId,
-      data: { review_decisions_sha256: reviewDecisionsSha256 },
-    });
-    setPollActive(true);
-    await refreshWorkflow(queued.run_id);
-  }
-
-  async function handleRetryRecompute() {
-    if (
-      !parentRunId ||
-      !reviewDecisionsArtifact ||
-      (recomputeRecoveryMode !== "retry" &&
-        recoveryAttemptState !== "failed") ||
-      recoveryAttemptKeyRef.current !== null
-    ) {
-      return;
-    }
-    const retryRunId = parentRunId;
-    const retryKey = `retry:${retryRunId}:${reviewDecisionsArtifact.size_bytes}`;
-    recoveredArtifactRef.current = retryKey;
-    recoveryAttemptKeyRef.current = retryKey;
-    setRecoveryAttemptState("pending");
-    setPageError(null);
-    try {
-      const digest = await sha256Artifact(retryRunId, reviewDecisionsArtifact);
-      if (
-        parentRunIdRef.current !== retryRunId ||
-        recoveredArtifactRef.current !== retryKey
-      ) {
-        return;
-      }
-      await queueRecompute(digest);
-      if (recoveryAttemptKeyRef.current === retryKey) {
-        setRecoveryAttemptState("idle");
-      }
-    } catch (error) {
-      if (parentRunIdRef.current !== retryRunId) return;
-      if (recoveryAttemptKeyRef.current === retryKey) {
-        setRecoveryAttemptState("failed");
-      }
-      if (statusCode(error) === 409) {
-        recoveredArtifactRef.current = `blocked:${retryRunId}`;
-        setPageError(t.broadcast.staleEvidence);
-        await refreshWorkflow();
-      } else {
-        setPageError(errorMessage(error, t.broadcast.recomputeFailed));
-      }
-    } finally {
-      if (recoveryAttemptKeyRef.current === retryKey) {
-        recoveryAttemptKeyRef.current = null;
-      }
-    }
-  }
-
-  async function handleReviewSubmit(decisions: BroadcastReviewDecision[]) {
-    if (!parentRunId || !reviewQuery.data) return;
-    setPageError(null);
-    const request = validateAndBuildBroadcastReviewActions(
-      reviewQuery.data,
-      decisions,
-      reviewerId,
-      new Date().toISOString(),
-    );
-    if (!request.ok) {
-      setPageError(
-        request.messages
-          .map((message) => localizeBroadcastWorkflowMessage(message, language))
-          .join(" "),
-      );
-      return;
-    }
-    let digest: string;
-    try {
-      const submitted = await submitReview.mutateAsync({
-        runId: parentRunId,
-        data: request.value,
-      });
-      const submittedDigest =
-        submitted.details?.review_decisions_sha256?.trim();
-      if (!submittedDigest || !/^[0-9a-f]{64}$/.test(submittedDigest)) {
-        throw new Error(
-          "The server did not return the evidence-bound review decision hash.",
-        );
-      }
-      digest = submittedDigest;
-    } catch (error) {
-      if (statusCode(error) === 409) {
-        recoveredArtifactRef.current = `blocked:${parentRunId}`;
-        setPageError(t.broadcast.staleEvidence);
-        await refreshWorkflow();
-      } else {
-        setPageError(errorMessage(error, t.broadcast.submitFailed));
-      }
-      return;
-    }
-    try {
-      recoveredArtifactRef.current = `submitted:${digest}`;
-      await queueRecompute(digest);
-    } catch (error) {
-      recoveryAttemptKeyRef.current = null;
-      setRecoveryAttemptState("failed");
-      await refreshWorkflow().catch(() => undefined);
-      if (statusCode(error) === 409) {
-        recoveredArtifactRef.current = `blocked:${parentRunId}`;
-        setPageError(t.broadcast.staleEvidence);
-      } else {
-        setPageError(errorMessage(error, t.broadcast.recomputeFailed));
-      }
-    }
-  }
-
-  useEffect(() => {
-    if (
-      recomputeRecoveryMode !== "auto" ||
-      recovery.state !== "needs_review" ||
-      !parentRunId ||
-      !reviewDecisionsArtifact ||
-      submitReview.isPending ||
-      recompute.isPending ||
-      recoveryAttemptKeyRef.current !== null
-    ) {
-      return;
-    }
-    if (
-      recoveredArtifactRef.current === `blocked:${parentRunId}` ||
-      recoveredArtifactRef.current?.startsWith("submitted:")
-    ) {
-      return;
-    }
-    const recoveryKey = `auto:${parentRunId}:${reviewDecisionsArtifact.size_bytes}`;
-    if (recoveredArtifactRef.current === recoveryKey) return;
-    recoveredArtifactRef.current = recoveryKey;
-    recoveryAttemptKeyRef.current = recoveryKey;
-    setRecoveryAttemptState("pending");
-    const controller = new AbortController();
-    let queueStarted = false;
-    void (async () => {
-      try {
-        const digest = await sha256Artifact(
-          parentRunId,
-          reviewDecisionsArtifact,
-          controller.signal,
-        );
-        if (
-          controller.signal.aborted ||
-          parentRunIdRef.current !== parentRunId ||
-          recoveredArtifactRef.current !== recoveryKey
-        ) {
-          return;
-        }
-        queueStarted = true;
-        await queueRecompute(digest);
-        if (recoveryAttemptKeyRef.current === recoveryKey) {
-          setRecoveryAttemptState("idle");
-        }
-      } catch (error) {
-        if (
-          (!queueStarted && controller.signal.aborted) ||
-          parentRunIdRef.current !== parentRunId ||
-          recoveredArtifactRef.current !== recoveryKey
-        ) {
-          return;
-        }
-        if (recoveryAttemptKeyRef.current === recoveryKey) {
-          setRecoveryAttemptState("failed");
-        }
-        if (statusCode(error) === 409) {
-          recoveredArtifactRef.current = `blocked:${parentRunId}`;
-          setPageError(t.broadcast.staleEvidence);
-          await refreshWorkflow();
-        } else {
-          setPageError(errorMessage(error, t.broadcast.recomputeFailed));
-        }
-      } finally {
-        if (recoveryAttemptKeyRef.current === recoveryKey) {
-          recoveryAttemptKeyRef.current = null;
-        }
-      }
-    })();
-    return () => {
-      controller.abort();
-      if (!queueStarted && recoveryAttemptKeyRef.current === recoveryKey) {
-        recoveryAttemptKeyRef.current = null;
-        if (recoveredArtifactRef.current === recoveryKey) {
-          recoveredArtifactRef.current = null;
-        }
-        setRecoveryAttemptState("idle");
-      }
-    };
-  }, [
-    parentRunId,
-    recoveryNonce,
-    recovery.state,
-    recomputeRecoveryMode,
-    recompute.isPending,
-    reviewDecisionsArtifact?.exists,
-    reviewDecisionsArtifact?.name,
-    reviewDecisionsArtifact?.size_bytes,
-    submitReview.isPending,
-  ]);
-
-  async function handleRender(request: BroadcastRenderRequest) {
-    if (!parentRunId) return;
-    setPageError(null);
-    try {
-      const queued = await render.mutateAsync({
-        runId: parentRunId,
-        data: request,
-      });
-      setPollActive(true);
-      await refreshWorkflow(queued.run_id);
-    } catch (error) {
-      if (statusCode(error) === 409) {
-        setPageError(t.broadcast.staleEvidence);
-        await refreshWorkflow();
-      } else {
-        setPageError(errorMessage(error, t.broadcast.renderFailed));
-      }
-    }
-  }
-
-  async function handleCancel() {
-    const targetId = broadcastCancellationTarget(recovery);
-    if (!targetId) return;
-    if (recovery.state === "recomputing" && parentRunId) {
-      recoveredArtifactRef.current = `blocked:${parentRunId}`;
-    }
-    setPageError(null);
-    try {
-      await cancel.mutateAsync({ runId: targetId });
-      await refreshWorkflow(targetId);
-    } catch (error) {
-      setPageError(errorMessage(error, t.broadcast.cancelFailed));
-    }
-  }
-
-  const montageResolution = useMemo(() => {
-    const urls: Record<string, string> = {};
-    const messages: string[] = [];
-    for (const item of reviewQuery.data?.items ?? []) {
-      for (const candidate of item.candidates ?? []) {
-        const resolved = resolveBroadcastMontageArtifact(artifacts, candidate);
-        if (resolved.ok) {
-          urls[candidate.candidate_id] = getGetArtifactUrl(
-            parentRunId,
-            resolved.value.name,
-          );
-        } else {
-          messages.push(
-            ...resolved.messages.map((message) =>
-              localizeBroadcastWorkflowMessage(message, language),
-            ),
-          );
-        }
-      }
-    }
-    return { urls, messages };
-  }, [artifacts, language, parentRunId, reviewQuery.data]);
-
-  const localizedReviewResponse = useMemo(() => {
-    if (!reviewQuery.data) return null;
-    return {
-      ...reviewQuery.data,
-      reason: reviewQuery.data.reason
-        ? localizeBroadcastWorkflowMessage(reviewQuery.data.reason, language)
-        : reviewQuery.data.reason,
-    };
-  }, [language, reviewQuery.data]);
-
-  const deliveryUrls = useMemo(() => {
-    const result: Partial<Record<BroadcastDeliveryArtifact, string>> = {};
-    if (!artifactQueryIdentity.deliveryReady || !artifactsQuery.isSuccess) {
-      return result;
-    }
-    for (const name of BROADCAST_DELIVERY_ARTIFACTS) {
-      const artifact = exactArtifact(artifactsQuery.data ?? [], name);
-      if (artifact)
-        result[name] = getGetArtifactUrl(parentRunId, artifact.name);
-    }
-    return result;
-  }, [
-    artifactQueryIdentity.deliveryReady,
-    artifactsQuery.data,
-    artifactsQuery.isSuccess,
-    parentRunId,
-  ]);
 
   const activeStep = stepIndex(recovery.state);
   const steps = [
@@ -601,26 +108,29 @@ export default function BroadcastPage() {
     t.broadcast.reviewStep,
     t.broadcast.renderStep,
   ];
-  const loading = Boolean(
-    runId && !parentRun && (requestedRunQuery.isLoading || runsQuery.isLoading),
-  );
-  const queryError =
-    requestedRunQuery.error ?? runsQuery.error ?? artifactsQuery.error;
+  const loading = controller.pending.initialLoad;
+  const actionError = controller.errors.action
+    ? controllerErrorMessage(controller.errors.action, {
+        submitFailed: t.broadcast.submitFailed,
+        recomputeFailed: t.broadcast.recomputeFailed,
+        renderFailed: t.broadcast.renderFailed,
+        cancelFailed: t.broadcast.cancelFailed,
+        staleEvidence: t.broadcast.staleEvidence,
+      })
+    : null;
   const combinedError =
-    pageError ??
-    (queryError ? errorMessage(queryError, t.broadcast.loadFailed) : null);
-  const workflowMessages = Array.from(
-    new Set(
-      [
-        ...recovery.messages.map((message) =>
-          localizeBroadcastWorkflowMessage(message, language),
-        ),
-        ...(parentRun?.broadcast?.blocking_reasons ?? []).map((message) =>
-          localizeBroadcastWorkflowMessage(message, language),
-        ),
-      ].filter(Boolean),
-    ),
-  );
+    setupError ??
+    actionError ??
+    (controller.errors.query
+      ? errorMessage(controller.errors.query, t.broadcast.loadFailed)
+      : null);
+  const workflowMessages = controller.workflowMessages;
+  const localizedReviewResponse = controller.review.localizedData;
+  const montageResolution = {
+    urls: controller.montage.urlsByCandidateId,
+    messages: controller.montage.messages,
+  };
+  const deliveryUrls = controller.delivery.urls;
 
   return (
     <div
@@ -648,12 +158,7 @@ export default function BroadcastPage() {
               variant="outline"
               size="sm"
               disabled={recoveryAttemptState === "pending"}
-              onClick={() => {
-                recoveredArtifactRef.current = null;
-                setRecoveryAttemptState("idle");
-                setRecoveryNonce((value) => value + 1);
-                void refreshWorkflow();
-              }}
+              onClick={() => void controller.actions.refresh()}
             >
               <RefreshCw className="mr-1.5 h-4 w-4" />
               {t.broadcast.refresh}
@@ -718,7 +223,7 @@ export default function BroadcastPage() {
           labels={t.broadcast.setup}
           onSubmit={(input) => void handleSetup(input)}
           isSubmitting={createRun.isPending}
-          error={pageError}
+          error={setupError}
         />
       )}
 
@@ -734,8 +239,8 @@ export default function BroadcastPage() {
             </div>
             <Button
               variant="outline"
-              onClick={() => void handleCancel()}
-              disabled={cancel.isPending}
+              onClick={() => void controller.actions.cancel()}
+              disabled={controller.pending.cancel}
             >
               {t.broadcast.cancel}
             </Button>
@@ -763,19 +268,21 @@ export default function BroadcastPage() {
                 <p>{t.broadcast.retryRecomputeDescription}</p>
                 <Button
                   type="button"
-                  onClick={() => void handleRetryRecompute()}
+                  onClick={() => void controller.actions.retryRecompute()}
                   disabled={
-                    recompute.isPending || recoveryAttemptState === "pending"
+                    controller.pending.recompute ||
+                    recoveryAttemptState === "pending"
                   }
                 >
-                  {recompute.isPending || recoveryAttemptState === "pending"
+                  {controller.pending.recompute ||
+                  recoveryAttemptState === "pending"
                     ? t.broadcast.retryingRecompute
                     : t.broadcast.retryRecompute}
                 </Button>
               </AlertDescription>
             </Alert>
           )}
-          {recomputeRecoveryMode === "none" && reviewQuery.isLoading && (
+          {recomputeRecoveryMode === "none" && controller.review.isLoading && (
             <Card>
               <CardContent className="flex items-center gap-3 py-10">
                 <Loader2 className="h-5 w-5 animate-spin" />
@@ -783,7 +290,7 @@ export default function BroadcastPage() {
               </CardContent>
             </Card>
           )}
-          {recomputeRecoveryMode === "none" && reviewQuery.isError && (
+          {recomputeRecoveryMode === "none" && controller.review.isError && (
             <Alert>
               <AlertCircle className="h-4 w-4" />
               <AlertTitle>{t.broadcast.reviewUnavailable}</AlertTitle>
@@ -810,7 +317,7 @@ export default function BroadcastPage() {
                   value={reviewerId}
                   onChange={(event) => setReviewerId(event.target.value)}
                   maxLength={200}
-                  disabled={submitReview.isPending || recompute.isPending}
+                  disabled={controller.pending.review}
                 />
               </div>
               <BroadcastReviewStep
@@ -818,8 +325,10 @@ export default function BroadcastPage() {
                 montageUrlsByCandidateId={montageResolution.urls}
                 decisions={reviewDecisions}
                 onDecisionsChange={setReviewDecisions}
-                onSubmit={(decisions) => void handleReviewSubmit(decisions)}
-                isSubmitting={submitReview.isPending || recompute.isPending}
+                onSubmit={(decisions) =>
+                  void controller.actions.submitReview(decisions, reviewerId)
+                }
+                isSubmitting={controller.pending.review}
                 disabled={
                   montageResolution.messages.length > 0 ||
                   ((localizedReviewResponse.items ?? []).some(
@@ -827,7 +336,7 @@ export default function BroadcastPage() {
                   ) &&
                     !reviewerId.trim())
                 }
-                error={pageError}
+                error={actionError}
                 labels={t.broadcast.review}
                 noiseSubtypeLabels={t.broadcast.noiseSubtypes}
               />
@@ -848,8 +357,8 @@ export default function BroadcastPage() {
             </div>
             <Button
               variant="outline"
-              onClick={() => void handleCancel()}
-              disabled={cancel.isPending}
+              onClick={() => void controller.actions.cancel()}
+              disabled={controller.pending.cancel}
             >
               {t.broadcast.cancel}
             </Button>
@@ -869,13 +378,15 @@ export default function BroadcastPage() {
               parentRun.broadcast?.trajectory_generation_id
             }
             artifactUrls={deliveryUrls}
-            onRender={(request) => void handleRender(request)}
-            isRendering={render.isPending || recovery.state === "rendering"}
+            onRender={(request) => void controller.actions.render(request)}
+            isRendering={
+              controller.pending.render || recovery.state === "rendering"
+            }
             disabled={recovery.state === "ready"}
-            error={pageError}
+            error={actionError}
             onCancel={
               recovery.state === "rendering"
-                ? () => void handleCancel()
+                ? () => void controller.actions.cancel()
                 : undefined
             }
             labels={t.broadcast.render}

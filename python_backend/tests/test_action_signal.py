@@ -5,6 +5,7 @@ import io
 import json
 import tempfile
 import unittest
+from concurrent.futures import CancelledError
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
@@ -17,6 +18,9 @@ from football_tracking.action_signal import (
     ACTION_SIGNAL_DIAGNOSTICS_NAME,
     ACTION_SIGNAL_REPORT_NAME,
     ACTION_SIGNAL_SCHEMA_VERSION,
+    ACTION_SIGNAL_TERMINAL_SHORTFALL_LIMITATION,
+    ACTION_SIGNAL_TERMINAL_SHORTFALL_REASON,
+    ACTION_SIGNAL_TERMINAL_SHORTFALL_STATUS,
     ACTION_TRACK_NAME,
     ActionCalibration,
     ActionMeasurement,
@@ -518,6 +522,142 @@ class ActionSignalGenerationTests(unittest.TestCase):
         self.assertEqual(5, report["expected_frame_count"])
         self.assertEqual(3, report["frame_count"])
         self.assertEqual(report["status"], written["status"])
+        self.assertTrue(capture.released)
+
+    def test_exact_trusted_terminal_shortfall_is_explicit_and_reviewable(self) -> None:
+        frames = [np.zeros((32, 64, 3), dtype=np.uint8) for _ in range(3)]
+        capture = _FakeCapture(frames, reported_frame_count=5, fps=20.0)
+        with (
+            tempfile.TemporaryDirectory() as temp_name,
+            patch("football_tracking.action_signal.cv2.VideoCapture", return_value=capture),
+        ):
+            output_dir = Path(temp_name)
+            report = generate_action_track(
+                input_video=output_dir / "input.avi",
+                calibration=self.make_calibration(),
+                output_dir=output_dir,
+                settings=ActionSignalSettings(process_width=64, warmup_frames=0),
+                expected_terminal_shortfall_frames=2,
+                max_terminal_shortfall_seconds=0.1,
+            )
+
+        self.assertEqual(ACTION_SIGNAL_TERMINAL_SHORTFALL_STATUS, report["status"])
+        self.assertEqual(ACTION_SIGNAL_TERMINAL_SHORTFALL_REASON, report["termination_reason"])
+        self.assertEqual(5, report["expected_frame_count"])
+        self.assertEqual(3, report["frame_count"])
+        self.assertEqual(
+            {
+                "code": ACTION_SIGNAL_TERMINAL_SHORTFALL_LIMITATION,
+                "requires_manual_review": True,
+                "reported_frame_count": 5,
+                "verified_frame_count": 3,
+                "expected_frame_count": 5,
+                "decoded_frame_count": 3,
+                "missing_terminal_frames": 2,
+                "missing_terminal_seconds": 0.1,
+                "expected_terminal_shortfall_frames": 2,
+                "max_accepted_terminal_shortfall_seconds": 0.1,
+                "policy": "trusted_full_source_terminal_tail_only",
+            },
+            report["limitations"][0],
+        )
+        self.assertTrue(capture.released)
+
+    def test_terminal_shortfall_exception_stays_exact_unbounded_and_time_limited(self) -> None:
+        cases = (
+            ("unexpected_one_frame_gap", 4, 5, 20.0, 2, 0.1, None),
+            ("bounded_read", 3, 5, 20.0, 2, 0.1, 5),
+            ("one_frame_over_time_limit", 4, 5, 5.0, 1, 0.1, None),
+        )
+        for name, decoded, reported, fps, expected_gap, max_seconds, max_frames in cases:
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as temp_name:
+                capture = _FakeCapture(
+                    [np.zeros((32, 64, 3), dtype=np.uint8) for _ in range(decoded)],
+                    reported_frame_count=reported,
+                    fps=fps,
+                )
+                with patch("football_tracking.action_signal.cv2.VideoCapture", return_value=capture):
+                    report = generate_action_track(
+                        input_video=Path(temp_name) / "input.avi",
+                        calibration=self.make_calibration(),
+                        output_dir=Path(temp_name),
+                        settings=ActionSignalSettings(process_width=64, warmup_frames=0),
+                        max_frames=max_frames,
+                        expected_terminal_shortfall_frames=expected_gap,
+                        max_terminal_shortfall_seconds=max_seconds,
+                    )
+                self.assertEqual("truncated", report["status"])
+                self.assertEqual("premature_read_failure", report["termination_reason"])
+                self.assertEqual([], report["limitations"])
+
+        with tempfile.TemporaryDirectory() as temp_name, self.assertRaisesRegex(
+            ValueError,
+            "exceeds the terminal shortfall policy",
+        ):
+            generate_action_track(
+                input_video=Path(temp_name) / "input.avi",
+                calibration=self.make_calibration(),
+                output_dir=Path(temp_name),
+                expected_terminal_shortfall_frames=3,
+                max_terminal_shortfall_seconds=0.1,
+            )
+
+    def test_cancellation_after_terminal_eof_publishes_no_shortfall_artifacts(self) -> None:
+        capture = _FakeCapture(
+            [np.zeros((32, 64, 3), dtype=np.uint8) for _ in range(3)],
+            reported_frame_count=5,
+            fps=20.0,
+        )
+        cancellation_checks = 0
+
+        def cancel_before_publish() -> bool:
+            nonlocal cancellation_checks
+            cancellation_checks += 1
+            return cancellation_checks >= 6
+
+        with (
+            tempfile.TemporaryDirectory() as temp_name,
+            patch("football_tracking.action_signal.cv2.VideoCapture", return_value=capture),
+        ):
+            output_dir = Path(temp_name)
+            with self.assertRaises(CancelledError):
+                generate_action_track(
+                    input_video=output_dir / "input.avi",
+                    calibration=self.make_calibration(),
+                    output_dir=output_dir,
+                    settings=ActionSignalSettings(process_width=64, warmup_frames=0),
+                    should_cancel=cancel_before_publish,
+                    expected_terminal_shortfall_frames=2,
+                    max_terminal_shortfall_seconds=0.1,
+                )
+            for name in (ACTION_TRACK_NAME, ACTION_SIGNAL_DIAGNOSTICS_NAME, ACTION_SIGNAL_REPORT_NAME):
+                self.assertFalse((output_dir / name).exists())
+
+        self.assertTrue(capture.released)
+
+    def test_partial_start_never_uses_the_full_source_terminal_shortfall_exception(self) -> None:
+        capture = _FakeCapture(
+            [np.zeros((32, 64, 3), dtype=np.uint8) for _ in range(3)],
+            reported_frame_count=5,
+            fps=20.0,
+        )
+        with (
+            tempfile.TemporaryDirectory() as temp_name,
+            patch("football_tracking.action_signal.cv2.VideoCapture", return_value=capture),
+        ):
+            report = generate_action_track(
+                input_video=Path(temp_name) / "input.avi",
+                calibration=self.make_calibration(),
+                output_dir=Path(temp_name),
+                settings=ActionSignalSettings(process_width=64, warmup_frames=0),
+                start_frame=1,
+                expected_terminal_shortfall_frames=2,
+                max_terminal_shortfall_seconds=0.1,
+            )
+
+        self.assertEqual("truncated", report["status"])
+        self.assertEqual("premature_read_failure", report["termination_reason"])
+        self.assertEqual([], report["limitations"])
         self.assertTrue(capture.released)
 
     def test_processing_failure_preserves_existing_artifact_set_and_cleans_temps(self) -> None:

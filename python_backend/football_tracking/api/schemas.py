@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from football_tracking.ai_contracts import (
     AIApprovedActionName,
@@ -607,6 +607,7 @@ class BroadcastRunState(BaseModel):
         Literal[
             "queued",
             "running",
+            "reconciling",
             "committing",
             "completed",
             "failed",
@@ -710,6 +711,48 @@ class BroadcastReviewActionsRequest(BaseModel):
         return self
 
 
+class BroadcastTerminalTailReviewEvidence(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    source_video_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    tracking_contract_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    action_signal_report_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    temporal_chunks_report_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    reported_frame_count: int = Field(ge=1)
+    verified_frame_count: int = Field(ge=1)
+    gap_frames: int = Field(ge=1)
+    gap_seconds: float = Field(gt=0.0)
+    evidence_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+class BroadcastTerminalTailReviewState(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["not_required", "required", "accepted", "invalid"]
+    reason: str | None = None
+    evidence: BroadcastTerminalTailReviewEvidence | None = None
+    decision: Literal["accept_terminal_shortfall"] | None = None
+    reviewer_id: str | None = None
+    reviewed_at: str | None = None
+    acknowledgement_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+
+
+class BroadcastTerminalTailReviewRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    decision: Literal["accept_terminal_shortfall"]
+    reviewer_id: str = Field(min_length=1, max_length=200)
+    evidence_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+    @field_validator("reviewer_id")
+    @classmethod
+    def validate_reviewer_id(cls, value: str) -> str:
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("reviewer_id must not be blank")
+        return stripped
+
+
 class BroadcastTrajectoryRecomputeRequest(BaseModel):
     review_decisions_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
 
@@ -724,6 +767,7 @@ class BroadcastOperationDetails(BaseModel):
     model_config = ConfigDict(extra="allow")
 
     review_decisions_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    terminal_tail_review_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     message: str | None = None
 
 
@@ -803,6 +847,9 @@ class BroadcastReviewWindowsResponse(BaseModel):
     queue_sha256: str | None = None
     review_item_count: int = 0
     items: list[BroadcastReviewWindow] = Field(default_factory=list)
+    terminal_tail_review: BroadcastTerminalTailReviewState = Field(
+        default_factory=lambda: BroadcastTerminalTailReviewState(status="not_required")
+    )
 
 
 class CreateRunRequest(BaseModel):

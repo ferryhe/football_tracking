@@ -1,7 +1,7 @@
-import { useState } from "react";
-import { render, screen } from "@testing-library/react";
+import { useEffect, useRef, useState } from "react";
+import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { LanguageProvider } from "@/contexts/LanguageContext";
 import {
@@ -17,6 +17,10 @@ import {
 } from "@/lib/productionWorkflow";
 import type { ProductionTrialState } from "@/lib/productionTrial";
 import { ProductionWorkspace } from "./ProductionWorkspace";
+
+const fullRunMock = vi.hoisted(() => ({
+  recovered: null as ProductionDraft["full_run"],
+}));
 
 vi.mock("./ProductionCalibrationStep", () => ({
   ProductionCalibrationStep: ({
@@ -58,6 +62,54 @@ vi.mock("./ProductionTrialStep", () => ({
     </div>
   ),
 }));
+
+vi.mock("./ProductionFullRunStep", () => ({
+  ProductionFullRunStep: ({
+    focusRequest,
+    fullRun,
+    onFullRunChange,
+  }: {
+    focusRequest?: number;
+    fullRun?: ProductionDraft["full_run"];
+    onFullRunChange?: NonNullable<
+      React.ComponentProps<typeof ProductionWorkspace>["onFullRunChange"]
+    >;
+  }) => {
+    const cancelRef = useRef<HTMLButtonElement>(null);
+    const headingRef = useRef<HTMLHeadingElement>(null);
+    useEffect(() => {
+      if (!focusRequest) return;
+      (fullRun?.pending_submission
+        ? headingRef.current
+        : cancelRef.current
+      )?.focus();
+    }, [focusRequest, fullRun?.pending_submission]);
+    useEffect(() => {
+      if (
+        fullRunMock.recovered &&
+        fullRun &&
+        fullRunMock.recovered.revision === fullRun.revision + 1
+      ) {
+        onFullRunChange?.(fullRunMock.recovered, fullRun.revision);
+      }
+    }, [fullRun, onFullRunChange]);
+    return (
+      <div>
+        <h3 ref={headingRef} tabIndex={-1}>
+          Full run reconciliation
+        </h3>
+        <span>interactive full tracking</span>
+        <button ref={cancelRef} type="button">
+          Cancel full tracking
+        </button>
+      </div>
+    );
+  },
+}));
+
+beforeEach(() => {
+  fullRunMock.recovered = null;
+});
 
 const videos: SourceSignature[] = [
   {
@@ -250,15 +302,65 @@ function draftAtReady(): ProductionDraft {
     workflow_id: "workflow-ready",
     status: "completed",
     full_run: {
-      run_id: "full-a",
-      status: "ready",
+      revision: 2,
+      attempts: [
+        {
+          run_id: "full-a",
+          generation: 1,
+          submission_id: "full-submission-a",
+          parent_trial_run_id: "trial-a",
+          config_name: "locked-a.yaml",
+          config_sha256: "a".repeat(64),
+          request_sha256: "3".repeat(64),
+          request: {} as never,
+          created_at: "2026-07-14T12:00:00Z",
+          last_observed: {
+            run_status: "completed",
+            workflow_state: "ready",
+            status_generation: "b".repeat(64),
+            trajectory_generation_id: null,
+            operation: null,
+            observed_at: "2026-07-14T12:00:00Z",
+          },
+        },
+      ],
+      pending_submission: null,
+      current_run_id: "full-a",
     },
     verified_product: {
       run_id: "full-a",
       artifact_name: "broadcast.mp4",
+      artifact_size_bytes: 4_096,
+      artifact_sha256: "4".repeat(64),
+      quality_report_sha256: "5".repeat(64),
       status_generation: "b".repeat(64),
+      verified_at: "2026-07-14T12:00:00Z",
     },
   };
+}
+
+function draftAtActiveFullRun(): ProductionDraft {
+  const draft = draftAtReady();
+  draft.status = "active";
+  draft.verified_product = null;
+  draft.full_run!.attempts[0].last_observed = {
+    ...draft.full_run!.attempts[0].last_observed,
+    run_status: "running",
+    workflow_state: "tracking",
+    status_generation: null,
+  };
+  return draft;
+}
+
+function draftAtPendingFullRun(): ProductionDraft {
+  const draft = draftAtFullTracking();
+  draft.full_run = {
+    revision: 1,
+    attempts: [],
+    pending_submission: {} as never,
+    current_run_id: null,
+  };
+  return draft;
 }
 
 function renderWorkspace(
@@ -301,6 +403,18 @@ function renderWorkspace(
             );
             return true;
           }}
+          onFullRunChange={(fullRun, expectedRevision) => {
+            setDraft((current) => {
+              if ((current.full_run?.revision ?? 0) !== expectedRevision) {
+                return current;
+              }
+              return { ...current, full_run: fullRun };
+            });
+            return true;
+          }}
+          onPersistCurrent={() => true}
+          onVerifiedProduct={() => true}
+          onParentRunIdChange={() => undefined}
           onInvalidate={(from) => {
             setDraft((current) => invalidateProductionDraft(current, from));
             return true;
@@ -322,6 +436,83 @@ function renderWorkspace(
 }
 
 describe("ProductionWorkspace", () => {
+  it("blocks Back and Start New for active full tracking and focuses Cancel", async () => {
+    const { user, onStartNew } = renderWorkspace(draftAtActiveFullRun());
+    expect(screen.getByText("interactive full tracking")).toBeVisible();
+
+    await user.click(
+      screen.getByRole("button", { name: "Start new production" }),
+    );
+    expect(onStartNew).not.toHaveBeenCalled();
+    expect(
+      screen.getByRole("button", { name: "Cancel full tracking" }),
+    ).toHaveFocus();
+    expect(screen.getByText(/full tracking is active/i)).toBeVisible();
+
+    await user.click(screen.getByRole("button", { name: "Back" }));
+    expect(screen.getByText("interactive full tracking")).toBeVisible();
+  });
+
+  it("blocks upstream reset after an active child is recovered before the parent facade updates", async () => {
+    const draft = draftAtReady();
+    draft.status = "active";
+    draft.verified_product = null;
+    draft.full_run!.attempts[0].last_observed = {
+      ...draft.full_run!.attempts[0].last_observed,
+      workflow_state: "trajectory_ready",
+      status_generation: null,
+    };
+    fullRunMock.recovered = {
+      ...draft.full_run!,
+      revision: draft.full_run!.revision + 1,
+      attempts: draft.full_run!.attempts.map((attempt) => ({
+        ...attempt,
+        last_observed: {
+          ...attempt.last_observed,
+          workflow_state: "rendering",
+          operation: {
+            run_id: "render-child",
+            kind: "render",
+            status: "running",
+          },
+        },
+      })),
+    };
+    const { user, onStartNew } = renderWorkspace(draft);
+
+    await waitFor(() =>
+      expect(
+        screen.getByRole("heading", { name: "Full tracking and review" }),
+      ).toBeVisible(),
+    );
+    await user.click(
+      screen.getByRole("button", { name: "Start new production" }),
+    );
+    expect(onStartNew).not.toHaveBeenCalled();
+    expect(
+      screen.getByRole("button", { name: "Cancel full tracking" }),
+    ).toHaveFocus();
+    expect(screen.getByText(/full tracking is active/i)).toBeVisible();
+    await user.click(screen.getByRole("button", { name: "Back" }));
+    expect(
+      screen.getByRole("heading", { name: "Full tracking and review" }),
+    ).toBeVisible();
+  });
+
+  it("blocks replacement for pending full submission and focuses reconciliation", async () => {
+    const { user, onStartNew } = renderWorkspace(draftAtPendingFullRun());
+    await user.click(
+      screen.getByRole("button", { name: "Start new production" }),
+    );
+    expect(onStartNew).not.toHaveBeenCalled();
+    expect(
+      screen.getByRole("heading", { name: "Full run reconciliation" }),
+    ).toHaveFocus();
+    expect(
+      screen.getByText(/submission is still being reconciled/i),
+    ).toBeVisible();
+  });
+
   it("shows only the current source step and guards Next", async () => {
     const { user } = renderWorkspace();
 

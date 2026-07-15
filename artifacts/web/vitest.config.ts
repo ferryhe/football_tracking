@@ -19,6 +19,8 @@ export default defineConfig({
       "src/lib/productionCalibration.test.ts",
       "src/lib/productionTrial.test.ts",
       "src/lib/productionConfigFreeze.test.ts",
+      "src/lib/productionBroadcast.test.ts",
+      "src/lib/broadcastDelivery.test.ts",
       "src/components/production/**/*.test.tsx",
       "src/pages/production.test.tsx",
     ],
@@ -34,6 +36,8 @@ export default defineConfig({
         "src/lib/productionCalibration.ts",
         "src/lib/productionTrial.ts",
         "src/lib/productionConfigFreeze.ts",
+        "src/lib/productionBroadcast.ts",
+        "src/lib/broadcastDelivery.ts",
       ],
       thresholds: {
         branches: 90,

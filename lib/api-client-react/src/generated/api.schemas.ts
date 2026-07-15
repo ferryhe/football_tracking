@@ -884,6 +884,7 @@ export interface BroadcastRunState {
   operation_status?:
     | "queued"
     | "running"
+    | "reconciling"
     | "committing"
     | "completed"
     | "failed"
@@ -1045,6 +1046,7 @@ export interface BallAuditReport {
 
 export interface BroadcastOperationDetails {
   review_decisions_sha256?: string | null;
+  terminal_tail_review_sha256?: string | null;
   message?: string | null;
   [key: string]: unknown;
 }
@@ -1222,6 +1224,47 @@ export const BroadcastReviewWindowsResponseStatus = {
   needs_review: "needs_review",
 } as const;
 
+export type BroadcastTerminalTailReviewStateStatus =
+  (typeof BroadcastTerminalTailReviewStateStatus)[keyof typeof BroadcastTerminalTailReviewStateStatus];
+
+export const BroadcastTerminalTailReviewStateStatus = {
+  not_required: "not_required",
+  required: "required",
+  accepted: "accepted",
+  invalid: "invalid",
+} as const;
+
+export interface BroadcastTerminalTailReviewEvidence {
+  /** @pattern ^[0-9a-f]{64}$ */
+  source_video_sha256: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  tracking_contract_sha256: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  action_signal_report_sha256: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  temporal_chunks_report_sha256: string;
+  /** @minimum 1 */
+  reported_frame_count: number;
+  /** @minimum 1 */
+  verified_frame_count: number;
+  /** @minimum 1 */
+  gap_frames: number;
+  /** @exclusiveMinimum 0 */
+  gap_seconds: number;
+  /** @pattern ^[0-9a-f]{64}$ */
+  evidence_sha256: string;
+}
+
+export interface BroadcastTerminalTailReviewState {
+  status: BroadcastTerminalTailReviewStateStatus;
+  reason?: string | null;
+  evidence?: BroadcastTerminalTailReviewEvidence | null;
+  decision?: "accept_terminal_shortfall" | null;
+  reviewer_id?: string | null;
+  reviewed_at?: string | null;
+  acknowledgement_sha256?: string | null;
+}
+
 export interface BroadcastReviewWindowsResponse {
   run_id: string;
   status: BroadcastReviewWindowsResponseStatus;
@@ -1229,6 +1272,18 @@ export interface BroadcastReviewWindowsResponse {
   queue_sha256?: string | null;
   review_item_count?: number;
   items?: BroadcastReviewWindow[];
+  terminal_tail_review?: BroadcastTerminalTailReviewState;
+}
+
+export interface BroadcastTerminalTailReviewRequest {
+  decision: "accept_terminal_shortfall";
+  /**
+   * @minLength 1
+   * @maxLength 200
+   */
+  reviewer_id: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  evidence_sha256: string;
 }
 
 export interface BroadcastTrajectoryRecomputeRequest {
@@ -1679,6 +1734,14 @@ export type DeleteInputVideoParams = {
 
 export type DeleteRunOutputParams = {
   run_id: string;
+};
+
+export type ListArtifactsParams = {
+  status_generation?: string | null;
+};
+
+export type GetArtifactParams = {
+  status_generation?: string | null;
 };
 
 export type GetCameraPathParams = {

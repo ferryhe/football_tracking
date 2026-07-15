@@ -3,6 +3,7 @@ from __future__ import annotations
 import atexit
 import hashlib
 import json
+import math
 import os
 import re
 import shutil
@@ -19,8 +20,13 @@ from typing import Any
 import ijson  # pyright: ignore[reportMissingImports]
 
 from football_tracking.action_signal import (
+    ACTION_SIGNAL_MAX_TERMINAL_SHORTFALL_FRAMES,
+    ACTION_SIGNAL_MAX_TERMINAL_SHORTFALL_SECONDS,
     ACTION_SIGNAL_REPORT_NAME,
     ACTION_SIGNAL_SUCCESS_STATUSES,
+    ACTION_SIGNAL_TERMINAL_SHORTFALL_LIMITATION,
+    ACTION_SIGNAL_TERMINAL_SHORTFALL_REASON,
+    ACTION_SIGNAL_TERMINAL_SHORTFALL_STATUS,
     ACTION_TRACK_NAME,
 )
 from football_tracking.camera_path_renderer import (
@@ -75,7 +81,7 @@ from football_tracking.selective_review import (
     SelectiveReviewError,
     materialize_selective_review_actions,
 )
-from football_tracking.tracking_contracts import TRACKING_CONTRACT_REPORT_NAME
+from football_tracking.tracking_contracts import TRACKING_CONTRACT_REPORT_NAME, normalize_tracking_contract_payload
 
 ORCHESTRATION_VERSION = "broadcast-hybrid-orchestration-v1"
 ORCHESTRATION_REPORT_NAME = "broadcast_trajectory_orchestration.v1.json"
@@ -870,6 +876,12 @@ def _validate_action_signal_binding(
         or action_report.get("status") not in ACTION_SIGNAL_SUCCESS_STATUSES
     ):
         raise BroadcastHybridOrchestrationError("action signal report is not a successful generation")
+    _validate_action_signal_terminal_shortfall(
+        run_dir,
+        binding=binding,
+        action_report=action_report,
+        source_contract_sha256=source_contract_sha256,
+    )
     report_source = Path(_required_text(action_report.get("input_video"), "action signal input video")).resolve()
     if report_source != source_video.resolve():
         raise BroadcastHybridOrchestrationError("action signal report is bound to a different source video path")
@@ -877,6 +889,240 @@ def _validate_action_signal_binding(
     if report_artifacts.get("track") != ACTION_TRACK_NAME:
         raise BroadcastHybridOrchestrationError("action signal report does not bind the canonical action track")
     return binding_path
+
+
+def _validate_action_signal_terminal_shortfall(
+    run_dir: Path,
+    *,
+    binding: dict[str, Any],
+    action_report: dict[str, Any],
+    source_contract_sha256: str,
+) -> None:
+    status = action_report.get("status")
+    evidence = binding.get("terminal_shortfall_evidence")
+    limitations = action_report.get("limitations")
+    if status != ACTION_SIGNAL_TERMINAL_SHORTFALL_STATUS:
+        if evidence is not None:
+            raise BroadcastHybridOrchestrationError(
+                "ordinary action signal report must not bind terminal shortfall evidence"
+            )
+        if isinstance(limitations, list) and any(
+            isinstance(item, dict) and item.get("code") == ACTION_SIGNAL_TERMINAL_SHORTFALL_LIMITATION
+            for item in limitations
+        ):
+            raise BroadcastHybridOrchestrationError(
+                "ordinary action signal report has a terminal shortfall limitation"
+            )
+        return
+
+    if action_report.get("termination_reason") != ACTION_SIGNAL_TERMINAL_SHORTFALL_REASON:
+        raise BroadcastHybridOrchestrationError("action signal terminal shortfall reason is invalid")
+    limitation = limitations[0] if isinstance(limitations, list) and len(limitations) == 1 else None
+    if not isinstance(limitation, dict) or not isinstance(evidence, dict):
+        raise BroadcastHybridOrchestrationError("action signal terminal shortfall evidence is incomplete")
+
+    root_contract_path = run_dir / TRACKING_CONTRACT_REPORT_NAME
+    root_contract, root_contract_digest = _load_json_snapshot(
+        root_contract_path,
+        "terminal shortfall root tracking contract",
+    )
+    if root_contract_digest != source_contract_sha256:
+        raise BroadcastHybridOrchestrationError("terminal shortfall root tracking contract changed")
+    normalized = normalize_tracking_contract_payload(root_contract, path=root_contract_path)
+    source = normalized.get("source")
+    summary = normalized.get("summary")
+    frames = normalized.get("frames")
+    if (
+        normalized.get("artifact_status") != "loaded"
+        or normalized.get("validation_errors") != []
+        or not isinstance(source, dict)
+        or not isinstance(summary, dict)
+        or not isinstance(frames, list)
+    ):
+        raise BroadcastHybridOrchestrationError("terminal shortfall root tracking contract is invalid")
+    reported_frame_count = source.get("frame_count")
+    verified_frame_count = summary.get("frame_count")
+    source_fps = source.get("fps")
+    source_width = source.get("width")
+    source_height = source.get("height")
+    if (
+        isinstance(reported_frame_count, bool)
+        or not isinstance(reported_frame_count, int)
+        or isinstance(verified_frame_count, bool)
+        or not isinstance(verified_frame_count, int)
+        or not isinstance(source_fps, (int, float))
+        or isinstance(source_fps, bool)
+        or not math.isfinite(float(source_fps))
+        or float(source_fps) <= 0.0
+        or isinstance(source_width, bool)
+        or not isinstance(source_width, int)
+        or isinstance(source_height, bool)
+        or not isinstance(source_height, int)
+        or len(frames) != verified_frame_count
+        or any(not isinstance(frame, dict) or frame.get("frame_index") != index for index, frame in enumerate(frames))
+    ):
+        raise BroadcastHybridOrchestrationError("terminal shortfall tracking frame evidence is invalid")
+    assert isinstance(reported_frame_count, int)
+    assert isinstance(verified_frame_count, int)
+    assert isinstance(source_fps, (int, float))
+    assert isinstance(source_width, int)
+    assert isinstance(source_height, int)
+    missing_frame_count = reported_frame_count - verified_frame_count
+    missing_duration_seconds = missing_frame_count / float(source_fps)
+    if (
+        missing_frame_count <= 0
+        or missing_frame_count > ACTION_SIGNAL_MAX_TERMINAL_SHORTFALL_FRAMES
+        or missing_duration_seconds > ACTION_SIGNAL_MAX_TERMINAL_SHORTFALL_SECONDS + 1e-9
+    ):
+        raise BroadcastHybridOrchestrationError("terminal shortfall exceeds the fail-closed policy")
+    if (
+        action_report.get("start_frame") != 0
+        or action_report.get("max_frames") is not None
+        or action_report.get("source_frame_count") != reported_frame_count
+        or action_report.get("expected_frame_count") != reported_frame_count
+        or action_report.get("frame_count") != verified_frame_count
+        or action_report.get("source_resolution") != [source_width, source_height]
+        or not isinstance(action_report.get("fps"), (int, float))
+        or isinstance(action_report.get("fps"), bool)
+        or not math.isclose(float(action_report["fps"]), float(source_fps), rel_tol=0.0, abs_tol=1e-6)
+    ):
+        raise BroadcastHybridOrchestrationError("terminal shortfall action report does not match the root contract")
+    if (
+        limitation.get("code") != ACTION_SIGNAL_TERMINAL_SHORTFALL_LIMITATION
+        or limitation.get("requires_manual_review") is not True
+        or limitation.get("reported_frame_count") != reported_frame_count
+        or limitation.get("verified_frame_count") != verified_frame_count
+        or limitation.get("expected_frame_count") != reported_frame_count
+        or limitation.get("decoded_frame_count") != verified_frame_count
+        or limitation.get("missing_terminal_frames") != missing_frame_count
+        or not isinstance(limitation.get("missing_terminal_seconds"), (int, float))
+        or not math.isclose(
+            float(limitation["missing_terminal_seconds"]),
+            missing_duration_seconds,
+            rel_tol=0.0,
+            abs_tol=1e-9,
+        )
+        or limitation.get("expected_terminal_shortfall_frames") != missing_frame_count
+        or limitation.get("max_accepted_terminal_shortfall_seconds")
+        != ACTION_SIGNAL_MAX_TERMINAL_SHORTFALL_SECONDS
+        or limitation.get("policy") != "trusted_full_source_terminal_tail_only"
+    ):
+        raise BroadcastHybridOrchestrationError("terminal shortfall action limitation is invalid")
+    policy = evidence.get("policy")
+    if (
+        evidence.get("tracking_contract_sha256") != source_contract_sha256
+        or evidence.get("source_video_sha256") != source.get("video_sha256")
+        or evidence.get("source_width") != source_width
+        or evidence.get("source_height") != source_height
+        or evidence.get("source_fps") != float(source_fps)
+        or evidence.get("reported_frame_count") != reported_frame_count
+        or evidence.get("verified_frame_count") != verified_frame_count
+        or evidence.get("first_missing_frame") != verified_frame_count
+        or evidence.get("last_missing_frame") != reported_frame_count - 1
+        or evidence.get("missing_frame_count") != missing_frame_count
+        or not isinstance(evidence.get("missing_duration_seconds"), (int, float))
+        or not math.isclose(
+            float(evidence["missing_duration_seconds"]),
+            missing_duration_seconds,
+            rel_tol=0.0,
+            abs_tol=1e-9,
+        )
+        or policy
+        != {
+            "max_missing_frames": ACTION_SIGNAL_MAX_TERMINAL_SHORTFALL_FRAMES,
+            "max_missing_seconds": ACTION_SIGNAL_MAX_TERMINAL_SHORTFALL_SECONDS,
+            "requires_manual_review": True,
+        }
+    ):
+        raise BroadcastHybridOrchestrationError("terminal shortfall binding evidence is invalid")
+
+    temporal_path = run_dir / "temporal_chunks_report.json"
+    temporal, temporal_digest = _load_json_snapshot(temporal_path, "terminal shortfall temporal chunks report")
+    if evidence.get("temporal_chunks_report_sha256") != temporal_digest:
+        raise BroadcastHybridOrchestrationError("terminal shortfall temporal chunks report changed")
+    _validate_terminal_shortfall_temporal_report(
+        temporal,
+        reported_frame_count=reported_frame_count,
+        verified_frame_count=verified_frame_count,
+    )
+
+
+def _validate_terminal_shortfall_temporal_report(
+    temporal: dict[str, Any],
+    *,
+    reported_frame_count: int,
+    verified_frame_count: int,
+) -> None:
+    chunks = temporal.get("chunks")
+    ordered_chunks = (
+        chunks
+        if isinstance(chunks, list) and chunks and all(isinstance(chunk, dict) for chunk in chunks)
+        else []
+    )
+    chunk_names = [chunk.get("name") for chunk in ordered_chunks]
+    contiguous_cores = bool(ordered_chunks) and ordered_chunks[0].get("core_start_frame") == 0
+    previous_core_end = -1
+    if contiguous_cores:
+        for index, chunk in enumerate(ordered_chunks):
+            core_start = chunk.get("core_start_frame")
+            core_end = chunk.get("core_end_frame")
+            if (
+                chunk.get("index") != index
+                or not isinstance(chunk.get("name"), str)
+                or isinstance(core_start, bool)
+                or not isinstance(core_start, int)
+                or isinstance(core_end, bool)
+                or not isinstance(core_end, int)
+                or core_start != previous_core_end + 1
+                or core_end < core_start
+            ):
+                contiguous_cores = False
+                break
+            previous_core_end = core_end
+        contiguous_cores = contiguous_cores and previous_core_end == reported_frame_count - 1
+    execution = temporal.get("execution")
+    results = execution.get("results") if isinstance(execution, dict) else None
+    ordered_results = (
+        isinstance(results, list)
+        and len(results) == len(ordered_chunks)
+        and all(
+            isinstance(result, dict)
+            and isinstance(result.get("chunk"), dict)
+            and result["chunk"].get("index") == index
+            and result["chunk"].get("name") == chunk_names[index]
+            and result.get("chunk_index") == index
+            and result.get("chunk_name") == chunk_names[index]
+            and result.get("exit_code") == 0
+            for index, result in enumerate(results)
+        )
+    )
+    events = temporal.get("boundary_events")
+    event = events[0] if isinstance(events, list) and len(events) == 1 else None
+    final_chunk = ordered_chunks[-1] if ordered_chunks else None
+    stitch = temporal.get("stitch")
+    if (
+        temporal.get("frame_count") != verified_frame_count
+        or temporal.get("chunk_count") != len(ordered_chunks)
+        or temporal.get("source_chunk_names") != chunk_names
+        or not contiguous_cores
+        or not isinstance(event, dict)
+        or event.get("type") != "truncated_final_tail"
+        or not isinstance(final_chunk, dict)
+        or event.get("chunk_index") != final_chunk.get("index")
+        or event.get("chunk_name") != final_chunk.get("name")
+        or event.get("first_missing_frame") != verified_frame_count
+        or event.get("last_missing_frame") != reported_frame_count - 1
+        or event.get("missing_frame_count") != reported_frame_count - verified_frame_count
+        or event.get("planned_core_end_frame") != reported_frame_count - 1
+        or event.get("stitched_core_end_frame") != verified_frame_count - 1
+        or final_chunk.get("core_end_frame") != reported_frame_count - 1
+        or not isinstance(stitch, dict)
+        or stitch.get("status") != "succeeded"
+        or not isinstance(execution, dict)
+        or execution.get("status") != "succeeded"
+        or not ordered_results
+    ):
+        raise BroadcastHybridOrchestrationError("terminal shortfall temporal chunks evidence is invalid")
 
 
 def _validate_materialization(

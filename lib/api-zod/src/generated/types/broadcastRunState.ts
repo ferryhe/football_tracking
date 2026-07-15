@@ -27,6 +27,7 @@ export interface BroadcastRunState {
   operation_status?:
     | "queued"
     | "running"
+    | "reconciling"
     | "committing"
     | "completed"
     | "failed"

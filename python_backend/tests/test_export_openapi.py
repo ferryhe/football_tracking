@@ -157,11 +157,30 @@ class ExportOpenApiTests(unittest.TestCase):
             "#/components/schemas/BroadcastRunState",
             run_record["properties"]["broadcast"]["$ref"],
         )
+        operation_status = document["components"]["schemas"]["BroadcastRunState"]["properties"][
+            "operation_status"
+        ]
+        self.assertIn("reconciling", operation_status["anyOf"][0]["enum"])
+
+        for operation in (
+            paths["/runs/{run_id}/artifacts"]["get"],
+            paths["/runs/{run_id}/artifacts/{artifact_name}"]["get"],
+        ):
+            generation_parameter = next(
+                parameter for parameter in operation["parameters"] if parameter["name"] == "status_generation"
+            )
+            self.assertEqual("query", generation_parameter["in"])
+            self.assertFalse(generation_parameter["required"])
+            self.assertEqual("^[0-9a-f]{64}$", generation_parameter["schema"]["anyOf"][0]["pattern"])
+            self.assertIn("409", operation["responses"])
 
     def test_generated_clients_expose_broadcast_hybrid_workflow_contracts(self) -> None:
         react_api = Path("lib/api-client-react/src/generated/api.ts").read_text(encoding="utf-8")
         react_schemas = Path("lib/api-client-react/src/generated/api.schemas.ts").read_text(encoding="utf-8")
         zod_api = Path("lib/api-zod/src/generated/api.ts").read_text(encoding="utf-8")
+        zod_broadcast_state = Path("lib/api-zod/src/generated/types/broadcastRunState.ts").read_text(
+            encoding="utf-8"
+        )
 
         for operation in (
             "getBroadcastReviewWindows",
@@ -197,6 +216,14 @@ class ExportOpenApiTests(unittest.TestCase):
             "broadcastRenderRequest.ts",
         ):
             self.assertTrue((Path("lib/api-zod/src/generated/types") / filename).is_file())
+        for generated_contract in (react_schemas, zod_api, zod_broadcast_state):
+            self.assertIn('"reconciling"', generated_contract)
+        self.assertIn("export type ListArtifactsParams", react_schemas)
+        self.assertIn("export type GetArtifactParams", react_schemas)
+        self.assertGreaterEqual(react_schemas.count("status_generation?: string | null"), 2)
+        self.assertIn("params?: ListArtifactsParams", react_api)
+        self.assertIn("params?: GetArtifactParams", react_api)
+        self.assertIn("status_generation: zod", zod_api)
 
     def test_openapi_run_record_exposes_ai_candidate_lifecycle_schema(self) -> None:
         document = build_openapi_document()

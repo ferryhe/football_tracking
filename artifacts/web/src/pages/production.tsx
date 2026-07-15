@@ -1,6 +1,6 @@
 import { useRef, useState } from "react";
 import { AlertTriangle, RefreshCw } from "lucide-react";
-import { useLocation } from "wouter";
+import { useLocation, useSearch } from "wouter";
 import { useListInputVideos } from "@workspace/api-client-react";
 
 import { ProductionWorkspace } from "@/components/production/ProductionWorkspace";
@@ -22,6 +22,7 @@ import {
   createSafeBrowserStorage,
   type SafeBrowserStorage,
 } from "@/lib/browserStorage";
+import { productionFullRunRequiresStop } from "@/lib/productionBroadcast";
 import {
   clearProductionDraft,
   createProductionDraft,
@@ -34,10 +35,14 @@ import {
   updateConfirmedProductionConfig,
   updatePendingConfigConfirmation,
   updateProductionCalibration,
+  updateProductionFullRun,
   updateProductionSource,
   updateProductionTrial,
+  updateVerifiedProductionProduct,
   type ProductionDraft,
   type ProductionDraftLoadResult,
+  type ProductionFullRunState,
+  type ProductionProductEvidence,
   type SourceSignature,
 } from "@/lib/productionWorkflow";
 import type { ProductionCalibrationDraft } from "@/lib/productionCalibration";
@@ -69,6 +74,8 @@ type ProductionNotice =
   | "sourceReset"
   | "activeTrialMustStop"
   | "pendingTrialMustReconcile"
+  | "activeFullRunMustStop"
+  | "pendingFullRunMustReconcile"
   | "storageFallback";
 
 interface ProductionError {
@@ -80,11 +87,18 @@ interface ProductionPageProps {
   storage?: SafeBrowserStorage;
 }
 
+function runIdFromSearch(search: string): string | null {
+  const value = new URLSearchParams(search).get("run")?.trim();
+  return value || null;
+}
+
 export function ProductionPageContent({
   storage: storageOverride,
 }: ProductionPageProps = {}) {
   const { t } = useLanguage();
   const [, setLocation] = useLocation();
+  const search = useSearch();
+  const requestedRunId = runIdFromSearch(search);
   const [storage] = useState(
     () => storageOverride ?? createSafeBrowserStorage(),
   );
@@ -155,7 +169,15 @@ export function ProductionPageContent({
     return true;
   }
 
-  function blockActiveTrialDiscard(): boolean {
+  function blockActiveWorkDiscard(): boolean {
+    if (productionFullRunRequiresStop(draftRef.current.full_run)) {
+      setNotice(
+        draftRef.current.full_run?.pending_submission
+          ? "pendingFullRunMustReconcile"
+          : "activeFullRunMustStop",
+      );
+      return true;
+    }
     if (!productionTrialRequiresStop(draftRef.current.trial)) return false;
     setNotice(
       draftRef.current.trial?.pending_submission
@@ -166,7 +188,7 @@ export function ProductionPageContent({
   }
 
   function handleSourceChange(source: SourceSignature) {
-    if (blockActiveTrialDiscard()) return;
+    if (blockActiveWorkDiscard()) return;
     const resetsDownstream =
       draftRef.current.source !== null &&
       !sourceSignaturesMatch(draftRef.current.source, source);
@@ -182,7 +204,7 @@ export function ProductionPageContent({
   }
 
   function handleCalibrationChange(calibration: ProductionCalibrationDraft) {
-    if (blockActiveTrialDiscard()) return;
+    if (blockActiveWorkDiscard()) return;
     commitDraft((current) => updateProductionCalibration(current, calibration));
   }
 
@@ -226,7 +248,7 @@ export function ProductionPageContent({
   }
 
   function handleInvalidate(from: "calibration"): boolean {
-    if (blockActiveTrialDiscard()) return false;
+    if (blockActiveWorkDiscard()) return false;
     return commitDraft((current) => invalidateProductionDraft(current, from));
   }
 
@@ -235,7 +257,7 @@ export function ProductionPageContent({
   }
 
   function replaceWith(nextDraft: ProductionDraft) {
-    if (blockActiveTrialDiscard()) return;
+    if (blockActiveWorkDiscard()) return;
     const result = clearProductionDraft(storage);
     draftRef.current = nextDraft;
     setDraft(nextDraft);
@@ -246,7 +268,7 @@ export function ProductionPageContent({
   }
 
   function handleStartNew() {
-    if (blockActiveTrialDiscard()) return;
+    if (blockActiveWorkDiscard()) return;
     const nextDraft = createProductionDraft();
     if (
       requiresDraftReplacementConfirmation(
@@ -262,6 +284,42 @@ export function ProductionPageContent({
 
   function handleDiscardRecovery() {
     replaceWith(createProductionDraft());
+  }
+
+  function handleFullRunChange(
+    fullRun: ProductionFullRunState,
+    expectedRevision: number,
+  ): boolean {
+    const currentRevision = draftRef.current.full_run?.revision ?? 0;
+    if (currentRevision !== expectedRevision) return false;
+    return commitDraft((current) =>
+      updateProductionFullRun(current, fullRun, expectedRevision),
+    );
+  }
+
+  function handlePersistCurrent(expectedRevision: number): boolean {
+    if ((draftRef.current.full_run?.revision ?? 0) !== expectedRevision) {
+      return false;
+    }
+    return persist(draftRef.current);
+  }
+
+  function handleVerifiedProduct(
+    product: ProductionProductEvidence,
+    expectedRevision: number,
+  ): boolean {
+    if ((draftRef.current.full_run?.revision ?? 0) !== expectedRevision) {
+      return false;
+    }
+    return commitDraft((current) =>
+      updateVerifiedProductionProduct(current, product, expectedRevision),
+    );
+  }
+
+  function handleParentRunIdChange(runId: string) {
+    setLocation(`/production?run=${encodeURIComponent(runId)}`, {
+      replace: true,
+    });
   }
 
   if (recovery) {
@@ -300,6 +358,30 @@ export function ProductionPageContent({
             </Button>
           </CardContent>
         </Card>
+      </section>
+    );
+  }
+
+  if (requestedRunId && !draft.full_run?.current_run_id) {
+    return (
+      <section
+        className="mx-auto max-w-2xl"
+        aria-labelledby="production-url-conflict-title"
+      >
+        <Alert variant="destructive" data-testid="production-full-run-error">
+          <AlertTitle id="production-url-conflict-title">
+            {t.production.fullUrlConflictTitle}
+          </AlertTitle>
+          <AlertDescription className="space-y-3">
+            <p>{t.production.fullUrlConflict}</p>
+            <a
+              className="font-medium underline"
+              href={`/broadcast?run=${encodeURIComponent(requestedRunId)}`}
+            >
+              {t.production.fullOpenLegacy}
+            </a>
+          </AlertDescription>
+        </Alert>
       </section>
     );
   }
@@ -357,11 +439,16 @@ export function ProductionPageContent({
         sourceIssue={sourceIssue}
         notice={noticeText}
         error={errorText}
+        requestedRunId={requestedRunId}
         onSourceChange={handleSourceChange}
         onCalibrationChange={handleCalibrationChange}
         onTrialChange={handleTrialChange}
         onPendingConfigChange={handlePendingConfigChange}
         onConfirmedConfigChange={handleConfirmedConfigChange}
+        onFullRunChange={handleFullRunChange}
+        onPersistCurrent={handlePersistCurrent}
+        onVerifiedProduct={handleVerifiedProduct}
+        onParentRunIdChange={handleParentRunIdChange}
         onInvalidate={handleInvalidate}
         onSaveExit={handleSaveExit}
         onStartNew={handleStartNew}

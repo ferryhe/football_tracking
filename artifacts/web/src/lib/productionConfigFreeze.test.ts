@@ -63,8 +63,12 @@ async function acceptedTrial(): Promise<ProductionTrialState> {
     tuning_patch: {
       detector: { confidence: 0.2 },
       output: { dir: "temporary", video_name: "trial.mp4" },
-      runtime: { start_frame: 999, max_frames: 1 },
-      follow_cam: { enabled: true, legacy_render: true },
+      runtime: { start_frame: 999, max_frames: 1, trial_stride: 4 },
+      follow_cam: {
+        enabled: true,
+        legacy_render: true,
+        preview_codec: "trial-only",
+      },
       metadata: { old: true },
     },
   };
@@ -80,7 +84,10 @@ async function acceptedTrial(): Promise<ProductionTrialState> {
     created_at: NOW,
   });
   const observed = appendProductionTrialAttempt(
-    setPendingProductionTrial(createProductionTrialState(settings), submission.pending),
+    setPendingProductionTrial(
+      createProductionTrialState(settings),
+      submission.pending,
+    ),
     {
       run: { run_id: "trial-1", status: "completed" },
       pending: submission.pending,
@@ -159,6 +166,34 @@ function detailFor(
   };
 }
 
+function mergedBaseDetailFor(
+  pending: Awaited<ReturnType<typeof buildProductionConfigConfirmation>>,
+): ConfigDetail {
+  const detail = detailFor(pending);
+  return {
+    ...detail,
+    raw: {
+      ...(detail.raw as Record<string, unknown>),
+      runtime: {
+        use_gpu_if_available: true,
+        opencv_threads: 2,
+        ...((detail.raw.runtime as Record<string, unknown>) ?? {}),
+      },
+      follow_cam: {
+        prefer_cleaned_track: true,
+        target_width: 1_920,
+        output_video_name: "follow_cam.stable.mp4",
+        ...((detail.raw.follow_cam as Record<string, unknown>) ?? {}),
+      },
+      output: {
+        video_name: "annotated.mp4",
+        save_csv: true,
+        ...((detail.raw.output as Record<string, unknown>) ?? {}),
+      },
+    },
+  };
+}
+
 describe("production configuration freeze patch", () => {
   it("rejects accepted state whose persisted readiness omits a required artifact", async () => {
     const trial = await acceptedTrial();
@@ -181,48 +216,69 @@ describe("production configuration freeze patch", () => {
 
   it.each([
     ["zero frames", { ...CALIBRATION, confirmed_frames: [] }],
-    ["two frames", { ...CALIBRATION, confirmed_frames: CALIBRATION.confirmed_frames.slice(0, 2) }],
-    ["duplicate frame", {
-      ...CALIBRATION,
-      confirmed_frames: [
-        CALIBRATION.confirmed_frames[0],
-        { ...CALIBRATION.confirmed_frames[0] },
-        CALIBRATION.confirmed_frames[2],
-      ],
-    }],
-    ["wrong source", {
-      ...CALIBRATION,
-      confirmed_frames: CALIBRATION.confirmed_frames.map((frame, index) =>
-        index === 1 ? { ...frame, input_video: "data/other.mp4" } : frame,
-      ),
-    }],
-    ["wrong digest", {
-      ...CALIBRATION,
-      confirmed_frames: CALIBRATION.confirmed_frames.map((frame, index) =>
-        index === 1 ? { ...frame, polygon_digest: "d".repeat(64) } : frame,
-      ),
-    }],
-    ["wrong resolution", {
-      ...CALIBRATION,
-      confirmed_frames: CALIBRATION.confirmed_frames.map((frame, index) =>
-        index === 1
-          ? { ...frame, source_resolution: { width: 1_280, height: 720 } }
-          : frame,
-      ),
-    }],
-  ])("refuses to freeze with incomplete calibration evidence: %s", async (_label, calibration) => {
-    await expect(
-      buildProductionConfigConfirmation({
-        workflow_id: "workflow-a",
-        source: SOURCE,
-        calibration,
-        trial: await acceptedTrial(),
-        output_id: "config-invalid",
-        generation: 1,
-        confirmed_at: NOW,
-      }),
-    ).rejects.toThrow();
-  });
+    [
+      "two frames",
+      {
+        ...CALIBRATION,
+        confirmed_frames: CALIBRATION.confirmed_frames.slice(0, 2),
+      },
+    ],
+    [
+      "duplicate frame",
+      {
+        ...CALIBRATION,
+        confirmed_frames: [
+          CALIBRATION.confirmed_frames[0],
+          { ...CALIBRATION.confirmed_frames[0] },
+          CALIBRATION.confirmed_frames[2],
+        ],
+      },
+    ],
+    [
+      "wrong source",
+      {
+        ...CALIBRATION,
+        confirmed_frames: CALIBRATION.confirmed_frames.map((frame, index) =>
+          index === 1 ? { ...frame, input_video: "data/other.mp4" } : frame,
+        ),
+      },
+    ],
+    [
+      "wrong digest",
+      {
+        ...CALIBRATION,
+        confirmed_frames: CALIBRATION.confirmed_frames.map((frame, index) =>
+          index === 1 ? { ...frame, polygon_digest: "d".repeat(64) } : frame,
+        ),
+      },
+    ],
+    [
+      "wrong resolution",
+      {
+        ...CALIBRATION,
+        confirmed_frames: CALIBRATION.confirmed_frames.map((frame, index) =>
+          index === 1
+            ? { ...frame, source_resolution: { width: 1_280, height: 720 } }
+            : frame,
+        ),
+      },
+    ],
+  ])(
+    "refuses to freeze with incomplete calibration evidence: %s",
+    async (_label, calibration) => {
+      await expect(
+        buildProductionConfigConfirmation({
+          workflow_id: "workflow-a",
+          source: SOURCE,
+          calibration,
+          trial: await acceptedTrial(),
+          output_id: "config-invalid",
+          generation: 1,
+          confirmed_at: NOW,
+        }),
+      ).rejects.toThrow();
+    },
+  );
 
   it("builds an exact persistent patch, removes trial-only execution/output settings, and adds full lineage", async () => {
     const trial = await acceptedTrial();
@@ -257,9 +313,12 @@ describe("production configuration freeze patch", () => {
       },
       postprocess: { enabled: true },
       runtime: { start_frame: 0, max_frames: null },
-      follow_cam: { enabled: false, legacy_render: true },
+      follow_cam: { enabled: false },
+      output: { save_tracking_contract: true },
     });
-    expect(pending.persistent_patch).not.toHaveProperty("output");
+    expect(pending.persistent_patch.output).toEqual({
+      save_tracking_contract: true,
+    });
     const metadata = (
       pending.request.patch?.metadata as Record<string, unknown>
     ).production_workflow as Record<string, unknown>;
@@ -350,7 +409,17 @@ describe("configuration finalization and verification", () => {
           ...(detail.raw as Record<string, unknown>),
         },
       }),
-    ).resolves.toMatchObject({ name: expectedProductionConfigName(pending.output_name) });
+    ).resolves.toMatchObject({
+      name: expectedProductionConfigName(pending.output_name),
+    });
+    await expect(
+      finalizeProductionConfigConfirmation(
+        pending,
+        mergedBaseDetailFor(pending),
+      ),
+    ).resolves.toMatchObject({
+      name: expectedProductionConfigName(pending.output_name),
+    });
     await expect(
       finalizeProductionConfigConfirmation(pending, {
         ...detail,
@@ -360,6 +429,15 @@ describe("configuration finalization and verification", () => {
         },
       }),
     ).rejects.toThrow(/patch|lineage/i);
+    await expect(
+      finalizeProductionConfigConfirmation(pending, {
+        ...detail,
+        raw: {
+          ...(detail.raw as Record<string, unknown>),
+          follow_cam: { enabled: false, legacy_render: true },
+        },
+      }),
+    ).rejects.toThrow(/lineage/i);
   });
 
   it("hashes returned UTF-8 text and verifies exact raw lineage before finalizing", async () => {
@@ -372,8 +450,11 @@ describe("configuration finalization and verification", () => {
       generation: 1,
       confirmed_at: NOW,
     });
-    const detail = detailFor(pending);
-    const confirmed = await finalizeProductionConfigConfirmation(pending, detail);
+    const detail = mergedBaseDetailFor(pending);
+    const confirmed = await finalizeProductionConfigConfirmation(
+      pending,
+      detail,
+    );
     expect(confirmed.name).toBe(detail.name);
     expect(confirmed.sha256).toBe(
       "e759a6280020920a84e362dd71825b90b6144fb8cab3e89b1a09dd6d20881459",
@@ -382,6 +463,15 @@ describe("configuration finalization and verification", () => {
     expect(confirmed.accepted_trial_run_id).toBe("trial-1");
     expect(isProductionConfigEvidence(confirmed)).toBe(true);
     expect(isProductionConfigEvidence({ ...confirmed, patch: {} })).toBe(false);
+    expect(
+      isProductionConfigEvidence({
+        ...confirmed,
+        patch: {
+          ...confirmed.patch,
+          output: { save_tracking_contract: false },
+        },
+      }),
+    ).toBe(false);
     expect(
       isProductionConfigEvidence({
         ...confirmed,
@@ -419,10 +509,14 @@ describe("configuration finalization and verification", () => {
         request: { ...pending.request, patch: {} },
       }),
     ).toBe(false);
-    const patch = structuredClone(pending.request.patch) as Record<string, unknown>;
+    const patch = structuredClone(pending.request.patch) as Record<
+      string,
+      unknown
+    >;
     const metadata = patch.metadata as Record<string, unknown>;
-    (metadata.production_workflow as Record<string, unknown>).calibration_digest =
-      "9".repeat(64);
+    (
+      metadata.production_workflow as Record<string, unknown>
+    ).calibration_digest = "9".repeat(64);
     expect(
       isProductionPendingConfigConfirmation({
         ...pending,
@@ -430,6 +524,46 @@ describe("configuration finalization and verification", () => {
       }),
     ).toBe(false);
   });
+
+  it.each([
+    ["runtime", { start_frame: 0, max_frames: null, trial_stride: 4 }],
+    ["follow_cam", { enabled: false, legacy_render: true }],
+    ["output", { save_tracking_contract: true, video_name: "trial.mp4" }],
+  ])(
+    "fails closed when persisted %s invariants contain extra keys",
+    async (section, forcedObject) => {
+      const pending = await buildProductionConfigConfirmation({
+        workflow_id: "workflow-a",
+        source: SOURCE,
+        calibration: CALIBRATION,
+        trial: await acceptedTrial(),
+        output_id: "11111111-1111-4111-8111-111111111111",
+        generation: 1,
+        confirmed_at: NOW,
+      });
+      const pendingWithRequestExtra = structuredClone(pending);
+      (pendingWithRequestExtra.request.patch as Record<string, unknown>)[
+        section
+      ] = forcedObject;
+      expect(
+        isProductionPendingConfigConfirmation(pendingWithRequestExtra),
+      ).toBe(false);
+
+      const pendingWithPersistentExtra = structuredClone(pending);
+      pendingWithPersistentExtra.persistent_patch[section] = forcedObject;
+      expect(
+        isProductionPendingConfigConfirmation(pendingWithPersistentExtra),
+      ).toBe(false);
+
+      const confirmed = await finalizeProductionConfigConfirmation(
+        pending,
+        detailFor(pending),
+      );
+      const evidenceWithExtra = structuredClone(confirmed);
+      evidenceWithExtra.patch[section] = forcedObject;
+      expect(isProductionConfigEvidence(evidenceWithExtra)).toBe(false);
+    },
+  );
 
   it("classifies missing, name, digest, lineage, and unverifiable configuration states", async () => {
     const pending = await buildProductionConfigConfirmation({
@@ -442,15 +576,26 @@ describe("configuration finalization and verification", () => {
       confirmed_at: NOW,
     });
     const detail = detailFor(pending);
-    const confirmed = await finalizeProductionConfigConfirmation(pending, detail);
-    await expect(verifyProductionConfigDetail(confirmed, null)).resolves.toEqual({
+    const confirmed = await finalizeProductionConfigConfirmation(
+      pending,
+      detail,
+    );
+    await expect(
+      verifyProductionConfigDetail(confirmed, null),
+    ).resolves.toEqual({
       status: "missing",
     });
     await expect(
-      verifyProductionConfigDetail(confirmed, { ...detail, name: "wrong.yaml" }),
+      verifyProductionConfigDetail(confirmed, {
+        ...detail,
+        name: "wrong.yaml",
+      }),
     ).resolves.toEqual({ status: "name_mismatch" });
     await expect(
-      verifyProductionConfigDetail(confirmed, { ...detail, text: `${detail.text}tampered` }),
+      verifyProductionConfigDetail(confirmed, {
+        ...detail,
+        text: `${detail.text}tampered`,
+      }),
     ).resolves.toEqual({ status: "digest_mismatch" });
     await expect(
       verifyProductionConfigDetail(confirmed, {
@@ -464,6 +609,24 @@ describe("configuration finalization and verification", () => {
               accepted_trial_run_id: "trial-other",
             },
           },
+        },
+      }),
+    ).resolves.toEqual({ status: "lineage_mismatch" });
+    await expect(
+      verifyProductionConfigDetail(confirmed, {
+        ...detail,
+        raw: {
+          ...(detail.raw as Record<string, unknown>),
+          follow_cam: { enabled: false, legacy_render: true },
+        },
+      }),
+    ).resolves.toEqual({ status: "lineage_mismatch" });
+    await expect(
+      verifyProductionConfigDetail(confirmed, {
+        ...detail,
+        raw: {
+          ...(detail.raw as Record<string, unknown>),
+          output: { save_tracking_contract: false },
         },
       }),
     ).resolves.toEqual({ status: "lineage_mismatch" });

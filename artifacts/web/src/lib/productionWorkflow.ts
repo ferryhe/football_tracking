@@ -17,8 +17,18 @@ import {
   type ProductionConfigEvidence,
   type ProductionPendingConfigConfirmation,
 } from "./productionConfigFreeze";
+import {
+  isProductionFullRunState,
+  productionFullRunMatchesContext,
+  type ProductionFullRunAttempt,
+  type ProductionFullRunState,
+} from "./productionBroadcast";
+import {
+  isProductionProductEvidence,
+  type ProductionProductEvidence,
+} from "./broadcastDelivery";
 
-export const PRODUCTION_DRAFT_SCHEMA_VERSION = 3 as const;
+export const PRODUCTION_DRAFT_SCHEMA_VERSION = 4 as const;
 export const PRODUCTION_DRAFT_STORAGE_KEY =
   "football-tracking.production-draft.v1";
 
@@ -51,27 +61,7 @@ export interface SourceSignature {
   modified_at: string;
 }
 
-export type ProductionFullRunStatus =
-  | "queued"
-  | "running"
-  | "needs_review"
-  | "recomputing"
-  | "trajectory_ready"
-  | "rendering"
-  | "ready"
-  | "failed"
-  | "cancelled";
-
-export interface ProductionFullRunEvidence {
-  run_id: string;
-  status: ProductionFullRunStatus;
-}
-
-export interface ProductionProductEvidence {
-  run_id: string;
-  artifact_name: "broadcast.mp4";
-  status_generation: string;
-}
+export type { ProductionFullRunState, ProductionProductEvidence };
 
 export interface ProductionDraft {
   schema_version: typeof PRODUCTION_DRAFT_SCHEMA_VERSION;
@@ -84,7 +74,7 @@ export interface ProductionDraft {
   trial: ProductionTrialState | null;
   pending_config_confirmation: ProductionPendingConfigConfirmation | null;
   confirmed_config: ProductionConfigEvidence | null;
-  full_run: ProductionFullRunEvidence | null;
+  full_run: ProductionFullRunState | null;
   verified_product: ProductionProductEvidence | null;
 }
 
@@ -106,18 +96,6 @@ export type ProductionDraftStorageResult =
   | { ok: false; message: string };
 
 type DraftStorage = Pick<Storage, "getItem" | "setItem" | "removeItem">;
-
-const FULL_RUN_STATUSES = new Set<ProductionFullRunStatus>([
-  "queued",
-  "running",
-  "needs_review",
-  "recomputing",
-  "trajectory_ready",
-  "rendering",
-  "ready",
-  "failed",
-  "cancelled",
-]);
 
 const DRAFT_STATUSES = new Set<ProductionDraftStatus>([
   "active",
@@ -237,24 +215,6 @@ function isCalibrationEvidence(
   );
 }
 
-function isFullRunEvidence(value: unknown): value is ProductionFullRunEvidence {
-  if (!isRecord(value)) return false;
-  return (
-    isNonEmptyString(value.run_id) &&
-    typeof value.status === "string" &&
-    FULL_RUN_STATUSES.has(value.status as ProductionFullRunStatus)
-  );
-}
-
-function isProductEvidence(value: unknown): value is ProductionProductEvidence {
-  if (!isRecord(value)) return false;
-  return (
-    isNonEmptyString(value.run_id) &&
-    value.artifact_name === "broadcast.mp4" &&
-    isSha256(value.status_generation)
-  );
-}
-
 function isNullable<T>(
   value: unknown,
   predicate: (candidate: unknown) => candidate is T,
@@ -280,8 +240,8 @@ function isProductionDraft(value: unknown): value is ProductionDraft {
         isProductionPendingConfigConfirmation,
       ) &&
       isNullable(value.confirmed_config, isProductionConfigEvidence) &&
-      isNullable(value.full_run, isFullRunEvidence) &&
-      isNullable(value.verified_product, isProductEvidence)
+      isNullable(value.full_run, isProductionFullRunState) &&
+      isNullable(value.verified_product, isProductionProductEvidence)
     )
   )
     return false;
@@ -330,13 +290,27 @@ function isProductionDraft(value: unknown): value is ProductionDraft {
     )
       return false;
   }
-  if (fullRun !== null && confirmedConfig === null) return false;
-  if (
-    product !== null &&
-    (fullRun === null || product.run_id !== fullRun.run_id)
-  ) {
-    return false;
+  if (fullRun !== null) {
+    if (
+      !source ||
+      !calibration ||
+      !trial ||
+      !confirmedConfig ||
+      !productionFullRunMatchesContext(fullRun, {
+        workflow_id: value.workflow_id,
+        source,
+        calibration,
+        trial,
+        confirmed_config: confirmedConfig,
+      })
+    ) {
+      return false;
+    }
   }
+  if (product !== null && !productMatchesFullRun(product, fullRun))
+    return false;
+  if (value.status === "completed" && product === null) return false;
+  if (value.status === "active" && product !== null) return false;
   return true;
 }
 
@@ -361,8 +335,8 @@ function migrateV0OrV1Draft(
     created_at: value.created_at,
     updated_at: value.updated_at,
     status:
-      value.schema_version === 1
-        ? (value.status as ProductionDraftStatus)
+      value.schema_version === 1 && value.status === "archived"
+        ? "archived"
         : "active",
     source: value.source,
     calibration: null,
@@ -407,6 +381,67 @@ function migrateV2Draft(
   };
 }
 
+function migrateV3Draft(
+  value: Record<string, unknown>,
+): ProductionDraft | null {
+  if (
+    !isNonEmptyString(value.workflow_id) ||
+    !isNonEmptyString(value.created_at) ||
+    !isNonEmptyString(value.updated_at) ||
+    !isNullable(value.source, isSourceSignature) ||
+    typeof value.status !== "string" ||
+    !DRAFT_STATUSES.has(value.status as ProductionDraftStatus)
+  ) {
+    return null;
+  }
+
+  const source = value.source;
+  const calibration =
+    source && isCalibrationEvidence(value.calibration)
+      ? value.calibration
+      : null;
+  const trial =
+    source &&
+    calibration &&
+    calibrationIsComplete(calibration, source.path) &&
+    isProductionTrialState(value.trial) &&
+    productionTrialMatchesContext(value.trial, {
+      workflow_id: value.workflow_id,
+      source,
+      calibration,
+    })
+      ? value.trial
+      : null;
+  const confirmedConfig =
+    trial?.accepted &&
+    isProductionConfigEvidence(value.confirmed_config) &&
+    value.confirmed_config.workflow_id === value.workflow_id &&
+    value.confirmed_config.accepted_trial_run_id === trial.accepted.run_id &&
+    value.confirmed_config.trial_intent_sha256 ===
+      trial.accepted.intent_sha256 &&
+    value.confirmed_config.trial_request_sha256 ===
+      trial.accepted.request_sha256 &&
+    value.confirmed_config.calibration_digest === calibration?.polygon_digest &&
+    sourceSignaturesMatch(value.confirmed_config.source_signature, source)
+      ? value.confirmed_config
+      : null;
+  const migrated: ProductionDraft = {
+    schema_version: PRODUCTION_DRAFT_SCHEMA_VERSION,
+    workflow_id: value.workflow_id,
+    created_at: value.created_at,
+    updated_at: value.updated_at,
+    status: value.status === "archived" ? "archived" : "active",
+    source,
+    calibration,
+    trial,
+    pending_config_confirmation: null,
+    confirmed_config: confirmedConfig,
+    full_run: null,
+    verified_product: null,
+  };
+  return isProductionDraft(migrated) ? migrated : null;
+}
+
 function hasConfirmedCalibration(draft: ProductionDraft): boolean {
   return Boolean(
     draft.source && calibrationIsComplete(draft.calibration, draft.source.path),
@@ -421,12 +456,34 @@ function hasConfirmedConfig(draft: ProductionDraft): boolean {
   return Boolean(draft.confirmed_config?.name && draft.confirmed_config.sha256);
 }
 
+function currentFullRunAttempt(
+  fullRun: ProductionFullRunState | null,
+): ProductionFullRunAttempt | null {
+  if (!fullRun?.current_run_id) return null;
+  return (
+    fullRun.attempts.find(
+      (attempt) => attempt.run_id === fullRun.current_run_id,
+    ) ?? null
+  );
+}
+
+function productMatchesFullRun(
+  product: ProductionProductEvidence,
+  fullRun: ProductionFullRunState | null,
+): boolean {
+  const current = currentFullRunAttempt(fullRun);
+  return Boolean(
+    current &&
+    current.run_id === product.run_id &&
+    current.last_observed.workflow_state === "ready" &&
+    current.last_observed.status_generation === product.status_generation,
+  );
+}
+
 function hasVerifiedProduct(draft: ProductionDraft): boolean {
   return Boolean(
-    draft.full_run?.status === "ready" &&
-    draft.verified_product?.run_id === draft.full_run.run_id &&
-    draft.verified_product.artifact_name === "broadcast.mp4" &&
-    isSha256(draft.verified_product.status_generation),
+    draft.verified_product &&
+    productMatchesFullRun(draft.verified_product, draft.full_run),
   );
 }
 
@@ -503,7 +560,15 @@ export function deriveProductionWorkflow(
       delivery_blocked: false,
     };
   }
-  if (!draft.full_run) {
+  if (!draft.full_run || draft.full_run.pending_submission) {
+    return {
+      stage: "full_tracking",
+      user_stage: "full_tracking",
+      delivery_blocked: false,
+    };
+  }
+  const current = currentFullRunAttempt(draft.full_run);
+  if (!current) {
     return {
       stage: "full_tracking",
       user_stage: "full_tracking",
@@ -511,9 +576,8 @@ export function deriveProductionWorkflow(
     };
   }
 
-  switch (draft.full_run.status) {
-    case "queued":
-    case "running":
+  switch (current.last_observed.workflow_state) {
+    case "tracking":
       return {
         stage: "full_tracking",
         user_stage: "full_tracking",
@@ -566,6 +630,7 @@ export function canEnterProductionStage(
   draft: ProductionDraft,
   stage: ProductionWorkflowStage,
 ): boolean {
+  const current = currentFullRunAttempt(draft.full_run);
   switch (stage) {
     case "source":
       return true;
@@ -582,22 +647,22 @@ export function canEnterProductionStage(
         hasConfirmedConfig(draft)
       );
     case "review":
-      return draft.full_run?.status === "needs_review";
+      return current?.last_observed.workflow_state === "needs_review";
     case "recomputing":
-      return draft.full_run?.status === "recomputing";
+      return current?.last_observed.workflow_state === "recomputing";
     case "trajectory_ready":
-      return draft.full_run?.status === "trajectory_ready";
+      return current?.last_observed.workflow_state === "trajectory_ready";
     case "rendering":
       return (
-        draft.full_run?.status === "rendering" ||
-        draft.full_run?.status === "ready"
+        current?.last_observed.workflow_state === "rendering" ||
+        current?.last_observed.workflow_state === "ready"
       );
     case "ready":
       return hasVerifiedProduct(draft);
     case "failed":
-      return draft.full_run?.status === "failed";
+      return current?.last_observed.workflow_state === "failed";
     case "cancelled":
-      return draft.full_run?.status === "cancelled";
+      return current?.last_observed.workflow_state === "cancelled";
   }
 }
 
@@ -781,6 +846,176 @@ export function updateConfirmedProductionConfig(
   return candidate;
 }
 
+function fullRunAttemptIdentityMatches(
+  left: ProductionFullRunAttempt,
+  right: ProductionFullRunAttempt,
+): boolean {
+  return (
+    left.run_id === right.run_id &&
+    left.generation === right.generation &&
+    left.submission_id === right.submission_id &&
+    left.parent_trial_run_id === right.parent_trial_run_id &&
+    left.config_name === right.config_name &&
+    left.config_sha256 === right.config_sha256 &&
+    left.request_sha256 === right.request_sha256 &&
+    left.created_at === right.created_at &&
+    JSON.stringify(left.request) === JSON.stringify(right.request)
+  );
+}
+
+function productionFullRunTransitionIsValid(
+  previous: ProductionFullRunState | null,
+  next: ProductionFullRunState,
+): boolean {
+  const prior: ProductionFullRunState = previous ?? {
+    revision: 0,
+    attempts: [],
+    pending_submission: null,
+    current_run_id: null,
+  };
+  if (next.revision !== prior.revision + 1) return false;
+  if (next.attempts.length < prior.attempts.length) return false;
+  if (
+    prior.attempts.some(
+      (attempt, index) =>
+        !fullRunAttemptIdentityMatches(attempt, next.attempts[index]),
+    )
+  ) {
+    return false;
+  }
+
+  if (prior.pending_submission) {
+    if (
+      next.pending_submission === null &&
+      next.attempts.length === prior.attempts.length &&
+      next.current_run_id === prior.current_run_id &&
+      JSON.stringify(next.attempts) === JSON.stringify(prior.attempts)
+    ) {
+      return true;
+    }
+    if (
+      next.pending_submission !== null ||
+      next.attempts.length !== prior.attempts.length + 1
+    ) {
+      return false;
+    }
+    const appended = next.attempts.at(-1);
+    return Boolean(
+      appended &&
+      appended.run_id === prior.pending_submission.expected_run_id &&
+      appended.generation === prior.pending_submission.generation &&
+      appended.submission_id === prior.pending_submission.submission_id &&
+      appended.parent_trial_run_id ===
+        prior.pending_submission.accepted_trial_run_id &&
+      appended.config_name === prior.pending_submission.config_name &&
+      appended.config_sha256 === prior.pending_submission.config_sha256 &&
+      appended.request_sha256 === prior.pending_submission.request_sha256 &&
+      next.current_run_id === appended.run_id,
+    );
+  }
+
+  if (next.pending_submission) {
+    const nextGeneration =
+      Math.max(0, ...prior.attempts.map((attempt) => attempt.generation)) + 1;
+    return (
+      next.attempts.length === prior.attempts.length &&
+      next.current_run_id === prior.current_run_id &&
+      next.pending_submission.generation === nextGeneration
+    );
+  }
+
+  if (
+    next.attempts.length !== prior.attempts.length ||
+    next.current_run_id !== prior.current_run_id
+  ) {
+    return false;
+  }
+  const changedObservations = prior.attempts.filter(
+    (attempt, index) =>
+      JSON.stringify(attempt.last_observed) !==
+      JSON.stringify(next.attempts[index].last_observed),
+  ).length;
+  return changedObservations === 1;
+}
+
+export function updateProductionFullRun(
+  draft: ProductionDraft,
+  fullRun: ProductionFullRunState,
+  expectedRevision: number,
+  now = new Date().toISOString(),
+): ProductionDraft {
+  const currentRevision = draft.full_run?.revision ?? 0;
+  if (expectedRevision !== currentRevision) {
+    throw new TypeError("Production full-run revision conflict");
+  }
+  if (!isProductionFullRunState(fullRun)) {
+    throw new TypeError("Invalid production full-run state");
+  }
+  if (!productionFullRunTransitionIsValid(draft.full_run, fullRun)) {
+    throw new TypeError("Invalid production full-run transition");
+  }
+  if (
+    !draft.source ||
+    !draft.calibration ||
+    !draft.trial ||
+    !draft.confirmed_config ||
+    !productionFullRunMatchesContext(fullRun, {
+      workflow_id: draft.workflow_id,
+      source: draft.source,
+      calibration: draft.calibration,
+      trial: draft.trial,
+      confirmed_config: draft.confirmed_config,
+    })
+  ) {
+    throw new TypeError("Production full-run state does not match the draft");
+  }
+  const verifiedProduct =
+    draft.verified_product &&
+    productMatchesFullRun(draft.verified_product, fullRun)
+      ? draft.verified_product
+      : null;
+  const candidate: ProductionDraft = {
+    ...draft,
+    updated_at: now,
+    status: verifiedProduct ? draft.status : "active",
+    full_run: fullRun,
+    verified_product: verifiedProduct,
+  };
+  if (!isProductionDraft(candidate)) {
+    throw new TypeError("Production full-run state does not match the draft");
+  }
+  return candidate;
+}
+
+export function updateVerifiedProductionProduct(
+  draft: ProductionDraft,
+  product: ProductionProductEvidence,
+  expectedFullRunRevision: number,
+  now = new Date().toISOString(),
+): ProductionDraft {
+  if (!isProductionProductEvidence(product)) {
+    throw new TypeError("Invalid production product evidence");
+  }
+  if (!draft.full_run || draft.full_run.revision !== expectedFullRunRevision) {
+    throw new TypeError("Production full-run revision conflict");
+  }
+  if (!productMatchesFullRun(product, draft.full_run)) {
+    throw new TypeError(
+      "Production product does not match the current full run",
+    );
+  }
+  const candidate: ProductionDraft = {
+    ...draft,
+    updated_at: now,
+    status: "completed",
+    verified_product: product,
+  };
+  if (!isProductionDraft(candidate)) {
+    throw new TypeError("Production product does not match the current draft");
+  }
+  return candidate;
+}
+
 export function loadProductionDraft(
   storage: DraftStorage,
 ): ProductionDraftLoadResult {
@@ -815,6 +1050,12 @@ export function loadProductionDraft(
     return migrated
       ? { status: "restored", draft: migrated, migrated: true }
       : { status: "corrupt", message: "Version 2 draft is invalid." };
+  }
+  if (value.schema_version === 3) {
+    const migrated = migrateV3Draft(value);
+    return migrated
+      ? { status: "restored", draft: migrated, migrated: true }
+      : { status: "corrupt", message: "Version 3 draft is invalid." };
   }
   if (!isProductionDraft(value)) {
     return { status: "corrupt", message: "Draft data is invalid." };

@@ -43,7 +43,7 @@ from football_tracking.selective_review import (
     REVIEW_QUEUE_NAME,
     TRAJECTORY_CORRECTIONS_NAME,
 )
-from football_tracking.tracking_contracts import TRACKING_CONTRACT_REPORT_NAME
+from football_tracking.tracking_contracts import TRACKING_CONTRACT_REPORT_NAME, build_tracking_contract
 
 
 def _sha256(path: Path) -> str:
@@ -177,6 +177,136 @@ class _BoundRun:
                 },
             },
         )
+
+
+def _configure_terminal_shortfall(bound: _BoundRun) -> None:
+    contract_path = bound.paths["contract"]
+    contract = build_tracking_contract(
+        source={
+            "video_sha256": _sha256(bound.source_video),
+            "fps": 20.0,
+            "width": 64,
+            "height": 36,
+            "frame_count": 12,
+        },
+        frames=[{"frame_index": index, "status": "unknown"} for index in range(10)],
+    )
+    _write_json(contract_path, contract)
+    temporal_path = bound.run_dir / "temporal_chunks_report.json"
+    temporal = {
+        "chunk_count": 1,
+        "frame_count": 10,
+        "chunks_root_name": "chunks",
+        "source_chunk_names": ["chunk_0000"],
+        "chunks": [
+            {
+                "index": 0,
+                "name": "chunk_0000",
+                "decode_start_frame": 0,
+                "start_frame": 0,
+                "end_frame": 11,
+                "core_start_frame": 0,
+                "core_end_frame": 11,
+            }
+        ],
+        "boundary_events": [
+            {
+                "type": "truncated_final_tail",
+                "chunk_index": 0,
+                "chunk_name": "chunk_0000",
+                "first_missing_frame": 10,
+                "last_missing_frame": 11,
+                "missing_frame_count": 2,
+                "planned_core_end_frame": 11,
+                "stitched_core_end_frame": 9,
+            }
+        ],
+        "stitch": {"status": "succeeded"},
+        "execution": {
+            "status": "succeeded",
+            "results": [
+                {
+                    "chunk": {"index": 0, "name": "chunk_0000"},
+                    "chunk_index": 0,
+                    "chunk_name": "chunk_0000",
+                    "exit_code": 0,
+                }
+            ],
+        },
+    }
+    _write_json(temporal_path, temporal)
+    action_track = bound.run_dir / "action_track.csv"
+    action_report_path = bound.run_dir / "action_signal_report.v1.json"
+    limitation = {
+        "code": "action_signal_terminal_decoder_shortfall",
+        "requires_manual_review": True,
+        "reported_frame_count": 12,
+        "verified_frame_count": 10,
+        "expected_frame_count": 12,
+        "decoded_frame_count": 10,
+        "missing_terminal_frames": 2,
+        "missing_terminal_seconds": 0.1,
+        "expected_terminal_shortfall_frames": 2,
+        "max_accepted_terminal_shortfall_seconds": 0.1,
+        "policy": "trusted_full_source_terminal_tail_only",
+    }
+    _write_json(
+        action_report_path,
+        {
+            "schema_version": "1.0",
+            "artifact_type": "action_signal_report",
+            "status": "complete_with_terminal_shortfall",
+            "termination_reason": "terminal_decoder_shortfall",
+            "input_video": str(bound.source_video.resolve()),
+            "source_resolution": [64, 36],
+            "source_frame_count": 12,
+            "fps": 20.0,
+            "start_frame": 0,
+            "max_frames": None,
+            "expected_frame_count": 12,
+            "frame_count": 10,
+            "limitations": [limitation],
+            "artifacts": {"track": "action_track.csv", "diagnostics": "action_signal_diagnostics.v1.jsonl"},
+        },
+    )
+    contract_sha256 = _sha256(contract_path)
+    evidence = {
+        "tracking_contract_sha256": contract_sha256,
+        "source_video_sha256": _sha256(bound.source_video),
+        "source_width": 64,
+        "source_height": 36,
+        "source_fps": 20.0,
+        "reported_frame_count": 12,
+        "verified_frame_count": 10,
+        "temporal_chunks_report_sha256": _sha256(temporal_path),
+        "first_missing_frame": 10,
+        "last_missing_frame": 11,
+        "missing_frame_count": 2,
+        "missing_duration_seconds": 0.1,
+        "policy": {"max_missing_frames": 2, "max_missing_seconds": 0.1, "requires_manual_review": True},
+    }
+    _write_json(
+        bound.run_dir / orchestration.ACTION_SIGNAL_BINDING_NAME,
+        {
+            "schema_version": "1.0",
+            "artifact_type": "broadcast_action_signal_binding",
+            "source": {
+                "video_sha256": _sha256(bound.source_video),
+                "tracking_contract_sha256": contract_sha256,
+            },
+            "artifacts": {
+                "action_track.csv": {
+                    "sha256": _sha256(action_track),
+                    "size_bytes": action_track.stat().st_size,
+                },
+                "action_signal_report.v1.json": {
+                    "sha256": _sha256(action_report_path),
+                    "size_bytes": action_report_path.stat().st_size,
+                },
+            },
+            "terminal_shortfall_evidence": evidence,
+        },
+    )
 
 
 def _fake_materialize(
@@ -535,6 +665,59 @@ class BroadcastHybridOrchestrationTests(unittest.TestCase):
                 target_width=32,
                 target_height=18,
             )
+
+    def test_terminal_shortfall_binding_is_semantically_revalidated(self) -> None:
+        _configure_terminal_shortfall(self.fixture)
+
+        binding_path = orchestration._validate_action_signal_binding(
+            self.fixture.run_dir,
+            source_video=self.fixture.source_video,
+            source_contract_sha256=_sha256(self.fixture.paths["contract"]),
+        )
+
+        self.assertEqual(
+            (self.fixture.run_dir / orchestration.ACTION_SIGNAL_BINDING_NAME).resolve(),
+            binding_path.resolve(),
+        )
+
+    def test_terminal_shortfall_semantic_revalidation_rejects_tampered_evidence(self) -> None:
+        cases = ("binding_gap", "multiple_temporal_events", "report_gap")
+        for case in cases:
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as temp_name:
+                bound = _BoundRun(Path(temp_name))
+                _configure_terminal_shortfall(bound)
+                binding_path = bound.run_dir / orchestration.ACTION_SIGNAL_BINDING_NAME
+                binding = json.loads(binding_path.read_text(encoding="utf-8"))
+                if case == "binding_gap":
+                    binding["terminal_shortfall_evidence"]["missing_frame_count"] = 1
+                elif case == "multiple_temporal_events":
+                    temporal_path = bound.run_dir / "temporal_chunks_report.json"
+                    temporal = json.loads(temporal_path.read_text(encoding="utf-8"))
+                    temporal["boundary_events"].append(dict(temporal["boundary_events"][0]))
+                    _write_json(temporal_path, temporal)
+                    binding["terminal_shortfall_evidence"]["temporal_chunks_report_sha256"] = _sha256(
+                        temporal_path
+                    )
+                else:
+                    report_path = bound.run_dir / "action_signal_report.v1.json"
+                    report = json.loads(report_path.read_text(encoding="utf-8"))
+                    report["limitations"][0]["missing_terminal_frames"] = 1
+                    _write_json(report_path, report)
+                    binding["artifacts"]["action_signal_report.v1.json"] = {
+                        "sha256": _sha256(report_path),
+                        "size_bytes": report_path.stat().st_size,
+                    }
+                _write_json(binding_path, binding)
+
+                with self.assertRaisesRegex(
+                    orchestration.BroadcastHybridOrchestrationError,
+                    "terminal shortfall",
+                ):
+                    orchestration._validate_action_signal_binding(
+                        bound.run_dir,
+                        source_video=bound.source_video,
+                        source_contract_sha256=_sha256(bound.paths["contract"]),
+                    )
 
     def test_exclusive_publication_rejects_a_dangling_target_symlink(self) -> None:
         with tempfile.TemporaryDirectory() as external_dir:

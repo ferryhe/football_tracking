@@ -24,7 +24,14 @@ ACTION_SIGNAL_REPORT_NAME = "action_signal_report.v1.json"
 ACTION_SIGNAL_DIAGNOSTICS_NAME = "action_signal_diagnostics.v1.jsonl"
 ACTION_DIRECTOR_SOURCE_SHA256 = "7533C69CE3DB28817F9D76DC753F8AB580D9F94EB79DD252E52E8A71CA3DFBD5"
 ACTION_CALIBRATION_ASPECT_RATIO_TOLERANCE = 1e-4
-ACTION_SIGNAL_SUCCESS_STATUSES = frozenset({"complete", "bounded_complete"})
+ACTION_SIGNAL_TERMINAL_SHORTFALL_STATUS = "complete_with_terminal_shortfall"
+ACTION_SIGNAL_TERMINAL_SHORTFALL_REASON = "terminal_decoder_shortfall"
+ACTION_SIGNAL_TERMINAL_SHORTFALL_LIMITATION = "action_signal_terminal_decoder_shortfall"
+ACTION_SIGNAL_MAX_TERMINAL_SHORTFALL_FRAMES = 2
+ACTION_SIGNAL_MAX_TERMINAL_SHORTFALL_SECONDS = 0.1
+ACTION_SIGNAL_SUCCESS_STATUSES = frozenset(
+    {"complete", "bounded_complete", ACTION_SIGNAL_TERMINAL_SHORTFALL_STATUS}
+)
 
 Point = tuple[float, float]
 Polygon = tuple[Point, ...]
@@ -471,6 +478,8 @@ def generate_action_track(
     progress_callback: Callable[[dict[str, Any]], None] | None = None,
     should_cancel: Callable[[], bool] | None = None,
     progress_interval_frames: int = 250,
+    expected_terminal_shortfall_frames: int = 0,
+    max_terminal_shortfall_seconds: float = 0.0,
 ) -> dict[str, Any]:
     settings = settings or ActionSignalSettings()
     input_video = Path(input_video).resolve()
@@ -478,6 +487,22 @@ def generate_action_track(
     start_frame = _nonnegative_int(start_frame, "start_frame")
     max_frames = None if max_frames is None else _nonnegative_int(max_frames, "max_frames")
     progress_interval_frames = _positive_int(progress_interval_frames, "progress_interval_frames")
+    expected_terminal_shortfall_frames = _nonnegative_int(
+        expected_terminal_shortfall_frames,
+        "expected_terminal_shortfall_frames",
+    )
+    if expected_terminal_shortfall_frames > ACTION_SIGNAL_MAX_TERMINAL_SHORTFALL_FRAMES:
+        raise ValueError(
+            "expected_terminal_shortfall_frames exceeds the terminal shortfall policy"
+        )
+    max_terminal_shortfall_seconds = _finite_float(
+        max_terminal_shortfall_seconds,
+        "max_terminal_shortfall_seconds",
+    )
+    if max_terminal_shortfall_seconds < 0.0:
+        raise ValueError("max_terminal_shortfall_seconds must be non-negative")
+    if max_terminal_shortfall_seconds > ACTION_SIGNAL_MAX_TERMINAL_SHORTFALL_SECONDS:
+        raise ValueError("max_terminal_shortfall_seconds exceeds the terminal shortfall policy")
     temporary_paths: list[Path] = []
     capture = cv2.VideoCapture(str(input_video))
     try:
@@ -581,7 +606,28 @@ def generate_action_track(
             expected_frame_count=expected_frame_count,
             frame_count=frame_count,
             read_failed=read_failed,
+            expected_terminal_shortfall_frames=expected_terminal_shortfall_frames,
+            max_terminal_shortfall_seconds=max_terminal_shortfall_seconds,
+            fps=fps,
         )
+        limitations: list[dict[str, Any]] = []
+        if status == ACTION_SIGNAL_TERMINAL_SHORTFALL_STATUS:
+            assert expected_frame_count is not None
+            limitations.append(
+                {
+                    "code": ACTION_SIGNAL_TERMINAL_SHORTFALL_LIMITATION,
+                    "requires_manual_review": True,
+                    "reported_frame_count": expected_frame_count,
+                    "verified_frame_count": frame_count,
+                    "expected_frame_count": expected_frame_count,
+                    "decoded_frame_count": frame_count,
+                    "missing_terminal_frames": expected_frame_count - frame_count,
+                    "missing_terminal_seconds": (expected_frame_count - frame_count) / fps,
+                    "expected_terminal_shortfall_frames": expected_terminal_shortfall_frames,
+                    "max_accepted_terminal_shortfall_seconds": max_terminal_shortfall_seconds,
+                    "policy": "trusted_full_source_terminal_tail_only",
+                }
+            )
         calibration_payload = calibration.to_dict()
         calibration_json = json.dumps(
             calibration_payload,
@@ -596,6 +642,7 @@ def generate_action_track(
             "generated_at": datetime.now(timezone.utc).isoformat(),
             "status": status,
             "termination_reason": termination_reason,
+            "limitations": limitations,
             "input_video": str(input_video),
             "output_dir": str(output_dir),
             "source_resolution": [source_width, source_height],
@@ -603,6 +650,7 @@ def generate_action_track(
             "process_resolution": [settings.process_width, processor.process_height],
             "fps": fps,
             "start_frame": start_frame,
+            "max_frames": max_frames,
             "expected_frame_count": expected_frame_count,
             "frame_count": frame_count,
             "seek_mode": seek_mode,
@@ -718,10 +766,25 @@ def _termination(
     expected_frame_count: int | None,
     frame_count: int,
     read_failed: bool,
+    expected_terminal_shortfall_frames: int,
+    max_terminal_shortfall_seconds: float,
+    fps: float,
 ) -> tuple[str, str]:
     if total_source_frames is None and frame_count == 0:
         return "failed", "no_decodable_frames"
     if expected_frame_count is not None and frame_count < expected_frame_count:
+        terminal_shortfall = expected_frame_count - frame_count
+        if (
+            start_frame == 0
+            and max_frames is None
+            and read_failed
+            and frame_count > 0
+            and expected_terminal_shortfall_frames > 0
+            and terminal_shortfall == expected_terminal_shortfall_frames
+            and max_terminal_shortfall_seconds > 0.0
+            and terminal_shortfall / fps <= max_terminal_shortfall_seconds + 1e-9
+        ):
+            return ACTION_SIGNAL_TERMINAL_SHORTFALL_STATUS, ACTION_SIGNAL_TERMINAL_SHORTFALL_REASON
         return "truncated", "premature_read_failure"
     if total_source_frames is None and read_failed and max_frames is not None:
         return "truncated", "premature_read_failure"

@@ -5,14 +5,14 @@
 - Program status: in_progress
 - Current PR: PR4 · Full Production, Review, and Render
 - Current branch: codex/full-production-review-render
-- Current phase: independent_specification_review
-- Checks: implementation gates pass with Vitest 330 and Production Playwright 32/32 serial and 4-worker; runtime, axe, unknown-API, and contract audits are clean; independent specification review is in progress before the real-video gate
-- Blockers: none
+- Current phase: real_video_gate_blocked_review_evidence
+- Checks: PR4 code and terminal-tail acknowledgement review SAFE with 0 Critical, 0 Important, and 0 Minor; related Python 155 passed/5 skipped/33 subtests; frontend Vitest 368/368; Playwright 33/33 plus the real missing-queue tail acknowledgement path; typechecks, OpenAPI/codegen, diff, and pnpm freeze gates pass; real full run generation 2 completed tracking/action-signal, entered authoritative needs_review, and the hash-bound two-frame terminal limitation was accepted by operator without removing unrelated blockers
+- Blockers: the real full run has 6,406 candidates but no qualified candidate dataset, classifier package, selective policy, human-confirmed evidence, or selective_review_queue.v1.json; the current HTTP API only reads/consumes an externally provisioned queue. Completing PR4 requires an approved review-evidence provisioning program or an approved, separately designed manual fallback. Default acceptance, fabricated labels, and empty-queue synthesis are prohibited.
 - Heartbeat: ACTIVE
 - Heartbeat automation id: production-workflow-multi-pr-heartbeat
 - Heartbeat interval: 15 minutes
 - Heartbeat scope: Continue and report this six-PR program until PR1–PR6 are merged; then delete the heartbeat and verify removal.
-- Last updated: 2026-07-15 13:59 ET
+- Last updated: 2026-07-15 17:04 ET
 
 ## PR Ledger
 
@@ -21,7 +21,7 @@
 | PR1 | codex/production-workflow-foundation | completed | https://github.com/ferryhe/football_tracking/pull/104 | Final window started 2026-07-15T10:32:54.4422764Z | Merged 2026-07-15T10:43:22Z · ea52548 |
 | PR2 | codex/interactive-field-calibration | completed | https://github.com/ferryhe/football_tracking/pull/105 | Final window completed 2026-07-15T12:29:00.338Z | Merged 2026-07-15T12:29:09Z · c781b34 |
 | PR3 | codex/trial-tuning-and-config-freeze | completed | https://github.com/ferryhe/football_tracking/pull/106 | Completed 2026-07-15T15:46:04Z with no actionable feedback | Merged 2026-07-15T15:46:13Z · 1dd538c |
-| PR4 | codex/full-production-review-render | independent_specification_review | Pending | Pending | Pending |
+| PR4 | codex/full-production-review-render | blocked_review_evidence | Pending | Pending | Pending |
 | PR5 | codex/grouped-production-history | pending | Pending | Pending | Pending |
 | PR6 | codex/production-workflow-cutover | pending | Pending | Pending | Pending |
 
