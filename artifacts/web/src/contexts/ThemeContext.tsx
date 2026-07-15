@@ -1,4 +1,11 @@
-import { createContext, useContext, useState, useEffect, type ReactNode } from "react";
+import {
+  createContext,
+  useContext,
+  useState,
+  useEffect,
+  type ReactNode,
+} from "react";
+import { createSafeBrowserStorage } from "@/lib/browserStorage";
 
 type Theme = "light" | "dark";
 
@@ -10,10 +17,13 @@ interface ThemeContextValue {
 const ThemeContext = createContext<ThemeContextValue | null>(null);
 
 export function ThemeProvider({ children }: { children: ReactNode }) {
+  const [storage] = useState(createSafeBrowserStorage);
   const [theme, setTheme] = useState<Theme>(() => {
-    const stored = localStorage.getItem("app-theme");
+    const stored = storage.getItem("app-theme");
     if (stored === "dark" || stored === "light") return stored;
-    return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+    return window.matchMedia("(prefers-color-scheme: dark)").matches
+      ? "dark"
+      : "light";
   });
 
   useEffect(() => {
@@ -23,8 +33,8 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
     } else {
       root.classList.remove("dark");
     }
-    localStorage.setItem("app-theme", theme);
-  }, [theme]);
+    storage.setItem("app-theme", theme);
+  }, [storage, theme]);
 
   function toggleTheme() {
     setTheme((prev) => (prev === "dark" ? "light" : "dark"));

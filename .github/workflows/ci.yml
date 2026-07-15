@@ -43,16 +43,29 @@ jobs:
             exit 1
           fi
 
-      - name: Test broadcast workflow state and validation
-        run: |
-          pnpm --filter @workspace/web run test:broadcast-workflow
-          pnpm --filter @workspace/web run test:broadcast-components
+      - name: Test web workflows and components
+        run: pnpm --filter @workspace/web run test:web
+
+      - name: Install Playwright Chromium
+        run: pnpm --filter @workspace/web exec playwright install --with-deps chromium
+
+      - name: Test production workflow in Chromium
+        run: pnpm --filter @workspace/web run test:e2e
 
       - name: Type-check workspace
         run: pnpm run typecheck
 
       - name: Build workspace
         run: pnpm -r --if-present run build
+
+      - name: Verify tests and builds left a clean worktree
+        run: |
+          changes="$(git status --porcelain --untracked-files=all)"
+          if [ -n "$changes" ]; then
+            echo "Unexpected tracked or untracked files were produced:"
+            echo "$changes"
+            exit 1
+          fi
 
   python:
     name: Python
