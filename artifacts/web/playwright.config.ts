@@ -9,7 +9,9 @@ export default defineConfig({
   fullyParallel: true,
   forbidOnly: Boolean(process.env.CI),
   retries: process.env.CI ? 2 : 0,
-  workers: process.env.CI ? 1 : undefined,
+  // Konva browser journeys allocate canvases and screenshots; cap local parallelism
+  // so a full suite does not starve a page before React mounts. CI stays serial.
+  workers: process.env.CI ? 1 : 4,
   reporter: process.env.CI
     ? [
         ["github"],

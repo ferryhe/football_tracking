@@ -14,6 +14,7 @@ import {
   requiresDraftReplacementConfirmation,
   saveProductionDraft,
   sourceSignaturesMatch,
+  updateProductionCalibration,
   updateProductionSource,
   type ProductionDraft,
   type ProductionWorkflowStage,
@@ -27,15 +28,35 @@ const SOURCE: SourceSignature = {
   size_bytes: 1_024,
   modified_at: "2026-07-14T10:00:00Z",
 };
+const POLYGON_DIGEST = "c".repeat(64);
+
+function completeCalibration() {
+  return {
+    source_resolution: { width: 1_920, height: 1_080 },
+    suggestion: null,
+    approved_polygon: [
+      [0, 0],
+      [1_919, 0],
+      [1_919, 1_079],
+    ] as [number, number][],
+    exclusions: [],
+    polygon_digest: POLYGON_DIGEST,
+    confirmed_frames: [10, 20, 30].map((frame_index, sample_index) => ({
+      input_video: SOURCE.path,
+      frame_index,
+      frame_time_seconds: frame_index / 25,
+      sample_index,
+      source_resolution: { width: 1_920, height: 1_080 },
+      polygon_digest: POLYGON_DIGEST,
+    })),
+  };
+}
 
 function draftWithEvidence(): ProductionDraft {
   return {
     ...createProductionDraft(NOW, "workflow-a"),
     source: SOURCE,
-    calibration: {
-      polygon_digest: "polygon-a",
-      confirmed_frame_ids: ["10", "20", "30"],
-    },
+    calibration: completeCalibration(),
     trial: {
       latest_run_id: "trial-2",
       accepted_run_id: "trial-2",
@@ -85,10 +106,7 @@ describe("production workflow stage derivation", () => {
       name: "trial",
       change: (draft) => {
         draft.source = SOURCE;
-        draft.calibration = {
-          polygon_digest: "polygon-a",
-          confirmed_frame_ids: ["10", "20", "30"],
-        };
+        draft.calibration = completeCalibration();
       },
       expected: "trial",
     },
@@ -371,6 +389,52 @@ describe("production workflow invalidation", () => {
     expect(fromFullRun.confirmed_config).not.toBeNull();
     expect(fromFullRun.full_run).toBeNull();
   });
+
+  it("keeps suggestion-only updates but clears all downstream evidence on an approved polygon edit", () => {
+    const current = draftWithEvidence();
+    const suggestionOnly = updateProductionCalibration(
+      current,
+      {
+        ...current.calibration!,
+        suggestion: {
+          source_path: SOURCE.path,
+          source: "detector",
+          confidence: "detected",
+          field_coverage: 0.75,
+          source_resolution: { width: 1_920, height: 1_080 },
+          frame_index: 10,
+          polygon: [
+            [20, 20],
+            [100, 20],
+            [100, 100],
+          ],
+        },
+      },
+      LATER,
+    );
+    expect(suggestionOnly.trial).toEqual(current.trial);
+    expect(suggestionOnly.calibration?.confirmed_frames).toHaveLength(3);
+
+    const approvedEdit = updateProductionCalibration(
+      current,
+      {
+        ...current.calibration!,
+        approved_polygon: [
+          [10, 10],
+          [1_900, 10],
+          [1_900, 1_000],
+        ],
+        polygon_digest: "d".repeat(64),
+        confirmed_frames: [],
+      },
+      LATER,
+    );
+    expect(approvedEdit.calibration?.confirmed_frames).toEqual([]);
+    expect(approvedEdit.trial).toBeNull();
+    expect(approvedEdit.confirmed_config).toBeNull();
+    expect(approvedEdit.full_run).toBeNull();
+    expect(approvedEdit.verified_product).toBeNull();
+  });
 });
 
 describe("production draft persistence", () => {
@@ -454,6 +518,43 @@ describe("production draft persistence", () => {
         trial: null,
       },
     });
+  });
+
+  it("migrates v1 fail-closed by preserving the source and clearing calibration and downstream", () => {
+    const legacy = {
+      ...draftWithEvidence(),
+      schema_version: 1,
+      calibration: {
+        polygon_digest: "legacy-unbound",
+        confirmed_frame_ids: ["10", "20", "30"],
+      },
+    };
+    const result = loadProductionDraft(memoryStorage(JSON.stringify(legacy)));
+    expect(result).toMatchObject({
+      status: "restored",
+      migrated: true,
+      draft: {
+        schema_version: 2,
+        source: SOURCE,
+        calibration: null,
+        trial: null,
+        confirmed_config: null,
+        full_run: null,
+        verified_product: null,
+      },
+    });
+  });
+
+  it("never persists preview data URLs", () => {
+    const storage = memoryStorage();
+    const draft = draftWithEvidence() as ProductionDraft & {
+      preview_data_url?: string;
+    };
+    draft.preview_data_url = "data:image/png;base64,large";
+    expect(saveProductionDraft(storage, draft)).toEqual({ ok: true });
+    expect(storage.getItem(PRODUCTION_DRAFT_STORAGE_KEY)).not.toContain(
+      "preview_data_url",
+    );
   });
 
   it("rejects malformed version-zero drafts", () => {

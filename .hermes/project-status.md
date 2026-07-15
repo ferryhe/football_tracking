@@ -5,21 +5,21 @@
 - Program status: in_progress
 - Current PR: PR2 · Interactive Field Calibration
 - Current branch: codex/interactive-field-calibration
-- Current phase: implementation
-- Checks: PR1 merged with Node/Python CI passing; PR2 starts from merge commit ea52548
+- Current phase: ready_to_publish
+- Checks: spec review COMPLIANT and code-quality review SAFE TO PUBLISH (0 Critical, 0 Important); root validation passed 1450 Python tests with 8 skips, web Vitest 125, legacy Broadcast 80+4, Playwright CI-serial 14/14, typechecks, builds, frozen lockfile, and diff check
 - Blockers: none
 - Heartbeat: ACTIVE
 - Heartbeat automation id: production-workflow-multi-pr-heartbeat
 - Heartbeat interval: 15 minutes
 - Heartbeat scope: Continue and report this six-PR program until PR1–PR6 are merged; then delete the heartbeat and verify removal.
-- Last updated: 2026-07-15 06:44 ET
+- Last updated: 2026-07-15 08:00 ET
 
 ## PR Ledger
 
 | PR | Branch | Status | Pull request | Remote feedback started | Merge |
 | --- | --- | --- | --- | --- | --- |
 | PR1 | codex/production-workflow-foundation | completed | https://github.com/ferryhe/football_tracking/pull/104 | Final window started 2026-07-15T10:32:54.4422764Z | Merged 2026-07-15T10:43:22Z · ea52548 |
-| PR2 | codex/interactive-field-calibration | implementation | Pending | Pending | Pending |
+| PR2 | codex/interactive-field-calibration | ready_to_publish | Pending | Pending | Pending |
 | PR3 | codex/trial-tuning-and-config-freeze | pending | Pending | Pending | Pending |
 | PR4 | codex/full-production-review-render | pending | Pending | Pending | Pending |
 | PR5 | codex/grouped-production-history | pending | Pending | Pending | Pending |
