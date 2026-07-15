@@ -190,6 +190,9 @@ describe("ProductionCalibrationStep", () => {
     expect(screen.getByTestId("approved-coordinates")).toHaveTextContent(
       "(100, 100)",
     );
+    expect(screen.getByRole("status")).not.toHaveTextContent(
+      /prior frame confirmations.*cleared/i,
+    );
 
     const x = screen.getByLabelText("Point 1 X coordinate");
     await view.user.clear(x);
@@ -256,6 +259,9 @@ describe("ProductionCalibrationStep", () => {
     expect(view.latest()).toEqual(originalEvidence);
     await waitFor(() =>
       expect(onUsabilityChange).toHaveBeenLastCalledWith(true),
+    );
+    expect(screen.getByRole("status")).not.toHaveTextContent(
+      /prior frame confirmations.*cleared/i,
     );
 
     await view.user.clear(x);
@@ -444,10 +450,13 @@ describe("ProductionCalibrationStep", () => {
       screen.getByRole("button", { name: "Use this suggestion" }),
     );
     expect(view.latest()?.confirmed_frames).toEqual(current.confirmed_frames);
+    expect(screen.getByRole("status")).not.toHaveTextContent(
+      /prior frame confirmations.*cleared/i,
+    );
   });
 
   it("supports pointer add, selected deletion, undo, clear, and keyboard point creation", async () => {
-    const view = renderStep(approvedCalibration());
+    const view = renderStep(completedCalibration());
     await loadCurrentImage();
 
     await view.user.click(
@@ -457,6 +466,9 @@ describe("ProductionCalibrationStep", () => {
       expect(view.latest()?.approved_polygon).toHaveLength(4),
     );
     expect(view.latest()?.confirmed_frames).toEqual([]);
+    expect(screen.getByRole("status")).toHaveTextContent(
+      /prior frame confirmations.*cleared/i,
+    );
 
     await view.user.click(
       screen.getByRole("button", { name: "mock select first" }),

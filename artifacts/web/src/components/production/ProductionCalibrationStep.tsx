@@ -326,6 +326,7 @@ export function ProductionCalibrationStep({
     if (remember) setHistory((current) => [...current, approved]);
     const generation = ++polygonGenerationRef.current;
     const current = calibrationRef.current ?? createEmptyCalibration();
+    const hadConfirmedFrames = current.confirmed_frames.length > 0;
     const provisional: ProductionCalibrationDraft = {
       ...current,
       source_resolution: sourceResolution,
@@ -335,7 +336,9 @@ export function ProductionCalibrationStep({
     };
     publishCalibration(provisional);
     setSelectedVertex(null);
-    setStatusMessage(t.production.framesClearedAfterEdit);
+    if (hadConfirmedFrames) {
+      setStatusMessage(t.production.framesClearedAfterEdit);
+    }
     if (!validatePolygon(points, sourceResolution).valid) return;
     void polygonSha256(points, sourceResolution)
       .then((digest) => {
