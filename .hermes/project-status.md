@@ -3,23 +3,23 @@
 - Program: Production Workflow frontend consolidation
 - Canonical plan: docs/superpowers/plans/2026-07-14-production-workflow-final-managed-pr-plan.md
 - Program status: in_progress
-- Current PR: PR1 · Production Workflow Foundation
-- Current branch: codex/production-workflow-foundation
-- Current phase: waiting_remote_feedback_3
-- Checks: Node CI root cause fixed; product focus restoration covered by component/E2E tests; independent spec and quality reviews pass; CI-mode focused repeat 20/20 and full E2E 5/5 pass
+- Current PR: PR2 · Interactive Field Calibration
+- Current branch: codex/interactive-field-calibration
+- Current phase: implementation
+- Checks: PR1 merged with Node/Python CI passing; PR2 starts from merge commit ea52548
 - Blockers: none
 - Heartbeat: ACTIVE
 - Heartbeat automation id: production-workflow-multi-pr-heartbeat
 - Heartbeat interval: 15 minutes
 - Heartbeat scope: Continue and report this six-PR program until PR1–PR6 are merged; then delete the heartbeat and verify removal.
-- Last updated: 2026-07-15 06:33 ET
+- Last updated: 2026-07-15 06:44 ET
 
 ## PR Ledger
 
 | PR | Branch | Status | Pull request | Remote feedback started | Merge |
 | --- | --- | --- | --- | --- | --- |
-| PR1 | codex/production-workflow-foundation | waiting_remote_feedback_3 | https://github.com/ferryhe/football_tracking/pull/104 | Resets after this status update push | Pending |
-| PR2 | codex/interactive-field-calibration | pending | Pending | Pending | Pending |
+| PR1 | codex/production-workflow-foundation | completed | https://github.com/ferryhe/football_tracking/pull/104 | Final window started 2026-07-15T10:32:54.4422764Z | Merged 2026-07-15T10:43:22Z · ea52548 |
+| PR2 | codex/interactive-field-calibration | implementation | Pending | Pending | Pending |
 | PR3 | codex/trial-tuning-and-config-freeze | pending | Pending | Pending | Pending |
 | PR4 | codex/full-production-review-render | pending | Pending | Pending | Pending |
 | PR5 | codex/grouped-production-history | pending | Pending | Pending | Pending |
