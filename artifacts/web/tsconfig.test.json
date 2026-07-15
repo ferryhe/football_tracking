@@ -1,6 +1,19 @@
 {
   "extends": "./tsconfig.json",
+  "include": [
+    "src/**/*.tsx",
+    "src/**/*.vitest.test.ts",
+    "src/lib/productionWorkflow.test.ts",
+    "vitest.setup.ts"
+  ],
+  "exclude": ["node_modules", "build", "dist"],
   "compilerOptions": {
-    "jsx": "react-jsx"
+    "jsx": "react-jsx",
+    "types": [
+      "node",
+      "vite/client",
+      "vitest/globals",
+      "@testing-library/jest-dom/vitest"
+    ]
   }
 }

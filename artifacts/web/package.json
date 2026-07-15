@@ -11,7 +11,8 @@
     "test:ai-improvement-status": "node --experimental-strip-types src/lib/aiImprovementStatus.test.ts",
     "test:broadcast-workflow": "node --experimental-strip-types src/lib/broadcastWorkflow.test.ts",
     "test:broadcast-components": "tsx --tsconfig tsconfig.test.json src/components/broadcast/broadcastComponents.test.tsx",
-    "test:production-workflow": "vitest run --config vitest.config.ts --coverage",
+    "typecheck:test": "tsc -p tsconfig.test.json --noEmit",
+    "test:production-workflow": "pnpm run typecheck:test && vitest run --config vitest.config.ts --coverage",
     "test:web": "pnpm run test:lifecycle && pnpm run test:ai-improvement-status && pnpm run test:broadcast-workflow && pnpm run test:broadcast-components && pnpm run test:production-workflow",
     "test:e2e": "playwright test --config playwright.config.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit"
