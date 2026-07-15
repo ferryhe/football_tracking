@@ -1,4 +1,5 @@
 import { createContext, useContext, useState, type ReactNode } from "react";
+import { createSafeBrowserStorage } from "@/lib/browserStorage";
 import { translations, type Language, type Translations } from "@/lib/i18n";
 
 interface LanguageContextValue {
@@ -10,18 +11,21 @@ interface LanguageContextValue {
 const LanguageContext = createContext<LanguageContextValue | null>(null);
 
 export function LanguageProvider({ children }: { children: ReactNode }) {
+  const [storage] = useState(createSafeBrowserStorage);
   const [language, setLanguageState] = useState<Language>(() => {
-    const stored = localStorage.getItem("app-language");
-    return (stored === "zh" || stored === "en") ? stored : "en";
+    const stored = storage.getItem("app-language");
+    return stored === "zh" || stored === "en" ? stored : "en";
   });
 
   function setLanguage(lang: Language) {
     setLanguageState(lang);
-    localStorage.setItem("app-language", lang);
+    storage.setItem("app-language", lang);
   }
 
   return (
-    <LanguageContext.Provider value={{ language, setLanguage, t: translations[language] }}>
+    <LanguageContext.Provider
+      value={{ language, setLanguage, t: translations[language] }}
+    >
       {children}
     </LanguageContext.Provider>
   );

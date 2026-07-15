@@ -20,6 +20,7 @@ import AIAnalysisPage from "@/pages/ai-analysis";
 import DeliverablePage from "@/pages/deliverable";
 import HistoryPage from "@/pages/history";
 import BroadcastPage from "@/pages/broadcast";
+import ProductionPage from "@/pages/production";
 import {
   LayoutDashboard,
   Play,
@@ -218,6 +219,7 @@ function Layout() {
             <Route path="/ai" component={AIAnalysisPage} />
             <Route path="/deliverable" component={DeliverablePage} />
             <Route path="/history" component={HistoryPage} />
+            <Route path="/production" component={ProductionPage} />
             <Route component={NotFound} />
           </Switch>
         </main>
