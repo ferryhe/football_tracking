@@ -28,6 +28,10 @@ vi.mock("@workspace/api-client-react", () => ({
   useListInputVideos: () => queryResult,
 }));
 
+vi.mock("@/components/production/ProductionCalibrationStep", () => ({
+  ProductionCalibrationStep: () => <div>interactive calibration</div>,
+}));
+
 import { ProductionPageContent } from "./production";
 
 function TestLanguageToggle() {
@@ -179,8 +183,23 @@ describe("ProductionPage", () => {
       source,
     );
     draft.calibration = {
-      polygon_digest: "polygon-a",
-      confirmed_frame_ids: ["1", "2", "3"],
+      source_resolution: { width: 1_920, height: 1_080 },
+      suggestion: null,
+      approved_polygon: [
+        [0, 0],
+        [1_919, 0],
+        [1_919, 1_079],
+      ],
+      exclusions: [],
+      polygon_digest: "c".repeat(64),
+      confirmed_frames: [1, 2, 3].map((frame_index, sample_index) => ({
+        input_video: source.path,
+        frame_index,
+        frame_time_seconds: frame_index / 25,
+        sample_index,
+        source_resolution: { width: 1_920, height: 1_080 },
+        polygon_digest: "c".repeat(64),
+      })),
     };
     saveProductionDraft(localStorage, draft);
     queryResult = {

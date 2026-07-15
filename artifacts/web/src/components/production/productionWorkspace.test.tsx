@@ -6,11 +6,30 @@ import { describe, expect, it, vi } from "vitest";
 import { LanguageProvider } from "@/contexts/LanguageContext";
 import {
   createProductionDraft,
+  updateProductionCalibration,
   updateProductionSource,
   type ProductionDraft,
   type SourceSignature,
 } from "@/lib/productionWorkflow";
 import { ProductionWorkspace } from "./ProductionWorkspace";
+
+vi.mock("./ProductionCalibrationStep", () => ({
+  ProductionCalibrationStep: ({
+    onUsabilityChange,
+  }: {
+    onUsabilityChange?: (usable: boolean) => void;
+  }) => (
+    <div>
+      interactive calibration
+      <button type="button" onClick={() => onUsabilityChange?.(true)}>
+        mark preview usable
+      </button>
+      <button type="button" onClick={() => onUsabilityChange?.(false)}>
+        mark preview unusable
+      </button>
+    </div>
+  ),
+}));
 
 const videos: SourceSignature[] = [
   {
@@ -30,8 +49,23 @@ function draftAtTrial(): ProductionDraft {
     ...createProductionDraft("2026-07-14T12:00:00Z", "workflow-trial"),
     source: videos[0],
     calibration: {
-      polygon_digest: "polygon-a",
-      confirmed_frame_ids: ["10", "20", "30"],
+      source_resolution: { width: 1_920, height: 1_080 },
+      suggestion: null,
+      approved_polygon: [
+        [0, 0],
+        [1_919, 0],
+        [1_919, 1_079],
+      ],
+      exclusions: [],
+      polygon_digest: "c".repeat(64),
+      confirmed_frames: [10, 20, 30].map((frame_index, sample_index) => ({
+        input_video: videos[0].path,
+        frame_index,
+        frame_time_seconds: frame_index / 25,
+        sample_index,
+        source_resolution: { width: 1_920, height: 1_080 },
+        polygon_digest: "c".repeat(64),
+      })),
     },
     trial: {
       latest_run_id: "trial-a",
@@ -85,6 +119,11 @@ function renderWorkspace(
           onSourceChange={(source) =>
             setDraft((current) =>
               updateProductionSource(current, source, "2026-07-14T12:05:00Z"),
+            )
+          }
+          onCalibrationChange={(calibration) =>
+            setDraft((current) =>
+              updateProductionCalibration(current, calibration),
             )
           }
           onSaveExit={onSaveExit}
@@ -188,6 +227,22 @@ describe("ProductionWorkspace", () => {
       screen.queryByTestId("completed-stage-full_tracking"),
     ).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Next" })).toBeDisabled();
+  });
+
+  it("blocks leaving a completed calibration while its current preview is unusable", async () => {
+    const { user } = renderWorkspace(draftAtTrial());
+    await user.click(screen.getByRole("button", { name: "Back" }));
+
+    const next = screen.getByRole("button", { name: "Next" });
+    expect(next).toBeDisabled();
+    await user.click(
+      screen.getByRole("button", { name: "mark preview usable" }),
+    );
+    expect(next).toBeEnabled();
+    await user.click(
+      screen.getByRole("button", { name: "mark preview unusable" }),
+    );
+    expect(next).toBeDisabled();
   });
 
   it("restores a full-tracking draft and navigates forward after Back", async () => {

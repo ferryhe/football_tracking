@@ -1,4 +1,13 @@
-export const PRODUCTION_DRAFT_SCHEMA_VERSION = 1 as const;
+import {
+  calibrationIsComplete,
+  resolutionsMatch,
+  type ProductionCalibrationDraft,
+  type ProductionCalibrationFrame,
+  type ProductionCalibrationSuggestion,
+} from "./productionCalibration";
+import type { FieldPoint, FieldResolution } from "./fieldGeometry";
+
+export const PRODUCTION_DRAFT_SCHEMA_VERSION = 2 as const;
 export const PRODUCTION_DRAFT_STORAGE_KEY =
   "football-tracking.production-draft.v1";
 
@@ -29,11 +38,6 @@ export interface SourceSignature {
   path: string;
   size_bytes: number;
   modified_at: string;
-}
-
-export interface ProductionCalibrationEvidence {
-  polygon_digest: string;
-  confirmed_frame_ids: string[];
 }
 
 export interface ProductionTrialEvidence {
@@ -75,7 +79,7 @@ export interface ProductionDraft {
   updated_at: string;
   status: ProductionDraftStatus;
   source: SourceSignature | null;
-  calibration: ProductionCalibrationEvidence | null;
+  calibration: ProductionCalibrationDraft | null;
   trial: ProductionTrialEvidence | null;
   confirmed_config: ProductionConfigEvidence | null;
   full_run: ProductionFullRunEvidence | null;
@@ -131,6 +135,75 @@ function isSha256(value: unknown): value is string {
   return typeof value === "string" && /^[a-f\d]{64}$/i.test(value);
 }
 
+function isFieldPoint(value: unknown): value is FieldPoint {
+  return (
+    Array.isArray(value) &&
+    value.length === 2 &&
+    value.every(
+      (coordinate) =>
+        typeof coordinate === "number" && Number.isFinite(coordinate),
+    )
+  );
+}
+
+function isFieldResolution(value: unknown): value is FieldResolution {
+  return (
+    isRecord(value) &&
+    typeof value.width === "number" &&
+    Number.isFinite(value.width) &&
+    value.width > 0 &&
+    typeof value.height === "number" &&
+    Number.isFinite(value.height) &&
+    value.height > 0
+  );
+}
+
+function isPointList(value: unknown): value is FieldPoint[] {
+  return Array.isArray(value) && value.every(isFieldPoint);
+}
+
+function isCalibrationSuggestion(
+  value: unknown,
+): value is ProductionCalibrationSuggestion {
+  if (!isRecord(value)) return false;
+  return (
+    isNonEmptyString(value.source_path) &&
+    isNonEmptyString(value.source) &&
+    (value.confidence === "config" ||
+      value.confidence === "detected" ||
+      value.confidence === "fallback") &&
+    typeof value.field_coverage === "number" &&
+    Number.isFinite(value.field_coverage) &&
+    value.field_coverage >= 0 &&
+    value.field_coverage <= 1 &&
+    isFieldResolution(value.source_resolution) &&
+    typeof value.frame_index === "number" &&
+    Number.isInteger(value.frame_index) &&
+    value.frame_index >= 0 &&
+    isPointList(value.polygon)
+  );
+}
+
+function isCalibrationFrame(
+  value: unknown,
+): value is ProductionCalibrationFrame {
+  if (!isRecord(value)) return false;
+  return (
+    isNonEmptyString(value.input_video) &&
+    typeof value.frame_index === "number" &&
+    Number.isInteger(value.frame_index) &&
+    value.frame_index >= 0 &&
+    typeof value.frame_time_seconds === "number" &&
+    Number.isFinite(value.frame_time_seconds) &&
+    value.frame_time_seconds >= 0 &&
+    typeof value.sample_index === "number" &&
+    Number.isInteger(value.sample_index) &&
+    value.sample_index >= 0 &&
+    isFieldResolution(value.source_resolution) &&
+    isSha256(value.polygon_digest)
+  );
+}
+
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
@@ -148,12 +221,17 @@ function isSourceSignature(value: unknown): value is SourceSignature {
 
 function isCalibrationEvidence(
   value: unknown,
-): value is ProductionCalibrationEvidence {
+): value is ProductionCalibrationDraft {
   if (!isRecord(value)) return false;
   return (
-    isNonEmptyString(value.polygon_digest) &&
-    Array.isArray(value.confirmed_frame_ids) &&
-    value.confirmed_frame_ids.every(isNonEmptyString)
+    isNullable(value.source_resolution, isFieldResolution) &&
+    isNullable(value.suggestion, isCalibrationSuggestion) &&
+    isPointList(value.approved_polygon) &&
+    Array.isArray(value.exclusions) &&
+    value.exclusions.every(isPointList) &&
+    (value.polygon_digest === null || isSha256(value.polygon_digest)) &&
+    Array.isArray(value.confirmed_frames) &&
+    value.confirmed_frames.every(isCalibrationFrame)
   );
 }
 
@@ -213,14 +291,17 @@ function isProductionDraft(value: unknown): value is ProductionDraft {
   );
 }
 
-function migrateVersionZero(
+function migrateLegacyDraft(
   value: Record<string, unknown>,
 ): ProductionDraft | null {
   if (
     !isNonEmptyString(value.workflow_id) ||
     !isNonEmptyString(value.created_at) ||
     !isNonEmptyString(value.updated_at) ||
-    !isNullable(value.source, isSourceSignature)
+    !isNullable(value.source, isSourceSignature) ||
+    (value.schema_version === 1 &&
+      (typeof value.status !== "string" ||
+        !DRAFT_STATUSES.has(value.status as ProductionDraftStatus)))
   ) {
     return null;
   }
@@ -230,7 +311,10 @@ function migrateVersionZero(
     workflow_id: value.workflow_id,
     created_at: value.created_at,
     updated_at: value.updated_at,
-    status: "active",
+    status:
+      value.schema_version === 1
+        ? (value.status as ProductionDraftStatus)
+        : "active",
     source: value.source,
     calibration: null,
     trial: null,
@@ -242,8 +326,7 @@ function migrateVersionZero(
 
 function hasConfirmedCalibration(draft: ProductionDraft): boolean {
   return Boolean(
-    draft.calibration?.polygon_digest &&
-    new Set(draft.calibration.confirmed_frame_ids).size >= 3,
+    draft.source && calibrationIsComplete(draft.calibration, draft.source.path),
   );
 }
 
@@ -480,6 +563,33 @@ export function updateProductionSource(
   };
 }
 
+export function updateProductionCalibration(
+  draft: ProductionDraft,
+  calibration: ProductionCalibrationDraft,
+  now = new Date().toISOString(),
+): ProductionDraft {
+  const approvedChanged =
+    draft.calibration?.polygon_digest !== calibration.polygon_digest ||
+    !resolutionsMatch(
+      draft.calibration?.source_resolution ?? null,
+      calibration.source_resolution,
+    ) ||
+    JSON.stringify(draft.calibration?.approved_polygon ?? []) !==
+      JSON.stringify(calibration.approved_polygon) ||
+    JSON.stringify(draft.calibration?.exclusions ?? []) !==
+      JSON.stringify(calibration.exclusions);
+  return {
+    ...draft,
+    updated_at: now,
+    status: "active",
+    calibration,
+    trial: approvedChanged ? null : draft.trial,
+    confirmed_config: approvedChanged ? null : draft.confirmed_config,
+    full_run: approvedChanged ? null : draft.full_run,
+    verified_product: approvedChanged ? null : draft.verified_product,
+  };
+}
+
 export function loadProductionDraft(
   storage: DraftStorage,
 ): ProductionDraftLoadResult {
@@ -503,8 +613,8 @@ export function loadProductionDraft(
   if (value.schema_version > PRODUCTION_DRAFT_SCHEMA_VERSION) {
     return { status: "unsupported", version: value.schema_version };
   }
-  if (value.schema_version === 0) {
-    const migrated = migrateVersionZero(value);
+  if (value.schema_version === 0 || value.schema_version === 1) {
+    const migrated = migrateLegacyDraft(value);
     return migrated
       ? { status: "restored", draft: migrated, migrated: true }
       : { status: "corrupt", message: "Legacy draft is invalid." };
@@ -520,7 +630,12 @@ export function saveProductionDraft(
   draft: ProductionDraft,
 ): ProductionDraftStorageResult {
   try {
-    storage.setItem(PRODUCTION_DRAFT_STORAGE_KEY, JSON.stringify(draft));
+    storage.setItem(
+      PRODUCTION_DRAFT_STORAGE_KEY,
+      JSON.stringify(draft, (key, value) =>
+        key === "preview_data_url" ? undefined : value,
+      ),
+    );
     return { ok: true };
   } catch (error) {
     return { ok: false, message: errorMessage(error) };

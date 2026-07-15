@@ -25,7 +25,8 @@ export const translations = {
     },
     production: {
       title: "Match production",
-      subtitle: "Start with the original video and complete one step at a time.",
+      subtitle:
+        "Start with the original video and complete one step at a time.",
       stepLabel: (current: number, total: number, label: string) =>
         `Step ${current} of ${total} · ${label}`,
       stages: {
@@ -59,8 +60,83 @@ export const translations = {
       noSources: "No input videos are available.",
       calibrationTitle: "Field calibration",
       calibrationDescription:
-        "Polygon editing and three-frame confirmation arrive in the next delivery.",
-      calibrationPending: "Calibration tools are not enabled in this foundation PR.",
+        "Approve one field polygon, then verify it on three distinct source frames.",
+      calibrationPending: "Complete field calibration before continuing.",
+      calibrationSource: "Original source",
+      previewAlt: (frame: number) => `Original source frame ${frame}`,
+      previewUnavailable: "The source preview is not available yet.",
+      previousFrame: "Previous frame",
+      nextFrame: "Next frame",
+      frameMeta: (
+        sample: number,
+        count: number,
+        actual: number,
+        width: number,
+        height: number,
+      ) =>
+        `Sample ${sample}/${count} · source frame ${actual} · ${width}×${height}`,
+      tooFewDistinctFrames:
+        "This video exposes fewer than three distinct preview frames, so calibration cannot be completed.",
+      calibrationResolutionChanged:
+        "This preview resolution differs from the saved calibration. Reselect the source before continuing.",
+      systemSuggestion: "System suggestion",
+      requestSuggestion: "Request system suggestion",
+      regenerateSuggestion: "Request another suggestion",
+      adoptSuggestion: "Use this suggestion",
+      suggestionReady:
+        "A system suggestion is ready. It has not changed the approved polygon.",
+      noSuggestion: "No system suggestion has been requested.",
+      suggestionSource: "Source",
+      suggestionConfidence: {
+        config: "Configuration-based",
+        detected: "Detected",
+        fallback: "Fallback boundary",
+      },
+      fieldCoverage: "Field coverage",
+      approvedPolygon: "Approved polygon",
+      addPoint: "Add point",
+      undo: "Undo",
+      clearPolygon: "Clear",
+      deleteSelectedPoint: "Delete selected point",
+      coordinateEditor: "Approved polygon coordinate editor",
+      pointCoordinate: (point: number, axis: "x" | "y") =>
+        `Point ${point} ${axis.toUpperCase()} coordinate`,
+      deletePoint: (point: number) => `Delete point ${point}`,
+      coordinateNumberError: "Enter a finite number.",
+      coordinateBoundsError: (maximum: number) =>
+        `Enter a value from 0 through ${maximum - 1}; it was not clamped.`,
+      polygonValidation: {
+        valid: "Valid polygon. The solid numbered line is approved.",
+        too_few_points: "Add at least three points.",
+        non_finite: "Every coordinate must be a finite number.",
+        out_of_bounds: "Every point must remain inside the source pixels.",
+        zero_area: "The polygon must enclose a non-zero area.",
+      },
+      framesClearedAfterEdit:
+        "The approved polygon changed, so prior frame confirmations and downstream results were cleared.",
+      polygonDigestFailed:
+        "The approved polygon could not be verified in this browser. Edit a point or retry the suggestion.",
+      threeFrameVerification: "Three-frame verification",
+      confirmCurrentFrame: "Confirm this frame",
+      frameAlreadyConfirmed: "Frame already confirmed",
+      frameConfirmed: (count: number) =>
+        `Frame confirmed. ${count} of 3 complete.`,
+      confirmedFrameDetail: (frame: number, width: number, height: number) =>
+        `Source frame ${frame} · ${width}×${height} · approved polygon digest verified`,
+      confirmFrameError: {
+        preview_not_ready:
+          "Wait until the source image and polygon overlay are visible.",
+        invalid_polygon:
+          "Fix the approved polygon before confirming this frame.",
+        source_mismatch: "The suggestion belongs to another source.",
+        resolution_mismatch:
+          "The saved polygon uses another source resolution.",
+        digest_mismatch: "The approved polygon digest is not current.",
+        preview_mismatch:
+          "This preview does not belong to the current source and resolution.",
+        duplicate_frame: "Choose a different actual source frame.",
+        already_complete: "Three frames are already confirmed.",
+      },
       trialDescription:
         "Review a bounded trial, tune parameters, and confirm the result before full tracking.",
       trialPending: "Trial and tuning controls arrive in a later delivery.",
@@ -812,8 +888,76 @@ export const translations = {
       retry: "重试",
       noSources: "当前没有可用的输入视频。",
       calibrationTitle: "球场校准",
-      calibrationDescription: "Polygon 编辑和三帧确认将在下一个交付阶段接入。",
-      calibrationPending: "当前基础 PR 尚未启用校准工具。",
+      calibrationDescription:
+        "先确认一套球场多边形，再用三个不同的原片帧进行核验。",
+      calibrationPending: "完成球场校准后才能继续。",
+      calibrationSource: "原始来源",
+      previewAlt: (frame: number) => `原片第 ${frame} 帧`,
+      previewUnavailable: "原片预览尚不可用。",
+      previousFrame: "上一帧",
+      nextFrame: "下一帧",
+      frameMeta: (
+        sample: number,
+        count: number,
+        actual: number,
+        width: number,
+        height: number,
+      ) => `采样 ${sample}/${count} · 原片帧 ${actual} · ${width}×${height}`,
+      tooFewDistinctFrames: "该视频可用的不同预览帧不足三个，无法完成校准。",
+      calibrationResolutionChanged:
+        "当前预览分辨率与已保存校准不同，请重新选择原片后继续。",
+      systemSuggestion: "系统建议",
+      requestSuggestion: "获取系统建议",
+      regenerateSuggestion: "重新获取建议",
+      adoptSuggestion: "采用此建议",
+      suggestionReady: "系统建议已生成，尚未改动已批准的多边形。",
+      noSuggestion: "尚未获取系统建议。",
+      suggestionSource: "建议来源",
+      suggestionConfidence: {
+        config: "基于配置",
+        detected: "系统识别",
+        fallback: "兜底边界",
+      },
+      fieldCoverage: "球场覆盖率",
+      approvedPolygon: "已批准多边形",
+      addPoint: "添加点",
+      undo: "撤销",
+      clearPolygon: "清空",
+      deleteSelectedPoint: "删除选中点",
+      coordinateEditor: "已批准多边形坐标编辑器",
+      pointCoordinate: (point: number, axis: "x" | "y") =>
+        `第 ${point} 点 ${axis.toUpperCase()} 坐标`,
+      deletePoint: (point: number) => `删除第 ${point} 点`,
+      coordinateNumberError: "请输入有限数值。",
+      coordinateBoundsError: (maximum: number) =>
+        `请输入 0 到 ${maximum - 1} 之间的值；系统不会自动截断。`,
+      polygonValidation: {
+        valid: "多边形有效；实线和编号点表示已批准值。",
+        too_few_points: "请至少添加三个点。",
+        non_finite: "每个坐标都必须是有限数值。",
+        out_of_bounds: "每个点都必须位于原片像素范围内。",
+        zero_area: "多边形必须围成非零面积。",
+      },
+      framesClearedAfterEdit:
+        "已批准多边形发生变化，原有三帧确认和所有后续结果已清除。",
+      polygonDigestFailed:
+        "当前浏览器无法核验已批准多边形，请编辑一个点或重新采用建议。",
+      threeFrameVerification: "三帧校准确认",
+      confirmCurrentFrame: "确认当前帧",
+      frameAlreadyConfirmed: "该帧已确认",
+      frameConfirmed: (count: number) => `当前帧已确认，已完成 ${count}/3。`,
+      confirmedFrameDetail: (frame: number, width: number, height: number) =>
+        `原片帧 ${frame} · ${width}×${height} · 已核对批准多边形摘要`,
+      confirmFrameError: {
+        preview_not_ready: "请等待原片图像和多边形覆盖层显示完成。",
+        invalid_polygon: "请先修正已批准多边形。",
+        source_mismatch: "该建议属于另一个原片。",
+        resolution_mismatch: "已保存多边形使用了另一个原片分辨率。",
+        digest_mismatch: "已批准多边形摘要不是最新值。",
+        preview_mismatch: "当前预览不属于当前原片或分辨率。",
+        duplicate_frame: "请选择另一个实际原片帧。",
+        already_complete: "已经确认了三个帧。",
+      },
       trialDescription: "检查短片试跑、调整参数，并在整场追踪前确认结果。",
       trialPending: "试跑和调参操作将在后续交付中接入。",
       fullTrackingDescription: "执行整场追踪，并仅在证据需要时进行人工复核。",
@@ -830,7 +974,8 @@ export const translations = {
       migrated: "旧版比赛制作草稿已升级并恢复。",
       recoveryTitle: "比赛制作草稿需要恢复",
       corruptDraft: "已保存的比赛制作草稿已损坏，无法安全打开。",
-      unsupportedDraft: (version: number) => `该草稿使用不支持的版本 ${version}。`,
+      unsupportedDraft: (version: number) =>
+        `该草稿使用不支持的版本 ${version}。`,
       unavailableStorage: "浏览器存储不可用，可以恢复为不保存的临时草稿。",
       discardDraft: "丢弃草稿并重新开始",
       replaceTitle: "替换未完成的比赛制作？",

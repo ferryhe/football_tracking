@@ -29,11 +29,13 @@ import {
   requiresDraftReplacementConfirmation,
   saveProductionDraft,
   sourceSignaturesMatch,
+  updateProductionCalibration,
   updateProductionSource,
   type ProductionDraft,
   type ProductionDraftLoadResult,
   type SourceSignature,
 } from "@/lib/productionWorkflow";
+import type { ProductionCalibrationDraft } from "@/lib/productionCalibration";
 
 function queryErrorMessage(error: unknown): string | null {
   return error instanceof Error && error.message ? error.message : null;
@@ -130,6 +132,14 @@ export function ProductionPageContent({
             ? "sourceReset"
             : "savedLocally",
       );
+    }
+  }
+
+  function handleCalibrationChange(calibration: ProductionCalibrationDraft) {
+    const nextDraft = updateProductionCalibration(draft, calibration);
+    setDraft(nextDraft);
+    if (persist(nextDraft)) {
+      setNotice(storage.isPersistent ? "savedLocally" : "storageFallback");
     }
   }
 
@@ -253,6 +263,7 @@ export function ProductionPageContent({
         notice={noticeText}
         error={errorText}
         onSourceChange={handleSourceChange}
+        onCalibrationChange={handleCalibrationChange}
         onSaveExit={handleSaveExit}
         onStartNew={handleStartNew}
         startNewButtonRef={startNewButtonRef}

@@ -93,5 +93,9 @@
     "vitest": "^4.1.10",
     "wouter": "^3.3.5",
     "zod": "catalog:"
+  },
+  "dependencies": {
+    "konva": "10.3.0",
+    "react-konva": "19.0.10"
   }
 }

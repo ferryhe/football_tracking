@@ -15,6 +15,8 @@ export default defineConfig({
     include: [
       "src/**/*.vitest.test.{ts,tsx}",
       "src/lib/productionWorkflow.test.ts",
+      "src/lib/fieldGeometry.test.ts",
+      "src/lib/productionCalibration.test.ts",
       "src/components/production/**/*.test.tsx",
       "src/pages/production.test.tsx",
     ],
@@ -24,7 +26,11 @@ export default defineConfig({
         import.meta.dirname,
         "../../tmp/coverage/web-production-workflow",
       ),
-      include: ["src/lib/productionWorkflow.ts"],
+      include: [
+        "src/lib/productionWorkflow.ts",
+        "src/lib/fieldGeometry.ts",
+        "src/lib/productionCalibration.ts",
+      ],
       thresholds: {
         branches: 90,
         functions: 90,

@@ -13,6 +13,7 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { useLanguage } from "@/contexts/LanguageContext";
+import type { ProductionCalibrationDraft } from "@/lib/productionCalibration";
 import {
   canEnterProductionStage,
   deriveProductionWorkflow,
@@ -20,6 +21,7 @@ import {
   type ProductionUserStage,
   type SourceSignature,
 } from "@/lib/productionWorkflow";
+import { ProductionCalibrationStep } from "./ProductionCalibrationStep";
 
 const USER_STAGES: ProductionUserStage[] = [
   "source",
@@ -36,6 +38,7 @@ export interface ProductionWorkspaceProps {
   notice?: string | null;
   error?: string | null;
   onSourceChange: (source: SourceSignature) => void;
+  onCalibrationChange: (calibration: ProductionCalibrationDraft) => void;
   onSaveExit: () => void;
   onStartNew: () => void;
   startNewButtonRef?: Ref<HTMLButtonElement>;
@@ -54,6 +57,7 @@ export function ProductionWorkspace({
   notice = null,
   error = null,
   onSourceChange,
+  onCalibrationChange,
   onSaveExit,
   onStartNew,
   startNewButtonRef,
@@ -63,6 +67,8 @@ export function ProductionWorkspace({
   const [viewStage, setViewStage] = useState<ProductionUserStage>(() =>
     sourceIssue ? "source" : derived.user_stage,
   );
+  const [calibrationPreviewUsable, setCalibrationPreviewUsable] =
+    useState(false);
   const sourceInCatalog = videos.find(
     (video) => video.path === draft.source?.path,
   );
@@ -117,11 +123,13 @@ export function ProductionWorkspace({
     sourceIssue === null &&
     nextStage !== null &&
     currentIndex + 1 <= reachableStageIndex &&
+    (effectiveStage !== "calibration" || calibrationPreviewUsable) &&
     canEnterUserStage(nextStage);
 
   function handleSourceSelection(path: string) {
     const source = videos.find((video) => video.path === path);
     if (!source) return;
+    setCalibrationPreviewUsable(false);
     onSourceChange(source);
     setViewStage("source");
   }
@@ -143,7 +151,7 @@ export function ProductionWorkspace({
           : t.common.notAvailable;
       case "calibration":
         return draft.calibration
-          ? `${t.production.confirmedFrames(draft.calibration.confirmed_frame_ids.length)} · ${draft.calibration.polygon_digest}`
+          ? `${t.production.confirmedFrames(draft.calibration.confirmed_frames.length)} · ${draft.calibration.polygon_digest ?? t.common.notAvailable}`
           : t.common.notAvailable;
       case "trial":
         return (
@@ -257,6 +265,13 @@ export function ProductionWorkspace({
               )}
             </div>
           </>
+        ) : effectiveStage === "calibration" && draft.source ? (
+          <ProductionCalibrationStep
+            source={draft.source}
+            calibration={draft.calibration}
+            onChange={onCalibrationChange}
+            onUsabilityChange={setCalibrationPreviewUsable}
+          />
         ) : (
           <Alert>
             <AlertDescription>
