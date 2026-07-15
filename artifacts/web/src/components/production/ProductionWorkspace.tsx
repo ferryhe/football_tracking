@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, type Ref } from "react";
 import { Check, ChevronLeft, ChevronRight, Save } from "lucide-react";
 
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
@@ -38,6 +38,7 @@ export interface ProductionWorkspaceProps {
   onSourceChange: (source: SourceSignature) => void;
   onSaveExit: () => void;
   onStartNew: () => void;
+  startNewButtonRef?: Ref<HTMLButtonElement>;
 }
 
 function formatBytes(bytes: number): string {
@@ -55,6 +56,7 @@ export function ProductionWorkspace({
   onSourceChange,
   onSaveExit,
   onStartNew,
+  startNewButtonRef,
 }: ProductionWorkspaceProps) {
   const { t } = useLanguage();
   const derived = deriveProductionWorkflow(draft);
@@ -308,7 +310,12 @@ export function ProductionWorkspace({
             {t.production.subtitle}
           </p>
         </div>
-        <Button type="button" variant="outline" onClick={onStartNew}>
+        <Button
+          ref={startNewButtonRef}
+          type="button"
+          variant="outline"
+          onClick={onStartNew}
+        >
           {t.production.startNew}
         </Button>
       </div>

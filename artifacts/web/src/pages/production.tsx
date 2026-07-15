@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { AlertTriangle, RefreshCw } from "lucide-react";
 import { useLocation } from "wouter";
 import { useListInputVideos } from "@workspace/api-client-react";
@@ -86,6 +86,7 @@ export function ProductionPageContent({
   });
   const [error, setError] = useState<ProductionError | null>(null);
   const [replacement, setReplacement] = useState<ProductionDraft | null>(null);
+  const startNewButtonRef = useRef<HTMLButtonElement>(null);
   const inputs = useListInputVideos();
   const videos: SourceSignature[] = (inputs.data?.videos ?? []).map(
     (video) => ({
@@ -254,6 +255,7 @@ export function ProductionPageContent({
         onSourceChange={handleSourceChange}
         onSaveExit={handleSaveExit}
         onStartNew={handleStartNew}
+        startNewButtonRef={startNewButtonRef}
       />
 
       <AlertDialog
@@ -262,7 +264,12 @@ export function ProductionPageContent({
           if (!open) setReplacement(null);
         }}
       >
-        <AlertDialogContent>
+        <AlertDialogContent
+          onCloseAutoFocus={(event) => {
+            event.preventDefault();
+            startNewButtonRef.current?.focus();
+          }}
+        >
           <AlertDialogHeader>
             <AlertDialogTitle>{t.production.replaceTitle}</AlertDialogTitle>
             <AlertDialogDescription>

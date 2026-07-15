@@ -221,23 +221,23 @@ describe("ProductionPage", () => {
     saveProductionDraft(localStorage, draft);
     const { user } = renderPage();
 
-    await user.click(
-      screen.getByRole("button", { name: "Start new production" }),
-    );
+    const startNewButton = screen.getByRole("button", {
+      name: "Start new production",
+    });
+    await user.click(startNewButton);
     expect(screen.getByRole("alertdialog")).toBeVisible();
     expect(screen.getByText("Replace unfinished production?")).toBeVisible();
     await user.click(
       screen.getByRole("button", { name: "Keep current production" }),
     );
     expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
+    expect(startNewButton).toHaveFocus();
     expect(
       JSON.parse(localStorage.getItem(PRODUCTION_DRAFT_STORAGE_KEY) ?? "{}")
         .source,
     ).toEqual(source);
 
-    await user.click(
-      screen.getByRole("button", { name: "Start new production" }),
-    );
+    await user.click(startNewButton);
     await user.click(
       screen.getByRole("button", { name: "Replace and start new" }),
     );

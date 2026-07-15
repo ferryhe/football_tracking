@@ -63,9 +63,16 @@ test("requires confirmation before starting over and has no serious accessibilit
 }) => {
   await page.goto("/production");
   await page.getByLabel("Original video").selectOption("data/match-a.mp4");
-  await page.getByRole("button", { name: "Start new production" }).click();
-  await expect(page.getByRole("alertdialog")).toBeVisible();
+  const startNewButton = page.getByRole("button", {
+    name: "Start new production",
+  });
+  const alertDialog = page.getByRole("alertdialog");
+  await startNewButton.click();
+  await expect(alertDialog).toBeVisible();
   await page.getByRole("button", { name: "Keep current production" }).click();
+  await expect(alertDialog).toHaveCount(0);
+  await expect(page.locator("main")).not.toHaveAttribute("aria-hidden", "true");
+  await expect(startNewButton).toBeFocused();
 
   const results = await new AxeBuilder({ page })
     .include("main")
