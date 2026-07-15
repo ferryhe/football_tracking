@@ -11,15 +11,20 @@ import {
   invalidateProductionDraft,
   loadProductionDraft,
   productionHistoryOpenAction,
+  productionTrialRequiresStop,
   requiresDraftReplacementConfirmation,
   saveProductionDraft,
   sourceSignaturesMatch,
+  updateConfirmedProductionConfig,
+  updatePendingConfigConfirmation,
   updateProductionCalibration,
   updateProductionSource,
+  updateProductionTrial,
   type ProductionDraft,
   type ProductionWorkflowStage,
   type SourceSignature,
 } from "./productionWorkflow";
+import type { ProductionTrialState } from "./productionTrial";
 
 const NOW = "2026-07-14T12:00:00.000Z";
 const LATER = "2026-07-14T12:05:00.000Z";
@@ -29,6 +34,9 @@ const SOURCE: SourceSignature = {
   modified_at: "2026-07-14T10:00:00Z",
 };
 const POLYGON_DIGEST = "c".repeat(64);
+const INTENT_DIGEST = "d".repeat(64);
+const REQUEST_DIGEST = "e".repeat(64);
+const EVIDENCE_DIGEST = "f".repeat(64);
 
 function completeCalibration() {
   return {
@@ -52,19 +60,230 @@ function completeCalibration() {
   };
 }
 
+function trialState(accepted = true): ProductionTrialState {
+  const notes = JSON.stringify({
+    schema_version: "1.0",
+    purpose: "production_trial",
+    workflow_id: "workflow-a",
+    submission_id: "submission-a",
+    output_id: "output-a",
+    calibration_digest: POLYGON_DIGEST,
+    intent_sha256: INTENT_DIGEST,
+  });
+  const attempt = {
+    run_id: "trial-2",
+    generation: 1,
+    submission_id: "submission-a",
+    parent_run_id: null,
+    intent_sha256: INTENT_DIGEST,
+    request_sha256: REQUEST_DIGEST,
+    request: {
+      config_name: "default.yaml",
+      input_video: SOURCE.path,
+      parent_run_id: null,
+      output_dir_name: "production_trial_output-a",
+      config_patch: {
+        input_video: SOURCE.path,
+        filtering: { roi: [0, 0, 1_919, 1_079] },
+        scene_bias: {
+          enabled: true,
+          ground_zones: [
+            {
+              name: "production_field",
+              points: completeCalibration().approved_polygon,
+            },
+          ],
+          negative_rois: [],
+        },
+        postprocess: { enabled: true },
+        follow_cam: { enabled: true },
+        runtime: { start_frame: 0, max_frames: 300 },
+        metadata: {
+          production_workflow: {
+            schema_version: "1.0",
+            purpose: "production_trial",
+            workflow_id: "workflow-a",
+            submission_id: "submission-a",
+            output_id: "output-a",
+            calibration_digest: POLYGON_DIGEST,
+            intent_sha256: INTENT_DIGEST,
+            source_signature: SOURCE,
+            output_dir_name: "production_trial_output-a",
+          },
+        },
+      },
+      enable_postprocess: true,
+      enable_follow_cam: true,
+      start_frame: 0,
+      max_frames: 300,
+      pipeline_mode: "standard" as const,
+      notes,
+    },
+    created_at: NOW,
+    last_observed: {
+      status: "completed" as const,
+      observed_at: NOW,
+      evidence_generation: EVIDENCE_DIGEST,
+    },
+  };
+  return {
+    settings: {
+      base_config_name: "default.yaml",
+      start_frame: 0,
+      max_frames: 300,
+      enable_postprocess: true,
+      enable_follow_cam: true,
+      tuning_patch: {},
+    },
+    attempts: [attempt],
+    active_run_id: null,
+    pending_submission: null,
+    accepted: accepted
+      ? {
+          run_id: attempt.run_id,
+          intent_sha256: INTENT_DIGEST,
+          request_sha256: REQUEST_DIGEST,
+          accepted_at: NOW,
+          readiness: {
+            run_id: attempt.run_id,
+            request_sha256: REQUEST_DIGEST,
+            evidence_generation: EVIDENCE_DIGEST,
+            verified_at: NOW,
+            video_artifact_name: "follow_cam.mp4",
+            artifact_names: [
+              "run_manifest.json",
+              "metrics_report.json",
+              "ball_track.csv",
+              "ball_audit.json",
+              "ball_track.cleaned.csv",
+              "follow_cam.mp4",
+            ],
+            quality: {
+              frame_count: 300,
+              detected: 200,
+              predicted: 50,
+              lost: 50,
+              detected_ratio: 2 / 3,
+              predicted_ratio: 1 / 6,
+              lost_ratio: 1 / 6,
+              longest_lost_streak: 5,
+              false_positive_island_count: 1,
+              max_step_px: 20,
+              audit_tracklet_count: 3,
+              audit_suspicious_tracklet_count: 1,
+              audit_review_event_count: 1,
+              audit_lost_gap_count: 2,
+              quality_gate_status: null,
+            },
+          },
+        }
+      : null,
+  };
+}
+
+function configExecutionPatch() {
+  return {
+    input_video: SOURCE.path,
+    filtering: { roi: [0, 0, 1_919, 1_079] },
+    scene_bias: {
+      enabled: true,
+      ground_zones: [
+        {
+          name: "production_field",
+          points: completeCalibration().approved_polygon,
+        },
+      ],
+      negative_rois: [],
+    },
+    postprocess: { enabled: true },
+    runtime: { start_frame: 0, max_frames: null },
+    follow_cam: { enabled: false },
+    metadata: {
+      production_workflow: {
+        schema_version: "1.0",
+        workflow_id: "workflow-a",
+        base_config_name: "default.yaml",
+        accepted_trial_run_id: "trial-2",
+        calibration_digest: POLYGON_DIGEST,
+        source_signature: SOURCE,
+        trial_intent_sha256: INTENT_DIGEST,
+        trial_request_sha256: REQUEST_DIGEST,
+        trial_patch_sha256: "2".repeat(64),
+        patch_sha256: "1".repeat(64),
+        confirmed_at: NOW,
+      },
+    },
+  };
+}
+
+function confirmedConfig() {
+  return {
+    name: "generated/production_workflow-a_11111111-1111-4111-8111-111111111111.yaml",
+    sha256: "a".repeat(64),
+    base_config_name: "default.yaml",
+    patch: configExecutionPatch(),
+    patch_sha256: "1".repeat(64),
+    trial_patch_sha256: "2".repeat(64),
+    workflow_id: "workflow-a",
+    accepted_trial_run_id: "trial-2",
+    trial_intent_sha256: INTENT_DIGEST,
+    trial_request_sha256: REQUEST_DIGEST,
+    calibration_digest: POLYGON_DIGEST,
+    source_signature: SOURCE,
+    confirmed_at: NOW,
+  };
+}
+
+function pendingConfig() {
+  const outputId = "11111111-1111-4111-8111-111111111111";
+  const outputName = `production_workflow-a_${outputId}.yaml`;
+  return {
+    generation: 1,
+    output_id: outputId,
+    output_name: outputName,
+    request: {
+      base_config_name: "default.yaml",
+      output_name: outputName,
+      patch: configExecutionPatch(),
+    },
+    persistent_patch: configExecutionPatch(),
+    patch_sha256: "1".repeat(64),
+    trial_patch_sha256: "2".repeat(64),
+    workflow_id: "workflow-a",
+    base_config_name: "default.yaml",
+    accepted_trial_run_id: "trial-2",
+    trial_intent_sha256: INTENT_DIGEST,
+    trial_request_sha256: REQUEST_DIGEST,
+    calibration_digest: POLYGON_DIGEST,
+    source_signature: SOURCE,
+    confirmed_at: NOW,
+  };
+}
+
+function calibrationSuggestion() {
+  return {
+    source_path: SOURCE.path,
+    source: "system-detector",
+    confidence: "detected" as const,
+    field_coverage: 0.78,
+    source_resolution: { width: 1_920, height: 1_080 },
+    frame_index: 10,
+    polygon: [
+      [100, 100],
+      [1_800, 100],
+      [1_800, 1_000],
+    ] as [number, number][],
+  };
+}
+
 function draftWithEvidence(): ProductionDraft {
   return {
     ...createProductionDraft(NOW, "workflow-a"),
     source: SOURCE,
     calibration: completeCalibration(),
-    trial: {
-      latest_run_id: "trial-2",
-      accepted_run_id: "trial-2",
-    },
-    confirmed_config: {
-      name: "production-workflow-a.yaml",
-      sha256: "a".repeat(64),
-    },
+    trial: trialState(),
+    pending_config_confirmation: null,
+    confirmed_config: confirmedConfig(),
     full_run: {
       run_id: "full-a",
       status: "trajectory_ready",
@@ -251,6 +470,39 @@ describe("production workflow identifiers", () => {
 });
 
 describe("production workflow guards", () => {
+  it("requires an explicit stop only for active trial identities/statuses", () => {
+    expect(productionTrialRequiresStop(null)).toBe(false);
+    for (const status of ["completed", "failed", "cancelled"] as const) {
+      const trial = trialState(false);
+      trial.attempts[0].last_observed.status = status;
+      trial.active_run_id = null;
+      expect(productionTrialRequiresStop(trial)).toBe(false);
+    }
+    for (const status of ["queued", "running"] as const) {
+      const trial = trialState(false);
+      trial.attempts[0].last_observed.status = status;
+      trial.active_run_id = "trial-2";
+      expect(productionTrialRequiresStop(trial)).toBe(true);
+    }
+    const staleIdentity = trialState(false);
+    staleIdentity.active_run_id = "trial-2";
+    expect(productionTrialRequiresStop(staleIdentity)).toBe(true);
+
+    const pending = trialState(false);
+    pending.active_run_id = null;
+    pending.attempts[0].last_observed.status = "completed";
+    pending.pending_submission = {
+      generation: 2,
+      submission_id: "submission-b",
+      output_id: "output-b",
+      intent_sha256: "1".repeat(64),
+      request_sha256: "2".repeat(64),
+      request: { ...pending.attempts[0].request },
+      created_at: LATER,
+    };
+    expect(productionTrialRequiresStop(pending)).toBe(true);
+  });
+
   it("enforces each sequential prerequisite", () => {
     const empty = createProductionDraft(NOW, "workflow-a");
     expect(canEnterProductionStage(empty, "source")).toBe(true);
@@ -261,20 +513,17 @@ describe("production workflow guards", () => {
     expect(canEnterProductionStage(source, "trial")).toBe(false);
 
     const trial = draftWithEvidence();
-    trial.trial = { latest_run_id: "trial-a", accepted_run_id: null };
+    trial.trial = trialState(false);
     trial.confirmed_config = null;
     trial.full_run = null;
     expect(canEnterProductionStage(trial, "trial")).toBe(true);
     expect(canEnterProductionStage(trial, "config_confirmation")).toBe(false);
 
-    trial.trial.accepted_run_id = "trial-a";
+    trial.trial = trialState(true);
     expect(canEnterProductionStage(trial, "config_confirmation")).toBe(true);
     expect(canEnterProductionStage(trial, "full_tracking")).toBe(false);
 
-    trial.confirmed_config = {
-      name: "locked.yaml",
-      sha256: "a".repeat(64),
-    };
+    trial.confirmed_config = confirmedConfig();
     expect(canEnterProductionStage(trial, "full_tracking")).toBe(true);
     expect(canEnterProductionStage(trial, "review")).toBe(false);
 
@@ -361,7 +610,8 @@ describe("production workflow invalidation", () => {
       LATER,
     );
     expect(fromTrial.calibration).not.toBeNull();
-    expect(fromTrial.trial).toBeNull();
+    expect(fromTrial.trial?.accepted).toBeNull();
+    expect(fromTrial.trial?.attempts).toHaveLength(1);
     expect(fromTrial.confirmed_config).toBeNull();
     expect(fromTrial.full_run).toBeNull();
 
@@ -434,6 +684,42 @@ describe("production workflow invalidation", () => {
     expect(approvedEdit.confirmed_config).toBeNull();
     expect(approvedEdit.full_run).toBeNull();
     expect(approvedEdit.verified_product).toBeNull();
+  });
+
+  it("validates trial/config transitions and clears only their downstream evidence", () => {
+    const current = draftWithEvidence();
+    expect(() => updateProductionTrial(current, {} as never, LATER)).toThrow(
+      "Invalid production trial state",
+    );
+    expect(() =>
+      updatePendingConfigConfirmation(current, {} as never, LATER),
+    ).toThrow("Invalid pending configuration confirmation");
+    expect(() =>
+      updateConfirmedProductionConfig(current, {} as never, LATER),
+    ).toThrow("Invalid confirmed configuration evidence");
+
+    const pending = updatePendingConfigConfirmation(
+      current,
+      pendingConfig(),
+      LATER,
+    );
+    expect(pending.pending_config_confirmation).toEqual(pendingConfig());
+    expect(pending.confirmed_config).toBeNull();
+    expect(pending.full_run).toBeNull();
+    expect(pending.verified_product).toBeNull();
+
+    const withoutPending = updatePendingConfigConfirmation(current, null);
+    expect(withoutPending.confirmed_config).toEqual(current.confirmed_config);
+    expect(withoutPending.full_run).toEqual(current.full_run);
+
+    const confirmed = updateConfirmedProductionConfig(
+      pending,
+      confirmedConfig(),
+    );
+    expect(confirmed.pending_config_confirmation).toBeNull();
+    expect(confirmed.confirmed_config).toEqual(confirmedConfig());
+    expect(confirmed.full_run).toBeNull();
+    expect(confirmed.verified_product).toBeNull();
   });
 });
 
@@ -534,10 +820,280 @@ describe("production draft persistence", () => {
       status: "restored",
       migrated: true,
       draft: {
-        schema_version: 2,
+        schema_version: 3,
         source: SOURCE,
         calibration: null,
         trial: null,
+        confirmed_config: null,
+        full_run: null,
+        verified_product: null,
+      },
+    });
+  });
+
+  it.each([
+    [
+      "trial workflow",
+      (draft: ProductionDraft) => {
+        const attempt = draft.trial!.attempts[0];
+        attempt.request.notes = JSON.stringify({
+          ...JSON.parse(attempt.request.notes ?? "{}"),
+          workflow_id: "workflow-other",
+        });
+      },
+    ],
+    [
+      "trial source",
+      (draft: ProductionDraft) => {
+        draft.trial!.attempts[0].request.input_video = "data/other.mp4";
+      },
+    ],
+    [
+      "trial calibration",
+      (draft: ProductionDraft) => {
+        const attempt = draft.trial!.attempts[0];
+        attempt.request.notes = JSON.stringify({
+          ...JSON.parse(attempt.request.notes ?? "{}"),
+          calibration_digest: "9".repeat(64),
+        });
+      },
+    ],
+    [
+      "current settings",
+      (draft: ProductionDraft) => {
+        draft.trial!.settings.max_frames = 301;
+      },
+    ],
+    [
+      "dangling acceptance",
+      (draft: ProductionDraft) => {
+        draft.trial!.accepted!.run_id = "missing-run";
+      },
+    ],
+    [
+      "accepted artifact contract",
+      (draft: ProductionDraft) => {
+        draft.trial!.accepted!.readiness.artifact_names = [
+          "run_manifest.json",
+          "metrics_report.json",
+          "ball_track.csv",
+          "ball_audit.json",
+          "follow_cam.mp4",
+        ];
+      },
+    ],
+    [
+      "dangling active run",
+      (draft: ProductionDraft) => {
+        draft.trial!.accepted = null;
+        draft.trial!.attempts[0].last_observed.status = "completed";
+        draft.trial!.active_run_id = "missing-run";
+      },
+    ],
+    [
+      "pending config without acceptance",
+      (draft: ProductionDraft) => {
+        draft.trial!.accepted = null;
+        draft.pending_config_confirmation = pendingConfig();
+        draft.confirmed_config = null;
+        draft.full_run = null;
+      },
+    ],
+    [
+      "confirmed config lineage",
+      (draft: ProductionDraft) => {
+        draft.confirmed_config!.accepted_trial_run_id = "other-run";
+      },
+    ],
+    [
+      "confirmed config empty patch",
+      (draft: ProductionDraft) => {
+        draft.confirmed_config!.patch = {};
+      },
+    ],
+    [
+      "confirmed config patch lineage",
+      (draft: ProductionDraft) => {
+        const metadata = draft.confirmed_config!.patch.metadata as Record<
+          string,
+          unknown
+        >;
+        (metadata.production_workflow as Record<string, unknown>).workflow_id =
+          "workflow-other";
+      },
+    ],
+    [
+      "pending config empty request patch",
+      (draft: ProductionDraft) => {
+        const pending = pendingConfig();
+        (pending.request as { patch: Record<string, unknown> }).patch = {};
+        draft.pending_config_confirmation = pending;
+        draft.confirmed_config = null;
+        draft.full_run = null;
+      },
+    ],
+  ])("rejects v3 context corruption: %s", (_label, mutate) => {
+    const invalid = structuredClone(draftWithEvidence());
+    mutate(invalid);
+    expect(
+      loadProductionDraft(memoryStorage(JSON.stringify(invalid))),
+    ).toMatchObject({ status: "corrupt" });
+    expect(saveProductionDraft(memoryStorage(), invalid)).toMatchObject({
+      ok: false,
+    });
+  });
+
+  it("allows historical attempts to keep older tuning while current accepted tuning matches", () => {
+    const draft = structuredClone(draftWithEvidence());
+    const latest = draft.trial!.attempts[0];
+    latest.generation = 2;
+    const old = structuredClone(latest);
+    old.run_id = "trial-1";
+    old.generation = 1;
+    old.submission_id = "submission-old";
+    old.request_sha256 = "8".repeat(64);
+    const oldNote = {
+      ...JSON.parse(old.request.notes ?? "{}"),
+      submission_id: "submission-old",
+      output_id: "output-old",
+    };
+    old.request.notes = JSON.stringify(oldNote);
+    old.request.output_dir_name = "production_trial_output-old";
+    old.request.config_patch = {
+      ...old.request.config_patch,
+      detector: { confidence: 0.1 },
+      metadata: {
+        production_workflow: {
+          ...oldNote,
+          source_signature: SOURCE,
+          output_dir_name: "production_trial_output-old",
+        },
+      },
+    };
+    latest.parent_run_id = old.run_id;
+    latest.request.parent_run_id = old.run_id;
+    draft.trial!.attempts = [old, latest];
+    expect(
+      loadProductionDraft(memoryStorage(JSON.stringify(draft))),
+    ).toMatchObject({
+      status: "restored",
+      migrated: false,
+    });
+  });
+
+  it("restores complete suggestion, pending-config, and verified-product shapes", () => {
+    const withSuggestion = {
+      ...draftWithEvidence(),
+      calibration: {
+        ...completeCalibration(),
+        suggestion: calibrationSuggestion(),
+      },
+      full_run: { run_id: "full-a", status: "ready" as const },
+      verified_product: {
+        run_id: "full-a",
+        artifact_name: "broadcast.mp4" as const,
+        status_generation: "9".repeat(64),
+      },
+    };
+    expect(
+      loadProductionDraft(memoryStorage(JSON.stringify(withSuggestion))),
+    ).toMatchObject({ status: "restored", migrated: false });
+
+    const withPending = {
+      ...draftWithEvidence(),
+      pending_config_confirmation: pendingConfig(),
+      confirmed_config: null,
+      full_run: null,
+      verified_product: null,
+    };
+    expect(
+      loadProductionDraft(memoryStorage(JSON.stringify(withPending))),
+    ).toMatchObject({ status: "restored", migrated: false });
+  });
+
+  it.each([
+    ["non-object", []],
+    ["source path", { ...calibrationSuggestion(), source_path: "" }],
+    ["source label", { ...calibrationSuggestion(), source: "" }],
+    ["confidence", { ...calibrationSuggestion(), confidence: "unknown" }],
+    ["negative coverage", { ...calibrationSuggestion(), field_coverage: -0.1 }],
+    ["excess coverage", { ...calibrationSuggestion(), field_coverage: 1.1 }],
+    [
+      "resolution",
+      {
+        ...calibrationSuggestion(),
+        source_resolution: { width: 0, height: 1_080 },
+      },
+    ],
+    ["fractional frame", { ...calibrationSuggestion(), frame_index: 1.5 }],
+    ["negative frame", { ...calibrationSuggestion(), frame_index: -1 }],
+    ["polygon", { ...calibrationSuggestion(), polygon: [[100]] }],
+  ])("rejects an invalid calibration suggestion: %s", (_label, suggestion) => {
+    const invalid = {
+      ...draftWithEvidence(),
+      calibration: { ...completeCalibration(), suggestion },
+    };
+    expect(
+      loadProductionDraft(memoryStorage(JSON.stringify(invalid))),
+    ).toMatchObject({ status: "corrupt" });
+  });
+
+  it.each([
+    [
+      "run id",
+      {
+        run_id: "",
+        artifact_name: "broadcast.mp4",
+        status_generation: "9".repeat(64),
+      },
+    ],
+    [
+      "artifact",
+      {
+        run_id: "full-a",
+        artifact_name: "other.mp4",
+        status_generation: "9".repeat(64),
+      },
+    ],
+    [
+      "generation",
+      {
+        run_id: "full-a",
+        artifact_name: "broadcast.mp4",
+        status_generation: "invalid",
+      },
+    ],
+  ])("rejects invalid verified-product %s", (_label, verifiedProduct) => {
+    const invalid = {
+      ...draftWithEvidence(),
+      full_run: { run_id: "full-a", status: "ready" as const },
+      verified_product: verifiedProduct,
+    };
+    expect(
+      loadProductionDraft(memoryStorage(JSON.stringify(invalid))),
+    ).toMatchObject({ status: "corrupt" });
+  });
+
+  it("migrates v2 by preserving a legal source/calibration and clearing insufficient downstream evidence", () => {
+    const current = draftWithEvidence();
+    const legacy = {
+      ...current,
+      schema_version: 2,
+      trial: { latest_run_id: "legacy-trial", accepted_run_id: "legacy-trial" },
+      confirmed_config: { name: "legacy.yaml", sha256: "a".repeat(64) },
+    };
+    const result = loadProductionDraft(memoryStorage(JSON.stringify(legacy)));
+    expect(result).toMatchObject({
+      status: "restored",
+      migrated: true,
+      draft: {
+        schema_version: 3,
+        workflow_id: "workflow-a",
+        status: "active",
+        source: SOURCE,
+        calibration: completeCalibration(),
+        trial: null,
+        pending_config_confirmation: null,
         confirmed_config: null,
         full_run: null,
         verified_product: null,

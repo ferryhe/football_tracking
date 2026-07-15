@@ -20,6 +20,120 @@ const previewDataUrl = `data:image/svg+xml;base64,${Buffer.from(
 const squarePreviewSvg =
   '<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="1000"><rect width="1000" height="1000" fill="#174f2a"/><path d="M80 80H920V920H80Z" fill="none" stroke="white" stroke-width="8"/></svg>';
 
+function trialTrackCsv(counts: {
+  detected: number;
+  predicted: number;
+  lost: number;
+}) {
+  const statuses = [
+    ...Array.from({ length: counts.detected }, () => "Detected"),
+    ...Array.from({ length: counts.predicted }, () => "Predicted"),
+    ...Array.from({ length: counts.lost }, () => "Lost"),
+  ];
+  return [
+    "Frame,X,Y,Confidence,Status",
+    ...statuses.map(
+      (status, frame) =>
+        `${frame},${100 + frame},${200 + frame},${status === "Lost" ? 0 : 0.9},${status}`,
+    ),
+  ].join("\n");
+}
+
+const trialRawTrackCsv = trialTrackCsv({
+  detected: 200,
+  predicted: 50,
+  lost: 50,
+});
+const trialCleanedTrackCsv = trialTrackCsv({
+  detected: 210,
+  predicted: 50,
+  lost: 40,
+});
+
+const runtimeErrors = new WeakMap<Page, string[]>();
+const allowedRuntimeErrors = new WeakMap<Page, RegExp[]>();
+
+function allowRuntimeError(page: Page, pattern: RegExp) {
+  allowedRuntimeErrors.set(page, [
+    ...(allowedRuntimeErrors.get(page) ?? []),
+    pattern,
+  ]);
+}
+
+async function watchRuntimeErrors(page: Page) {
+  const errors: string[] = [];
+  runtimeErrors.set(page, errors);
+  page.on("console", (message) => {
+    if (message.type() === "error") {
+      errors.push(`console.error: ${message.text()}`);
+    }
+  });
+  page.on("pageerror", (error) => {
+    errors.push(`pageerror: ${error.message}`);
+  });
+  await page.addInitScript(() => {
+    window.addEventListener("unhandledrejection", (event) => {
+      const reason =
+        event.reason instanceof Error
+          ? event.reason.message
+          : String(event.reason ?? "unknown reason");
+      console.error(`[unhandledrejection] ${reason}`);
+    });
+  });
+}
+
+async function createPlayableVideoFixture(page: Page) {
+  return page.evaluate(async () => {
+    const canvas = document.createElement("canvas");
+    canvas.width = 64;
+    canvas.height = 36;
+    const context = canvas.getContext("2d");
+    if (!context) throw new Error("Canvas 2D is unavailable");
+
+    const preferredMime = ["video/webm;codecs=vp8", "video/webm"].find(
+      (candidate) => MediaRecorder.isTypeSupported(candidate),
+    );
+    const stream = canvas.captureStream(10);
+    const recorder = new MediaRecorder(
+      stream,
+      preferredMime ? { mimeType: preferredMime } : undefined,
+    );
+    const chunks: Blob[] = [];
+    const stopped = new Promise<Blob>((resolve, reject) => {
+      recorder.addEventListener("dataavailable", (event) => {
+        if (event.data.size > 0) chunks.push(event.data);
+      });
+      recorder.addEventListener("error", () => {
+        reject(new Error("Could not record the browser video fixture"));
+      });
+      recorder.addEventListener("stop", () => {
+        resolve(new Blob(chunks, { type: recorder.mimeType || "video/webm" }));
+      });
+    });
+
+    recorder.start();
+    context.fillStyle = "#174f2a";
+    context.fillRect(0, 0, canvas.width, canvas.height);
+    context.strokeStyle = "#ffffff";
+    context.strokeRect(4, 4, canvas.width - 8, canvas.height - 8);
+    await new Promise((resolve) => window.setTimeout(resolve, 250));
+    recorder.stop();
+    const blob = await stopped;
+    stream.getTracks().forEach((track) => track.stop());
+
+    const dataUrl = await new Promise<string>((resolve, reject) => {
+      const reader = new FileReader();
+      reader.addEventListener("load", () => resolve(String(reader.result)));
+      reader.addEventListener("error", () => reject(reader.error));
+      reader.readAsDataURL(blob);
+    });
+    return {
+      bodyBase64: dataUrl.slice(dataUrl.indexOf(",") + 1),
+      contentType: blob.type || "video/webm",
+    };
+  });
+}
+
 interface CanvasBox {
   x: number;
   y: number;
@@ -66,7 +180,7 @@ function chromiumMouseSourcePoint(
 function draftWithApprovedPolygon() {
   const timestamp = "2026-07-14T12:00:00Z";
   return {
-    schema_version: 2,
+    schema_version: 3,
     workflow_id: "workflow-overlay-readiness",
     created_at: timestamp,
     updated_at: timestamp,
@@ -85,9 +199,526 @@ function draftWithApprovedPolygon() {
       confirmed_frames: [],
     },
     trial: null,
+    pending_config_confirmation: null,
     confirmed_config: null,
     full_run: null,
     verified_product: null,
+  };
+}
+
+async function mockTrialDefaults(page: Page) {
+  await page.route("**/api/**", async (route) => {
+    const request = route.request();
+    const url = new URL(request.url());
+    const key = `${request.method()} ${url.pathname}`;
+    if (key === "GET /api/configs") {
+      await route.fulfill({ json: [] });
+      return;
+    }
+    if (key === "GET /api/health") {
+      await route.fulfill({
+        json: {
+          status: "ok",
+          active_run_id: null,
+          config_count: 0,
+          run_count: 0,
+        },
+      });
+      return;
+    }
+    if (key === "GET /api/healthz") {
+      await route.fulfill({
+        json: {
+          status: "ok",
+          active_run_id: null,
+          config_count: 0,
+          run_count: 0,
+        },
+      });
+      return;
+    }
+    if (key === "GET /api/runs") {
+      await route.fulfill({ json: [] });
+      return;
+    }
+    await route.fallback();
+  });
+}
+
+type TrialRunStatus =
+  | "queued"
+  | "running"
+  | "completed"
+  | "failed"
+  | "cancelled";
+
+interface TrialScenarioOptions {
+  activeRunId?: string | null;
+  conflictOnCreate?: boolean;
+  deferDerive?: boolean;
+  loseCreateResponseOnce?: boolean;
+  missingArtifact?: string;
+  corruptMetrics?: boolean;
+  omitVideo?: boolean;
+}
+
+function backendPathName(value: unknown): string {
+  return (
+    String(value ?? "")
+      .replaceAll("\\", "/")
+      .split("/")
+      .at(-1) ?? ""
+  );
+}
+
+function backendPathStem(value: unknown): string {
+  const name = backendPathName(value);
+  const suffixStart = name.lastIndexOf(".");
+  return suffixStart > 0 ? name.slice(0, suffixStart) : name;
+}
+
+function backendMaterializedRunConfigName(
+  baseConfigName: unknown,
+  runId: string,
+): string {
+  return `generated/${backendPathStem(baseConfigName)}_field_setup_${runId}.yaml`;
+}
+
+async function installTrialScenario(
+  page: Page,
+  options: TrialScenarioOptions = {},
+) {
+  const videoFixture = options.omitVideo
+    ? null
+    : await createPlayableVideoFixture(page);
+  const createBodies: Array<Record<string, unknown>> = [];
+  const deriveBodies: Array<Record<string, unknown>> = [];
+  const cancelIds: string[] = [];
+  const configGetNames: string[] = [];
+  const runs: Array<Record<string, unknown>> = [];
+  const configs = new Map<string, Record<string, unknown>>();
+  let externalActiveRunId = options.activeRunId ?? null;
+  let configMode: "ok" | "missing" | "tampered" = "ok";
+  let createResponseLost = false;
+  let releaseDeriveGate: (() => void) | null = null;
+  const deriveGate = options.deferDerive
+    ? new Promise<void>((resolve) => {
+        releaseDeriveGate = resolve;
+      })
+    : null;
+
+  const artifactList = () =>
+    [
+      {
+        name: "run_manifest.json",
+        path: "run_manifest.json",
+        kind: "json",
+        exists: true,
+        size_bytes: 100,
+        content_type: "application/json",
+      },
+      {
+        name: "metrics_report.json",
+        path: "metrics_report.json",
+        kind: "json",
+        exists: true,
+        size_bytes: 100,
+        content_type: "application/json",
+      },
+      {
+        name: "ball_track.csv",
+        path: "ball_track.csv",
+        kind: "csv",
+        exists: true,
+        size_bytes: Buffer.byteLength(trialRawTrackCsv),
+        content_type: "text/csv",
+      },
+      {
+        name: "ball_audit.json",
+        path: "ball_audit.json",
+        kind: "json",
+        exists: true,
+        size_bytes: 100,
+        content_type: "application/json",
+      },
+      {
+        name: "ball_track.cleaned.csv",
+        path: "ball_track.cleaned.csv",
+        kind: "csv",
+        exists: true,
+        size_bytes: Buffer.byteLength(trialCleanedTrackCsv),
+        content_type: "text/csv",
+      },
+      ...(videoFixture
+        ? [
+            {
+              name: "follow_cam.webm",
+              path: "follow_cam.webm",
+              kind: "video",
+              exists: true,
+              size_bytes: Buffer.byteLength(videoFixture.bodyBase64, "base64"),
+              content_type: videoFixture.contentType,
+            },
+          ]
+        : []),
+    ].filter((item) => item.name !== options.missingArtifact);
+
+  function activeRunId() {
+    return (
+      externalActiveRunId ??
+      (runs.find((run) => run.status === "queued" || run.status === "running")
+        ?.run_id as string | undefined) ??
+      null
+    );
+  }
+
+  function runRecord(
+    runId: string,
+    body: Record<string, unknown>,
+  ): Record<string, unknown> {
+    const configPatch = body.config_patch as Record<string, unknown> | null;
+    const configName =
+      configPatch && Object.keys(configPatch).length > 0
+        ? backendMaterializedRunConfigName(body.config_name, runId)
+        : String(body.config_name);
+    return {
+      run_id: runId,
+      source: "api",
+      status: "queued",
+      created_at: "2026-07-15T12:00:00Z",
+      started_at: null,
+      completed_at: null,
+      config_name: configName,
+      config_path: `configs/${configName}`,
+      input_video: body.input_video,
+      parent_run_id: body.parent_run_id ?? null,
+      output_dir: `outputs/${body.output_dir_name}`,
+      modules_enabled: {
+        postprocess: body.enable_postprocess,
+        follow_cam: body.enable_follow_cam,
+      },
+      artifacts: [],
+      stats: {},
+      broadcast: null,
+      progress: {
+        stage: "queued",
+        current_frame: 0,
+        total_frames: body.max_frames,
+        percent: 0,
+      },
+      notes: body.notes,
+      error: null,
+    };
+  }
+
+  await page.route("**/api/**", async (route) => {
+    const request = route.request();
+    const url = new URL(request.url());
+    const method = request.method();
+    const path = url.pathname;
+    if (method === "GET" && path === "/api/configs") {
+      await route.fulfill({
+        json: [
+          {
+            name: "default.yaml",
+            path: "configs/default.yaml",
+            created_at: "2026-07-15T00:00:00Z",
+            input_video: inputCatalog.videos[0].path,
+            output_dir: null,
+            detector_model_path: "models/ball.pt",
+            postprocess_enabled: true,
+            follow_cam_enabled: true,
+            exists: { yaml: true },
+          },
+        ],
+      });
+      return;
+    }
+    if (method === "GET" && path === "/api/health") {
+      await route.fulfill({
+        json: {
+          status: "ok",
+          active_run_id: activeRunId(),
+          config_count: configs.size + 1,
+          run_count: runs.length,
+        },
+      });
+      return;
+    }
+    if (method === "GET" && path === "/api/runs") {
+      await route.fulfill({ json: runs });
+      return;
+    }
+    if (method === "POST" && path === "/api/runs") {
+      const body = request.postDataJSON() as Record<string, unknown>;
+      createBodies.push(body);
+      if (options.conflictOnCreate) {
+        externalActiveRunId = "race-run";
+        await route.fulfill({
+          status: 409,
+          json: { detail: "Another run is already active: race-run" },
+        });
+        return;
+      }
+      const runId = backendPathName(body.output_dir_name);
+      if (!runId) throw new Error("Trial fixture requires output_dir_name");
+      const created = runRecord(runId, body);
+      runs.push(created);
+      if (options.loseCreateResponseOnce && !createResponseLost) {
+        createResponseLost = true;
+        await route.abort("connectionreset");
+        return;
+      }
+      await route.fulfill({ status: 201, json: created });
+      return;
+    }
+    const cancelMatch = path.match(/^\/api\/runs\/([^/]+)\/cancel$/);
+    if (method === "POST" && cancelMatch) {
+      const run = runs.find(
+        (item) => item.run_id === decodeURIComponent(cancelMatch[1]),
+      );
+      if (!run) {
+        await route.fulfill({ status: 404, json: { detail: "missing" } });
+        return;
+      }
+      cancelIds.push(String(run.run_id));
+      run.status = "cancelled";
+      run.progress = null;
+      await route.fulfill({ json: run });
+      return;
+    }
+    const artifactsMatch = path.match(/^\/api\/runs\/([^/]+)\/artifacts$/);
+    if (method === "GET" && artifactsMatch) {
+      await route.fulfill({ json: artifactList() });
+      return;
+    }
+    const auditMatch = path.match(/^\/api\/runs\/([^/]+)\/ball-audit$/);
+    if (method === "GET" && auditMatch) {
+      await route.fulfill({
+        json: {
+          schema_version: "1.0",
+          generated_at: "2026-07-15T12:05:00Z",
+          summary: {
+            frame_count: 300,
+            source_count: 2,
+            tracklet_count: 0,
+            suspicious_tracklet_count: 0,
+            review_event_count: 0,
+            lost_gap_count: 0,
+            max_step_px: 20,
+          },
+          sources: [
+            {
+              name: "raw",
+              path: "ball_track.csv",
+              row_count: 300,
+              tracklet_count: 0,
+            },
+            {
+              name: "cleaned",
+              path: "ball_track.cleaned.csv",
+              row_count: 300,
+              tracklet_count: 0,
+            },
+          ],
+          tracklets: [],
+          review_events: [],
+        },
+      });
+      return;
+    }
+    const artifactMatch = path.match(/^\/api\/runs\/([^/]+)\/artifacts\/(.+)$/);
+    if (method === "GET" && artifactMatch) {
+      const runId = decodeURIComponent(artifactMatch[1]);
+      const name = decodeURIComponent(artifactMatch[2]);
+      const run = runs.find((item) => item.run_id === runId);
+      if (
+        !run ||
+        name === options.missingArtifact ||
+        (options.omitVideo && name === "follow_cam.webm")
+      ) {
+        await route.fulfill({ status: 404, json: { detail: "missing" } });
+        return;
+      }
+      if (name === "run_manifest.json") {
+        await route.fulfill({
+          json: {
+            schema_version: "1.0",
+            run_id: run.run_id,
+            input_video: run.input_video,
+            config_name: run.config_name,
+            status: run.status,
+            notes: run.notes,
+          },
+        });
+        return;
+      }
+      if (name === "metrics_report.json") {
+        if (options.corruptMetrics) {
+          await route.fulfill({ contentType: "application/json", body: "[]" });
+        } else {
+          await route.fulfill({
+            json: {
+              schema_version: "1.0",
+              generated_at: "2026-07-15T12:05:00Z",
+              tracks: {
+                raw: (run.stats as Record<string, unknown>).raw,
+                cleaned: (run.stats as Record<string, unknown>).cleaned,
+              },
+              quality_gate: (run.stats as Record<string, unknown>).quality_gate,
+            },
+          });
+        }
+        return;
+      }
+      if (name.endsWith(".csv")) {
+        await route.fulfill({
+          contentType: "text/csv",
+          body:
+            name === "ball_track.cleaned.csv"
+              ? trialCleanedTrackCsv
+              : trialRawTrackCsv,
+        });
+        return;
+      }
+      if (name === "follow_cam.webm" && videoFixture) {
+        await route.fulfill({
+          status: 200,
+          contentType: videoFixture.contentType,
+          headers: { "Accept-Ranges": "bytes" },
+          body: Buffer.from(videoFixture.bodyBase64, "base64"),
+        });
+        return;
+      }
+    }
+    const runMatch = path.match(/^\/api\/runs\/([^/]+)$/);
+    if (method === "GET" && runMatch) {
+      const run = runs.find(
+        (item) => item.run_id === decodeURIComponent(runMatch[1]),
+      );
+      if (!run) {
+        await route.fulfill({ status: 404, json: { detail: "missing" } });
+        return;
+      }
+      await route.fulfill({ json: run });
+      return;
+    }
+    if (method === "POST" && path === "/api/configs/derive") {
+      const body = request.postDataJSON() as Record<string, unknown>;
+      deriveBodies.push(body);
+      if (deriveGate) await deriveGate;
+      const outputName = String(body.output_name);
+      const name = `generated/${outputName}`;
+      const detail = {
+        name,
+        path: `configs/${name}`,
+        text: `input_video: ${inputCatalog.videos[0].path}\nname: ${name}\n`,
+        raw: body.patch,
+        resolved: body.patch,
+        summary: {
+          name,
+          path: `configs/${name}`,
+          created_at: "2026-07-15T12:10:00Z",
+          input_video: inputCatalog.videos[0].path,
+          output_dir: null,
+          detector_model_path: "models/ball.pt",
+          postprocess_enabled: true,
+          follow_cam_enabled: false,
+          exists: { yaml: true },
+        },
+      };
+      configs.set(name, detail);
+      configMode = "ok";
+      await route.fulfill({ status: 201, json: detail });
+      return;
+    }
+    const configMatch = path.match(/^\/api\/configs\/(.+)$/);
+    if (method === "GET" && configMatch) {
+      const name = decodeURIComponent(configMatch[1]);
+      configGetNames.push(name);
+      const detail = configs.get(name);
+      if (!detail || configMode === "missing") {
+        await route.fulfill({ status: 404, json: { detail: "missing" } });
+        return;
+      }
+      await route.fulfill({
+        json:
+          configMode === "tampered"
+            ? { ...detail, text: `${detail.text as string}tampered: true\n` }
+            : detail,
+      });
+      return;
+    }
+    await route.fallback();
+  });
+
+  return {
+    runs,
+    createBodies,
+    deriveBodies,
+    cancelIds,
+    configGetNames,
+    runId(index = 0) {
+      const runId = runs[index]?.run_id;
+      if (typeof runId !== "string") throw new Error(`Unknown run ${index}`);
+      return runId;
+    },
+    setStatus(runId: string, status: TrialRunStatus) {
+      const run = runs.find((item) => item.run_id === runId);
+      if (!run) throw new Error(`Unknown run ${runId}`);
+      run.status = status;
+      run.error = status === "failed" ? "trial failed" : null;
+      run.completed_at =
+        status === "completed" || status === "failed" || status === "cancelled"
+          ? "2026-07-15T12:05:00Z"
+          : null;
+      run.artifacts = status === "completed" ? artifactList() : [];
+      run.progress =
+        status === "queued" || status === "running"
+          ? {
+              stage: status,
+              current_frame: status === "running" ? 150 : 0,
+              total_frames: 300,
+              percent: status === "running" ? 50 : 0,
+            }
+          : null;
+      run.stats =
+        status === "completed"
+          ? {
+              raw: {
+                frame_count: 300,
+                detected: 200,
+                predicted: 50,
+                lost: 50,
+                detected_ratio: 2 / 3,
+                predicted_ratio: 1 / 6,
+                lost_ratio: 1 / 6,
+                longest_lost_streak: 4,
+                false_positive_island_count: 1,
+                max_step_px: 20,
+              },
+              cleaned: {
+                frame_count: 300,
+                detected: 210,
+                predicted: 50,
+                lost: 40,
+                detected_ratio: 0.7,
+                predicted_ratio: 1 / 6,
+                lost_ratio: 2 / 15,
+              },
+              quality_gate: { status: "warn" },
+            }
+          : {};
+    },
+    setConfigMode(mode: "ok" | "missing" | "tampered") {
+      configMode = mode;
+    },
+    setExternalActiveRun(runId: string | null) {
+      externalActiveRunId = runId;
+    },
+    releaseDerive() {
+      releaseDeriveGate?.();
+    },
   };
 }
 
@@ -178,8 +809,55 @@ async function openCalibration(page: Page) {
   await expect(page.getByAltText("Original source frame 10")).toBeVisible();
 }
 
+async function openTrialFromDraft(page: Page, language: "en" | "zh" = "en") {
+  await page.addInitScript((draft) => {
+    const key = "football-tracking.production-draft.v1";
+    if (localStorage.getItem(key) === null) {
+      localStorage.setItem(key, JSON.stringify(draft));
+    }
+  }, draftWithCompletedCalibration());
+  await page.goto("/production");
+  await expect(
+    page.getByRole("heading", {
+      name: language === "zh" ? "试跑调参" : "Trial and tuning",
+    }),
+  ).toBeVisible();
+  await expect(
+    page.getByLabel(language === "zh" ? "基础配置" : "Base configuration"),
+  ).toHaveValue("default.yaml");
+}
+
+async function finishTrialForAcceptance(
+  page: Page,
+  scenario: Awaited<ReturnType<typeof installTrialScenario>>,
+) {
+  await page.getByRole("button", { name: "Start bounded trial" }).click();
+  await expect.poll(() => scenario.createBodies.length).toBe(1);
+  const runId = scenario.runId();
+  scenario.setStatus(runId, "running");
+  await expect(page.getByTestId("trial-run-status")).toHaveText("Running");
+  scenario.setStatus(runId, "completed");
+  const accept = page.getByRole("button", { name: "Accept this trial" });
+  await expect(accept).toBeVisible({ timeout: 15_000 });
+  await accept.click();
+  await expect(page.getByText("Trial accepted")).toBeVisible();
+}
+
 test.beforeEach(async ({ page }) => {
+  await watchRuntimeErrors(page);
   await mockInputs(page);
+  await mockTrialDefaults(page);
+});
+
+test.afterEach(async ({ page }) => {
+  const allowed = [...(allowedRuntimeErrors.get(page) ?? [])];
+  const unexpected = (runtimeErrors.get(page) ?? []).filter((message) => {
+    const match = allowed.findIndex((pattern) => pattern.test(message));
+    if (match < 0) return true;
+    allowed.splice(match, 1);
+    return false;
+  });
+  expect(unexpected).toEqual([]);
 });
 
 test("selects an original video, advances, and restores after refresh", async ({
@@ -428,6 +1106,474 @@ test("supports keyboard coordinates and completes three distinct frame confirmat
     page.getByRole("heading", { name: "Trial and tuning" }),
   ).toBeVisible();
   await expect(page.locator(".konvajs-content")).toHaveCount(0);
+});
+
+test("runs a bounded trial, reads evidence, explicitly accepts, freezes config, and enables Next", async ({
+  page,
+}, testInfo) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  const scenario = await installTrialScenario(page);
+  await openTrialFromDraft(page);
+  await finishTrialForAcceptance(page, scenario);
+
+  expect(scenario.createBodies[0]).toMatchObject({
+    config_name: "default.yaml",
+    input_video: inputCatalog.videos[0].path,
+    parent_run_id: null,
+    start_frame: 0,
+    max_frames: 300,
+    enable_postprocess: true,
+    enable_follow_cam: true,
+    pipeline_mode: "standard",
+    config_patch: {
+      input_video: inputCatalog.videos[0].path,
+      filtering: { roi: [100, 100, 1800, 1000] },
+      runtime: { start_frame: 0, max_frames: 300 },
+    },
+  });
+  const trialRunId = scenario.runId();
+  expect(trialRunId).toBe(scenario.createBodies[0].output_dir_name);
+  const materializedTrialConfigName = backendMaterializedRunConfigName(
+    scenario.createBodies[0].config_name,
+    trialRunId,
+  );
+  expect(scenario.runs[0]).toMatchObject({
+    run_id: trialRunId,
+    config_name: materializedTrialConfigName,
+    config_path: `configs/${materializedTrialConfigName}`,
+  });
+  await page.getByRole("button", { name: "Confirm configuration" }).click();
+  await expect.poll(() => scenario.deriveBodies.length).toBe(1);
+  await expect(page.getByText("Configuration snapshot verified")).toBeVisible();
+  const next = page.getByRole("button", { name: /^Next$/ });
+  await expect(next).toBeEnabled();
+  const derive = scenario.deriveBodies[0];
+  expect(derive.output_name).toMatch(
+    /^production_workflow-completed-calibration_[0-9a-f-]+\.yaml$/,
+  );
+  const canonicalConfigName = `generated/${String(derive.output_name)}`;
+  await expect
+    .poll(() => scenario.configGetNames)
+    .toContain(canonicalConfigName);
+  expect(scenario.configGetNames).not.toContain(derive.output_name);
+  await expect(page.getByText(canonicalConfigName)).toBeVisible();
+  expect(derive.patch).toMatchObject({
+    input_video: inputCatalog.videos[0].path,
+    runtime: { start_frame: 0, max_frames: null },
+    follow_cam: { enabled: false },
+    metadata: {
+      production_workflow: {
+        workflow_id: "workflow-completed-calibration",
+        accepted_trial_run_id: scenario.runId(),
+      },
+    },
+  });
+  await testInfo.attach("trial-config-verified-1440", {
+    body: await page.screenshot(),
+    contentType: "image/png",
+  });
+  await next.click();
+  await expect(
+    page.getByRole("heading", { name: "Full tracking and review" }),
+  ).toBeVisible();
+
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expect(page.getByTestId("completed-stage-trial")).toBeVisible();
+  const results = await new AxeBuilder({ page })
+    .include("main")
+    .withTags(["wcag2a", "wcag2aa", "wcag21a", "wcag21aa"])
+    .analyze();
+  expect(
+    results.violations.filter(
+      (violation) =>
+        violation.impact === "critical" || violation.impact === "serious",
+    ),
+  ).toEqual([]);
+});
+
+test("keeps the trial workspace responsive, keyboard reachable, and accessible", async ({
+  page,
+}, testInfo) => {
+  await installTrialScenario(page, { omitVideo: true });
+  await openTrialFromDraft(page);
+
+  for (const viewport of [
+    { width: 1440, height: 900 },
+    { width: 1280, height: 720 },
+    { width: 390, height: 844 },
+  ]) {
+    await page.setViewportSize(viewport);
+    await expect(page.getByTestId("production-trial-step")).toBeVisible();
+    await expect
+      .poll(() =>
+        page.evaluate(
+          () =>
+            document.documentElement.scrollWidth <=
+            document.documentElement.clientWidth,
+        ),
+      )
+      .toBe(true);
+
+    const baseConfig = page.getByLabel("Base configuration");
+    const startFrame = page.getByLabel("Start frame");
+    await baseConfig.focus();
+    await expect(baseConfig).toBeFocused();
+    await page.keyboard.press("Tab");
+    await expect(startFrame).toBeFocused();
+    await page.keyboard.press("Shift+Tab");
+    await expect(baseConfig).toBeFocused();
+
+    const results = await new AxeBuilder({ page })
+      .include("main")
+      .withTags(["wcag2a", "wcag2aa", "wcag21a", "wcag21aa"])
+      .analyze();
+    expect(
+      results.violations.filter(
+        (violation) =>
+          violation.impact === "critical" || violation.impact === "serious",
+      ),
+    ).toEqual([]);
+    await testInfo.attach(
+      `trial-workspace-${viewport.width}x${viewport.height}`,
+      {
+        body: await page.screenshot(),
+        contentType: "image/png",
+      },
+    );
+  }
+});
+
+test("invalidates downstream evidence when the source changes and restores focus", async ({
+  page,
+}) => {
+  const scenario = await installTrialScenario(page, { omitVideo: true });
+  await openTrialFromDraft(page);
+  await page.getByRole("button", { name: "Start bounded trial" }).click();
+  await expect.poll(() => scenario.createBodies.length).toBe(1);
+  scenario.setStatus(scenario.runId(), "failed");
+  await expect(page.getByTestId("trial-run-status")).toHaveText("Failed");
+
+  const changedSource = {
+    ...inputCatalog.videos[0],
+    size_bytes: 2_048,
+    modified_at: "2026-07-15T14:00:00Z",
+  };
+  await page.unroute("**/api/inputs");
+  await page.route("**/api/inputs", async (route) => {
+    await route.fulfill({
+      json: { ...inputCatalog, videos: [changedSource] },
+    });
+  });
+  await page.reload();
+
+  await expect(
+    page.getByRole("heading", { name: "Choose the original video" }),
+  ).toBeVisible();
+  const sourceSelect = page.getByTestId("production-source-select");
+  const useCurrentSource = page.getByRole("button", {
+    name: "Use current file and reset downstream",
+  });
+  await useCurrentSource.click();
+  await expect(page.getByRole("alertdialog")).toBeVisible();
+  await page.getByRole("button", { name: "Keep current evidence" }).click();
+  await expect(page.getByRole("alertdialog")).toHaveCount(0);
+  await expect(sourceSelect).toBeFocused();
+
+  await useCurrentSource.click();
+  await page.getByRole("button", { name: "Invalidate and edit" }).click();
+  await expect(page.getByRole("alertdialog")).toHaveCount(0);
+  await expect(sourceSelect).toBeFocused();
+  await expect(sourceSelect).toHaveValue(changedSource.path);
+  await expect
+    .poll(() =>
+      page.evaluate(() => {
+        const raw = localStorage.getItem(
+          "football-tracking.production-draft.v1",
+        );
+        return raw ? JSON.parse(raw) : null;
+      }),
+    )
+    .toMatchObject({
+      source: {
+        path: changedSource.path,
+        size_bytes: changedSource.size_bytes,
+        modified_at: changedSource.modified_at,
+      },
+      calibration: null,
+      trial: null,
+      pending_config_confirmation: null,
+      confirmed_config: null,
+    });
+});
+
+test("discards a delayed configuration response after trial evidence is invalidated", async ({
+  page,
+}) => {
+  const scenario = await installTrialScenario(page, { deferDerive: true });
+  await openTrialFromDraft(page);
+  await finishTrialForAcceptance(page, scenario);
+
+  await page.getByRole("button", { name: "Confirm configuration" }).click();
+  await expect.poll(() => scenario.deriveBodies.length).toBe(1);
+  await page.getByRole("button", { name: "Unlock trial settings" }).click();
+  await page.getByRole("button", { name: "Unlock and invalidate" }).click();
+  await expect(page.getByRole("alertdialog")).toHaveCount(0);
+  await expect
+    .poll(() =>
+      page.evaluate(() => {
+        const raw = localStorage.getItem(
+          "football-tracking.production-draft.v1",
+        );
+        if (!raw) return null;
+        const draft = JSON.parse(raw);
+        return {
+          accepted: draft.trial?.accepted ?? null,
+          pending: draft.pending_config_confirmation ?? null,
+          confirmed: draft.confirmed_config ?? null,
+        };
+      }),
+    )
+    .toEqual({ accepted: null, pending: null, confirmed: null });
+
+  scenario.releaseDerive();
+  await expect(page.getByText("Configuration snapshot verified")).toHaveCount(
+    0,
+  );
+  await expect.poll(() => scenario.configGetNames.length).toBe(0);
+  await expect(
+    page.getByRole("button", { name: "Start bounded trial" }),
+  ).toBeVisible();
+});
+
+test("does not duplicate a trial on double click or reload while active", async ({
+  page,
+}) => {
+  const scenario = await installTrialScenario(page);
+  await openTrialFromDraft(page);
+  await page
+    .getByRole("button", { name: "Start bounded trial" })
+    .evaluate((button: HTMLButtonElement) => {
+      button.click();
+      button.click();
+    });
+  await expect.poll(() => scenario.createBodies.length).toBe(1);
+  const runId = scenario.runId();
+  expect(runId).toBe(scenario.createBodies[0].output_dir_name);
+  scenario.setStatus(runId, "running");
+  await expect(page.getByTestId("trial-run-status")).toHaveText("Running");
+  await page.reload();
+  await expect(page.getByTestId("trial-run-status")).toHaveText("Running");
+  expect(scenario.createBodies).toHaveLength(1);
+  await page.getByRole("button", { name: "Cancel trial" }).click();
+  await expect.poll(() => scenario.cancelIds).toEqual([runId]);
+  await expect(page.getByTestId("trial-run-status")).toHaveText("Stopped");
+});
+
+test("reconciles a lost create response after reload without another POST", async ({
+  page,
+}) => {
+  const scenario = await installTrialScenario(page, {
+    loseCreateResponseOnce: true,
+    omitVideo: true,
+  });
+  allowRuntimeError(
+    page,
+    /^console\.error: Failed to load resource: net::ERR_CONNECTION_RESET$/,
+  );
+  await openTrialFromDraft(page);
+  await page.getByRole("button", { name: "Start bounded trial" }).click();
+  await expect.poll(() => scenario.createBodies.length).toBe(1);
+
+  const runId = scenario.runId();
+  const expectedConfigName = backendMaterializedRunConfigName(
+    scenario.createBodies[0].config_name,
+    runId,
+  );
+  expect(scenario.runs[0]).toMatchObject({
+    run_id: runId,
+    source: "api",
+    config_name: expectedConfigName,
+    input_video: scenario.createBodies[0].input_video,
+    parent_run_id: scenario.createBodies[0].parent_run_id,
+    modules_enabled: {
+      postprocess: scenario.createBodies[0].enable_postprocess,
+      follow_cam: scenario.createBodies[0].enable_follow_cam,
+    },
+    notes: scenario.createBodies[0].notes,
+  });
+  await expect(
+    page
+      .getByRole("paragraph")
+      .filter({ hasText: /previous submission result is not confirmed/i }),
+  ).toBeVisible();
+  await expect
+    .poll(() =>
+      page.evaluate(() => {
+        const raw = localStorage.getItem(
+          "football-tracking.production-draft.v1",
+        );
+        return raw ? (JSON.parse(raw).trial?.pending_submission ?? null) : null;
+      }),
+    )
+    .not.toBeNull();
+
+  await page.reload();
+  await expect(page.getByTestId("trial-run-status")).toHaveText("Queued");
+  await expect
+    .poll(() =>
+      page.evaluate(() => {
+        const raw = localStorage.getItem(
+          "football-tracking.production-draft.v1",
+        );
+        if (!raw) return null;
+        const trial = JSON.parse(raw).trial;
+        return {
+          pending: trial?.pending_submission ?? null,
+          run_ids: (trial?.attempts ?? []).map(
+            (attempt: { run_id: string }) => attempt.run_id,
+          ),
+        };
+      }),
+    )
+    .toEqual({ pending: null, run_ids: [runId] });
+  expect(scenario.createBodies).toHaveLength(1);
+});
+
+test("tunes after a failed trial, accepts the successful child, and preserves lineage", async ({
+  page,
+}) => {
+  const scenario = await installTrialScenario(page);
+  await openTrialFromDraft(page);
+  await page.getByRole("button", { name: "Start bounded trial" }).click();
+  await expect.poll(() => scenario.createBodies.length).toBe(1);
+  const firstRunId = scenario.runId();
+  scenario.setStatus(firstRunId, "failed");
+  await expect(page.getByTestId("trial-run-status")).toHaveText("Failed");
+  await page.getByLabel("Frame count").fill("120");
+  await page.getByRole("button", { name: "Retry as a new trial" }).click();
+  await expect.poll(() => scenario.createBodies.length).toBe(2);
+  expect(scenario.createBodies[1]).toMatchObject({
+    parent_run_id: firstRunId,
+    max_frames: 120,
+  });
+  const secondRunId = scenario.runId(1);
+  scenario.setStatus(secondRunId, "running");
+  await expect(page.getByTestId("trial-run-status")).toHaveText("Running");
+  scenario.setStatus(secondRunId, "completed");
+  await expect(page.getByTestId("trial-evidence-ready")).toBeAttached({
+    timeout: 15_000,
+  });
+  await page.getByRole("button", { name: "Accept this trial" }).click();
+  await expect(page.getByText("Trial accepted")).toBeVisible();
+  const attempts = page.getByRole("listitem");
+  await expect(attempts.nth(0)).toContainText(firstRunId);
+  await expect(attempts.nth(0)).toContainText("Failed");
+  await expect(attempts.nth(1)).toContainText(secondRunId);
+  await expect(attempts.nth(1)).toContainText(`Parent: ${firstRunId}`);
+  await expect(attempts.nth(1)).toContainText("Completed");
+});
+
+test("shows the Chinese trial journey and preserves retry lineage", async ({
+  page,
+}) => {
+  await page.addInitScript(() => localStorage.setItem("app-language", "zh"));
+  const scenario = await installTrialScenario(page, { omitVideo: true });
+  await openTrialFromDraft(page, "zh");
+  await expect(page.getByText("试跑记录")).toHaveCount(0);
+
+  await page.getByRole("button", { name: "开始有限试跑" }).click();
+  await expect.poll(() => scenario.createBodies.length).toBe(1);
+  const firstRunId = scenario.runId();
+  scenario.setStatus(firstRunId, "failed");
+  await expect(page.getByTestId("trial-run-status")).toHaveText("失败");
+  await page.getByLabel("试跑帧数").fill("150");
+  await page.getByRole("button", { name: "新建一次重试" }).click();
+  await expect.poll(() => scenario.createBodies.length).toBe(2);
+  expect(scenario.createBodies[1]).toMatchObject({
+    parent_run_id: firstRunId,
+    max_frames: 150,
+  });
+  await expect(page.getByText("试跑记录")).toBeVisible();
+  await expect(page.getByText(`上一次试跑: ${firstRunId}`)).toBeVisible();
+});
+
+test("blocks missing evidence and preserves the draft for active-run conflicts", async ({
+  page,
+}) => {
+  const missing = await installTrialScenario(page, {
+    missingArtifact: "ball_audit.json",
+    omitVideo: true,
+  });
+  await openTrialFromDraft(page);
+  await page.getByRole("button", { name: "Start bounded trial" }).click();
+  await expect.poll(() => missing.createBodies.length).toBe(1);
+  missing.setStatus(missing.runId(), "completed");
+  await expect(
+    page.getByText("Required artifact is unavailable: ball_audit.json."),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "Accept this trial" }),
+  ).toHaveCount(0);
+
+  await page.evaluate(() =>
+    localStorage.removeItem("football-tracking.production-draft.v1"),
+  );
+  await page.reload();
+  const conflict = await installTrialScenario(page, {
+    activeRunId: "occupying-run",
+  });
+  await openTrialFromDraft(page);
+  await page.getByRole("button", { name: "Start bounded trial" }).click();
+  await expect(page.getByText(/occupying-run/)).toBeVisible();
+  expect(conflict.createBodies).toHaveLength(0);
+  await expect(page.getByLabel("Frame count")).toHaveValue("300");
+});
+
+test("detects config tampering and deletion, then re-confirms with a new UUID", async ({
+  page,
+}) => {
+  const scenario = await installTrialScenario(page);
+  await openTrialFromDraft(page);
+  await finishTrialForAcceptance(page, scenario);
+  await page.getByRole("button", { name: "Confirm configuration" }).click();
+  await expect.poll(() => scenario.deriveBodies.length).toBe(1);
+  await expect(page.getByText("Configuration snapshot verified")).toBeVisible();
+  const firstName = scenario.deriveBodies[0].output_name;
+
+  scenario.setConfigMode("tampered");
+  await page.reload();
+  await expect(
+    page.getByText("The confirmed configuration text was modified."),
+  ).toBeVisible();
+  await expect(page.getByRole("button", { name: /^Next$/ })).toBeDisabled();
+  await page
+    .getByRole("button", { name: "Re-confirm with a new snapshot" })
+    .click();
+  await expect.poll(() => scenario.deriveBodies.length).toBe(2);
+  expect(scenario.deriveBodies[1].output_name).not.toBe(firstName);
+  await expect(page.getByText("Configuration snapshot verified")).toBeVisible();
+
+  scenario.setConfigMode("missing");
+  // A missing canonical snapshot is deliberately represented by one 404.
+  allowRuntimeError(
+    page,
+    /^console\.error: Failed to load resource: the server responded with a status of 404 \(Not Found\)$/,
+  );
+  await page.reload();
+  await expect(
+    page.getByText("The confirmed configuration was deleted."),
+  ).toBeVisible();
+  await expect(page.getByRole("button", { name: /^Next$/ })).toBeDisabled();
+
+  scenario.setConfigMode("ok");
+  await page
+    .getByRole("button", { name: "Re-confirm with a new snapshot" })
+    .click();
+  await expect.poll(() => scenario.deriveBodies.length).toBe(3);
+  const thirdName = scenario.deriveBodies[2].output_name;
+  expect(thirdName).not.toBe(firstName);
+  expect(thirdName).not.toBe(scenario.deriveBodies[1].output_name);
+  await expect(page.getByText("Configuration snapshot verified")).toBeVisible();
 });
 
 test("restores approved calibration and suggestion without persisting preview image data", async ({

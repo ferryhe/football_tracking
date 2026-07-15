@@ -5,14 +5,14 @@
 - Program status: in_progress
 - Current PR: PR3 · Trial, Tuning, and Configuration Freeze
 - Current branch: codex/trial-tuning-and-config-freeze
-- Current phase: implementation
-- Checks: PR3 API/state discovery completed with no backend or generated-client gap; dedicated implementation agent is building v3 fail-closed draft migration, append-only trial lineage, evidence gates, explicit acceptance, and digest-verified UUID configuration snapshots
+- Current phase: ready_to_publish
+- Checks: spec COMPLIANT and quality SAFE with 0 findings; root gates pass with Python 1450, Broadcast 80+4, Vitest 267, Playwright 24, coverage, typechecks/build/frozen lock/diff
 - Blockers: none
 - Heartbeat: ACTIVE
 - Heartbeat automation id: production-workflow-multi-pr-heartbeat
 - Heartbeat interval: 15 minutes
 - Heartbeat scope: Continue and report this six-PR program until PR1–PR6 are merged; then delete the heartbeat and verify removal.
-- Last updated: 2026-07-15 08:42 ET
+- Last updated: 2026-07-15 11:33 ET
 
 ## PR Ledger
 
@@ -20,7 +20,7 @@
 | --- | --- | --- | --- | --- | --- |
 | PR1 | codex/production-workflow-foundation | completed | https://github.com/ferryhe/football_tracking/pull/104 | Final window started 2026-07-15T10:32:54.4422764Z | Merged 2026-07-15T10:43:22Z · ea52548 |
 | PR2 | codex/interactive-field-calibration | completed | https://github.com/ferryhe/football_tracking/pull/105 | Final window completed 2026-07-15T12:29:00.338Z | Merged 2026-07-15T12:29:09Z · c781b34 |
-| PR3 | codex/trial-tuning-and-config-freeze | implementation | Pending | Pending | Pending |
+| PR3 | codex/trial-tuning-and-config-freeze | ready_to_publish | Pending | Pending | Pending |
 | PR4 | codex/full-production-review-render | pending | Pending | Pending | Pending |
 | PR5 | codex/grouped-production-history | pending | Pending | Pending | Pending |
 | PR6 | codex/production-workflow-cutover | pending | Pending | Pending | Pending |
