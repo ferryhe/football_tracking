@@ -474,7 +474,7 @@ The legacy /baseline route remains functional. New trial orchestration affects o
 - Accept only a server-managed inbox `bundle_id` plus `bundle_manifest_sha256`; never accept arbitrary client filesystem paths.
 - Copy to a parent-run staging directory, rehash the entire inventory, verify exact source/contract/action-signal/profile/max-window compatibility and policy qualification, then rename the immutable generation into place. Write and validate its activation manifest before publishing the fixed root `selective_review_queue.v1.json` with exclusive create as the only commit marker.
 - Require `coverage_complete=true`, `requires_additional_round=false`, no dropped candidate IDs, and at most 30 review windows. PR4A does not add multi-round review; an over-capacity or partial queue remains blocked.
-- Surface compatible-bundle availability, import progress, blockers, capacity estimate, cancellation, retry, generation lineage, and queue readiness in both Production and legacy Broadcast through the shared workflow controller.
+- Surface compatible-bundle availability, import progress, blockers, capacity estimate, cancellation, retry, generation lineage, and queue readiness in legacy Broadcast through a reusable review-evidence hook/component. PR4 mounts the same unit in Production when the full-run stage lands; PR4A must not depend on unmerged PR4 code.
 - Preserve the complete immutable evidence generation after activation; a retry or different bundle creates a new version and never rewrites accepted evidence.
 - Offline producers deliver to the server-managed inbox by writing a hidden staging directory and atomically renaming it to the discoverable `bundle_id` only after the manifest and inventory are complete; discovery ignores hidden or incomplete directories.
 
@@ -519,7 +519,7 @@ The legacy /baseline route remains functional. New trial orchestration affects o
 - If a compatible bundle is available, show its manifest identity and an explicit “Prepare review evidence” action. Rendering must never start the import implicitly.
 - Show queued/copying/validating/committing progress, safe cancellation availability, exact blocker codes and recovery actions, retry state, generation identity, and capacity failures.
 - When ready, invalidate run/artifact/review queries and enter the existing Broadcast review component without changing its review contract.
-- Use the same controller behavior in Production and legacy `/broadcast`, including refresh recovery, StrictMode, and double-click protection.
+- Keep import state/mutations in a reusable controller used by legacy `/broadcast` and covered in an isolated Production host test; PR4 later mounts it in the real Production full-run stage. Include refresh recovery, StrictMode, and double-click protection.
 - Provide Chinese and English copy, complete keyboard navigation, announced progress/errors, and a usable desktop and narrow-screen layout.
 
 ### Acceptance Criteria
@@ -531,7 +531,7 @@ The legacy /baseline route remains functional. New trial orchestration affects o
 - Applying a frozen policy to the target population cannot mutate or recompute the model-development or policy-qualification packages.
 - Published queue counts reconcile exactly across target contract candidates, automatic decisions, abstentions, review items, and exclusions.
 - The existing review consumer loads the activated queue without bypasses and rejects tampered, stale, cross-run, or unqualified artifacts.
-- The Production and legacy Broadcast UIs can discover and explicitly import a compatible bundle, survive refresh, cancel before commit, and display authoritative ready/failure state without duplicate mutations.
+- Legacy Broadcast can discover and explicitly import a compatible bundle, survive refresh, cancel before commit, and display authoritative ready/failure state without duplicate mutations; the reusable unit passes its isolated Production-host contract for PR4 integration.
 - Activating or revoking an evidence generation changes only review-evidence state and related blockers; it preserves terminal-tail acknowledgement, every unrelated blocker, and all existing limitations.
 - Real videos, candidate tensors, reviewer ledgers containing sensitive identities, and model weights are runtime artifacts and are not committed to Git.
 - PR4A's engineering merge gate is satisfied when the implementation and deterministic validation pass, even if external evidence resources are still missing. This does not resume PR4.
@@ -545,7 +545,7 @@ The legacy /baseline route remains functional. New trial orchestration affects o
 - Security tests cover absolute or parent paths, symlinks/reparse points, cross-run access, inbox TOCTOU, source mutation during copy, oversized inventory, hash/size mismatch, and insufficient disk.
 - Recovery tests inject interruption during copy, validation, generation rename, root queue publication, and registry update; cancellation is covered at every pre-commit stage and rejected after commit starts.
 - Production-consumer tests reject partial/additional-round queues and prove the activated root queue passes the existing review-window/action/recompute lineage validators.
-- Production and legacy Broadcast UI tests cover no bundle, compatible bundle, explicit import, all progress states, double-click/StrictMode idempotency, cancellation, failure/retry, ready transition, refresh recovery, i18n, keyboard use, and accessibility.
+- Legacy Broadcast and reusable Production-host UI tests cover no bundle, compatible bundle, explicit import, all progress states, double-click/StrictMode idempotency, cancellation, failure/retry, ready transition, refresh recovery, i18n, keyboard use, and accessibility.
 - A small deterministic multi-video end-to-end fixture spans model-development, separate policy-qualification, target application, self-contained bundle, activated queue, existing review consumer, and recompute lineage without storing real media or model output in Git; new frontend evidence modules are included in the existing 90% branch/function/line/statement coverage gate, and new Python modules meet the repository's enforced changed-code coverage gate.
 - One real-run evidence exercise against `production_full_0276b82e-3dc5-445e-8758-e2de527ea216`; record actual annotation count, dataset/model/policy/queue digests, qualification result, and independent visual audit. If the evidence cannot meet the approved thresholds, PR4A reports the measured blocker and must not publish a qualified queue.
 
@@ -553,7 +553,7 @@ The legacy /baseline route remains functional. New trial orchestration affects o
 
 - Versioned evidence API/OpenAPI contract and generated clients.
 - Self-contained evidence-bundle schema, builder, validator, inventory, relocation, atomic activation, and restart reconciliation.
-- Production and legacy Broadcast evidence-import controls using the shared controller.
+- Legacy Broadcast evidence-import controls plus the reusable hook/component and Production-host contract consumed by PR4.
 - Deterministic multi-video fixture covering the existing dataset, annotation, training, evaluation, model, policy, queue, bundle, and import chain.
 - Frozen annotation/qualification protocol, evidence-inventory report, capacity/retention policy, and explicit resource-gap report.
 - Offline producer runbook covering controlled blind work packets, adjudication ledgers, reproducible training/evaluation, bundle construction, import, retry, rollback, audit, and incident response.
