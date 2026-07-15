@@ -5,14 +5,14 @@
 - Program status: in_progress
 - Current PR: PR4 · Full Production, Review, and Render
 - Current branch: codex/full-production-review-render
-- Current phase: phase_c_browser_journeys
-- Checks: backend, v4 state/adapters/delivery, shared controller, and production workspace integration are complete; Vitest 330/330 and both typechecks pass; strict full-run/review/render/product Playwright journeys are being implemented
+- Current phase: independent_specification_review
+- Checks: implementation gates pass with Vitest 330 and Production Playwright 32/32 serial and 4-worker; runtime, axe, unknown-API, and contract audits are clean; independent specification review is in progress before the real-video gate
 - Blockers: none
 - Heartbeat: ACTIVE
 - Heartbeat automation id: production-workflow-multi-pr-heartbeat
 - Heartbeat interval: 15 minutes
 - Heartbeat scope: Continue and report this six-PR program until PR1–PR6 are merged; then delete the heartbeat and verify removal.
-- Last updated: 2026-07-15 13:11 ET
+- Last updated: 2026-07-15 13:59 ET
 
 ## PR Ledger
 
@@ -21,7 +21,7 @@
 | PR1 | codex/production-workflow-foundation | completed | https://github.com/ferryhe/football_tracking/pull/104 | Final window started 2026-07-15T10:32:54.4422764Z | Merged 2026-07-15T10:43:22Z · ea52548 |
 | PR2 | codex/interactive-field-calibration | completed | https://github.com/ferryhe/football_tracking/pull/105 | Final window completed 2026-07-15T12:29:00.338Z | Merged 2026-07-15T12:29:09Z · c781b34 |
 | PR3 | codex/trial-tuning-and-config-freeze | completed | https://github.com/ferryhe/football_tracking/pull/106 | Completed 2026-07-15T15:46:04Z with no actionable feedback | Merged 2026-07-15T15:46:13Z · 1dd538c |
-| PR4 | codex/full-production-review-render | phase_c_browser_journeys | Pending | Pending | Pending |
+| PR4 | codex/full-production-review-render | independent_specification_review | Pending | Pending | Pending |
 | PR5 | codex/grouped-production-history | pending | Pending | Pending | Pending |
 | PR6 | codex/production-workflow-cutover | pending | Pending | Pending | Pending |
 
