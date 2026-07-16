@@ -32,6 +32,7 @@ import {
   BROADCAST_DELIVERY_ARTIFACTS,
   type BroadcastDeliveryArtifact,
 } from "@/components/broadcast/BroadcastRenderStep";
+import { BroadcastReviewEvidenceStep } from "@/components/broadcast/BroadcastReviewEvidenceStep";
 import {
   BroadcastReviewStep,
   type BroadcastReviewDecision,
@@ -40,6 +41,7 @@ import {
   BroadcastSetupStep,
   type BroadcastSetupInput,
 } from "@/components/broadcast/BroadcastSetupStep";
+import { useBroadcastReviewEvidenceController } from "@/components/broadcast/useBroadcastReviewEvidenceController";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -203,9 +205,25 @@ export default function BroadcastPage() {
     parentRun,
     reviewDecisionsArtifact !== null,
   );
-  const reviewEnabled = Boolean(
-    parentRunId && recovery.state === "needs_review",
+  const reviewEvidenceEnabled = Boolean(
+    parentRunId &&
+    parentRun?.source === "broadcast_hybrid" &&
+    recovery.state === "needs_review",
   );
+  const reviewEvidence = useBroadcastReviewEvidenceController({
+    runId: parentRunId,
+    enabled: reviewEvidenceEnabled,
+    messages: {
+      ambiguousBundleRecovery:
+        t.broadcast.reviewEvidence.ambiguousBundleRecovery,
+      insufficientCapacityRecovery:
+        t.broadcast.reviewEvidence.insufficientCapacityRecovery,
+      retryBundleUnavailableRecovery:
+        t.broadcast.reviewEvidence.retryBundleUnavailableRecovery,
+    },
+    formatRecoveryAction: t.broadcast.reviewEvidence.recoveryAction,
+  });
+  const reviewEnabled = reviewEvidenceEnabled && reviewEvidence.isReady;
   const reviewQuery = useGetBroadcastReviewWindows(parentRunId, {
     query: {
       queryKey: getGetBroadcastReviewWindowsQueryKey(parentRunId),
@@ -606,8 +624,19 @@ export default function BroadcastPage() {
   );
   const queryError =
     requestedRunQuery.error ?? runsQuery.error ?? artifactsQuery.error;
+  const reviewEvidenceError = reviewEvidence.error
+    ? errorMessage(
+        reviewEvidence.error.cause,
+        reviewEvidence.error.kind === "prepare"
+          ? t.broadcast.reviewEvidence.prepareFailed
+          : reviewEvidence.error.kind === "cancel"
+            ? t.broadcast.reviewEvidence.cancelFailed
+            : t.broadcast.reviewEvidence.loadFailed,
+      )
+    : null;
   const combinedError =
     pageError ??
+    reviewEvidenceError ??
     (queryError ? errorMessage(queryError, t.broadcast.loadFailed) : null);
   const workflowMessages = Array.from(
     new Set(
@@ -641,7 +670,12 @@ export default function BroadcastPage() {
         </div>
         {parentRun && (
           <div className="flex flex-wrap items-center gap-2">
-            <Badge variant="outline">{parentRun.run_id}</Badge>
+            <Badge
+              variant="outline"
+              className="max-w-full whitespace-normal break-all"
+            >
+              {parentRun.run_id}
+            </Badge>
             <Badge>{parentRun.broadcast?.status ?? parentRun.status}</Badge>
             <Button
               type="button"
@@ -652,7 +686,7 @@ export default function BroadcastPage() {
                 recoveredArtifactRef.current = null;
                 setRecoveryAttemptState("idle");
                 setRecoveryNonce((value) => value + 1);
-                void refreshWorkflow();
+                void Promise.all([refreshWorkflow(), reviewEvidence.refresh()]);
               }}
             >
               <RefreshCw className="mr-1.5 h-4 w-4" />
@@ -695,9 +729,11 @@ export default function BroadcastPage() {
           <AlertCircle className="h-4 w-4" />
           <AlertTitle>{t.broadcast.blockingReasons}</AlertTitle>
           <AlertDescription>
-            <ul className="list-disc space-y-1 pl-5">
+            <ul className="min-w-0 max-w-full list-disc space-y-1 pl-5">
               {workflowMessages.map((message) => (
-                <li key={message}>{message}</li>
+                <li key={message} className="min-w-0 [overflow-wrap:anywhere]">
+                  {message}
+                </li>
               ))}
             </ul>
           </AlertDescription>
@@ -775,64 +811,94 @@ export default function BroadcastPage() {
               </AlertDescription>
             </Alert>
           )}
-          {recomputeRecoveryMode === "none" && reviewQuery.isLoading && (
+          {recomputeRecoveryMode === "none" && reviewEvidence.isLoading && (
             <Card>
               <CardContent className="flex items-center gap-3 py-10">
                 <Loader2 className="h-5 w-5 animate-spin" />
-                {t.broadcast.loading}
+                {t.broadcast.reviewEvidence.loading}
               </CardContent>
             </Card>
           )}
-          {recomputeRecoveryMode === "none" && reviewQuery.isError && (
-            <Alert>
-              <AlertCircle className="h-4 w-4" />
-              <AlertTitle>{t.broadcast.reviewUnavailable}</AlertTitle>
-              <AlertDescription>{t.broadcast.evidenceBlocked}</AlertDescription>
-            </Alert>
-          )}
-          {recomputeRecoveryMode === "none" && localizedReviewResponse && (
-            <>
-              {montageResolution.messages.length > 0 && (
-                <Alert variant="destructive">
-                  <AlertCircle className="h-4 w-4" />
-                  <AlertTitle>{t.broadcast.reviewUnavailable}</AlertTitle>
-                  <AlertDescription>
-                    {montageResolution.messages.join(" ")}
-                  </AlertDescription>
-                </Alert>
-              )}
-              <div className="max-w-sm space-y-2">
-                <Label htmlFor="broadcast-reviewer-id">
-                  {t.broadcast.reviewerId}
-                </Label>
-                <Input
-                  id="broadcast-reviewer-id"
-                  value={reviewerId}
-                  onChange={(event) => setReviewerId(event.target.value)}
-                  maxLength={200}
-                  disabled={submitReview.isPending || recompute.isPending}
-                />
-              </div>
-              <BroadcastReviewStep
-                response={localizedReviewResponse}
-                montageUrlsByCandidateId={montageResolution.urls}
-                decisions={reviewDecisions}
-                onDecisionsChange={setReviewDecisions}
-                onSubmit={(decisions) => void handleReviewSubmit(decisions)}
-                isSubmitting={submitReview.isPending || recompute.isPending}
-                disabled={
-                  montageResolution.messages.length > 0 ||
-                  ((localizedReviewResponse.items ?? []).some(
-                    (item) => (item.candidates ?? []).length > 0,
-                  ) &&
-                    !reviewerId.trim())
-                }
-                error={pageError}
-                labels={t.broadcast.review}
-                noiseSubtypeLabels={t.broadcast.noiseSubtypes}
+          {recomputeRecoveryMode === "none" &&
+            !reviewEvidence.isLoading &&
+            !reviewEvidence.isReady && (
+              <BroadcastReviewEvidenceStep
+                {...reviewEvidence.stepProps}
+                labels={t.broadcast.reviewEvidence}
               />
-            </>
+            )}
+          {recomputeRecoveryMode === "none" && reviewEvidence.isReady && (
+            <BroadcastReviewEvidenceStep
+              {...reviewEvidence.stepProps}
+              labels={t.broadcast.reviewEvidence}
+            />
           )}
+          {recomputeRecoveryMode === "none" &&
+            reviewEvidence.isReady &&
+            reviewQuery.isLoading && (
+              <Card>
+                <CardContent className="flex items-center gap-3 py-10">
+                  <Loader2 className="h-5 w-5 animate-spin" />
+                  {t.broadcast.loading}
+                </CardContent>
+              </Card>
+            )}
+          {recomputeRecoveryMode === "none" &&
+            reviewEvidence.isReady &&
+            reviewQuery.isError && (
+              <Alert>
+                <AlertCircle className="h-4 w-4" />
+                <AlertTitle>{t.broadcast.reviewUnavailable}</AlertTitle>
+                <AlertDescription>
+                  {t.broadcast.evidenceBlocked}
+                </AlertDescription>
+              </Alert>
+            )}
+          {recomputeRecoveryMode === "none" &&
+            reviewEvidence.isReady &&
+            localizedReviewResponse && (
+              <>
+                {montageResolution.messages.length > 0 && (
+                  <Alert variant="destructive">
+                    <AlertCircle className="h-4 w-4" />
+                    <AlertTitle>{t.broadcast.reviewUnavailable}</AlertTitle>
+                    <AlertDescription>
+                      {montageResolution.messages.join(" ")}
+                    </AlertDescription>
+                  </Alert>
+                )}
+                <div className="max-w-sm space-y-2">
+                  <Label htmlFor="broadcast-reviewer-id">
+                    {t.broadcast.reviewerId}
+                  </Label>
+                  <Input
+                    id="broadcast-reviewer-id"
+                    value={reviewerId}
+                    onChange={(event) => setReviewerId(event.target.value)}
+                    maxLength={200}
+                    disabled={submitReview.isPending || recompute.isPending}
+                  />
+                </div>
+                <BroadcastReviewStep
+                  response={localizedReviewResponse}
+                  montageUrlsByCandidateId={montageResolution.urls}
+                  decisions={reviewDecisions}
+                  onDecisionsChange={setReviewDecisions}
+                  onSubmit={(decisions) => void handleReviewSubmit(decisions)}
+                  isSubmitting={submitReview.isPending || recompute.isPending}
+                  disabled={
+                    montageResolution.messages.length > 0 ||
+                    ((localizedReviewResponse.items ?? []).some(
+                      (item) => (item.candidates ?? []).length > 0,
+                    ) &&
+                      !reviewerId.trim())
+                  }
+                  error={pageError}
+                  labels={t.broadcast.review}
+                  noiseSubtypeLabels={t.broadcast.noiseSubtypes}
+                />
+              </>
+            )}
         </div>
       )}
 

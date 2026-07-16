@@ -165,6 +165,18 @@ class GlobalBallTrajectoryTests(unittest.TestCase):
                     solve_global_ball_trajectory(source, contract, predictions, root / "generation")
                 self.assertFalse((root / "generation").exists())
 
+    def test_prediction_inference_batch_size_above_128_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            root = Path(temp_name)
+            source, contract, predictions = self._inputs(root, frame_count=1, candidates=[(0, 10, 10, 0.8)])
+            payload = json.loads(predictions.read_text(encoding="utf-8"))
+            payload["inference"] = {"device": "cpu", "batch_size": 129}
+            predictions.write_text(json.dumps(payload, allow_nan=False), encoding="utf-8")
+
+            with self.assertRaisesRegex(GlobalBallTrajectoryError, "exceeds 128"):
+                solve_global_ball_trajectory(source, contract, predictions, root / "generation")
+            self.assertFalse((root / "generation").exists())
+
     def test_json_evidence_rejects_duplicate_keys_and_bounded_record_overflow(self) -> None:
         mutations = {
             "duplicate": (

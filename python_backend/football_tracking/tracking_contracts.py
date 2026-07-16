@@ -29,6 +29,7 @@ CLASSIFICATION_LABELS = (
     "lighting_shadow_or_blur",
     "unknown",
 )
+CLASSIFIER_MAX_BATCH_SIZE = 128
 LABEL_ORIGINS = ("prelabel", "ai_confirmed", "human_confirmed")
 CONFIRMED_LABEL_ORIGINS = frozenset({"ai_confirmed", "human_confirmed"})
 SELECTIVE_DECISIONS = ("accept", "reject", "abstain")

@@ -4,6 +4,7 @@ import hashlib
 import io
 import json
 import math
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -14,6 +15,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from football_tracking.selective_policy import (
+    SELECTIVE_APPLICATION_NAME,
     SelectivePolicyConfig,
     SelectivePolicyError,
     _binomial_lower_tail,
@@ -22,12 +24,14 @@ from football_tracking.selective_policy import (
     _qualification_evidence_summary,
     _threshold_grid,
     _wilson_upper_bound,
+    apply_frozen_selective_policy,
     build_roles_cli_main,
     build_selective_policy_roles,
     fit_cli_main,
     fit_selective_policy,
     validate_selective_decision_semantics,
     validate_selective_decisions_binding,
+    validate_selective_policy_application_binding,
 )
 from football_tracking.tracking_contracts import CLASSIFICATION_LABELS, build_tracking_contract
 
@@ -195,6 +199,87 @@ class SelectivePolicyStatisticsTests(unittest.TestCase):
 
 
 class SelectivePolicyEndToEndTests(unittest.TestCase):
+    def test_frozen_application_binds_exact_qualified_model_and_rejects_target_truth(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            root = Path(temp_name)
+            inputs = _write_inputs(root, calibration_per_class=1000, audit_per_class=400)
+            policy_dir = root / "policy"
+            fit_selective_policy(**inputs, output_dir=policy_dir)
+            policy_path = policy_dir / "selective_policy.v1.json"
+
+            target_contract_path = root / "target-contract.json"
+            target_contract = _read_json(inputs["resolved_contract_path"])
+            target_contract["classifications"] = []
+            target_contract["decisions"] = []
+            _write_json(target_contract_path, target_contract)
+            target_contract_sha256 = _sha256(target_contract_path)
+            target_dataset_path = root / "target-dataset.json"
+            target_dataset = _read_json(inputs["dataset_manifest_path"])
+            target_dataset["contract"]["sha256"] = target_contract_sha256
+            _write_json(target_dataset_path, target_dataset)
+            target_predictions_path = root / "target-predictions.json"
+            target_predictions = _read_json(inputs["predictions_path"])
+            target_predictions["source_contract_sha256"] = target_contract_sha256
+            _write_json(target_predictions_path, target_predictions)
+
+            def loaded_model(package_dir: Path) -> tuple[object, dict[str, object]]:
+                return object(), _read_json(Path(package_dir) / "model_manifest.v1.json")
+
+            with (
+                patch(
+                    "football_tracking.candidate_classifier.load_candidate_classifier",
+                    side_effect=loaded_model,
+                ),
+                patch("football_tracking.candidate_classifier.validate_candidate_predictions_package"),
+            ):
+                application_dir = root / "target-application"
+                application = apply_frozen_selective_policy(
+                    policy_path,
+                    target_predictions_path,
+                    target_dataset_path,
+                    target_contract_path,
+                    inputs["model_manifest_path"],
+                    application_dir,
+                )
+                validated = validate_selective_policy_application_binding(
+                    policy_path,
+                    application_dir / SELECTIVE_APPLICATION_NAME,
+                    target_predictions_path,
+                    target_dataset_path,
+                    target_contract_path,
+                    inputs["model_manifest_path"],
+                )
+                self.assertEqual(application, validated["application"])
+
+                mismatched_model = root / "mismatched-model"
+                mismatched_model.mkdir()
+                for name in ("model_manifest.v1.json", "training_report.v1.json", "model.pt"):
+                    shutil.copyfile(root / name, mismatched_model / name)
+                (mismatched_model / "model.pt").write_bytes(
+                    (mismatched_model / "model.pt").read_bytes() + b"different-qualified-model"
+                )
+                with self.assertRaisesRegex(SelectivePolicyError, "qualified frozen model"):
+                    apply_frozen_selective_policy(
+                        policy_path,
+                        target_predictions_path,
+                        target_dataset_path,
+                        target_contract_path,
+                        mismatched_model / "model_manifest.v1.json",
+                        root / "mismatched-application",
+                    )
+
+                target_dataset["samples"][0]["ground_truth"] = "match_ball"
+                _write_json(target_dataset_path, target_dataset)
+                with self.assertRaisesRegex(SelectivePolicyError, "discloses qualification truth"):
+                    apply_frozen_selective_policy(
+                        policy_path,
+                        target_predictions_path,
+                        target_dataset_path,
+                        target_contract_path,
+                        inputs["model_manifest_path"],
+                        root / "truth-leaking-application",
+                    )
+
     def test_policy_version_binds_full_config_qualification_and_recomputable_inputs(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:
             root = Path(temp_name)

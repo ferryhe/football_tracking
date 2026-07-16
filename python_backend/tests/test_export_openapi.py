@@ -118,6 +118,9 @@ class ExportOpenApiTests(unittest.TestCase):
         document = build_openapi_document()
         paths = document["paths"]
         for path in (
+            "/runs/{run_id}/broadcast/review-evidence",
+            "/runs/{run_id}/broadcast/review-evidence/import",
+            "/runs/{run_id}/broadcast/review-evidence/{generation_id}",
             "/runs/{run_id}/broadcast/review-windows",
             "/runs/{run_id}/broadcast/review-actions",
             "/runs/{run_id}/broadcast/trajectory-recompute",
@@ -126,6 +129,11 @@ class ExportOpenApiTests(unittest.TestCase):
             self.assertIn(path, paths)
         self.assertIn("202", paths["/runs/{run_id}/broadcast/trajectory-recompute"]["post"]["responses"])
         self.assertIn("202", paths["/runs/{run_id}/broadcast/render"]["post"]["responses"])
+        self.assertIn("202", paths["/runs/{run_id}/broadcast/review-evidence/import"]["post"]["responses"])
+        revoke = paths["/runs/{run_id}/broadcast/review-evidence/{generation_id}"]["delete"]
+        self.assertIn("200", revoke["responses"])
+        queue_parameter = next(parameter for parameter in revoke["parameters"] if parameter["name"] == "queue_sha256")
+        self.assertTrue(queue_parameter["required"])
 
         create_run = document["components"]["schemas"]["CreateRunRequest"]
         for field in (
@@ -152,6 +160,46 @@ class ExportOpenApiTests(unittest.TestCase):
             "#/components/schemas/BroadcastReviewWindow",
             review_windows["properties"]["items"]["items"]["$ref"],
         )
+        evidence_import = document["components"]["schemas"]["BroadcastReviewEvidenceImportRequest"]
+        self.assertIn("bundle_id", evidence_import["required"])
+        self.assertIn("bundle_manifest_sha256", evidence_import["required"])
+        evidence_state = document["components"]["schemas"]["BroadcastReviewEvidenceStateResponse"]
+        self.assertIn("capacity", evidence_state["properties"])
+        self.assertEqual(
+            {
+                "not_available",
+                "available",
+                "queued",
+                "copying",
+                "validating",
+                "committing",
+                "ready",
+                "failed",
+                "cancelled",
+                "blocked",
+            },
+            set(evidence_state["properties"]["status"]["enum"]),
+        )
+        for field in (
+            "stage",
+            "progress_percent",
+            "blocker_code",
+            "error_code",
+            "recovery_action",
+            "retryable",
+            "can_cancel",
+        ):
+            self.assertIn(field, evidence_state["properties"])
+        bundle_summary = document["components"]["schemas"]["BroadcastReviewEvidenceBundleSummary"]
+        for field in (
+            "required_free_bytes",
+            "available_free_bytes",
+            "attempt_quota_bytes",
+            "capacity_status",
+            "retention",
+            "provisioner_limits",
+        ):
+            self.assertIn(field, bundle_summary["properties"])
         run_record = document["components"]["schemas"]["RunRecord"]
         self.assertEqual(
             "#/components/schemas/BroadcastRunState",

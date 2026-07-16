@@ -14,6 +14,10 @@ from pathlib import Path
 from statistics import NormalDist
 from typing import Any
 
+from football_tracking.candidate_classifier import (
+    ClassifierError,
+    validate_candidate_predictions_package,
+)
 from football_tracking.tracking_benchmark import build_benchmark_report
 from football_tracking.tracking_contracts import (
     CLASSIFICATION_LABELS,
@@ -27,6 +31,7 @@ POLICY_SCHEMA_VERSION = "1.0"
 SELECTIVE_POLICY_NAME = "selective_policy.v1.json"
 SELECTIVE_ACCEPTANCE_REPORT_NAME = "selective_acceptance_report.v1.json"
 SELECTIVE_DECISIONS_NAME = "selective_decisions.v1.json"
+SELECTIVE_APPLICATION_NAME = "selective_application.v1.json"
 SELECTIVE_POLICY_ROLES_NAME = "selective_policy_roles.v1.json"
 NOISE_LABELS = tuple(label for label in CLASSIFICATION_LABELS if label not in {"match_ball", "unknown"})
 POLICY_ROLE_SEED = "football-tracking-selective-policy-role-seed-v1"
@@ -574,6 +579,22 @@ def validate_selective_policy_evidence_binding(
         policy_roles_snapshot,
         weights_snapshot,
     ]
+    source_contract_snapshot = _qualification_source_contract_snapshot(
+        dataset_snapshot,
+        resolution,
+    )
+    try:
+        validate_candidate_predictions_package(
+            model_snapshot.path.parent,
+            dataset_snapshot.path,
+            source_contract_snapshot.path,
+            predictions_snapshot.path,
+        )
+    except ClassifierError as exc:
+        raise SelectivePolicyError(
+            f"qualification predictions do not reproduce from frozen classifier inference: {exc}"
+        ) from exc
+    snapshots.append(source_contract_snapshot)
     lineage = _validate_lineage(
         predictions=predictions,
         predictions_snapshot=predictions_snapshot,
@@ -653,6 +674,286 @@ def validate_selective_policy_evidence_binding(
             },
         },
     }
+
+
+def apply_frozen_selective_policy(
+    policy_path: Path,
+    predictions_path: Path,
+    dataset_manifest_path: Path,
+    target_contract_path: Path,
+    model_manifest_path: Path,
+    output_dir: Path,
+) -> dict[str, Any]:
+    """Apply an already-qualified policy to a truth-free, disjoint target population."""
+
+    output_dir = Path(output_dir).resolve()
+    if output_dir.exists():
+        raise SelectivePolicyError(f"output directory already exists: {output_dir}")
+    policy, rows, lineage, snapshots, contract = _frozen_application_inputs(
+        policy_path,
+        predictions_path,
+        dataset_manifest_path,
+        target_contract_path,
+        model_manifest_path,
+    )
+    decisions, _ = _apply_policy(
+        rows,
+        contract,
+        thresholds=policy["thresholds"],
+        qualified=True,
+        config=_validated_policy_config(policy),
+    )
+    application = _frozen_application_payload(policy, decisions, lineage)
+    _validate_finite_json(application, "selective policy application")
+    output_dir.parent.mkdir(parents=True, exist_ok=True)
+    staging = Path(tempfile.mkdtemp(prefix=f".{output_dir.name}.staging-", dir=output_dir.parent))
+    try:
+        _write_json(staging / SELECTIVE_APPLICATION_NAME, application)
+        _verify_snapshots(snapshots)
+        os.replace(staging, output_dir)
+        return application
+    except BaseException:
+        shutil.rmtree(staging, ignore_errors=True)
+        raise
+
+
+def validate_selective_policy_application_binding(
+    policy_path: Path,
+    application_path: Path,
+    predictions_path: Path,
+    dataset_manifest_path: Path,
+    target_contract_path: Path,
+    model_manifest_path: Path,
+) -> dict[str, Any]:
+    """Recompute a target application from the frozen policy and exact target evidence."""
+
+    application, application_snapshot = _load_snapshot_json(application_path, "selective policy application")
+    policy, rows, lineage, snapshots, contract = _frozen_application_inputs(
+        policy_path,
+        predictions_path,
+        dataset_manifest_path,
+        target_contract_path,
+        model_manifest_path,
+    )
+    expected_rows, _ = _apply_policy(
+        rows,
+        contract,
+        thresholds=policy["thresholds"],
+        qualified=True,
+        config=_validated_policy_config(policy),
+    )
+    expected = _frozen_application_payload(policy, expected_rows, lineage, generated_at=application.get("generated_at"))
+    if application != expected:
+        raise SelectivePolicyError("target application does not match the frozen policy and target evidence")
+    _verify_snapshots([*snapshots, application_snapshot])
+    return {
+        "policy": policy,
+        "application": application,
+        "candidate_ids": sorted(row["candidate_id"] for row in expected_rows),
+        "candidate_population_sha256": _canonical_sha256(
+            [{"candidate_id": row["candidate_id"], "candidate_fingerprint": row["candidate_fingerprint"]} for row in expected_rows]
+        ),
+        "lineage": lineage,
+    }
+
+
+def _frozen_application_inputs(
+    policy_path: Path,
+    predictions_path: Path,
+    dataset_manifest_path: Path,
+    target_contract_path: Path,
+    model_manifest_path: Path,
+) -> tuple[dict[str, Any], list[dict[str, Any]], dict[str, Any], list[_Snapshot], dict[str, Any]]:
+    from football_tracking.candidate_classifier import (
+        ClassifierError,
+        load_candidate_classifier,
+        validate_candidate_predictions_package,
+    )
+
+    policy, policy_snapshot = _load_snapshot_json(policy_path, "selective policy")
+    _validate_policy_version_payload(policy)
+    if policy.get("status") != "qualified":
+        raise SelectivePolicyError("frozen policy must be qualified before target application")
+    predictions, predictions_snapshot = _load_snapshot_json(predictions_path, "target candidate predictions")
+    dataset, dataset_snapshot = _load_snapshot_json(dataset_manifest_path, "target candidate dataset")
+    model_manifest, model_snapshot = _load_snapshot_json(model_manifest_path, "model manifest")
+    contract, contract_snapshot = _load_snapshot_tracking_contract(target_contract_path, "target tracking contract")
+    if contract.get("artifact_status") != "loaded" or contract.get("validation_errors"):
+        raise SelectivePolicyError("target tracking contract is invalid")
+    try:
+        _, validated_model = load_candidate_classifier(model_snapshot.path.parent)
+    except (ClassifierError, OSError, ValueError) as exc:
+        raise SelectivePolicyError(f"target model package is invalid: {exc}") from exc
+    if validated_model != model_manifest:
+        raise SelectivePolicyError("model manifest changed during target application validation")
+    try:
+        validate_candidate_predictions_package(
+            model_snapshot.path.parent,
+            dataset_snapshot.path,
+            contract_snapshot.path,
+            predictions_snapshot.path,
+        )
+    except (ClassifierError, OSError, ValueError) as exc:
+        raise SelectivePolicyError(f"target predictions do not reproduce from the frozen model: {exc}") from exc
+    if dataset.get("schema_version") != "1.0" or dataset.get("artifact_type") != "candidate_dataset":
+        raise SelectivePolicyError("invalid target candidate dataset envelope")
+    summary = dataset.get("summary")
+    samples = dataset.get("samples")
+    sources = dataset.get("sources")
+    if (
+        not isinstance(summary, dict)
+        or summary.get("status") != "ok"
+        or not isinstance(samples, list)
+        or not samples
+        or summary.get("sample_count") != len(samples)
+        or not isinstance(sources, list)
+        or not sources
+        or summary.get("source_count") != len(sources)
+    ):
+        raise SelectivePolicyError("target candidate dataset must be successful and non-empty")
+    if predictions.get("schema_version") != "1.0" or predictions.get("artifact_type") != "candidate_predictions":
+        raise SelectivePolicyError("invalid target candidate predictions envelope")
+    if predictions.get("dataset_version") != dataset.get("dataset_version"):
+        raise SelectivePolicyError("target predictions dataset version mismatch")
+    if predictions.get("model_version") != model_manifest.get("model_version"):
+        raise SelectivePolicyError("target predictions model version mismatch")
+    if predictions.get("source_contract_sha256") != contract_snapshot.sha256:
+        raise SelectivePolicyError("target predictions contract binding mismatch")
+    contract_binding = dataset.get("contract")
+    if not isinstance(contract_binding, dict) or contract_binding.get("sha256") != contract_snapshot.sha256:
+        raise SelectivePolicyError("target dataset contract binding mismatch")
+    if predictions.get("class_order") != list(CLASSIFICATION_LABELS):
+        raise SelectivePolicyError("target predictions class order is incompatible")
+    if predictions.get("temperature") != model_manifest.get("calibration", {}).get("temperature"):
+        raise SelectivePolicyError("target predictions temperature does not match the frozen model")
+    truth_fields = {"label", "truth", "ground_truth", "training_label", "policy_role"}
+    for index, sample in enumerate(samples):
+        if not isinstance(sample, dict):
+            raise SelectivePolicyError(f"target dataset sample {index} is invalid")
+        disclosed = sorted(field for field in truth_fields if field in sample)
+        if disclosed:
+            raise SelectivePolicyError(
+                f"target application dataset discloses qualification truth or roles: {disclosed}"
+            )
+    if any(
+        isinstance(row, dict) and row.get("label_origin") in CONFIRMED_LABEL_ORIGINS
+        for row in contract.get("classifications", [])
+    ):
+        raise SelectivePolicyError("target application contract contains confirmed candidate truth")
+    candidate_ids = [_required_text(row.get("candidate_id"), "target candidate_id") for row in contract["candidates"]]
+    neutral_resolution = {
+        "resolutions": [
+            {
+                "candidate_id": candidate_id,
+                "status": "pending_adjudication",
+                "label": "unknown",
+                "label_origin": "prelabel",
+            }
+            for candidate_id in candidate_ids
+        ]
+    }
+    rows = _evaluation_rows(
+        predictions,
+        dataset,
+        neutral_resolution,
+        contract,
+        None,
+        supported_mask=model_manifest["supported_mask"],
+    )
+    if any(row.get("policy_role") is not None or row.get("truth") is not None for row in rows):
+        raise SelectivePolicyError("target application may not reuse qualification roles or truth")
+    training_path = _safe_package_artifact(
+        model_snapshot.path.parent,
+        model_manifest.get("training_report_path"),
+        expected_name="training_report.v1.json",
+        label="training report",
+    )
+    weights_path = _safe_package_artifact(
+        model_snapshot.path.parent,
+        model_manifest.get("weights_path"),
+        expected_name="model.pt",
+        label="model weights",
+    )
+    training_snapshot = _snapshot(training_path, "training report")
+    weights_snapshot = _snapshot(weights_path, "model weights")
+    qualification_lineage = policy.get("lineage")
+    if not isinstance(qualification_lineage, dict):
+        raise SelectivePolicyError("qualified policy lineage is invalid")
+    if qualification_lineage.get("model_version") != model_manifest.get("model_version"):
+        raise SelectivePolicyError("target model version differs from the qualified frozen model")
+    for name, snapshot in (
+        ("model_manifest", model_snapshot),
+        ("training_report", training_snapshot),
+        ("model_weights", weights_snapshot),
+    ):
+        qualified_descriptor = qualification_lineage.get(name)
+        if not isinstance(qualified_descriptor, dict):
+            raise SelectivePolicyError(f"qualified policy lineage {name} is invalid")
+        if _required_sha256(
+            qualified_descriptor.get("sha256"), f"qualified policy lineage {name} sha256"
+        ) != snapshot.sha256:
+            raise SelectivePolicyError(
+                f"target {name.replace('_', ' ')} differs from the qualified frozen model"
+            )
+    lineage = {
+        "policy": {"sha256": policy_snapshot.sha256},
+        "predictions": {"sha256": predictions_snapshot.sha256},
+        "dataset_manifest": {"sha256": dataset_snapshot.sha256},
+        "target_contract": {"sha256": contract_snapshot.sha256},
+        "model_manifest": {"sha256": model_snapshot.sha256},
+        "training_report": {"sha256": training_snapshot.sha256},
+        "model_weights": {"sha256": weights_snapshot.sha256},
+        "dataset_version": dataset["dataset_version"],
+        "model_version": model_manifest["model_version"],
+        "policy_version": policy["policy_version"],
+    }
+    return (
+        policy,
+        rows,
+        lineage,
+        [
+            policy_snapshot,
+            predictions_snapshot,
+            dataset_snapshot,
+            contract_snapshot,
+            model_snapshot,
+            training_snapshot,
+            weights_snapshot,
+        ],
+        contract,
+    )
+
+
+def _frozen_application_payload(
+    policy: dict[str, Any],
+    decisions: list[dict[str, Any]],
+    lineage: dict[str, Any],
+    *,
+    generated_at: Any = None,
+) -> dict[str, Any]:
+    if generated_at is None:
+        generated_at = _utc_now_iso()
+    summary = {
+        "candidate_count": len(decisions),
+        "accept_count": sum(row["decision"] == "accept" for row in decisions),
+        "reject_count": sum(row["decision"] == "reject" for row in decisions),
+        "abstain_count": sum(row["decision"] == "abstain" for row in decisions),
+        "review_count": sum(row["decision"] == "abstain" for row in decisions),
+        "excluded_existing_decision_count": sum(bool(row["existing_decision_preserved"]) for row in decisions),
+    }
+    content = {
+        "schema_version": POLICY_SCHEMA_VERSION,
+        "artifact_type": "selective_policy_application",
+        "application_algorithm": DECISION_ALGORITHM,
+        "status": "qualified_policy_applied",
+        "policy_version": policy["policy_version"],
+        "dataset_version": lineage["dataset_version"],
+        "model_version": lineage["model_version"],
+        "lineage": lineage,
+        "summary": summary,
+        "decisions": decisions,
+    }
+    return {**content, "generated_at": generated_at, "application_content_sha256": _canonical_sha256(content)}
 
 
 def _normalized_config(config: SelectivePolicyConfig) -> dict[str, Any]:
@@ -3365,6 +3666,28 @@ def _snapshot(path: Path, name: str) -> _Snapshot:
     return snapshot
 
 
+def _qualification_source_contract_snapshot(
+    dataset_snapshot: _Snapshot,
+    resolution: dict[str, Any],
+) -> _Snapshot:
+    binding = resolution.get("source_contract")
+    if not isinstance(binding, dict):
+        raise SelectivePolicyError("annotation resolution lacks its qualification source contract binding")
+    raw_path = binding.get("path", "source-contract.json")
+    if not isinstance(raw_path, str) or not raw_path or Path(raw_path).name != raw_path:
+        raise SelectivePolicyError("qualification source contract path must be a safe sibling file name")
+    path = (dataset_snapshot.path.parent / raw_path).resolve()
+    if path.parent != dataset_snapshot.path.parent.resolve():
+        raise SelectivePolicyError("qualification source contract escapes the dataset package")
+    snapshot = _snapshot(path, "qualification source contract")
+    if snapshot.sha256 != _required_sha256(
+        binding.get("sha256"),
+        "annotation qualification source contract sha256",
+    ):
+        raise SelectivePolicyError("qualification source contract sha256 does not match annotation evidence")
+    return snapshot
+
+
 def _capture_snapshot(
     path: Path,
     name: str,
@@ -3582,4 +3905,44 @@ def fit_cli_main(argv: list[str] | None = None) -> int:
         print(json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False), file=sys.stderr)
         return 1
     print(json.dumps({"ok": True, "status": policy["status"], "policy_version": policy["policy_version"]}))
+    return 0
+
+
+def apply_cli_main(argv: list[str] | None = None) -> int:
+    parser = _JsonArgumentParser(description="Apply a frozen qualified policy to independent target evidence")
+    parser.add_argument("--policy", required=True, type=Path)
+    parser.add_argument("--predictions", required=True, type=Path)
+    parser.add_argument("--dataset-manifest", required=True, type=Path)
+    parser.add_argument("--target-contract", required=True, type=Path)
+    parser.add_argument("--model-manifest", required=True, type=Path)
+    parser.add_argument("--output-dir", required=True, type=Path)
+    try:
+        args = parser.parse_args(argv)
+        application = apply_frozen_selective_policy(
+            args.policy,
+            args.predictions,
+            args.dataset_manifest,
+            args.target_contract,
+            args.model_manifest,
+            args.output_dir,
+        )
+    except _InvalidArgumentsError:
+        print(json.dumps({"ok": False, "error": "invalid_arguments"}), file=sys.stderr)
+        return 2
+    except SystemExit as exc:
+        return int(exc.code or 0)
+    except Exception as exc:
+        print(json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False), file=sys.stderr)
+        return 1
+    print(
+        json.dumps(
+            {
+                "ok": True,
+                "status": application["status"],
+                "policy_version": application["policy_version"],
+                "candidate_count": application["summary"]["candidate_count"],
+                "output_dir": str(args.output_dir),
+            }
+        )
+    )
     return 0

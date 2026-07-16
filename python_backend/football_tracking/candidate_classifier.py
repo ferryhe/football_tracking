@@ -22,6 +22,7 @@ from torch.nn import functional as F
 
 from football_tracking.tracking_contracts import (
     CLASSIFICATION_LABELS,
+    CLASSIFIER_MAX_BATCH_SIZE,
     CONFIRMED_LABEL_ORIGINS,
     TRACKING_CONTRACT_REPORT_NAME,
     build_tracking_contract,
@@ -40,6 +41,7 @@ CONTEXT_SHAPE = (5, 3, 128, 128)
 METADATA_DIM = 7
 _NOISE_LABELS = frozenset(CLASS_LABELS) - {"match_ball", "unknown"}
 _MAX_NPY_OVERHEAD_BYTES = 128 * 1024
+MAX_BATCH_SIZE = CLASSIFIER_MAX_BATCH_SIZE
 
 
 class ClassifierError(RuntimeError):
@@ -237,6 +239,146 @@ def load_candidate_classifier(package_dir: Path) -> tuple[CandidateClassifier, d
     return model, manifest
 
 
+def validate_candidate_classifier_package(
+    package_dir: Path,
+    dataset_manifest_path: Path,
+    annotation_resolution_path: Path,
+    resolved_contract_path: Path,
+) -> dict[str, Any]:
+    """Rebuild the immutable training-data and leakage-safe split evidence for a model package."""
+
+    package_dir = Path(package_dir).resolve()
+    model, manifest, package_bindings = _load_candidate_classifier_with_bindings(package_dir)
+    report_path = package_dir / TRAINING_REPORT_NAME
+    report = _load_json_object(report_path, "training report")
+    dataset_path, dataset, dataset_sha256 = _load_dataset_manifest(dataset_manifest_path)
+    resolution_path, resolution, resolution_sha256 = _load_resolution(annotation_resolution_path)
+    contract_path, contract, contract_sha256 = _load_contract(resolved_contract_path)
+    input_bindings = {
+        **package_bindings,
+        "candidate dataset manifest": (dataset_path, dataset_sha256),
+        "annotation resolution": (resolution_path, resolution_sha256),
+        "resolved tracking contract": (contract_path, contract_sha256),
+    }
+    expected_data_binding = {
+        "dataset_version": dataset["dataset_version"],
+        "dataset_manifest_sha256": dataset_sha256,
+        "annotation_resolution_sha256": resolution_sha256,
+        "resolved_contract_sha256": contract_sha256,
+    }
+    if manifest.get("data_binding") != expected_data_binding or report.get("data_binding") != expected_data_binding:
+        raise ClassifierError("model package training data binding does not match the supplied development evidence")
+    _verify_resolution_bindings(dataset, resolution, dataset_sha256, contract_sha256)
+    selected, truth_report = _select_training_truth(dataset, resolution, contract)
+    if not selected or report.get("truth_selection") != truth_report:
+        raise ClassifierError("training report truth selection does not match the supplied development evidence")
+    training_config = report.get("training_config")
+    if not isinstance(training_config, dict):
+        raise ClassifierError("training report training_config is invalid")
+    batch_size = _validated_batch_size(
+        training_config.get("batch_size"),
+        "training report batch_size",
+    )
+    try:
+        seed = int(training_config["seed"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ClassifierError("training report seed is invalid") from exc
+    expected_split = _build_split(selected, dataset, seed=seed)
+    if report.get("split") != expected_split:
+        raise ClassifierError("training report split does not match the leakage-safe development split")
+    if expected_split.get("leakage_checks") != {"passed": True, "violations": []}:
+        raise ClassifierError("model development split leakage checks did not pass")
+    examples = _load_examples(dataset_path.parent, dataset["samples"], selected)
+    examples_by_id = {item["candidate_id"]: item for item in examples}
+    calibration_examples = [
+        examples_by_id[candidate_id]
+        for candidate_id, split_name in expected_split["assignments"].items()
+        if split_name == "calibration"
+    ]
+    test_examples = [
+        examples_by_id[candidate_id]
+        for candidate_id, split_name in expected_split["assignments"].items()
+        if split_name == "test"
+    ]
+    calibration_logits, calibration_targets = _predict_logits(model, calibration_examples, batch_size)
+    temperature, before_metrics, after_metrics = _calibrate(
+        calibration_logits,
+        calibration_targets,
+        manifest["supported_mask"],
+    )
+    expected_calibration = {
+        "temperature": temperature,
+        "before": before_metrics,
+        "after": after_metrics,
+    }
+    test_logits, test_targets = _predict_logits(model, test_examples, batch_size)
+    expected_test_metrics = _classification_metrics(
+        test_logits,
+        test_targets,
+        manifest["supported_mask"],
+        temperature,
+    )
+    if report.get("calibration") != expected_calibration or manifest.get("calibration") != expected_calibration:
+        raise ClassifierError("model calibration metrics do not reproduce from the bound weights and evidence")
+    if report.get("test_metrics") != expected_test_metrics:
+        raise ClassifierError("model test metrics do not reproduce from the bound weights and evidence")
+    loss_history = report.get("loss_history")
+    if not isinstance(loss_history, list) or not loss_history or not all(
+        isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(float(value))
+        for value in loss_history
+    ):
+        raise ClassifierError("training report loss history must be non-empty and finite")
+    calibration = report.get("calibration")
+    if not isinstance(calibration, dict) or not all(
+        isinstance(calibration.get(part), dict) and int(calibration[part].get("example_count", 0)) > 0
+        for part in ("before", "after")
+    ):
+        raise ClassifierError("training report calibration evidence must be non-empty")
+    test_metrics = report.get("test_metrics")
+    if not isinstance(test_metrics, dict) or int(test_metrics.get("example_count", 0)) <= 0:
+        raise ClassifierError("training report test evidence must be non-empty")
+    _verify_file_bindings(input_bindings)
+    return {
+        "manifest": manifest,
+        "training_report": report,
+        "development_candidate_ids": sorted(row["candidate_id"] for row in selected),
+        "bindings": expected_data_binding,
+    }
+
+
+def validate_candidate_predictions_package(
+    package_dir: Path,
+    dataset_manifest_path: Path,
+    source_contract_path: Path,
+    predictions_path: Path,
+) -> dict[str, Any]:
+    """Run frozen CPU inference again and compare the published prediction artifact exactly."""
+
+    predictions_path = Path(predictions_path).resolve()
+    published = _load_json_object(predictions_path, "published candidate predictions")
+    inference = published.get("inference")
+    if not isinstance(inference, dict):
+        raise ClassifierError("published candidate predictions lack their inference configuration")
+    batch_size = _validated_batch_size(
+        inference.get("batch_size"),
+        "published candidate predictions inference batch_size",
+    )
+    if inference.get("device") != "cpu":
+        raise ClassifierError("published candidate predictions inference device must be cpu")
+    with tempfile.TemporaryDirectory(prefix="candidate-predictions-validate-") as temporary:
+        output_dir = Path(temporary) / "predictions"
+        recomputed = classify_candidates(
+            package_dir,
+            dataset_manifest_path,
+            source_contract_path,
+            output_dir,
+            batch_size=batch_size,
+        )
+        if recomputed != published:
+            raise ClassifierError("published candidate predictions do not reproduce from frozen model inference")
+    return published
+
+
 def _load_candidate_classifier_with_bindings(
     package_dir: Path,
 ) -> tuple[CandidateClassifier, dict[str, Any], dict[str, tuple[Path, str]]]:
@@ -273,6 +415,7 @@ def _load_candidate_classifier_with_bindings(
     training_config = manifest.get("training_config")
     if not isinstance(training_config, dict) or manifest.get("seed") != training_config.get("seed"):
         raise ClassifierError("model seed and training_config are inconsistent")
+    _validated_batch_size(training_config.get("batch_size"), "model training_config batch_size")
     if manifest.get("runtime", {}).get("device") != "cpu":
         raise ClassifierError("model package is not CPU-bound")
     temperature = _positive_finite(manifest.get("calibration", {}).get("temperature"), "temperature")
@@ -343,8 +486,7 @@ def classify_candidates(
     *,
     batch_size: int = 32,
 ) -> dict[str, Any]:
-    if not isinstance(batch_size, int) or isinstance(batch_size, bool) or batch_size <= 0:
-        raise ClassifierError("batch_size must be a positive integer")
+    batch_size = _validated_batch_size(batch_size, "batch_size")
     model, model_manifest, package_bindings = _load_candidate_classifier_with_bindings(package_dir)
     dataset_path, dataset, dataset_sha256 = _load_dataset_manifest(dataset_manifest_path)
     contract_path, contract, contract_sha256 = _load_contract(source_contract_path)
@@ -392,6 +534,7 @@ def classify_candidates(
         "source_contract_sha256": contract_sha256,
         "class_order": list(CLASS_LABELS),
         "temperature": temperature,
+        "inference": {"device": "cpu", "batch_size": batch_size},
         "prediction_count": len(predictions),
         "predictions": predictions,
     }
@@ -865,6 +1008,7 @@ def _predict_logits(
     examples: list[dict[str, Any]],
     batch_size: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
+    batch_size = _validated_batch_size(batch_size, "prediction batch_size")
     logits = []
     targets = []
     model.eval()
@@ -1115,8 +1259,7 @@ def _load_contract(path: Path) -> tuple[Path, dict[str, Any], str]:
 def _validated_config(config: TrainingConfig) -> TrainingConfig:
     if not isinstance(config.epochs, int) or isinstance(config.epochs, bool) or config.epochs <= 0:
         raise ClassifierError("epochs must be a positive integer")
-    if not isinstance(config.batch_size, int) or isinstance(config.batch_size, bool) or config.batch_size <= 0:
-        raise ClassifierError("batch_size must be a positive integer")
+    _validated_batch_size(config.batch_size, "batch_size")
     if not math.isfinite(config.learning_rate) or config.learning_rate <= 0:
         raise ClassifierError("learning_rate must be finite and positive")
     if not math.isfinite(config.weight_decay) or config.weight_decay < 0:
@@ -1124,6 +1267,17 @@ def _validated_config(config: TrainingConfig) -> TrainingConfig:
     if not isinstance(config.seed, int) or isinstance(config.seed, bool) or config.seed < 0:
         raise ClassifierError("seed must be a non-negative integer")
     return config
+
+
+def _validated_batch_size(value: Any, name: str) -> int:
+    if (
+        not isinstance(value, int)
+        or isinstance(value, bool)
+        or value <= 0
+        or value > MAX_BATCH_SIZE
+    ):
+        raise ClassifierError(f"{name} must be an integer between 1 and {MAX_BATCH_SIZE}")
+    return value
 
 
 def _set_deterministic_seed(seed: int) -> None:

@@ -731,6 +731,115 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/HTTPValidationError'
+  /runs/{run_id}/broadcast/review-evidence:
+    get:
+      tags:
+      - broadcast
+      summary: Get Broadcast Review Evidence
+      operationId: get_broadcast_review_evidence
+      parameters:
+      - name: run_id
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Run Id
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BroadcastReviewEvidenceStateResponse'
+        '404':
+          description: Run not found
+        '409':
+          description: Run evidence state conflict
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /runs/{run_id}/broadcast/review-evidence/import:
+    post:
+      tags:
+      - broadcast
+      summary: Import Broadcast Review Evidence
+      operationId: import_broadcast_review_evidence
+      parameters:
+      - name: run_id
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Run Id
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BroadcastReviewEvidenceImportRequest'
+      responses:
+        '202':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BroadcastOperationResponse'
+        '404':
+          description: Run not found
+        '409':
+          description: Evidence or run state conflict
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /runs/{run_id}/broadcast/review-evidence/{generation_id}:
+    delete:
+      tags:
+      - broadcast
+      summary: Revoke Broadcast Review Evidence
+      operationId: revoke_broadcast_review_evidence
+      parameters:
+      - name: run_id
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Run Id
+      - name: generation_id
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Generation Id
+      - name: queue_sha256
+        in: query
+        required: true
+        schema:
+          type: string
+          pattern: ^[0-9a-f]{64}$
+          title: Queue Sha256
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BroadcastReviewEvidenceRevokeResponse'
+        '404':
+          description: Run not found
+        '409':
+          description: Evidence already consumed or changed
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
   /runs/{run_id}/broadcast/review-windows:
     get:
       tags:
@@ -2910,6 +3019,22 @@ components:
           - type: integer
           - type: 'null'
           title: Target Height
+        bundle_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Bundle Id
+        bundle_manifest_sha256:
+          anyOf:
+          - type: string
+            pattern: ^[0-9a-f]{64}$
+          - type: 'null'
+          title: Bundle Manifest Sha256
+        retry_from_job_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Retry From Job Id
       additionalProperties: true
       type: object
       title: BroadcastOperationRequestState
@@ -2975,6 +3100,17 @@ components:
           - type: string
           - type: 'null'
           title: Render Generation Id
+        review_evidence_generation_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Review Evidence Generation Id
+        queue_sha256:
+          anyOf:
+          - type: string
+            pattern: ^[0-9a-f]{64}$
+          - type: 'null'
+          title: Queue Sha256
       additionalProperties: true
       type: object
       title: BroadcastOperationResultState
@@ -3269,6 +3405,325 @@ components:
       - context_tensor
       - review_montage
       title: BroadcastReviewEvidenceArtifacts
+    BroadcastReviewEvidenceBundleSummary:
+      properties:
+        status:
+          type: string
+          enum:
+          - available
+          - not_applicable
+          - invalid
+          title: Status
+        bundle_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Bundle Id
+        bundle_manifest_sha256:
+          anyOf:
+          - type: string
+            pattern: ^[0-9a-f]{64}$
+          - type: 'null'
+          title: Bundle Manifest Sha256
+        queue_sha256:
+          anyOf:
+          - type: string
+            pattern: ^[0-9a-f]{64}$
+          - type: 'null'
+          title: Queue Sha256
+        total_size_bytes:
+          anyOf:
+          - type: integer
+            minimum: 0.0
+          - type: 'null'
+          title: Total Size Bytes
+        required_free_bytes:
+          anyOf:
+          - type: integer
+            minimum: 0.0
+          - type: 'null'
+          title: Required Free Bytes
+        available_free_bytes:
+          anyOf:
+          - type: integer
+            minimum: 0.0
+          - type: 'null'
+          title: Available Free Bytes
+        attempt_quota_bytes:
+          anyOf:
+          - type: integer
+            minimum: 0.0
+          - type: 'null'
+          title: Attempt Quota Bytes
+        capacity_status:
+          anyOf:
+          - type: string
+            enum:
+            - sufficient
+            - insufficient
+          - type: 'null'
+          title: Capacity Status
+        retention:
+          anyOf:
+          - $ref: '#/components/schemas/BroadcastReviewEvidenceRetention'
+          - type: 'null'
+        provisioner_limits:
+          anyOf:
+          - $ref: '#/components/schemas/BroadcastReviewEvidenceProvisionerLimits'
+          - type: 'null'
+        inbox_entry:
+          type: string
+          title: Inbox Entry
+        error_code:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Error Code
+        error:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Error
+      additionalProperties: true
+      type: object
+      required:
+      - status
+      - inbox_entry
+      title: BroadcastReviewEvidenceBundleSummary
+    BroadcastReviewEvidenceCapacity:
+      properties:
+        total_size_bytes:
+          anyOf:
+          - type: integer
+            minimum: 0.0
+          - type: 'null'
+          title: Total Size Bytes
+        required_free_bytes:
+          anyOf:
+          - type: integer
+            minimum: 0.0
+          - type: 'null'
+          title: Required Free Bytes
+        available_free_bytes:
+          anyOf:
+          - type: integer
+            minimum: 0.0
+          - type: 'null'
+          title: Available Free Bytes
+        attempt_quota_bytes:
+          anyOf:
+          - type: integer
+            minimum: 0.0
+          - type: 'null'
+          title: Attempt Quota Bytes
+        capacity_status:
+          anyOf:
+          - type: string
+            enum:
+            - sufficient
+            - insufficient
+          - type: 'null'
+          title: Capacity Status
+        retention:
+          anyOf:
+          - $ref: '#/components/schemas/BroadcastReviewEvidenceRetention'
+          - type: 'null'
+        provisioner_limits:
+          anyOf:
+          - $ref: '#/components/schemas/BroadcastReviewEvidenceProvisionerLimits'
+          - type: 'null'
+      type: object
+      title: BroadcastReviewEvidenceCapacity
+    BroadcastReviewEvidenceImportRequest:
+      properties:
+        bundle_id:
+          type: string
+          maxLength: 96
+          minLength: 1
+          title: Bundle Id
+        bundle_manifest_sha256:
+          type: string
+          pattern: ^[0-9a-f]{64}$
+          title: Bundle Manifest Sha256
+        retry_from_job_id:
+          anyOf:
+          - type: string
+            maxLength: 200
+            minLength: 1
+          - type: 'null'
+          title: Retry From Job Id
+      additionalProperties: false
+      type: object
+      required:
+      - bundle_id
+      - bundle_manifest_sha256
+      title: BroadcastReviewEvidenceImportRequest
+    BroadcastReviewEvidenceProvisionerLimits:
+      properties:
+        max_files:
+          type: integer
+          exclusiveMinimum: 0.0
+          title: Max Files
+        max_bundle_bytes:
+          type: integer
+          exclusiveMinimum: 0.0
+          title: Max Bundle Bytes
+        max_single_file_bytes:
+          type: integer
+          exclusiveMinimum: 0.0
+          title: Max Single File Bytes
+      type: object
+      required:
+      - max_files
+      - max_bundle_bytes
+      - max_single_file_bytes
+      title: BroadcastReviewEvidenceProvisionerLimits
+    BroadcastReviewEvidenceRetention:
+      properties:
+        policy:
+          type: string
+          const: manual-audit-retention-v1
+          title: Policy
+        retain_until:
+          type: string
+          title: Retain Until
+        automatic_delete:
+          type: boolean
+          const: false
+          title: Automatic Delete
+      type: object
+      required:
+      - policy
+      - retain_until
+      - automatic_delete
+      title: BroadcastReviewEvidenceRetention
+    BroadcastReviewEvidenceRevokeResponse:
+      properties:
+        run_id:
+          type: string
+          title: Run Id
+        status:
+          type: string
+          const: revoked
+          title: Status
+        generation_id:
+          type: string
+          pattern: ^review-evidence-[0-9a-f]{24}$
+          title: Generation Id
+        queue_sha256:
+          type: string
+          pattern: ^[0-9a-f]{64}$
+          title: Queue Sha256
+        revoked_at:
+          type: string
+          title: Revoked At
+      type: object
+      required:
+      - run_id
+      - status
+      - generation_id
+      - queue_sha256
+      - revoked_at
+      title: BroadcastReviewEvidenceRevokeResponse
+    BroadcastReviewEvidenceStateResponse:
+      properties:
+        run_id:
+          type: string
+          title: Run Id
+        status:
+          type: string
+          enum:
+          - not_available
+          - available
+          - queued
+          - copying
+          - validating
+          - committing
+          - ready
+          - failed
+          - cancelled
+          - blocked
+          title: Status
+        active_job_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Active Job Id
+        retry_from_job_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Retry From Job Id
+        generation_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Generation Id
+        queue_sha256:
+          anyOf:
+          - type: string
+            pattern: ^[0-9a-f]{64}$
+          - type: 'null'
+          title: Queue Sha256
+        stage:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Stage
+        progress_percent:
+          type: number
+          maximum: 100.0
+          minimum: 0.0
+          title: Progress Percent
+          default: 0.0
+        blocker_code:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Blocker Code
+        error_code:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Error Code
+        recovery_action:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Recovery Action
+        retryable:
+          type: boolean
+          title: Retryable
+          default: false
+        can_cancel:
+          type: boolean
+          title: Can Cancel
+          default: false
+        bundles:
+          items:
+            $ref: '#/components/schemas/BroadcastReviewEvidenceBundleSummary'
+          type: array
+          title: Bundles
+        capacity:
+          anyOf:
+          - $ref: '#/components/schemas/BroadcastReviewEvidenceCapacity'
+          - type: 'null'
+        blocking_reasons:
+          items:
+            type: string
+          type: array
+          title: Blocking Reasons
+        message:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Message
+      additionalProperties: true
+      type: object
+      required:
+      - run_id
+      - status
+      title: BroadcastReviewEvidenceStateResponse
     BroadcastReviewWindow:
       properties:
         review_item_id:
@@ -3409,6 +3864,7 @@ components:
             enum:
             - recompute
             - render
+            - review_evidence_import
           - type: 'null'
           title: Operation
         operation_status:
@@ -3418,9 +3874,12 @@ components:
             - queued
             - running
             - committing
+            - copying
+            - validating
             - completed
             - failed
             - cancelled
+            - blocked
             - metadata_conflict
           - type: 'null'
           title: Operation Status

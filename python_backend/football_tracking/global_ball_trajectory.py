@@ -22,6 +22,7 @@ import ijson  # pyright: ignore[reportMissingImports]
 from football_tracking.kalman import ConstantAccelerationKalmanFilter
 from football_tracking.tracking_contracts import (
     CLASSIFICATION_LABELS,
+    CLASSIFIER_MAX_BATCH_SIZE,
     FRAME_STATUSES,
     LABEL_ORIGINS,
     LEGACY_STATUS_MAP,
@@ -1223,6 +1224,7 @@ def _ingest_predictions_once(
             "source_contract_sha256",
             "class_order",
             "temperature",
+            "inference",
             "prediction_count",
         },
     )
@@ -1242,6 +1244,20 @@ def _ingest_predictions_once(
     temperature = _finite_float(captured.get("temperature"), "temperature")
     if temperature <= 0.0:
         raise GlobalBallTrajectoryError("predictions temperature must be positive")
+    inference = captured.get("inference")
+    if inference is not None:
+        if not isinstance(inference, dict) or set(inference) != {"device", "batch_size"}:
+            raise GlobalBallTrajectoryError("candidate predictions inference configuration is invalid")
+        if inference.get("device") != "cpu":
+            raise GlobalBallTrajectoryError("candidate predictions inference device must be cpu")
+        inference_batch_size = _positive_int(
+            inference.get("batch_size"),
+            "candidate predictions inference batch_size",
+        )
+        if inference_batch_size > CLASSIFIER_MAX_BATCH_SIZE:
+            raise GlobalBallTrajectoryError(
+                f"candidate predictions inference batch_size exceeds {CLASSIFIER_MAX_BATCH_SIZE}"
+            )
     declared_count = _nonnegative_int(captured.get("prediction_count"), "prediction_count")
     candidate_count = int(connection.execute("SELECT COUNT(*) FROM candidates").fetchone()[0])
     if actual_count != declared_count or actual_count != candidate_count:

@@ -28,6 +28,9 @@ PUBLIC_ARTIFACT_NAMES = (
 QUALITY_REPORT_NAME = "broadcast_quality_report.json"
 FINAL_BINDINGS_NAME = "broadcast_artifact_bindings.v1.json"
 _QUEUE_NAME = "selective_review_queue.v1.json"
+_REVIEW_EVIDENCE_ACTIVATION_NAME = "review_evidence_activation.v1.json"
+_REVIEW_EVIDENCE_BUNDLE_NAME = "review_evidence_bundle.v1.json"
+_REVIEW_EVIDENCE_REVOCATION_NAME = "review_evidence_revocation.v1.json"
 _MAX_JSON_BYTES = 256 * 1024 * 1024
 _HASH_CHUNK_BYTES = 1024 * 1024
 _REVIEW_EVIDENCE_ARTIFACTS = ("tight_tensor", "context_tensor", "review_montage")
@@ -112,6 +115,21 @@ def build_review_action_envelope(
         "resolved_tracking_contract_sha256": "resolved_tracking_contract",
         "policy_roles_sha256": "policy_roles",
     }
+    optional_binding_fields = {
+        "qualification_dataset_sha256": "qualification_dataset",
+        "qualification_predictions_sha256": "qualification_predictions",
+        "qualification_decisions_sha256": "qualification_decisions",
+    }
+    present_optional = [
+        output_name
+        for output_name, source_name in optional_binding_fields.items()
+        if source_name in queue_bindings
+    ]
+    if present_optional and len(present_optional) != len(optional_binding_fields):
+        raise BroadcastApiError("review queue qualification bindings must be complete")
+    binding_fields.update(
+        {output_name: optional_binding_fields[output_name] for output_name in present_optional}
+    )
     shared_bindings = {"queue_sha256": queue_sha256}
     for output_name, source_name in binding_fields.items():
         binding = _required_mapping(queue_bindings.get(source_name), f"review queue binding {source_name}")
@@ -184,6 +202,7 @@ def validate_review_queue_bindings(
     queue_path: Path,
     *,
     trusted_root: Path | None = None,
+    binding_base: Path | None = None,
 ) -> tuple[dict[str, Any], str]:
     """Re-hash every evidence artifact referenced by a selective review queue."""
 
@@ -193,6 +212,14 @@ def validate_review_queue_bindings(
     else:
         root = _trusted_directory(trusted_root, "review queue root")
         queue_path = _contained_nonlink_file(root, Path(queue_path), "selective review queue")
+    resolved_binding_base = queue_path.parent
+    if binding_base is not None:
+        resolved_binding_base = _trusted_directory(binding_base, "review queue binding base")
+        if root is not None:
+            try:
+                resolved_binding_base.relative_to(root)
+            except ValueError as exc:
+                raise BroadcastApiError("review queue binding base must remain inside the trusted review root") from exc
     queue, queue_sha256 = load_bound_json(queue_path, "selective review queue")
     if queue_path.name != _QUEUE_NAME or queue.get("artifact_type") != "selective_review_queue":
         raise BroadcastApiError("review windows require a selective_review_queue.v1.json artifact")
@@ -203,7 +230,7 @@ def validate_review_queue_bindings(
     for name in sorted(required):
         binding = _required_mapping(bindings[name], f"review queue binding {name}")
         raw_path = Path(_required_text(binding.get("path"), f"review queue binding {name} path"))
-        path = raw_path if raw_path.is_absolute() else queue_path.parent / raw_path
+        path = raw_path if raw_path.is_absolute() else resolved_binding_base / raw_path
         if root is None:
             path = path.resolve()
             if not path.is_file():
@@ -216,9 +243,118 @@ def validate_review_queue_bindings(
         queue_path,
         bindings["dataset"],
         trusted_root=root,
+        binding_base=resolved_binding_base,
     )
     if sha256_file(queue_path) != queue_sha256:
         raise BroadcastApiError("selective review queue changed during validation")
+    return queue, queue_sha256
+
+
+def validate_review_queue_activation(output_dir: Path, queue_path: Path) -> tuple[dict[str, Any], str]:
+    """Validate an imported queue's immutable generation and activation manifest, when present."""
+
+    root = _trusted_directory(output_dir, "review activation root")
+    queue_path = _contained_nonlink_file(root, Path(queue_path), "selective review queue")
+    queue, queue_sha256 = validate_review_queue_bindings(queue_path, trusted_root=root)
+    activation = queue.get("activation")
+    if activation is None:
+        return queue, queue_sha256
+    collect_review_evidence_paths(queue_path, trusted_root=root)
+    activation = _required_mapping(activation, "review queue activation")
+    generation_id = _required_text(activation.get("generation_id"), "review queue activation generation_id")
+    suffix = generation_id.removeprefix("review-evidence-")
+    if (
+        not generation_id.startswith("review-evidence-")
+        or len(suffix) != 24
+        or any(character not in "0123456789abcdef" for character in suffix)
+    ):
+        raise BroadcastApiError("review queue activation generation_id is invalid")
+    bundle_id = _required_text(activation.get("bundle_id"), "review queue activation bundle_id")
+    generation_dir = root / "review_evidence" / "generations" / generation_id
+    if _is_link_or_reparse(generation_dir) or not generation_dir.is_dir():
+        raise BroadcastApiError("review evidence generation is unavailable")
+    if (generation_dir / _REVIEW_EVIDENCE_REVOCATION_NAME).exists():
+        raise BroadcastApiError("review evidence generation was revoked")
+    activation_path = _contained_nonlink_file(
+        root,
+        generation_dir / _REVIEW_EVIDENCE_ACTIVATION_NAME,
+        "review evidence activation manifest",
+    )
+    activation_manifest, _ = load_bound_json(activation_path, "review evidence activation manifest")
+    if (
+        activation_manifest.get("artifact_type") != "broadcast_review_evidence_activation"
+        or activation_manifest.get("generation_id") != generation_id
+        or activation_manifest.get("bundle_id") != bundle_id
+    ):
+        raise BroadcastApiError("review evidence activation manifest does not match the root queue")
+    expected_queue_sha256 = _required_sha256(
+        activation_manifest.get("activated_queue_sha256"),
+        "review evidence activation queue sha256",
+    )
+    generation_queue_path = _contained_nonlink_file(
+        root,
+        generation_dir / _QUEUE_NAME,
+        "review evidence generation queue",
+    )
+    if sha256_file(generation_queue_path) != expected_queue_sha256 or queue_sha256 != expected_queue_sha256:
+        raise BroadcastApiError("root review queue does not match its immutable generation")
+    generation_queue, generation_queue_sha256 = validate_review_queue_bindings(
+        generation_queue_path,
+        trusted_root=root,
+        binding_base=root,
+    )
+    collect_review_evidence_paths(generation_queue_path, trusted_root=root, binding_base=root)
+    if generation_queue != queue or generation_queue_sha256 != queue_sha256:
+        raise BroadcastApiError("review evidence generation queue does not match the root queue")
+    bundle_manifest_path = _contained_nonlink_file(
+        root,
+        generation_dir / "bundle" / _REVIEW_EVIDENCE_BUNDLE_NAME,
+        "review evidence bundle manifest",
+    )
+    if sha256_file(bundle_manifest_path) != _required_sha256(
+        activation_manifest.get("bundle_sha256"), "review evidence activation bundle sha256"
+    ):
+        raise BroadcastApiError("review evidence bundle manifest changed after activation")
+    bundle_manifest, _ = load_bound_json(bundle_manifest_path, "review evidence bundle manifest")
+    if (
+        bundle_manifest.get("bundle_id") != bundle_id
+        or bundle_manifest.get("target") != activation_manifest.get("target")
+    ):
+        raise BroadcastApiError("review evidence bundle target does not match activation")
+    request_identity = _required_mapping(
+        activation_manifest.get("request_identity"), "review evidence activation request identity"
+    )
+    expected_target_sha256 = hashlib.sha256(
+        json.dumps(
+            bundle_manifest.get("target"),
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+    ).hexdigest()
+    if (
+        request_identity.get("bundle_id") != bundle_id
+        or request_identity.get("bundle_manifest_sha256") != sha256_file(bundle_manifest_path)
+        or request_identity.get("target_sha256") != expected_target_sha256
+    ):
+        raise BroadcastApiError("review evidence activation request identity is stale")
+    reconciliation = _required_mapping(
+        activation_manifest.get("reconciliation"), "review evidence activation reconciliation"
+    )
+    bundle_reconciliation = _required_mapping(
+        bundle_manifest.get("reconciliation"), "review evidence bundle reconciliation"
+    )
+    if reconciliation != bundle_reconciliation:
+        raise BroadcastApiError("review evidence activation reconciliation binding is stale")
+    reconciliation_path = _contained_nonlink_file(
+        root,
+        generation_dir / "bundle" / _required_text(reconciliation.get("path"), "reconciliation path"),
+        "review evidence reconciliation",
+    )
+    if sha256_file(reconciliation_path) != _required_sha256(
+        reconciliation.get("sha256"), "review evidence reconciliation sha256"
+    ):
+        raise BroadcastApiError("review evidence reconciliation changed after activation")
     return queue, queue_sha256
 
 
@@ -227,13 +363,14 @@ def _validate_bound_dataset_sample_artifacts(
     raw_dataset_binding: Any,
     *,
     trusted_root: Path | None,
+    binding_base: Path,
 ) -> None:
     """Re-hash every file descriptor carried by the queue-bound dataset."""
 
     binding = _required_mapping(raw_dataset_binding, "review queue dataset binding")
     raw_dataset_path = Path(_required_text(binding.get("path"), "review queue dataset path"))
     if not raw_dataset_path.is_absolute():
-        raw_dataset_path = queue_path.parent / raw_dataset_path
+        raw_dataset_path = binding_base / raw_dataset_path
     if trusted_root is None:
         dataset_path = Path(os.path.abspath(raw_dataset_path))
         if _is_link_or_reparse(dataset_path) or not dataset_path.is_file():
@@ -300,17 +437,33 @@ def _validate_bound_dataset_sample_artifacts(
         raise BroadcastApiError("candidate dataset manifest changed during sample validation")
 
 
-def collect_review_evidence_paths(queue_path: Path, trusted_root: Path) -> list[Path]:
+def collect_review_evidence_paths(
+    queue_path: Path,
+    trusted_root: Path,
+    *,
+    binding_base: Path | None = None,
+) -> list[Path]:
     """Return only queue-bound sample artifacts that are safe for run downloads."""
 
     root = _trusted_directory(trusted_root, "review evidence root")
     queue_path = _contained_nonlink_file(root, Path(queue_path), "selective review queue")
-    queue, queue_sha256 = validate_review_queue_bindings(queue_path, trusted_root=root)
+    resolved_binding_base = queue_path.parent if binding_base is None else _trusted_directory(
+        binding_base, "review binding base"
+    )
+    try:
+        resolved_binding_base.relative_to(root)
+    except ValueError as exc:
+        raise BroadcastApiError("review binding base must remain inside the trusted review root") from exc
+    queue, queue_sha256 = validate_review_queue_bindings(
+        queue_path,
+        trusted_root=root,
+        binding_base=resolved_binding_base if binding_base is not None else None,
+    )
     bindings = _required_mapping(queue.get("bindings"), "review queue bindings")
     dataset_binding = _required_mapping(bindings.get("dataset"), "review queue dataset binding")
     raw_dataset_path = Path(_required_text(dataset_binding.get("path"), "review queue dataset path"))
     if not raw_dataset_path.is_absolute():
-        raw_dataset_path = queue_path.parent / raw_dataset_path
+        raw_dataset_path = resolved_binding_base / raw_dataset_path
     dataset_path = _contained_nonlink_file(root, raw_dataset_path, "candidate dataset manifest")
     dataset, dataset_sha256 = load_bound_json(dataset_path, "candidate dataset manifest")
     expected_dataset_sha256 = _required_sha256(
@@ -489,7 +642,7 @@ def publish_broadcast_facade(output_dir: Path) -> dict[str, Any]:
         blocking_reasons.append("missing_qualified_selective_review_queue")
     else:
         try:
-            validate_review_queue_bindings(queue_path, trusted_root=output_dir)
+            validate_review_queue_activation(output_dir, queue_path)
         except BroadcastApiError:
             blocking_reasons.append("invalid_or_stale_selective_review_evidence")
     if artifacts["action_track.csv"]["status"] != "available":

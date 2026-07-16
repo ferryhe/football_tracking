@@ -35,6 +35,9 @@ import type {
   BroadcastOperationResponse,
   BroadcastRenderRequest,
   BroadcastReviewActionsRequest,
+  BroadcastReviewEvidenceImportRequest,
+  BroadcastReviewEvidenceRevokeResponse,
+  BroadcastReviewEvidenceStateResponse,
   BroadcastReviewWindowsResponse,
   BroadcastTrajectoryRecomputeRequest,
   CameraPathResponse,
@@ -61,6 +64,7 @@ import type {
   InputQualityRequest,
   InputQualityResponse,
   PlayerTracksReport,
+  RevokeBroadcastReviewEvidenceParams,
   RunRecord,
   UpdateConfigRequest,
 } from "./api.schemas";
@@ -2474,6 +2478,325 @@ export const useSubmitBroadcastReviewActions = <
   TContext
 > => {
   return useMutation(getSubmitBroadcastReviewActionsMutationOptions(options));
+};
+
+/**
+ * @summary Get Broadcast Review Evidence
+ */
+export const getGetBroadcastReviewEvidenceUrl = (runId: string) => {
+  return `/api/runs/${encodePathSegmented(runId)}/broadcast/review-evidence`;
+};
+
+export const getBroadcastReviewEvidence = async (
+  runId: string,
+  options?: RequestInit,
+): Promise<BroadcastReviewEvidenceStateResponse> => {
+  return customFetch<BroadcastReviewEvidenceStateResponse>(
+    getGetBroadcastReviewEvidenceUrl(runId),
+    {
+      ...options,
+      method: "GET",
+    },
+  );
+};
+
+export const getGetBroadcastReviewEvidenceQueryKey = (runId: string) => {
+  return [`/api/runs/${encodePathSegmented(runId)}/broadcast/review-evidence`] as const;
+};
+
+export const getGetBroadcastReviewEvidenceQueryOptions = <
+  TData = Awaited<ReturnType<typeof getBroadcastReviewEvidence>>,
+  TError = ErrorType<void | HTTPValidationError>,
+>(
+  runId: string,
+  options?: {
+    query?: UseQueryOptions<
+      Awaited<ReturnType<typeof getBroadcastReviewEvidence>>,
+      TError,
+      TData
+    >;
+    request?: SecondParameter<typeof customFetch>;
+  },
+) => {
+  const { query: queryOptions, request: requestOptions } = options ?? {};
+
+  const queryKey =
+    queryOptions?.queryKey ?? getGetBroadcastReviewEvidenceQueryKey(runId);
+
+  const queryFn: QueryFunction<
+    Awaited<ReturnType<typeof getBroadcastReviewEvidence>>
+  > = ({ signal }) =>
+    getBroadcastReviewEvidence(runId, { signal, ...requestOptions });
+
+  return {
+    queryKey,
+    queryFn,
+    enabled: !!runId,
+    ...queryOptions,
+  } as UseQueryOptions<
+    Awaited<ReturnType<typeof getBroadcastReviewEvidence>>,
+    TError,
+    TData
+  > & { queryKey: QueryKey };
+};
+
+export type GetBroadcastReviewEvidenceQueryResult = NonNullable<
+  Awaited<ReturnType<typeof getBroadcastReviewEvidence>>
+>;
+export type GetBroadcastReviewEvidenceQueryError =
+  ErrorType<void | HTTPValidationError>;
+
+/**
+ * @summary Get Broadcast Review Evidence
+ */
+
+export function useGetBroadcastReviewEvidence<
+  TData = Awaited<ReturnType<typeof getBroadcastReviewEvidence>>,
+  TError = ErrorType<void | HTTPValidationError>,
+>(
+  runId: string,
+  options?: {
+    query?: UseQueryOptions<
+      Awaited<ReturnType<typeof getBroadcastReviewEvidence>>,
+      TError,
+      TData
+    >;
+    request?: SecondParameter<typeof customFetch>;
+  },
+): UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+  const queryOptions = getGetBroadcastReviewEvidenceQueryOptions(
+    runId,
+    options,
+  );
+
+  const query = useQuery(queryOptions) as UseQueryResult<TData, TError> & {
+    queryKey: QueryKey;
+  };
+
+  return { ...query, queryKey: queryOptions.queryKey };
+}
+
+/**
+ * @summary Import Broadcast Review Evidence
+ */
+export const getImportBroadcastReviewEvidenceUrl = (runId: string) => {
+  return `/api/runs/${encodePathSegmented(runId)}/broadcast/review-evidence/import`;
+};
+
+export const importBroadcastReviewEvidence = async (
+  runId: string,
+  broadcastReviewEvidenceImportRequest: BroadcastReviewEvidenceImportRequest,
+  options?: RequestInit,
+): Promise<BroadcastOperationResponse> => {
+  return customFetch<BroadcastOperationResponse>(
+    getImportBroadcastReviewEvidenceUrl(runId),
+    {
+      ...options,
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...options?.headers },
+      body: JSON.stringify(broadcastReviewEvidenceImportRequest),
+    },
+  );
+};
+
+export const getImportBroadcastReviewEvidenceMutationOptions = <
+  TError = ErrorType<void | HTTPValidationError>,
+  TContext = unknown,
+>(options?: {
+  mutation?: UseMutationOptions<
+    Awaited<ReturnType<typeof importBroadcastReviewEvidence>>,
+    TError,
+    { runId: string; data: BodyType<BroadcastReviewEvidenceImportRequest> },
+    TContext
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}): UseMutationOptions<
+  Awaited<ReturnType<typeof importBroadcastReviewEvidence>>,
+  TError,
+  { runId: string; data: BodyType<BroadcastReviewEvidenceImportRequest> },
+  TContext
+> => {
+  const mutationKey = ["importBroadcastReviewEvidence"];
+  const { mutation: mutationOptions, request: requestOptions } = options
+    ? options.mutation &&
+      "mutationKey" in options.mutation &&
+      options.mutation.mutationKey
+      ? options
+      : { ...options, mutation: { ...options.mutation, mutationKey } }
+    : { mutation: { mutationKey }, request: undefined };
+
+  const mutationFn: MutationFunction<
+    Awaited<ReturnType<typeof importBroadcastReviewEvidence>>,
+    { runId: string; data: BodyType<BroadcastReviewEvidenceImportRequest> }
+  > = (props) => {
+    const { runId, data } = props ?? {};
+
+    return importBroadcastReviewEvidence(runId, data, requestOptions);
+  };
+
+  return { mutationFn, ...mutationOptions };
+};
+
+export type ImportBroadcastReviewEvidenceMutationResult = NonNullable<
+  Awaited<ReturnType<typeof importBroadcastReviewEvidence>>
+>;
+export type ImportBroadcastReviewEvidenceMutationBody =
+  BodyType<BroadcastReviewEvidenceImportRequest>;
+export type ImportBroadcastReviewEvidenceMutationError =
+  ErrorType<void | HTTPValidationError>;
+
+/**
+ * @summary Import Broadcast Review Evidence
+ */
+export const useImportBroadcastReviewEvidence = <
+  TError = ErrorType<void | HTTPValidationError>,
+  TContext = unknown,
+>(options?: {
+  mutation?: UseMutationOptions<
+    Awaited<ReturnType<typeof importBroadcastReviewEvidence>>,
+    TError,
+    { runId: string; data: BodyType<BroadcastReviewEvidenceImportRequest> },
+    TContext
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}): UseMutationResult<
+  Awaited<ReturnType<typeof importBroadcastReviewEvidence>>,
+  TError,
+  { runId: string; data: BodyType<BroadcastReviewEvidenceImportRequest> },
+  TContext
+> => {
+  return useMutation(getImportBroadcastReviewEvidenceMutationOptions(options));
+};
+
+/**
+ * @summary Revoke Broadcast Review Evidence
+ */
+export const getRevokeBroadcastReviewEvidenceUrl = (
+  runId: string,
+  generationId: string,
+  params: RevokeBroadcastReviewEvidenceParams,
+) => {
+  const normalizedParams = new URLSearchParams();
+
+  Object.entries(params || {}).forEach(([key, value]) => {
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? "null" : value.toString());
+    }
+  });
+
+  const stringifiedParams = normalizedParams.toString();
+
+  return stringifiedParams.length > 0
+    ? `/api/runs/${encodePathSegmented(runId)}/broadcast/review-evidence/${encodePathSegmented(generationId)}?${stringifiedParams}`
+    : `/api/runs/${encodePathSegmented(runId)}/broadcast/review-evidence/${encodePathSegmented(generationId)}`;
+};
+
+export const revokeBroadcastReviewEvidence = async (
+  runId: string,
+  generationId: string,
+  params: RevokeBroadcastReviewEvidenceParams,
+  options?: RequestInit,
+): Promise<BroadcastReviewEvidenceRevokeResponse> => {
+  return customFetch<BroadcastReviewEvidenceRevokeResponse>(
+    getRevokeBroadcastReviewEvidenceUrl(runId, generationId, params),
+    {
+      ...options,
+      method: "DELETE",
+    },
+  );
+};
+
+export const getRevokeBroadcastReviewEvidenceMutationOptions = <
+  TError = ErrorType<void | HTTPValidationError>,
+  TContext = unknown,
+>(options?: {
+  mutation?: UseMutationOptions<
+    Awaited<ReturnType<typeof revokeBroadcastReviewEvidence>>,
+    TError,
+    {
+      runId: string;
+      generationId: string;
+      params: RevokeBroadcastReviewEvidenceParams;
+    },
+    TContext
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}): UseMutationOptions<
+  Awaited<ReturnType<typeof revokeBroadcastReviewEvidence>>,
+  TError,
+  {
+    runId: string;
+    generationId: string;
+    params: RevokeBroadcastReviewEvidenceParams;
+  },
+  TContext
+> => {
+  const mutationKey = ["revokeBroadcastReviewEvidence"];
+  const { mutation: mutationOptions, request: requestOptions } = options
+    ? options.mutation &&
+      "mutationKey" in options.mutation &&
+      options.mutation.mutationKey
+      ? options
+      : { ...options, mutation: { ...options.mutation, mutationKey } }
+    : { mutation: { mutationKey }, request: undefined };
+
+  const mutationFn: MutationFunction<
+    Awaited<ReturnType<typeof revokeBroadcastReviewEvidence>>,
+    {
+      runId: string;
+      generationId: string;
+      params: RevokeBroadcastReviewEvidenceParams;
+    }
+  > = (props) => {
+    const { runId, generationId, params } = props ?? {};
+
+    return revokeBroadcastReviewEvidence(
+      runId,
+      generationId,
+      params,
+      requestOptions,
+    );
+  };
+
+  return { mutationFn, ...mutationOptions };
+};
+
+export type RevokeBroadcastReviewEvidenceMutationResult = NonNullable<
+  Awaited<ReturnType<typeof revokeBroadcastReviewEvidence>>
+>;
+
+export type RevokeBroadcastReviewEvidenceMutationError =
+  ErrorType<void | HTTPValidationError>;
+
+/**
+ * @summary Revoke Broadcast Review Evidence
+ */
+export const useRevokeBroadcastReviewEvidence = <
+  TError = ErrorType<void | HTTPValidationError>,
+  TContext = unknown,
+>(options?: {
+  mutation?: UseMutationOptions<
+    Awaited<ReturnType<typeof revokeBroadcastReviewEvidence>>,
+    TError,
+    {
+      runId: string;
+      generationId: string;
+      params: RevokeBroadcastReviewEvidenceParams;
+    },
+    TContext
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}): UseMutationResult<
+  Awaited<ReturnType<typeof revokeBroadcastReviewEvidence>>,
+  TError,
+  {
+    runId: string;
+    generationId: string;
+    params: RevokeBroadcastReviewEvidenceParams;
+  },
+  TContext
+> => {
+  return useMutation(getRevokeBroadcastReviewEvidenceMutationOptions(options));
 };
 
 /**

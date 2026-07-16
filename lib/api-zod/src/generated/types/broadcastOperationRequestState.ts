@@ -9,5 +9,8 @@ export interface BroadcastOperationRequestState {
   trajectory_generation_id?: string | null;
   target_width?: number | null;
   target_height?: number | null;
+  bundle_id?: string | null;
+  bundle_manifest_sha256?: string | null;
+  retry_from_job_id?: string | null;
   [key: string]: unknown;
 }

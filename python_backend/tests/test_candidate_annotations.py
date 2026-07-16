@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
@@ -14,6 +15,7 @@ from football_tracking.candidate_annotations import (
     ANNOTATION_RESOLUTION_NAME,
     resolve_candidate_annotations,
     sample_evidence_sha256,
+    validate_candidate_annotation_package,
 )
 from football_tracking.tracking_contracts import (
     TRACKING_CONTRACT_REPORT_NAME,
@@ -217,6 +219,140 @@ class CandidateAnnotationTests(unittest.TestCase):
             },
             persisted["derived_tracking_contract"],
         )
+
+    def test_strict_package_rejects_ai_primaries_and_accepts_human_append_only_chain(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            root = Path(temp_name)
+            candidates = [_candidate("candidate", 1)]
+            ai_votes = [_vote("ai-1", "candidate", "match_ball"), _vote("ai-2", "candidate", "match_ball")]
+            contract_path, ai_ledger, ai_output = self._paths(root, candidates=candidates, votes=ai_votes)
+            manifest_path = root / "candidate_dataset_manifest.json"
+            self._set_append_only_header(ai_ledger, sequence=1, previous_sha256=None)
+            resolve_candidate_annotations(
+                contract_path,
+                ai_ledger,
+                ai_output,
+                dataset_manifest_path=manifest_path,
+            )
+            with self.assertRaisesRegex(ValueError, "blind human primary"):
+                validate_candidate_annotation_package(
+                    contract_path,
+                    ai_ledger,
+                    manifest_path,
+                    ai_output / ANNOTATION_RESOLUTION_NAME,
+                )
+
+            first_ledger = root / "human-v1.jsonl"
+            primary = [
+                _vote("human-1", "candidate", "match_ball", reviewer_type="human"),
+                _vote("human-2", "candidate", "equipment_or_background", reviewer_type="human"),
+            ]
+            _write_jsonl(
+                first_ledger,
+                primary,
+                contract_path=contract_path,
+                dataset_manifest_path=manifest_path,
+            )
+            self._set_append_only_header(first_ledger, sequence=1, previous_sha256=None)
+            second_ledger = root / "human-v2.jsonl"
+            adjudication = _vote(
+                "judge-1",
+                "candidate",
+                "match_ball",
+                reviewer_type="human",
+                stage="adjudication",
+                blind=False,
+                annotator_id="independent-judge",
+                fingerprint="independent-judge-fingerprint",
+            )
+            _write_jsonl(
+                second_ledger,
+                [*primary, adjudication],
+                contract_path=contract_path,
+                dataset_manifest_path=manifest_path,
+            )
+            self._set_append_only_header(second_ledger, sequence=2, previous_sha256=_sha256(first_ledger))
+            human_output = root / "human-resolved"
+            resolve_candidate_annotations(
+                contract_path,
+                second_ledger,
+                human_output,
+                dataset_manifest_path=manifest_path,
+            )
+            validated = validate_candidate_annotation_package(
+                contract_path,
+                second_ledger,
+                manifest_path,
+                human_output / ANNOTATION_RESOLUTION_NAME,
+                previous_ledger_path=first_ledger,
+            )
+            self.assertEqual("complete", validated["summary"]["status"])
+
+    def test_primary_vote_cannot_be_superseded(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            root = Path(temp_name)
+            candidates = [_candidate("candidate", 1)]
+            contract_path, _, _ = self._paths(root, candidates=candidates, votes=[])
+            manifest_path = root / "candidate_dataset_manifest.json"
+            first_vote = _vote(
+                "human-1-v1",
+                "candidate",
+                "equipment_or_background",
+                reviewer_type="human",
+                annotator_id="reviewer-1",
+                fingerprint="reviewer-1-fingerprint",
+            )
+            second_vote = _vote(
+                "human-2",
+                "candidate",
+                "match_ball",
+                reviewer_type="human",
+                annotator_id="reviewer-2",
+                fingerprint="reviewer-2-fingerprint",
+            )
+            first_ledger = root / "votes-v1.jsonl"
+            _write_jsonl(
+                first_ledger,
+                [first_vote, second_vote],
+                contract_path=contract_path,
+                dataset_manifest_path=manifest_path,
+            )
+            self._set_append_only_header(first_ledger, sequence=1, previous_sha256=None)
+            corrected_vote = _vote(
+                "human-1-v2",
+                "candidate",
+                "match_ball",
+                reviewer_type="human",
+                annotator_id="reviewer-1",
+                fingerprint="reviewer-1-fingerprint",
+            )
+            corrected_vote["created_at"] = "2026-01-01T00:01:00Z"
+            corrected_vote["supersedes_vote_id"] = "human-1-v1"
+            second_ledger = root / "votes-v2.jsonl"
+            _write_jsonl(
+                second_ledger,
+                [first_vote, second_vote, corrected_vote],
+                contract_path=contract_path,
+                dataset_manifest_path=manifest_path,
+            )
+            self._set_append_only_header(second_ledger, sequence=2, previous_sha256=_sha256(first_ledger))
+            with self.assertRaisesRegex(ValueError, "only an adjudication vote"):
+                resolve_candidate_annotations(
+                    contract_path,
+                    second_ledger,
+                    root / "resolved",
+                    dataset_manifest_path=manifest_path,
+                )
+
+    @staticmethod
+    def _set_append_only_header(path: Path, *, sequence: int, previous_sha256: str | None) -> None:
+        records = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line]
+        records[0]["append_only_chain"] = {
+            "algorithm": "sha256-ledger-chain-v1",
+            "sequence": sequence,
+            "previous_ledger_sha256": previous_sha256,
+        }
+        path.write_text("".join(json.dumps(record) + "\n" for record in records), encoding="utf-8")
 
     def test_unknown_disagreement_duplicate_low_confidence_and_single_votes_queue(self) -> None:
         candidates = [
@@ -614,6 +750,168 @@ class CandidateAnnotationTests(unittest.TestCase):
             )
             with self.assertRaisesRegex(ValueError, "evidence_sha256"):
                 resolve_candidate_annotations(contract_path, ledger_path, root / "invalid-output")
+
+    def test_dataset_sibling_contract_binding_is_required_but_ledger_may_remain_external(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            root = Path(temp_name)
+            input_root = root / "input"
+            dataset_root = root / "dataset"
+            input_root.mkdir()
+            dataset_root.mkdir()
+            contract_path = input_root / TRACKING_CONTRACT_REPORT_NAME
+            ledger_path = input_root / "votes.jsonl"
+            candidates = [_candidate("c1", 1)]
+            votes = [
+                _vote("v1", "c1", "match_ball", reviewer_type="human"),
+                _vote("v2", "c1", "match_ball", reviewer_type="human"),
+            ]
+            _write_json(contract_path, build_tracking_contract(candidates=candidates))
+            manifest_path = _write_dataset_manifest(dataset_root, contract_path, candidates)
+            _write_jsonl(
+                ledger_path,
+                votes,
+                contract_path=contract_path,
+                dataset_manifest_path=manifest_path,
+            )
+            self._set_append_only_header(ledger_path, sequence=1, previous_sha256=None)
+
+            missing_output = root / "missing-output"
+            with self.assertRaisesRegex(ValueError, "dataset-sibling source contract binding is missing"):
+                resolve_candidate_annotations(
+                    contract_path,
+                    ledger_path,
+                    missing_output,
+                    dataset_manifest_path=manifest_path,
+                )
+            self.assertFalse(missing_output.exists())
+
+            bound_contract_path = dataset_root / contract_path.name
+            bound_contract_path.write_bytes(b"hash-mismatched-source-contract")
+            mismatch_output = root / "mismatch-output"
+            with self.assertRaisesRegex(ValueError, "dataset-sibling source contract binding sha256"):
+                resolve_candidate_annotations(
+                    contract_path,
+                    ledger_path,
+                    mismatch_output,
+                    dataset_manifest_path=manifest_path,
+                )
+            self.assertFalse(mismatch_output.exists())
+
+            bound_contract_path.write_bytes(contract_path.read_bytes())
+            bound_contract_bytes = bound_contract_path.read_bytes()
+            with self.assertRaisesRegex(ValueError, "must not overwrite the dataset-sibling source contract"):
+                resolve_candidate_annotations(
+                    contract_path,
+                    ledger_path,
+                    dataset_root,
+                    dataset_manifest_path=manifest_path,
+                )
+            self.assertEqual(bound_contract_bytes, bound_contract_path.read_bytes())
+            self.assertFalse((dataset_root / ANNOTATION_RESOLUTION_NAME).exists())
+            self.assertFalse((dataset_root / ADJUDICATION_QUEUE_NAME).exists())
+
+            output_dir = root / "resolved"
+            report = resolve_candidate_annotations(
+                contract_path,
+                ledger_path,
+                output_dir,
+                dataset_manifest_path=manifest_path,
+            )
+
+            self.assertEqual(contract_path.name, report["source_contract"]["path"])
+            self.assertEqual(ledger_path.name, report["source_vote_ledger"]["path"])
+            self.assertFalse((dataset_root / ledger_path.name).exists())
+            validate_candidate_annotation_package(
+                contract_path,
+                ledger_path,
+                manifest_path,
+                output_dir / ANNOTATION_RESOLUTION_NAME,
+            )
+
+    def test_dataset_sibling_contract_snapshot_rejects_a_different_open_file_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            root = Path(temp_name)
+            contract_path, ledger_path, output_dir = self._paths(
+                root,
+                candidates=[_candidate("c1", 1)],
+                votes=[_vote("v1", "c1", "match_ball"), _vote("v2", "c1", "match_ball")],
+            )
+            external_path = root / "same-bytes-different-file.json"
+            external_path.write_bytes(contract_path.read_bytes())
+            manifest_path = root / "candidate_dataset_manifest.json"
+
+            from football_tracking import candidate_annotations
+
+            with patch.object(
+                candidate_annotations,
+                "_open_regular_file_no_follow",
+                side_effect=lambda _path: external_path.open("rb"),
+            ):
+                with self.assertRaisesRegex(ValueError, "stable regular non-link"):
+                    resolve_candidate_annotations(
+                        contract_path,
+                        ledger_path,
+                        output_dir,
+                        dataset_manifest_path=manifest_path,
+                    )
+            self.assertFalse(output_dir.exists())
+
+    def test_dataset_sibling_contract_snapshot_rejects_a_symlink(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            root = Path(temp_name)
+            contract_path, ledger_path, output_dir = self._paths(
+                root,
+                candidates=[_candidate("c1", 1)],
+                votes=[_vote("v1", "c1", "match_ball"), _vote("v2", "c1", "match_ball")],
+            )
+            external_path = root / "external-contract.json"
+            external_path.write_bytes(contract_path.read_bytes())
+            contract_path.unlink()
+            try:
+                contract_path.symlink_to(external_path)
+            except OSError as exc:
+                self.skipTest(f"file symlinks are unavailable: {exc}")
+
+            with self.assertRaisesRegex(ValueError, "stable regular non-link"):
+                resolve_candidate_annotations(
+                    contract_path,
+                    ledger_path,
+                    output_dir,
+                    dataset_manifest_path=root / "candidate_dataset_manifest.json",
+                )
+            self.assertFalse(output_dir.exists())
+
+    @unittest.skipUnless(hasattr(os, "mkfifo"), "POSIX FIFO support is unavailable")
+    def test_dataset_sibling_contract_snapshot_rejects_a_fifo_without_blocking(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            root = Path(temp_name)
+            input_root = root / "input"
+            dataset_root = root / "dataset"
+            input_root.mkdir()
+            dataset_root.mkdir()
+            contract_path = input_root / TRACKING_CONTRACT_REPORT_NAME
+            ledger_path = input_root / "votes.jsonl"
+            candidates = [_candidate("c1", 1)]
+            votes = [_vote("v1", "c1", "match_ball"), _vote("v2", "c1", "match_ball")]
+            _write_json(contract_path, build_tracking_contract(candidates=candidates))
+            manifest_path = _write_dataset_manifest(dataset_root, contract_path, candidates)
+            _write_jsonl(
+                ledger_path,
+                votes,
+                contract_path=contract_path,
+                dataset_manifest_path=manifest_path,
+            )
+            os.mkfifo(dataset_root / contract_path.name)
+            output_dir = root / "resolved"
+
+            with self.assertRaisesRegex(ValueError, "stable regular non-link"):
+                resolve_candidate_annotations(
+                    contract_path,
+                    ledger_path,
+                    output_dir,
+                    dataset_manifest_path=manifest_path,
+                )
+            self.assertFalse(output_dir.exists())
 
     def test_ai_votes_require_verified_manifest_sample_and_artifact_hashes(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:
