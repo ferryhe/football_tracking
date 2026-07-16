@@ -242,6 +242,8 @@ class ReviewEvidenceNativeIntegrationTests(unittest.TestCase):
 
     def _build_model_development(self, root: Path) -> dict[str, Path]:
         root.mkdir()
+        input_root = root / "input"
+        input_root.mkdir()
         inputs = _write_training_inputs(root)
         original_resolution = _read_json(inputs["resolution"])
         labels = {
@@ -252,7 +254,7 @@ class ReviewEvidenceNativeIntegrationTests(unittest.TestCase):
         }
         selected_ids = set(labels)
         candidates = [row for row in inputs["candidates"] if row["candidate_id"] in selected_ids]
-        source_contract = root / "source-contract.json"
+        source_contract = input_root / TRACKING_CONTRACT_REPORT_NAME
         _write_json(source_contract, build_tracking_contract(candidates=candidates))
 
         dataset = _read_json(inputs["dataset"])
@@ -276,6 +278,9 @@ class ReviewEvidenceNativeIntegrationTests(unittest.TestCase):
                 np.save(tensor_path, np.full(shape, value, dtype=np.uint8), allow_pickle=False)
                 descriptor["sha256"] = sha256_file(tensor_path)
         _write_json(inputs["dataset"], dataset)
+        bound_source_contract = inputs["dataset"].parent / source_contract.name
+        shutil.copyfile(source_contract, bound_source_contract)
+        self.assertEqual(sha256_file(source_contract), sha256_file(bound_source_contract))
         for source_row in dataset["sources"]:
             source_path = inputs["dataset"].parent / source_row["path"]
             source_path.write_bytes(Path(source_row["path"]).stem.encode("utf-8"))
@@ -298,7 +303,7 @@ class ReviewEvidenceNativeIntegrationTests(unittest.TestCase):
         )
         return {
             "root": root,
-            "source_contract": source_contract,
+            "source_contract": bound_source_contract,
             "vote_ledger": annotation["vote_ledger"],
             "annotation_resolution": annotation["annotation_resolution"],
             "resolved_contract": annotation["resolved_contract"],

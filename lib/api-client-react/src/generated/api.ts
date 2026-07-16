@@ -79,10 +79,7 @@ type Awaited<O> = O extends AwaitedInput<infer T> ? T : never;
 type SecondParameter<T extends (...args: never) => unknown> = Parameters<T>[1];
 
 function encodePathSegmented(path: string): string {
-  return path
-    .split("/")
-    .map((segment) => encodeURIComponent(segment))
-    .join("/");
+  return path.split("/").map((segment) => encodeURIComponent(segment)).join("/");
 }
 /**
  * @summary Config Diff
@@ -1864,9 +1861,7 @@ export const getAiImprovementStatus = async (
 };
 
 export const getGetAiImprovementStatusQueryKey = (runId: string) => {
-  return [
-    `/api/runs/${encodePathSegmented(runId)}/ai-improvement-status`,
-  ] as const;
+  return [`/api/runs/${encodePathSegmented(runId)}/ai-improvement-status`] as const;
 };
 
 export const getGetAiImprovementStatusQueryOptions = <
@@ -1960,9 +1955,7 @@ export const getAiReviewTriggersReport = async (
 };
 
 export const getGetAiReviewTriggersReportQueryKey = (runId: string) => {
-  return [
-    `/api/runs/${encodePathSegmented(runId)}/ai-review-triggers`,
-  ] as const;
+  return [`/api/runs/${encodePathSegmented(runId)}/ai-review-triggers`] as const;
 };
 
 export const getGetAiReviewTriggersReportQueryOptions = <
@@ -2141,9 +2134,7 @@ export const getArtifact = async (
 };
 
 export const getGetArtifactQueryKey = (runId: string, artifactName: string) => {
-  return [
-    `/api/runs/${encodePathSegmented(runId)}/artifacts/${encodePathSegmented(artifactName)}`,
-  ] as const;
+  return [`/api/runs/${encodePathSegmented(runId)}/artifacts/${encodePathSegmented(artifactName)}`] as const;
 };
 
 export const getGetArtifactQueryOptions = <
@@ -2510,9 +2501,7 @@ export const getBroadcastReviewEvidence = async (
 };
 
 export const getGetBroadcastReviewEvidenceQueryKey = (runId: string) => {
-  return [
-    `/api/runs/${encodePathSegmented(runId)}/broadcast/review-evidence`,
-  ] as const;
+  return [`/api/runs/${encodePathSegmented(runId)}/broadcast/review-evidence`] as const;
 };
 
 export const getGetBroadcastReviewEvidenceQueryOptions = <
@@ -2831,9 +2820,7 @@ export const getBroadcastReviewWindows = async (
 };
 
 export const getGetBroadcastReviewWindowsQueryKey = (runId: string) => {
-  return [
-    `/api/runs/${encodePathSegmented(runId)}/broadcast/review-windows`,
-  ] as const;
+  return [`/api/runs/${encodePathSegmented(runId)}/broadcast/review-windows`] as const;
 };
 
 export const getGetBroadcastReviewWindowsQueryOptions = <

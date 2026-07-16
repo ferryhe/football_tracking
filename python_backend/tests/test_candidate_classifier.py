@@ -651,6 +651,9 @@ class CandidateClassifierTests(unittest.TestCase):
             manifest = _read_json(inputs["dataset"])
             manifest["contract"] = {"sha256": _sha256(source_contract)}
             _write_json(inputs["dataset"], manifest)
+            bound_source_contract = Path(inputs["dataset"]).parent / source_contract.name
+            shutil.copyfile(source_contract, bound_source_contract)
+            self.assertEqual(_sha256(source_contract), _sha256(bound_source_contract))
             manifest_sha256 = _sha256(inputs["dataset"])
             ledger_path = root / "votes.jsonl"
             records: list[dict[str, object]] = [

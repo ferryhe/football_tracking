@@ -4542,43 +4542,29 @@ export const CreateHighlightRenderBody = zod
     }),
   )
   .superRefine((value, ctx) => {
-    const payload =
-      value && typeof value === "object"
-        ? (value as Record<string, unknown>)
-        : {};
+    const payload = value && typeof value === "object" ? (value as Record<string, unknown>) : {};
     const candidateId = Boolean(payload.candidate_id);
     const approvedActionId = Boolean(payload.approved_action_id);
-    const hasStart =
-      payload.start_frame !== undefined && payload.start_frame !== null;
-    const hasEnd =
-      payload.end_frame !== undefined && payload.end_frame !== null;
+    const hasStart = payload.start_frame !== undefined && payload.start_frame !== null;
+    const hasEnd = payload.end_frame !== undefined && payload.end_frame !== null;
     const explicitWindow = hasStart && hasEnd;
-    const modeCount = [candidateId, approvedActionId, explicitWindow].filter(
-      Boolean,
-    ).length;
+    const modeCount = [candidateId, approvedActionId, explicitWindow].filter(Boolean).length;
     if (modeCount !== 1) {
       ctx.addIssue({
         code: zod.ZodIssueCode.custom,
-        message:
-          "Highlight render requires exactly one of candidate_id, approved_action_id, or start_frame/end_frame.",
+        message: "Highlight render requires exactly one of candidate_id, approved_action_id, or start_frame/end_frame.",
       });
     }
     if (hasStart !== hasEnd) {
       ctx.addIssue({
         code: zod.ZodIssueCode.custom,
-        message:
-          "Highlight render frame window requires both start_frame and end_frame.",
+        message: "Highlight render frame window requires both start_frame and end_frame.",
       });
     }
-    if (
-      hasStart &&
-      hasEnd &&
-      Number(payload.end_frame) < Number(payload.start_frame)
-    ) {
+    if (hasStart && hasEnd && Number(payload.end_frame) < Number(payload.start_frame)) {
       ctx.addIssue({
         code: zod.ZodIssueCode.custom,
-        message:
-          "Highlight render requires end_frame to be greater than or equal to start_frame.",
+        message: "Highlight render requires end_frame to be greater than or equal to start_frame.",
       });
     }
   });

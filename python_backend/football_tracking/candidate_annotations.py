@@ -4,6 +4,7 @@ import hashlib
 import json
 import math
 import os
+import stat
 import tempfile
 import uuid
 from collections import Counter, defaultdict
@@ -11,7 +12,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from string import hexdigits
-from typing import Any
+from typing import Any, BinaryIO
 
 from football_tracking.tracking_contracts import (
     CLASSIFICATION_LABELS,
@@ -45,6 +46,8 @@ class _FileSnapshot:
     path: Path
     sha256: str
     label: str
+    stat_token: tuple[int, int, int, int, int] | None = None
+    regular_no_follow: bool = False
 
 
 def sample_evidence_sha256(sample: dict[str, Any]) -> str:
@@ -122,6 +125,7 @@ def resolve_candidate_annotations(
         ledger_header=ledger_header,
         votes=all_votes,
         candidate_ids=candidate_id_set,
+        source_contract_path=source_contract_path,
         contract_sha256=contract_sha256,
     )
     votes_by_candidate: dict[str, list[dict[str, Any]]] = defaultdict(list)
@@ -201,6 +205,9 @@ def resolve_candidate_annotations(
             "sha256": contract_sha256,
         },
         "source_vote_ledger": {
+            # This is a portable audit filename. Strict package validation
+            # resolves and replays the ledger from its explicit descriptor;
+            # unlike source_contract.path, it is not dataset-relative.
             "path": ledger_path.name,
             "sha256": ledger_snapshot.sha256,
             "schema_version": LEDGER_SCHEMA_VERSION,
@@ -808,6 +815,7 @@ def _validate_dataset_evidence(
     ledger_header: dict[str, Any],
     votes: list[dict[str, Any]],
     candidate_ids: set[str],
+    source_contract_path: Path,
     contract_sha256: str,
 ) -> dict[str, Any] | None:
     has_dataset_binding = "dataset_version" in ledger_header or "evidence_manifest_sha256" in ledger_header
@@ -832,6 +840,18 @@ def _validate_dataset_evidence(
     contract_descriptor = manifest.get("contract")
     if not isinstance(contract_descriptor, dict) or contract_descriptor.get("sha256") != contract_sha256:
         raise ValueError("candidate dataset manifest contract sha256 does not match the source tracking contract")
+    bound_contract_path = manifest_path.parent / source_contract_path.name
+    try:
+        _, bound_contract_snapshot = _capture_regular_file_snapshot(
+            bound_contract_path,
+            "dataset-sibling source contract binding",
+        )
+    except ValueError as exc:
+        raise ValueError(
+            "dataset-sibling source contract binding is missing or is not a stable regular non-link file"
+        ) from exc
+    if bound_contract_snapshot.sha256 != contract_sha256:
+        raise ValueError("dataset-sibling source contract binding sha256 does not match the source tracking contract")
     if manifest.get("frame_offsets") != [-2, -1, 0, 1, 2]:
         raise ValueError("candidate dataset manifest must bind the five frame offsets [-2,-1,0,1,2]")
     expected_tensor_contract = {
@@ -849,7 +869,7 @@ def _validate_dataset_evidence(
         raise ValueError("candidate dataset manifest must contain samples")
     samples_by_candidate: dict[str, dict[str, Any]] = {}
     sample_ids: set[str] = set()
-    evidence_snapshots = [manifest_snapshot]
+    evidence_snapshots = [manifest_snapshot, bound_contract_snapshot]
     manifest_root = manifest_path.parent.resolve()
     for index, sample in enumerate(raw_samples):
         if not isinstance(sample, dict):
@@ -1068,6 +1088,124 @@ def _capture_file_snapshot(path: Path, label: str) -> tuple[bytes, _FileSnapshot
     return raw_bytes, _FileSnapshot(path=path, sha256=hashlib.sha256(raw_bytes).hexdigest(), label=label)
 
 
+def _capture_regular_file_snapshot(path: Path, label: str) -> tuple[bytes, _FileSnapshot]:
+    path = Path(path)
+    try:
+        with _open_regular_file_no_follow(path) as handle:
+            before = os.fstat(handle.fileno())
+            if not stat.S_ISREG(before.st_mode):
+                raise ValueError(f"{label} must be a regular file")
+            raw_bytes = handle.read()
+            after = os.fstat(handle.fileno())
+            current = path.lstat()
+    except (OSError, ValueError) as exc:
+        raise ValueError(f"could not capture stable regular {label}: {path}: {exc}") from exc
+    token = _stat_token(after)
+    if (
+        _stat_token(before) != token
+        or _stat_token(current) != token
+        or not stat.S_ISREG(current.st_mode)
+        or _stat_is_link_or_reparse(current)
+    ):
+        raise ValueError(f"{label} changed while its stable non-link snapshot was being captured")
+    return raw_bytes, _FileSnapshot(
+        path=path,
+        sha256=hashlib.sha256(raw_bytes).hexdigest(),
+        label=label,
+        stat_token=token,
+        regular_no_follow=True,
+    )
+
+
+def _open_regular_file_no_follow(path: Path) -> BinaryIO:
+    if os.name != "nt":
+        no_follow = getattr(os, "O_NOFOLLOW", None)
+        if no_follow is None:
+            raise ValueError("platform does not support no-follow file opens")
+        flags = os.O_RDONLY | no_follow | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NONBLOCK", 0)
+        descriptor = os.open(path, flags)
+        return os.fdopen(descriptor, "rb", closefd=True)
+
+    import ctypes
+    import msvcrt
+    from ctypes import wintypes
+
+    class FileAttributeTagInfo(ctypes.Structure):
+        _fields_ = [
+            ("file_attributes", wintypes.DWORD),
+            ("reparse_tag", wintypes.DWORD),
+        ]
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    create_file = kernel32.CreateFileW
+    create_file.argtypes = (
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.HANDLE,
+    )
+    create_file.restype = wintypes.HANDLE
+    get_file_information_ex = kernel32.GetFileInformationByHandleEx
+    get_file_information_ex.argtypes = (wintypes.HANDLE, ctypes.c_int, wintypes.LPVOID, wintypes.DWORD)
+    get_file_information_ex.restype = wintypes.BOOL
+    close_handle = kernel32.CloseHandle
+    close_handle.argtypes = (wintypes.HANDLE,)
+    close_handle.restype = wintypes.BOOL
+    raw_handle = create_file(
+        str(path),
+        0x80000000,  # GENERIC_READ
+        0x00000001,  # FILE_SHARE_READ: deny write/delete/rename while capturing
+        None,
+        3,  # OPEN_EXISTING
+        0x08200000,  # FILE_FLAG_SEQUENTIAL_SCAN | FILE_FLAG_OPEN_REPARSE_POINT
+        None,
+    )
+    invalid_handle = ctypes.c_void_p(-1).value
+    if raw_handle is None or int(raw_handle) == invalid_handle:
+        error = ctypes.get_last_error()
+        raise OSError(error, ctypes.FormatError(error), str(path))
+    descriptor: int | None = None
+    try:
+        attributes = FileAttributeTagInfo()
+        if not get_file_information_ex(raw_handle, 9, ctypes.byref(attributes), ctypes.sizeof(attributes)):
+            error = ctypes.get_last_error()
+            raise OSError(error, ctypes.FormatError(error), str(path))
+        if int(attributes.file_attributes) & 0x00000400:  # FILE_ATTRIBUTE_REPARSE_POINT
+            raise ValueError("file is a reparse point")
+        descriptor = msvcrt.open_osfhandle(
+            int(raw_handle),
+            os.O_RDONLY | getattr(os, "O_BINARY", 0),
+        )
+        return os.fdopen(descriptor, "rb", closefd=True)
+    except BaseException:
+        if descriptor is None:
+            close_handle(raw_handle)
+        else:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+        raise
+
+
+def _stat_token(value: os.stat_result) -> tuple[int, int, int, int, int]:
+    return (
+        int(value.st_dev),
+        int(value.st_ino),
+        int(value.st_size),
+        int(value.st_mtime_ns),
+        int(getattr(value, "st_ctime_ns", 0)),
+    )
+
+
+def _stat_is_link_or_reparse(value: os.stat_result) -> bool:
+    reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x00000400)
+    return stat.S_ISLNK(value.st_mode) or bool(getattr(value, "st_file_attributes", 0) & reparse_flag)
+
+
 def _parse_json_object_bytes(raw_bytes: bytes, label: str) -> dict[str, Any]:
     try:
         text = raw_bytes.decode("utf-8")
@@ -1082,10 +1220,16 @@ def _parse_json_object_bytes(raw_bytes: bytes, label: str) -> dict[str, Any]:
 def _verify_unchanged_snapshots(snapshots: list[_FileSnapshot]) -> None:
     for snapshot in snapshots:
         try:
-            current_sha256 = _sha256_file(snapshot.path)
-        except OSError as exc:
+            if snapshot.regular_no_follow:
+                _, current = _capture_regular_file_snapshot(snapshot.path, snapshot.label)
+                current_sha256 = current.sha256
+                current_token = current.stat_token
+            else:
+                current_sha256 = _sha256_file(snapshot.path)
+                current_token = None
+        except (OSError, ValueError) as exc:
             raise ValueError(f"{snapshot.label} changed during annotation resolution: {exc}") from exc
-        if current_sha256 != snapshot.sha256:
+        if current_sha256 != snapshot.sha256 or current_token != snapshot.stat_token:
             raise ValueError(f"{snapshot.label} changed during annotation resolution")
 
 
@@ -1110,6 +1254,12 @@ def _reject_input_output_aliases(
     ]
     if dataset_manifest_path is not None:
         input_paths.append(("source candidate dataset manifest", dataset_manifest_path))
+        input_paths.append(
+            (
+                "dataset-sibling source contract binding",
+                dataset_manifest_path.parent / source_contract_path.name,
+            )
+        )
     for input_name, input_path in input_paths:
         if any(_same_path(input_path, final_path) for final_path in final_paths):
             raise ValueError(f"output artifacts must not overwrite the {input_name}")

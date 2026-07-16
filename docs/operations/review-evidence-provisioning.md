@@ -139,6 +139,14 @@ The source-map JSON for each population uses schema version `1.0`. Every entry b
   --source-map "$Dev\input\source-map.v1.json" `
   --output-dir "$Dev\dataset"
 
+$DevOriginalContract = "$Dev\input\tracking_contract.v2.json"
+$DevBoundContract = "$Dev\dataset\tracking_contract.v2.json"
+if (Test-Path -LiteralPath $DevBoundContract) { throw "Model-development dataset contract binding already exists" }
+Copy-Item -LiteralPath $DevOriginalContract -Destination $DevBoundContract
+$DevOriginalHash = (Get-FileHash -LiteralPath $DevOriginalContract -Algorithm SHA256).Hash.ToLowerInvariant()
+$DevBoundHash = (Get-FileHash -LiteralPath $DevBoundContract -Algorithm SHA256).Hash.ToLowerInvariant()
+if ($DevOriginalHash -ne $DevBoundHash) { throw "Model-development dataset contract binding copy mismatch" }
+
 & $Py scripts/resolve_candidate_annotations.py `
   --contract "$Dev\input\tracking_contract.v2.json" `
   --ledger "$Dev\input\votes.sequence-001.jsonl" `
@@ -285,7 +293,7 @@ The draft manifest must bind at least:
 - `provisioning.attempt_quota_bytes` plus `provisioning.retention` with policy, retention deadline, and automatic-delete setting; and
 - the queue producer directory and final queue identity required by the builder contract.
 
-In the draft manifest, `packages.policy_qualification.source_contract_path` must point to the dataset-sibling binding copy, for example `policy-qualification/dataset/tracking_contract.v2.json`, and its `source_contract_sha256` must equal the original `$Qual\input\tracking_contract.v2.json` digest. Do not point this descriptor at the annotation-derived contract.
+In the draft manifest, both `packages.model_development.source_contract_path` and `packages.policy_qualification.source_contract_path` must point to their dataset-sibling binding copies, for example `model-development/dataset/tracking_contract.v2.json` and `policy-qualification/dataset/tracking_contract.v2.json`. Each `source_contract_sha256` must equal its original `input/tracking_contract.v2.json` digest. Do not point either descriptor at the annotation-derived contract.
 
 The two operational blocks use this shape; all sizes and hashes are attempt-specific:
 
