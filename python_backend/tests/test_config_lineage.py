@@ -249,8 +249,9 @@ class ConfigLineagePublicationTests(unittest.TestCase):
         self.assertEqual(1, len(list(generations.iterdir())))
 
     def test_failed_staging_write_is_not_published_and_retry_succeeds(self) -> None:
-        with patch(
-            "football_tracking.config_lineage._write_file_exclusive",
+        with patch.object(
+            config_lineage_module._AnchoredDir,
+            "write_exclusive",
             side_effect=OSError("injected write failure"),
         ):
             with self.assertRaisesRegex(OSError, "injected"):
