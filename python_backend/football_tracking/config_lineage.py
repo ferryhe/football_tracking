@@ -275,46 +275,48 @@ class _AnchoredDir:
         import fcntl
 
         _single_component(name, "lock file")
+        descriptor: int | None = None
         try:
-            descriptor = os.open(
-                name,
-                os.O_RDWR
-                | os.O_CREAT
-                | os.O_NOFOLLOW
-                | getattr(os, "O_CLOEXEC", 0),
-                0o600,
-                dir_fd=self.descriptor,
-            )
-            details = os.fstat(descriptor)
-            if not stat.S_ISREG(details.st_mode) or int(details.st_nlink) != 1:
+            try:
+                descriptor = os.open(
+                    name,
+                    os.O_RDWR
+                    | os.O_CREAT
+                    | os.O_NOFOLLOW
+                    | getattr(os, "O_CLOEXEC", 0),
+                    0o600,
+                    dir_fd=self.descriptor,
+                )
+                details = os.fstat(descriptor)
+                if not stat.S_ISREG(details.st_mode) or int(details.st_nlink) != 1:
+                    raise ConfigLineageError(
+                        CONFIG_LINEAGE_UNSAFE,
+                        "config lineage lock is not a unique regular file",
+                    )
+                if details.st_size == 0:
+                    os.write(descriptor, b"\0")
+                    os.fsync(descriptor)
+                fcntl.flock(descriptor, fcntl.LOCK_EX)
+                if _opened_entry_identity(
+                    self.descriptor,
+                    name,
+                    directory=False,
+                ) != _stat_token(os.fstat(descriptor)):
+                    raise ConfigLineageError(
+                        CONFIG_LINEAGE_UNSAFE,
+                        "config lineage lock identity changed",
+                    )
+                self.assert_current()
+            except ConfigLineageError:
+                raise
+            except OSError as exc:
                 raise ConfigLineageError(
                     CONFIG_LINEAGE_UNSAFE,
-                    "config lineage lock is not a unique regular file",
-                )
-            if details.st_size == 0:
-                os.write(descriptor, b"\0")
-                os.fsync(descriptor)
-            fcntl.flock(descriptor, fcntl.LOCK_EX)
-            if _opened_entry_identity(
-                self.descriptor,
-                name,
-                directory=False,
-            ) != _stat_token(os.fstat(descriptor)):
-                raise ConfigLineageError(
-                    CONFIG_LINEAGE_UNSAFE,
-                    "config lineage lock identity changed",
-                )
-            self.assert_current()
-            yield
-        except ConfigLineageError:
-            raise
-        except OSError as exc:
-            raise ConfigLineageError(
-                CONFIG_LINEAGE_UNSAFE,
-                "config lineage anchored lock failed",
-            ) from exc
-        finally:
-            if "descriptor" in locals():
+                    "config lineage anchored lock failed",
+                ) from exc
+            try:
+                yield
+            finally:
                 try:
                     self.assert_current()
                     if _opened_entry_identity(
@@ -327,8 +329,22 @@ class _AnchoredDir:
                             "config lineage lock identity changed before unlock",
                         )
                     fcntl.flock(descriptor, fcntl.LOCK_UN)
-                finally:
+                except ConfigLineageError:
+                    raise
+                except OSError as exc:
+                    raise ConfigLineageError(
+                        CONFIG_LINEAGE_UNSAFE,
+                        "config lineage anchored lock release failed",
+                    ) from exc
+        finally:
+            if descriptor is not None:
+                try:
                     os.close(descriptor)
+                except OSError as exc:
+                    raise ConfigLineageError(
+                        CONFIG_LINEAGE_UNSAFE,
+                        "config lineage anchored lock release failed",
+                    ) from exc
 
     def rename_noreplace(
         self,

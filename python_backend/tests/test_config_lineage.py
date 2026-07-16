@@ -210,6 +210,109 @@ class ConfigLineagePublicationTests(unittest.TestCase):
             directory.assert_current()
         self.assertEqual(b"ok\n", probe.read_bytes())
 
+    def test_lock_body_exceptions_propagate_and_the_lock_is_released(self) -> None:
+        import fcntl
+
+        with config_lineage_module._open_absolute_directory(
+            self.root,
+            create=False,
+        ) as directory:
+            for index, sentinel in enumerate(
+                (OSError("body-oserror"), RuntimeError("body-runtime")),
+            ):
+                with self.subTest(error=type(sentinel).__name__):
+                    lock_name = f".body-exception-{index}.lock"
+                    with self.assertRaises(type(sentinel)) as caught:
+                        with directory.lock(lock_name):
+                            raise sentinel
+                    self.assertIs(sentinel, caught.exception)
+
+                    descriptor = os.open(self.root / lock_name, os.O_RDWR)
+                    try:
+                        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        fcntl.flock(descriptor, fcntl.LOCK_UN)
+                    finally:
+                        os.close(descriptor)
+
+    def test_lock_setup_and_release_oserrors_remain_typed_unsafe(self) -> None:
+        import fcntl
+
+        with config_lineage_module._open_absolute_directory(
+            self.root,
+            create=False,
+        ) as directory:
+            with (
+                patch.object(fcntl, "flock", side_effect=OSError("setup failure")),
+                self.assertRaises(ConfigLineageError) as setup_caught,
+            ):
+                with directory.lock(".setup-failure.lock"):
+                    self.fail("lock body must not run")
+            self.assertEqual(CONFIG_LINEAGE_UNSAFE, setup_caught.exception.code)
+            self.assertIn("anchored lock failed", str(setup_caught.exception))
+
+            original_flock = fcntl.flock
+
+            def fail_release(descriptor, operation):
+                if operation == fcntl.LOCK_UN:
+                    raise OSError("release failure")
+                return original_flock(descriptor, operation)
+
+            with (
+                patch.object(fcntl, "flock", side_effect=fail_release),
+                self.assertRaises(ConfigLineageError) as release_caught,
+            ):
+                with directory.lock(".release-failure.lock"):
+                    pass
+            self.assertEqual(CONFIG_LINEAGE_UNSAFE, release_caught.exception.code)
+            self.assertIn("anchored lock release failed", str(release_caught.exception))
+
+    def test_lock_descriptor_close_failure_is_typed_and_takes_precedence(self) -> None:
+        original_open = os.open
+        original_close = os.close
+
+        with config_lineage_module._open_absolute_directory(
+            self.root,
+            create=False,
+        ) as directory:
+            for index, body_error in enumerate((None, RuntimeError("body sentinel"))):
+                with self.subTest(body_error=body_error is not None):
+                    lock_name = f".close-failure-{index}.lock"
+                    lock_descriptor: int | None = None
+                    close_attempts = 0
+                    close_error = OSError("close failure")
+
+                    def capture_lock_open(path, flags, mode=0o777, *, dir_fd=None):
+                        nonlocal lock_descriptor
+                        descriptor = original_open(path, flags, mode, dir_fd=dir_fd)
+                        if (
+                            lock_descriptor is None
+                            and path == lock_name
+                            and dir_fd == directory.descriptor
+                        ):
+                            lock_descriptor = descriptor
+                        return descriptor
+
+                    def close_lock_then_fail(descriptor):
+                        nonlocal close_attempts
+                        if descriptor == lock_descriptor:
+                            close_attempts += 1
+                            original_close(descriptor)
+                            raise close_error
+                        return original_close(descriptor)
+
+                    with (
+                        patch.object(os, "open", side_effect=capture_lock_open),
+                        patch.object(os, "close", side_effect=close_lock_then_fail),
+                        self.assertRaises(ConfigLineageError) as caught,
+                    ):
+                        with directory.lock(lock_name):
+                            if body_error is not None:
+                                raise body_error
+                    self.assertEqual(CONFIG_LINEAGE_UNSAFE, caught.exception.code)
+                    self.assertIn("anchored lock release failed", str(caught.exception))
+                    self.assertIs(close_error, caught.exception.__cause__)
+                    self.assertEqual(1, close_attempts)
+
     def test_publish_is_append_only_and_idempotent(self) -> None:
         first = self._publish()
         second = self._publish()
