@@ -14,6 +14,7 @@ from football_tracking.candidate_annotations import (
     ANNOTATION_RESOLUTION_NAME,
     resolve_candidate_annotations,
     sample_evidence_sha256,
+    validate_candidate_annotation_package,
 )
 from football_tracking.tracking_contracts import (
     TRACKING_CONTRACT_REPORT_NAME,
@@ -217,6 +218,140 @@ class CandidateAnnotationTests(unittest.TestCase):
             },
             persisted["derived_tracking_contract"],
         )
+
+    def test_strict_package_rejects_ai_primaries_and_accepts_human_append_only_chain(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            root = Path(temp_name)
+            candidates = [_candidate("candidate", 1)]
+            ai_votes = [_vote("ai-1", "candidate", "match_ball"), _vote("ai-2", "candidate", "match_ball")]
+            contract_path, ai_ledger, ai_output = self._paths(root, candidates=candidates, votes=ai_votes)
+            manifest_path = root / "candidate_dataset_manifest.json"
+            self._set_append_only_header(ai_ledger, sequence=1, previous_sha256=None)
+            resolve_candidate_annotations(
+                contract_path,
+                ai_ledger,
+                ai_output,
+                dataset_manifest_path=manifest_path,
+            )
+            with self.assertRaisesRegex(ValueError, "blind human primary"):
+                validate_candidate_annotation_package(
+                    contract_path,
+                    ai_ledger,
+                    manifest_path,
+                    ai_output / ANNOTATION_RESOLUTION_NAME,
+                )
+
+            first_ledger = root / "human-v1.jsonl"
+            primary = [
+                _vote("human-1", "candidate", "match_ball", reviewer_type="human"),
+                _vote("human-2", "candidate", "equipment_or_background", reviewer_type="human"),
+            ]
+            _write_jsonl(
+                first_ledger,
+                primary,
+                contract_path=contract_path,
+                dataset_manifest_path=manifest_path,
+            )
+            self._set_append_only_header(first_ledger, sequence=1, previous_sha256=None)
+            second_ledger = root / "human-v2.jsonl"
+            adjudication = _vote(
+                "judge-1",
+                "candidate",
+                "match_ball",
+                reviewer_type="human",
+                stage="adjudication",
+                blind=False,
+                annotator_id="independent-judge",
+                fingerprint="independent-judge-fingerprint",
+            )
+            _write_jsonl(
+                second_ledger,
+                [*primary, adjudication],
+                contract_path=contract_path,
+                dataset_manifest_path=manifest_path,
+            )
+            self._set_append_only_header(second_ledger, sequence=2, previous_sha256=_sha256(first_ledger))
+            human_output = root / "human-resolved"
+            resolve_candidate_annotations(
+                contract_path,
+                second_ledger,
+                human_output,
+                dataset_manifest_path=manifest_path,
+            )
+            validated = validate_candidate_annotation_package(
+                contract_path,
+                second_ledger,
+                manifest_path,
+                human_output / ANNOTATION_RESOLUTION_NAME,
+                previous_ledger_path=first_ledger,
+            )
+            self.assertEqual("complete", validated["summary"]["status"])
+
+    def test_primary_vote_cannot_be_superseded(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            root = Path(temp_name)
+            candidates = [_candidate("candidate", 1)]
+            contract_path, _, _ = self._paths(root, candidates=candidates, votes=[])
+            manifest_path = root / "candidate_dataset_manifest.json"
+            first_vote = _vote(
+                "human-1-v1",
+                "candidate",
+                "equipment_or_background",
+                reviewer_type="human",
+                annotator_id="reviewer-1",
+                fingerprint="reviewer-1-fingerprint",
+            )
+            second_vote = _vote(
+                "human-2",
+                "candidate",
+                "match_ball",
+                reviewer_type="human",
+                annotator_id="reviewer-2",
+                fingerprint="reviewer-2-fingerprint",
+            )
+            first_ledger = root / "votes-v1.jsonl"
+            _write_jsonl(
+                first_ledger,
+                [first_vote, second_vote],
+                contract_path=contract_path,
+                dataset_manifest_path=manifest_path,
+            )
+            self._set_append_only_header(first_ledger, sequence=1, previous_sha256=None)
+            corrected_vote = _vote(
+                "human-1-v2",
+                "candidate",
+                "match_ball",
+                reviewer_type="human",
+                annotator_id="reviewer-1",
+                fingerprint="reviewer-1-fingerprint",
+            )
+            corrected_vote["created_at"] = "2026-01-01T00:01:00Z"
+            corrected_vote["supersedes_vote_id"] = "human-1-v1"
+            second_ledger = root / "votes-v2.jsonl"
+            _write_jsonl(
+                second_ledger,
+                [first_vote, second_vote, corrected_vote],
+                contract_path=contract_path,
+                dataset_manifest_path=manifest_path,
+            )
+            self._set_append_only_header(second_ledger, sequence=2, previous_sha256=_sha256(first_ledger))
+            with self.assertRaisesRegex(ValueError, "only an adjudication vote"):
+                resolve_candidate_annotations(
+                    contract_path,
+                    second_ledger,
+                    root / "resolved",
+                    dataset_manifest_path=manifest_path,
+                )
+
+    @staticmethod
+    def _set_append_only_header(path: Path, *, sequence: int, previous_sha256: str | None) -> None:
+        records = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line]
+        records[0]["append_only_chain"] = {
+            "algorithm": "sha256-ledger-chain-v1",
+            "sequence": sequence,
+            "previous_ledger_sha256": previous_sha256,
+        }
+        path.write_text("".join(json.dumps(record) + "\n" for record in records), encoding="utf-8")
 
     def test_unknown_disagreement_duplicate_low_confidence_and_single_votes_queue(self) -> None:
         candidates = [

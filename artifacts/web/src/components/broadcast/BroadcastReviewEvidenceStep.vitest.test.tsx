@@ -93,6 +93,52 @@ describe("BroadcastReviewEvidenceStep", () => {
     ).toBeDisabled();
   });
 
+  it("shows bundle capacity and blocks preparation or retry when capacity is insufficient", () => {
+    const { rerender } = render(
+      <BroadcastReviewEvidenceStep
+        state={{
+          status: "available",
+          bundle: { bundleId: "bundle-capacity", manifestSha256 },
+          capacity: {
+            totalSizeBytes: 64 * 1024 * 1024,
+            requiredFreeBytes: 96 * 1024 * 1024,
+            availableFreeBytes: 32 * 1024 * 1024,
+            attemptQuotaBytes: 128 * 1024 * 1024,
+            status: "insufficient",
+          },
+          blockerCode: "insufficient_capacity",
+          recoveryAction: "Free disk space or increase the attempt quota.",
+        }}
+        onPrepare={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText("Bundle capacity")).toBeVisible();
+    expect(screen.getByText("64.0 MB")).toBeVisible();
+    expect(screen.getByText("96.0 MB")).toBeVisible();
+    expect(screen.getByText("32.0 MB")).toBeVisible();
+    expect(screen.getByText("128.0 MB")).toBeVisible();
+    expect(screen.getByText("Insufficient capacity")).toBeVisible();
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "insufficient_capacity",
+    );
+    expect(
+      screen.getByRole("button", { name: "Prepare review evidence" }),
+    ).toBeDisabled();
+
+    rerender(
+      <BroadcastReviewEvidenceStep
+        state={{
+          status: "failed",
+          bundle: { bundleId: "bundle-capacity", manifestSha256 },
+          capacity: { status: "insufficient" },
+        }}
+        onRetry={vi.fn()}
+      />,
+    );
+    expect(screen.getByRole("button", { name: "Retry import" })).toBeDisabled();
+  });
+
   it.each(["queued", "copying", "validating"] as const)(
     "allows safe cancellation while %s",
     async (status) => {
@@ -109,6 +155,7 @@ describe("BroadcastReviewEvidenceStep", () => {
         name: "Evidence import progress",
       });
       expect(progress).toHaveAttribute("aria-valuenow", "42.5");
+      expect(progress).toHaveAttribute("aria-live", "polite");
       await user.click(screen.getByRole("button", { name: "Cancel import" }));
       expect(onCancel).toHaveBeenCalledTimes(1);
     },
@@ -160,6 +207,9 @@ describe("BroadcastReviewEvidenceStep", () => {
       expect(
         screen.getByText("Free disk space and retry the import."),
       ).toBeVisible();
+      expect(screen.getByRole("alert")).toHaveTextContent(
+        "insufficient_capacity",
+      );
       await user.click(screen.getByRole("button", { name: "Retry import" }));
       expect(onRetry).toHaveBeenCalledTimes(1);
     },
@@ -174,6 +224,7 @@ describe("BroadcastReviewEvidenceStep", () => {
         state={{
           status: "ready",
           generationId: "review-evidence-generation-1",
+          queueSha256: "b".repeat(64),
         }}
         onPrepare={onPrepare}
         onCancel={onCancel}
@@ -182,11 +233,56 @@ describe("BroadcastReviewEvidenceStep", () => {
     );
 
     expect(screen.getByText("review-evidence-generation-1")).toBeVisible();
+    expect(screen.getByText("b".repeat(64))).toBeVisible();
+    expect(screen.getByText("Queue SHA-256")).toBeVisible();
+    expect(screen.getByRole("status")).toHaveTextContent(
+      "review-evidence-generation-1",
+    );
+    expect(screen.getByRole("status")).toHaveTextContent("b".repeat(64));
     expect(screen.queryByRole("button")).toBeNull();
     expect(onPrepare).not.toHaveBeenCalled();
     expect(onCancel).not.toHaveBeenCalled();
     expect(onRetry).not.toHaveBeenCalled();
   });
+
+  it.each(["blocked", "failed", "cancelled"] as const)(
+    "supports retrying the same bundle or explicitly preparing one different bundle from %s",
+    async (status) => {
+      const user = userEvent.setup();
+      const onRetry = vi.fn();
+      const onPrepareAlternative = vi.fn();
+      const alternative = {
+        bundleId: "bundle-qualified-2",
+        manifestSha256: "c".repeat(64),
+      };
+      render(
+        <BroadcastReviewEvidenceStep
+          state={{
+            status,
+            bundle: {
+              bundleId: "bundle-qualified-1",
+              manifestSha256,
+            },
+            alternativeBundle: alternative,
+          }}
+          onRetry={onRetry}
+          onPrepareAlternative={onPrepareAlternative}
+        />,
+      );
+
+      expect(screen.getByText("Different compatible bundle")).toBeVisible();
+      expect(screen.getByText("bundle-qualified-2")).toBeVisible();
+      await user.click(screen.getByRole("button", { name: "Retry import" }));
+      const prepareDifferent = screen.getByRole("button", {
+        name: "Prepare different bundle",
+      });
+      prepareDifferent.focus();
+      await user.keyboard("{Enter}");
+
+      expect(onRetry).toHaveBeenCalledTimes(1);
+      expect(onPrepareAlternative).toHaveBeenCalledWith(alternative);
+    },
+  );
 
   it("supports localized labels and keyboard activation", async () => {
     const user = userEvent.setup();

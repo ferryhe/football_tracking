@@ -576,6 +576,9 @@ class BroadcastOperationRequestState(BaseModel):
     trajectory_generation_id: str | None = Field(default=None, pattern=r"^trajectory-[0-9a-f]{24}$")
     target_width: int | None = None
     target_height: int | None = None
+    bundle_id: str | None = None
+    bundle_manifest_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    retry_from_job_id: str | None = None
 
 
 class BroadcastOperationResultState(BaseModel):
@@ -585,6 +588,8 @@ class BroadcastOperationResultState(BaseModel):
     trajectory_generation_id: str | None = None
     camera_generation_id: str | None = None
     render_generation_id: str | None = None
+    review_evidence_generation_id: str | None = None
+    queue_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
 
 
 class BroadcastRunState(BaseModel):
@@ -602,15 +607,18 @@ class BroadcastRunState(BaseModel):
     trajectory_generation_id: str | None = None
     camera_generation_id: str | None = None
     render_generation_id: str | None = None
-    operation: Literal["recompute", "render"] | None = None
+    operation: Literal["recompute", "render", "review_evidence_import"] | None = None
     operation_status: (
         Literal[
             "queued",
             "running",
             "committing",
+            "copying",
+            "validating",
             "completed",
             "failed",
             "cancelled",
+            "blocked",
             "metadata_conflict",
         ]
         | None
@@ -735,6 +743,96 @@ class BroadcastOperationResponse(BaseModel):
     artifact: str | None = None
     generation_id: str | None = None
     details: BroadcastOperationDetails = Field(default_factory=BroadcastOperationDetails)
+
+
+class BroadcastReviewEvidenceImportRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    bundle_id: str = Field(min_length=1, max_length=96)
+    bundle_manifest_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    retry_from_job_id: str | None = Field(default=None, min_length=1, max_length=200)
+
+
+class BroadcastReviewEvidenceRevokeResponse(BaseModel):
+    run_id: str
+    status: Literal["revoked"]
+    generation_id: str = Field(pattern=r"^review-evidence-[0-9a-f]{24}$")
+    queue_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    revoked_at: str
+
+
+class BroadcastReviewEvidenceProvisionerLimits(BaseModel):
+    max_files: int = Field(gt=0)
+    max_bundle_bytes: int = Field(gt=0)
+    max_single_file_bytes: int = Field(gt=0)
+
+
+class BroadcastReviewEvidenceRetention(BaseModel):
+    policy: Literal["manual-audit-retention-v1"]
+    retain_until: str
+    automatic_delete: Literal[False]
+
+
+class BroadcastReviewEvidenceCapacity(BaseModel):
+    total_size_bytes: int | None = Field(default=None, ge=0)
+    required_free_bytes: int | None = Field(default=None, ge=0)
+    available_free_bytes: int | None = Field(default=None, ge=0)
+    attempt_quota_bytes: int | None = Field(default=None, ge=0)
+    capacity_status: Literal["sufficient", "insufficient"] | None = None
+    retention: BroadcastReviewEvidenceRetention | None = None
+    provisioner_limits: BroadcastReviewEvidenceProvisionerLimits | None = None
+
+
+class BroadcastReviewEvidenceBundleSummary(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    status: Literal["available", "not_applicable", "invalid"]
+    bundle_id: str | None = None
+    bundle_manifest_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    queue_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    total_size_bytes: int | None = Field(default=None, ge=0)
+    required_free_bytes: int | None = Field(default=None, ge=0)
+    available_free_bytes: int | None = Field(default=None, ge=0)
+    attempt_quota_bytes: int | None = Field(default=None, ge=0)
+    capacity_status: Literal["sufficient", "insufficient"] | None = None
+    retention: BroadcastReviewEvidenceRetention | None = None
+    provisioner_limits: BroadcastReviewEvidenceProvisionerLimits | None = None
+    inbox_entry: str
+    error_code: str | None = None
+    error: str | None = None
+
+
+class BroadcastReviewEvidenceStateResponse(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    run_id: str
+    status: Literal[
+        "not_available",
+        "available",
+        "queued",
+        "copying",
+        "validating",
+        "committing",
+        "ready",
+        "failed",
+        "cancelled",
+        "blocked",
+    ]
+    active_job_id: str | None = None
+    retry_from_job_id: str | None = None
+    generation_id: str | None = None
+    queue_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    stage: str | None = None
+    progress_percent: float = Field(default=0.0, ge=0.0, le=100.0)
+    blocker_code: str | None = None
+    error_code: str | None = None
+    recovery_action: str | None = None
+    retryable: bool = False
+    can_cancel: bool = False
+    bundles: list[BroadcastReviewEvidenceBundleSummary] = Field(default_factory=list)
+    capacity: BroadcastReviewEvidenceCapacity | None = None
+    blocking_reasons: list[str] = Field(default_factory=list)
+    message: str | None = None
 
 
 class BroadcastReviewEvidenceArtifact(BaseModel):

@@ -9,6 +9,7 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { Progress } from "@/components/ui/progress";
+import { formatBytes } from "@/lib/utils";
 
 export type BroadcastReviewEvidenceStatus =
   | "not_available"
@@ -27,14 +28,25 @@ export interface BroadcastReviewEvidenceBundleIdentity {
   manifestSha256: string;
 }
 
+export interface BroadcastReviewEvidenceCapacity {
+  totalSizeBytes?: number | null;
+  requiredFreeBytes?: number | null;
+  availableFreeBytes?: number | null;
+  attemptQuotaBytes?: number | null;
+  status?: "sufficient" | "insufficient" | null;
+}
+
 export interface BroadcastReviewEvidenceState {
   status: BroadcastReviewEvidenceStatus;
   bundle?: BroadcastReviewEvidenceBundleIdentity | null;
+  alternativeBundle?: BroadcastReviewEvidenceBundleIdentity | null;
   stage?: string | null;
   progressPercent?: number | null;
   blockerCode?: string | null;
   recoveryAction?: string | null;
   generationId?: string | null;
+  queueSha256?: string | null;
+  capacity?: BroadcastReviewEvidenceCapacity | null;
 }
 
 export interface BroadcastReviewEvidenceStepLabels {
@@ -57,8 +69,18 @@ export interface BroadcastReviewEvidenceStepLabels {
   blocker: string;
   recovery: string;
   generation: string;
+  queueSha256: string;
+  capacity: string;
+  totalSize: string;
+  requiredFree: string;
+  availableFree: string;
+  attemptQuota: string;
+  capacitySufficient: string;
+  capacityInsufficient: string;
+  alternativeBundle: string;
   prepare: string;
   preparing: string;
+  prepareAlternative: string;
   cancel: string;
   cancelling: string;
   cancelUnavailableDuringCommit: string;
@@ -69,6 +91,9 @@ export interface BroadcastReviewEvidenceStepLabels {
 export interface BroadcastReviewEvidenceStepProps {
   state: BroadcastReviewEvidenceState;
   onPrepare?: (bundle: BroadcastReviewEvidenceBundleIdentity) => void;
+  onPrepareAlternative?: (
+    bundle: BroadcastReviewEvidenceBundleIdentity,
+  ) => void;
   onCancel?: () => void;
   onRetry?: () => void;
   isPreparing?: boolean;
@@ -99,8 +124,18 @@ const DEFAULT_LABELS: BroadcastReviewEvidenceStepLabels = {
   blocker: "Blocker",
   recovery: "Recovery action",
   generation: "Evidence generation",
+  queueSha256: "Queue SHA-256",
+  capacity: "Bundle capacity",
+  totalSize: "Bundle size",
+  requiredFree: "Required free space",
+  availableFree: "Available free space",
+  attemptQuota: "Attempt quota",
+  capacitySufficient: "Capacity sufficient",
+  capacityInsufficient: "Insufficient capacity",
+  alternativeBundle: "Different compatible bundle",
   prepare: "Prepare review evidence",
   preparing: "Preparing review evidence…",
+  prepareAlternative: "Prepare different bundle",
   cancel: "Cancel import",
   cancelling: "Cancelling import…",
   cancelUnavailableDuringCommit:
@@ -154,6 +189,7 @@ function statusText(
 export function BroadcastReviewEvidenceStep({
   state,
   onPrepare,
+  onPrepareAlternative,
   onCancel,
   onRetry,
   isPreparing = false,
@@ -171,6 +207,11 @@ export function BroadcastReviewEvidenceStep({
     state.bundle?.bundleId.trim() &&
     SHA256_PATTERN.test(state.bundle.manifestSha256.trim()),
   );
+  const alternativeBundleValid = Boolean(
+    state.alternativeBundle?.bundleId.trim() &&
+    SHA256_PATTERN.test(state.alternativeBundle.manifestSha256.trim()),
+  );
+  const capacityInsufficient = state.capacity?.status === "insufficient";
   const showFooter = state.status === "available" || active || retryable;
 
   return (
@@ -195,6 +236,13 @@ export function BroadcastReviewEvidenceStep({
             <Badge variant={state.status === "ready" ? "secondary" : "outline"}>
               {status}
             </Badge>
+            {state.status === "ready" &&
+              (state.generationId || state.queueSha256) && (
+                <span className="sr-only">
+                  {labels.generation}: {state.generationId || "—"}.{" "}
+                  {labels.queueSha256}: {state.queueSha256 || "—"}.
+                </span>
+              )}
           </div>
         </div>
       </CardHeader>
@@ -215,6 +263,55 @@ export function BroadcastReviewEvidenceStep({
           </dl>
         )}
 
+        {state.capacity && (
+          <div className="min-w-0 space-y-3 rounded-lg border p-4 text-sm">
+            <div className="flex min-w-0 flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+              <p className="font-medium">{labels.capacity}</p>
+              {state.capacity.status && (
+                <Badge
+                  variant={
+                    state.capacity.status === "insufficient"
+                      ? "destructive"
+                      : "secondary"
+                  }
+                >
+                  {state.capacity.status === "insufficient"
+                    ? labels.capacityInsufficient
+                    : labels.capacitySufficient}
+                </Badge>
+              )}
+            </div>
+            <dl className="grid min-w-0 gap-3 sm:grid-cols-2 lg:grid-cols-4">
+              <div className="min-w-0">
+                <dt className="text-muted-foreground">{labels.totalSize}</dt>
+                <dd className="break-all font-mono tabular-nums">
+                  {formatBytes(state.capacity.totalSizeBytes)}
+                </dd>
+              </div>
+              <div className="min-w-0">
+                <dt className="text-muted-foreground">{labels.requiredFree}</dt>
+                <dd className="break-all font-mono tabular-nums">
+                  {formatBytes(state.capacity.requiredFreeBytes)}
+                </dd>
+              </div>
+              <div className="min-w-0">
+                <dt className="text-muted-foreground">
+                  {labels.availableFree}
+                </dt>
+                <dd className="break-all font-mono tabular-nums">
+                  {formatBytes(state.capacity.availableFreeBytes)}
+                </dd>
+              </div>
+              <div className="min-w-0">
+                <dt className="text-muted-foreground">{labels.attemptQuota}</dt>
+                <dd className="break-all font-mono tabular-nums">
+                  {formatBytes(state.capacity.attemptQuotaBytes)}
+                </dd>
+              </div>
+            </dl>
+          </div>
+        )}
+
         {active && (
           <div className="space-y-2">
             <div className="flex min-w-0 flex-col gap-1 text-sm sm:flex-row sm:items-center sm:justify-between">
@@ -226,6 +323,8 @@ export function BroadcastReviewEvidenceStep({
             <Progress
               value={progress}
               aria-label={labels.progress}
+              aria-live="polite"
+              aria-atomic="true"
               aria-valuemin={0}
               aria-valuemax={100}
               aria-valuenow={progress}
@@ -237,7 +336,10 @@ export function BroadcastReviewEvidenceStep({
         )}
 
         {(state.blockerCode || state.recoveryAction) && (
-          <dl className="min-w-0 space-y-3 rounded-lg border bg-muted/20 p-4 text-sm">
+          <dl
+            role="alert"
+            className="min-w-0 space-y-3 rounded-lg border bg-muted/20 p-4 text-sm"
+          >
             {state.blockerCode && (
               <div className="min-w-0">
                 <dt className="text-muted-foreground">{labels.blocker}</dt>
@@ -253,10 +355,45 @@ export function BroadcastReviewEvidenceStep({
           </dl>
         )}
 
-        {state.status === "ready" && state.generationId && (
-          <div className="min-w-0 text-sm">
-            <p className="text-muted-foreground">{labels.generation}</p>
-            <p className="break-all font-mono">{state.generationId}</p>
+        {state.status === "ready" &&
+          (state.generationId || state.queueSha256) && (
+            <dl className="grid min-w-0 gap-3 text-sm sm:grid-cols-2">
+              {state.generationId && (
+                <div className="min-w-0">
+                  <dt className="text-muted-foreground">{labels.generation}</dt>
+                  <dd className="break-all font-mono">{state.generationId}</dd>
+                </div>
+              )}
+              {state.queueSha256 && (
+                <div className="min-w-0">
+                  <dt className="text-muted-foreground">
+                    {labels.queueSha256}
+                  </dt>
+                  <dd className="break-all font-mono">{state.queueSha256}</dd>
+                </div>
+              )}
+            </dl>
+          )}
+
+        {retryable && state.alternativeBundle && (
+          <div className="min-w-0 space-y-2 rounded-lg border p-4 text-sm">
+            <p className="font-medium">{labels.alternativeBundle}</p>
+            <dl className="grid min-w-0 gap-3 sm:grid-cols-2">
+              <div className="min-w-0">
+                <dt className="text-muted-foreground">{labels.bundleId}</dt>
+                <dd className="break-all font-mono">
+                  {state.alternativeBundle.bundleId}
+                </dd>
+              </div>
+              <div className="min-w-0">
+                <dt className="text-muted-foreground">
+                  {labels.bundleManifest}
+                </dt>
+                <dd className="break-all font-mono">
+                  {state.alternativeBundle.manifestSha256}
+                </dd>
+              </div>
+            </dl>
           </div>
         )}
 
@@ -273,7 +410,13 @@ export function BroadcastReviewEvidenceStep({
             <Button
               type="button"
               onClick={() => state.bundle && onPrepare?.(state.bundle)}
-              disabled={disabled || isPreparing || !bundleValid || !onPrepare}
+              disabled={
+                disabled ||
+                isPreparing ||
+                capacityInsufficient ||
+                !bundleValid ||
+                !onPrepare
+              }
             >
               {isPreparing ? labels.preparing : labels.prepare}
             </Button>
@@ -297,9 +440,29 @@ export function BroadcastReviewEvidenceStep({
             <Button
               type="button"
               onClick={() => onRetry?.()}
-              disabled={disabled || isRetrying || !onRetry}
+              disabled={
+                disabled || capacityInsufficient || isRetrying || !onRetry
+              }
             >
               {isRetrying ? labels.retrying : labels.retry}
+            </Button>
+          )}
+          {retryable && state.alternativeBundle && (
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() =>
+                state.alternativeBundle &&
+                onPrepareAlternative?.(state.alternativeBundle)
+              }
+              disabled={
+                disabled ||
+                isPreparing ||
+                !alternativeBundleValid ||
+                !onPrepareAlternative
+              }
+            >
+              {isPreparing ? labels.preparing : labels.prepareAlternative}
             </Button>
           )}
         </CardFooter>

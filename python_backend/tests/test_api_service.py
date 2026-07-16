@@ -1698,6 +1698,56 @@ class ApiServiceSmokeTests(unittest.TestCase):
         finally:
             link.unlink(missing_ok=True)
 
+    def test_artifact_listing_ignores_visible_hidden_atomic_temp_file(self) -> None:
+        output_dir = self.repo_root / "outputs" / "atomic_artifact_scan"
+        output_dir.mkdir()
+        visible = output_dir / "broadcast_operation_report.v1.json"
+        visible.write_text("{}\n", encoding="utf-8")
+        temporary = output_dir / ".broadcast_operation_report.v1.json.concurrent.tmp"
+        ready = threading.Event()
+        release = threading.Event()
+
+        def hold_atomic_temp_visible() -> None:
+            with temporary.open("wb") as handle:
+                handle.write(b'{"partial":')
+                handle.flush()
+                ready.set()
+                release.wait(timeout=5.0)
+            temporary.unlink(missing_ok=True)
+
+        writer = threading.Thread(target=hold_atomic_temp_visible)
+        writer.start()
+        self.assertTrue(ready.wait(timeout=5.0))
+        try:
+            artifacts = self.service._collect_artifacts(output_dir)
+            names = {artifact["name"] for artifact in artifacts}
+            self.assertEqual({visible.name}, names)
+            self.assertNotIn(temporary, self.service._iter_artifact_paths(output_dir))
+        finally:
+            release.set()
+            writer.join(timeout=5.0)
+        self.assertFalse(writer.is_alive())
+
+    @unittest.skipUnless(os.name == "nt", "Windows extended-length paths are platform-specific")
+    def test_safe_artifact_paths_normalize_windows_extended_length_prefix(self) -> None:
+        output_dir = self.repo_root / "outputs" / "extended_artifact_scan"
+        output_dir.mkdir()
+        artifact = output_dir / "artifact.json"
+        artifact.write_text("{}\n", encoding="utf-8")
+        normal_artifact = self.service._normalize_filesystem_path(artifact.resolve())
+        extended_artifact = Path("\\\\?\\" + str(normal_artifact))
+
+        resolved = self.service._resolve_safe_descendant(
+            output_dir,
+            extended_artifact,
+            expected_kind="file",
+            direct=True,
+        )
+
+        self.assertEqual(normal_artifact, resolved)
+        self.assertTrue(self.service._path_is_relative_to(extended_artifact, output_dir))
+        self.assertEqual([normal_artifact], self.service._iter_artifact_paths(output_dir))
+
     def test_list_runs_collects_metrics_artifacts_and_stats(self) -> None:
         output_dir = self.create_output_bundle("kept_baseline")
         (output_dir / "tracking_contract.v2.json").write_text(

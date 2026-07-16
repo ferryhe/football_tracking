@@ -5,15 +5,15 @@
 - Program status: in_progress
 - Current PR: PR4A · Review Evidence Provisioning
 - Current branch: codex/review-evidence-provisioning
-- Current phase: backend_implementation
-- Checks: fresh branch created from main at 1dd538c; PR4 WIP df709a7 independently reviewed SAFE, fully validated, and backed up at origin/codex/full-production-review-render; heartbeat expanded to seven PRs; architecture and evidence feasibility reviews completed; final independent PR4A specification review COMPLIANT with 0 Critical, 0 Important, and 2 resolved Minor suggestions
-- Blockers: no blocker to implementing the fail-closed PR4A bundle/import shell after final spec re-review. Real qualification remains blocked: current target has 6,406 application candidates and zero confirmed labels; local evidence has one independent match group versus at least three for classifier splitting; current policy contract may require hundreds to more than one thousand independent videos; no qualified bundle or trusted reviewer team exists. Target candidates cannot train or qualify their own model.
-- Next: implement bundle builder/validator and managed backend import fixture-first, then integrate the shared Production/Broadcast UI and run independent specification/code-quality reviews.
+- Current phase: ready_to_submit
+- Checks: fresh branch created from main at 1dd538c; PR4 WIP df709a7 independently reviewed SAFE, fully validated, and backed up at origin/codex/full-production-review-render; heartbeat expanded to seven PRs; all prior and latest PR4A findings have implementation/test remediation; official Python verification passed 1,506 tests with 9 skipped in 326.2 seconds; native unmocked multi-video E2E now uses the documented input/dataset/annotations/predictions/roles/policy layout and spans real training, 1,472 qualification evidence items, frozen-model re-inference, tamper rejection, target inference/policy, bundle/import/activation, review actions, materialization, production recompute, and exact lineage/no-retrain assertions; classifier batch size is capped at 128 in training, replay, inference, low-level prediction, and trajectory consumption, with 128 accepted and 129/10^12 rejected before model/tensor work; frontend passed 322 tests with 94.01% statement, 92.91% branch, 100% function, and 95.91% line coverage; production/test/generated-client TypeScript, Ruff, OpenAPI freshness, git diff, and pnpm workspace/lock checks passed; 390 px Broadcast visual QA has no horizontal overflow
+- Blockers: no PR4A engineering submission blockers remain; final independent specification review is COMPLIANT and final independent code-quality review is APPROVE. Real qualification remains externally blocked by zero target labels, only one independent local match group, no qualified bundle, no immutable config snapshot matching the confirmed digest for the current real run, and no trusted reviewer team; these gaps keep PR4 paused after PR4A and do not authorize a synthetic queue.
+- Next: commit and push the validated PR4A snapshot, open the GitHub pull request, then wait a full 10 minutes after the material push before triaging Copilot/remote feedback and CI.
 - Heartbeat: ACTIVE
 - Heartbeat automation id: production-workflow-multi-pr-heartbeat
 - Heartbeat interval: 15 minutes
 - Heartbeat scope: Continue and report this seven-PR program through PR1, PR2, PR3, PR4A, PR4, PR5, and PR6; then delete the heartbeat and verify removal.
-- Last updated: 2026-07-15 17:55 ET
+- Last updated: 2026-07-15 23:40 ET
 
 ## PR Ledger
 
@@ -22,7 +22,7 @@
 | PR1 | codex/production-workflow-foundation | completed | https://github.com/ferryhe/football_tracking/pull/104 | Final window started 2026-07-15T10:32:54.4422764Z | Merged 2026-07-15T10:43:22Z · ea52548 |
 | PR2 | codex/interactive-field-calibration | completed | https://github.com/ferryhe/football_tracking/pull/105 | Final window completed 2026-07-15T12:29:00.338Z | Merged 2026-07-15T12:29:09Z · c781b34 |
 | PR3 | codex/trial-tuning-and-config-freeze | completed | https://github.com/ferryhe/football_tracking/pull/106 | Completed 2026-07-15T15:46:04Z with no actionable feedback | Merged 2026-07-15T15:46:13Z · 1dd538c |
-| PR4A | codex/review-evidence-provisioning | in_progress_backend_implementation | Pending | Pending | Pending |
+| PR4A | codex/review-evidence-provisioning | ready_to_submit · spec COMPLIANT · quality APPROVE | Pending | Pending | Pending |
 | PR4 | codex/full-production-review-render | paused_waiting_for_qualified_target_queue · WIP df709a7 backed up on origin | Pending | Pending | Pending |
 | PR5 | codex/grouped-production-history | pending | Pending | Pending | Pending |
 | PR6 | codex/production-workflow-cutover | pending | Pending | Pending | Pending |

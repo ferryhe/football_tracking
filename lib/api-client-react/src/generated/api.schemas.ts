@@ -826,6 +826,9 @@ export interface BroadcastOperationRequestState {
   trajectory_generation_id?: string | null;
   target_width?: number | null;
   target_height?: number | null;
+  bundle_id?: string | null;
+  bundle_manifest_sha256?: string | null;
+  retry_from_job_id?: string | null;
   [key: string]: unknown;
 }
 
@@ -834,6 +837,8 @@ export interface BroadcastOperationResultState {
   trajectory_generation_id?: string | null;
   camera_generation_id?: string | null;
   render_generation_id?: string | null;
+  review_evidence_generation_id?: string | null;
+  queue_sha256?: string | null;
   [key: string]: unknown;
 }
 
@@ -880,14 +885,17 @@ export interface BroadcastRunState {
   trajectory_generation_id?: string | null;
   camera_generation_id?: string | null;
   render_generation_id?: string | null;
-  operation?: "recompute" | "render" | null;
+  operation?: "recompute" | "render" | "review_evidence_import" | null;
   operation_status?:
     | "queued"
     | "running"
     | "committing"
+    | "copying"
+    | "validating"
     | "completed"
     | "failed"
     | "cancelled"
+    | "blocked"
     | "metadata_conflict"
     | null;
   operation_report_status?:
@@ -1195,6 +1203,120 @@ export interface BroadcastReviewCandidate {
   decision_reasons?: string[];
   review_kind: string;
   evidence: BroadcastReviewEvidence;
+  [key: string]: unknown;
+}
+
+export type BroadcastReviewEvidenceBundleSummaryStatus =
+  (typeof BroadcastReviewEvidenceBundleSummaryStatus)[keyof typeof BroadcastReviewEvidenceBundleSummaryStatus];
+
+export const BroadcastReviewEvidenceBundleSummaryStatus = {
+  available: "available",
+  not_applicable: "not_applicable",
+  invalid: "invalid",
+} as const;
+
+export interface BroadcastReviewEvidenceRetention {
+  policy: "manual-audit-retention-v1";
+  retain_until: string;
+  automatic_delete: false;
+}
+
+export interface BroadcastReviewEvidenceProvisionerLimits {
+  /** @exclusiveMinimum 0 */
+  max_files: number;
+  /** @exclusiveMinimum 0 */
+  max_bundle_bytes: number;
+  /** @exclusiveMinimum 0 */
+  max_single_file_bytes: number;
+}
+
+export interface BroadcastReviewEvidenceBundleSummary {
+  status: BroadcastReviewEvidenceBundleSummaryStatus;
+  bundle_id?: string | null;
+  bundle_manifest_sha256?: string | null;
+  queue_sha256?: string | null;
+  total_size_bytes?: number | null;
+  required_free_bytes?: number | null;
+  available_free_bytes?: number | null;
+  attempt_quota_bytes?: number | null;
+  capacity_status?: "sufficient" | "insufficient" | null;
+  retention?: BroadcastReviewEvidenceRetention | null;
+  provisioner_limits?: BroadcastReviewEvidenceProvisionerLimits | null;
+  inbox_entry: string;
+  error_code?: string | null;
+  error?: string | null;
+  [key: string]: unknown;
+}
+
+export interface BroadcastReviewEvidenceCapacity {
+  total_size_bytes?: number | null;
+  required_free_bytes?: number | null;
+  available_free_bytes?: number | null;
+  attempt_quota_bytes?: number | null;
+  capacity_status?: "sufficient" | "insufficient" | null;
+  retention?: BroadcastReviewEvidenceRetention | null;
+  provisioner_limits?: BroadcastReviewEvidenceProvisionerLimits | null;
+}
+
+export interface BroadcastReviewEvidenceImportRequest {
+  /**
+   * @minLength 1
+   * @maxLength 96
+   */
+  bundle_id: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  bundle_manifest_sha256: string;
+  retry_from_job_id?: string | null;
+}
+
+export interface BroadcastReviewEvidenceRevokeResponse {
+  run_id: string;
+  status: "revoked";
+  /** @pattern ^review-evidence-[0-9a-f]{24}$ */
+  generation_id: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  queue_sha256: string;
+  revoked_at: string;
+}
+
+export type BroadcastReviewEvidenceStateResponseStatus =
+  (typeof BroadcastReviewEvidenceStateResponseStatus)[keyof typeof BroadcastReviewEvidenceStateResponseStatus];
+
+export const BroadcastReviewEvidenceStateResponseStatus = {
+  not_available: "not_available",
+  available: "available",
+  queued: "queued",
+  copying: "copying",
+  validating: "validating",
+  committing: "committing",
+  ready: "ready",
+  failed: "failed",
+  cancelled: "cancelled",
+  blocked: "blocked",
+} as const;
+
+export interface BroadcastReviewEvidenceStateResponse {
+  run_id: string;
+  status: BroadcastReviewEvidenceStateResponseStatus;
+  active_job_id?: string | null;
+  retry_from_job_id?: string | null;
+  generation_id?: string | null;
+  queue_sha256?: string | null;
+  stage?: string | null;
+  /**
+   * @minimum 0
+   * @maximum 100
+   */
+  progress_percent?: number;
+  blocker_code?: string | null;
+  error_code?: string | null;
+  recovery_action?: string | null;
+  retryable?: boolean;
+  can_cancel?: boolean;
+  bundles?: BroadcastReviewEvidenceBundleSummary[];
+  capacity?: BroadcastReviewEvidenceCapacity | null;
+  blocking_reasons?: string[];
+  message?: string | null;
   [key: string]: unknown;
 }
 
@@ -1679,6 +1801,13 @@ export type DeleteInputVideoParams = {
 
 export type DeleteRunOutputParams = {
   run_id: string;
+};
+
+export type RevokeBroadcastReviewEvidenceParams = {
+  /**
+   * @pattern ^[0-9a-f]{64}$
+   */
+  queue_sha256: string;
 };
 
 export type GetCameraPathParams = {
