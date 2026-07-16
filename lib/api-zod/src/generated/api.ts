@@ -3217,6 +3217,80 @@ export const GetBallAuditReportResponse = zod.object({
 });
 
 /**
+ * @summary Reconfirm Broadcast Config Lineage
+ */
+export const ReconfirmBroadcastConfigLineageParams = zod.object({
+  run_id: zod.coerce.string(),
+});
+
+export const reconfirmBroadcastConfigLineageBodyConfirmedTextSha256RegExp =
+  new RegExp("^[0-9a-f]{64}$");
+export const reconfirmBroadcastConfigLineageBodyExpectedObservedRawSha256RegExp =
+  new RegExp("^[0-9a-f]{64}$");
+export const reconfirmBroadcastConfigLineageBodyOperatorIdMax = 200;
+
+export const reconfirmBroadcastConfigLineageBodyReviewerIdMax = 200;
+
+export const ReconfirmBroadcastConfigLineageBody = zod.object({
+  target_run_id: zod.string().min(1),
+  confirmed_config_name: zod.string().min(1),
+  confirmed_text_sha256: zod
+    .string()
+    .regex(reconfirmBroadcastConfigLineageBodyConfirmedTextSha256RegExp),
+  expected_observed_raw_sha256: zod
+    .string()
+    .regex(reconfirmBroadcastConfigLineageBodyExpectedObservedRawSha256RegExp),
+  workflow_bindings: zod.record(zod.string(), zod.unknown()),
+  operator_id: zod
+    .string()
+    .min(1)
+    .max(reconfirmBroadcastConfigLineageBodyOperatorIdMax),
+  reviewer_id: zod
+    .string()
+    .min(1)
+    .max(reconfirmBroadcastConfigLineageBodyReviewerIdMax),
+});
+
+export const reconfirmBroadcastConfigLineageResponseGenerationIdRegExp =
+  new RegExp("^lineage-[0-9a-f]{24}$");
+export const reconfirmBroadcastConfigLineageResponseManifestSha256RegExp =
+  new RegExp("^[0-9a-f]{64}$");
+export const reconfirmBroadcastConfigLineageResponseConfirmedTextSha256RegExp =
+  new RegExp("^[0-9a-f]{64}$");
+export const reconfirmBroadcastConfigLineageResponseObservedRawSha256RegExp =
+  new RegExp("^[0-9a-f]{64}$");
+export const reconfirmBroadcastConfigLineageResponseCanonicalSnapshotSha256RegExp =
+  new RegExp("^[0-9a-f]{64}$");
+export const reconfirmBroadcastConfigLineageResponseLineageGenerationIdRegExp =
+  new RegExp("^lineage-[0-9a-f]{24}$");
+
+export const ReconfirmBroadcastConfigLineageResponse = zod.object({
+  run_id: zod.string(),
+  status: zod.literal("reconfirmed"),
+  generation_id: zod
+    .string()
+    .regex(reconfirmBroadcastConfigLineageResponseGenerationIdRegExp),
+  manifest_sha256: zod
+    .string()
+    .regex(reconfirmBroadcastConfigLineageResponseManifestSha256RegExp),
+  confirmed_text_sha256: zod
+    .string()
+    .regex(reconfirmBroadcastConfigLineageResponseConfirmedTextSha256RegExp),
+  observed_raw_sha256: zod
+    .string()
+    .regex(reconfirmBroadcastConfigLineageResponseObservedRawSha256RegExp),
+  canonical_snapshot_sha256: zod
+    .string()
+    .regex(
+      reconfirmBroadcastConfigLineageResponseCanonicalSnapshotSha256RegExp,
+    ),
+  lineage_generation_id: zod
+    .string()
+    .regex(reconfirmBroadcastConfigLineageResponseLineageGenerationIdRegExp),
+  historical_raw_snapshot_observed: zod.boolean(),
+});
+
+/**
  * @summary Render Broadcast Hybrid
  */
 export const RenderBroadcastHybridParams = zod.object({
@@ -3393,6 +3467,11 @@ export const getBroadcastReviewEvidenceResponseCapacityOneProvisionerLimitsOneMa
 export const getBroadcastReviewEvidenceResponseCapacityOneProvisionerLimitsOneMaxBundleBytesExclusiveMin = 0;
 
 export const getBroadcastReviewEvidenceResponseCapacityOneProvisionerLimitsOneMaxSingleFileBytesExclusiveMin = 0;
+
+export const getBroadcastReviewEvidenceResponseConfigLineageReconfirmationOneConfirmedTextSha256RegExp =
+  new RegExp("^[0-9a-f]{64}$");
+export const getBroadcastReviewEvidenceResponseConfigLineageReconfirmationOneExpectedObservedRawSha256RegExp =
+  new RegExp("^[0-9a-f]{64}$");
 
 export const GetBroadcastReviewEvidenceResponse = zod.object({
   run_id: zod.string(),
@@ -3624,6 +3703,26 @@ export const GetBroadcastReviewEvidenceResponse = zod.object({
     .optional(),
   blocking_reasons: zod.array(zod.string()).optional(),
   message: zod.union([zod.string(), zod.null()]).optional(),
+  config_lineage_reconfirmation: zod
+    .union([
+      zod.object({
+        target_run_id: zod.string().min(1),
+        confirmed_config_name: zod.string().min(1),
+        confirmed_text_sha256: zod
+          .string()
+          .regex(
+            getBroadcastReviewEvidenceResponseConfigLineageReconfirmationOneConfirmedTextSha256RegExp,
+          ),
+        expected_observed_raw_sha256: zod
+          .string()
+          .regex(
+            getBroadcastReviewEvidenceResponseConfigLineageReconfirmationOneExpectedObservedRawSha256RegExp,
+          ),
+        workflow_bindings: zod.record(zod.string(), zod.unknown()),
+      }),
+      zod.null(),
+    ])
+    .optional(),
 });
 
 /**

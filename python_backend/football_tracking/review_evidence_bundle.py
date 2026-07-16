@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import shutil
 import stat
 import tempfile
@@ -16,7 +17,10 @@ from football_tracking.api.broadcast_api import (
     collect_review_evidence_paths,
     validate_review_queue_bindings,
 )
-from football_tracking.candidate_annotations import validate_candidate_annotation_package
+from football_tracking.candidate_annotations import (
+    ADJUDICATION_QUEUE_NAME,
+    validate_candidate_annotation_package,
+)
 from football_tracking.candidate_classifier import (
     ClassifierError,
     validate_candidate_classifier_package,
@@ -25,11 +29,22 @@ from football_tracking.selective_policy import (
     SelectivePolicyError,
     validate_selective_policy_application_binding,
     validate_selective_policy_evidence_binding,
+    validate_target_audit_application_binding,
+)
+from football_tracking.target_finite_population import (
+    TargetFinitePopulationError,
+    build_target_qualified_application,
+    capture_target_prelabel_commitment_file,
+    capture_target_prelabel_registry,
+    validate_target_label_non_leakage,
+    validate_target_prelabel_commitment_bytes,
 )
 
 BUNDLE_MANIFEST_NAME = "review_evidence_bundle.v1.json"
 BUNDLE_SCHEMA_VERSION = "1.0"
 BUNDLE_ARTIFACT_TYPE = "broadcast_review_evidence_bundle"
+TARGET_BUNDLE_SCHEMA_VERSION = "2.0"
+TARGET_BUNDLE_ARTIFACT_TYPE = "target_finite_population_review_evidence_bundle"
 REQUIRED_PACKAGE_NAMES = frozenset({"model_development", "policy_qualification", "target_application"})
 MAX_REVIEW_WINDOWS = 30
 ACTIVATION_MANIFEST_NAME = "review_evidence_activation.v1.json"
@@ -41,6 +56,43 @@ MAX_BUNDLE_FILES = 100_000
 MAX_BUNDLE_BYTES = 256 * 1024 * 1024 * 1024
 MAX_SINGLE_FILE_BYTES = 64 * 1024 * 1024 * 1024
 MAX_JSON_BYTES = 256 * 1024 * 1024
+_MODEL_DEVELOPMENT_REQUIRED_ARTIFACTS = frozenset(
+    {
+        "dataset",
+        "source_contract",
+        "vote_ledger",
+        "annotation_resolution",
+        "resolved_contract",
+    }
+)
+_POLICY_QUALIFICATION_REQUIRED_ARTIFACTS = frozenset(
+    {
+        "dataset",
+        "policy",
+        "source_contract",
+        "vote_ledger",
+        "annotation_resolution",
+        "resolved_contract",
+        "predictions",
+        "decisions",
+        "policy_roles",
+    }
+)
+_NON_TARGET_OPTIONAL_ARTIFACTS = frozenset(
+    {"previous_vote_ledger"}
+)
+_TARGET_APPLICATION_REQUIRED_ARTIFACTS = frozenset(
+    {"dataset", "predictions", "decisions", "source", "root_contract"}
+)
+_TARGET_SCOPE_REQUIRED_ARTIFACTS = frozenset(
+    {
+        "target_audit_plan",
+        "target_audit_labels",
+        "target_qualification",
+        "target_frozen_application",
+        "target_prelabel_commitment",
+    }
+)
 
 
 class ReviewEvidenceBundleError(ValueError):
@@ -198,8 +250,9 @@ def build_review_evidence_bundle(
             else:
                 raise ReviewEvidenceBundleError("unsafe_bundle_path", f"unsupported bundle entry: {relative}")
         manifest = dict(draft)
-        manifest["schema_version"] = BUNDLE_SCHEMA_VERSION
-        manifest["artifact_type"] = BUNDLE_ARTIFACT_TYPE
+        target_scope = draft.get("qualification_scope") == "target_finite_population"
+        manifest["schema_version"] = TARGET_BUNDLE_SCHEMA_VERSION if target_scope else BUNDLE_SCHEMA_VERSION
+        manifest["artifact_type"] = TARGET_BUNDLE_ARTIFACT_TYPE if target_scope else BUNDLE_ARTIFACT_TYPE
         _stage_bundle_root_queue(source, staging, manifest)
         reconciliation = _build_reconciliation(staging, manifest)
         target_root = _require_safe_relative_path(
@@ -239,7 +292,16 @@ def validate_review_evidence_bundle(bundle_dir: Path) -> ValidatedReviewEvidence
     manifest_path = _contained_nonlink_file(root, root / BUNDLE_MANIFEST_NAME, "bundle manifest")
     initial_manifest_sha256 = sha256_file(manifest_path)
     manifest = _load_json(manifest_path, "bundle manifest")
-    if manifest.get("schema_version") != BUNDLE_SCHEMA_VERSION or manifest.get("artifact_type") != BUNDLE_ARTIFACT_TYPE:
+    target_scope = (
+        manifest.get("schema_version") == TARGET_BUNDLE_SCHEMA_VERSION
+        and manifest.get("artifact_type") == TARGET_BUNDLE_ARTIFACT_TYPE
+        and manifest.get("qualification_scope") == "target_finite_population"
+    )
+    if not target_scope and (
+        manifest.get("schema_version") != BUNDLE_SCHEMA_VERSION
+        or manifest.get("artifact_type") != BUNDLE_ARTIFACT_TYPE
+        or "qualification_scope" in manifest
+    ):
         raise ReviewEvidenceBundleError("invalid_bundle_envelope", "invalid review evidence bundle envelope")
     bundle_id = _required_text(manifest.get("bundle_id"), "bundle_id")
     if not bundle_id.startswith("review-evidence-") or len(bundle_id) > 96:
@@ -258,6 +320,45 @@ def validate_review_evidence_bundle(bundle_dir: Path) -> ValidatedReviewEvidence
         raise ReviewEvidenceBundleError("target_binding_mismatch", "manual review window limits disagree")
     for field in ("action_signal_binding_sha256", "confirmed_config_sha256", "profile_digest"):
         _required_sha256(target.get(field), f"target.{field}")
+    config_lineage = target.get("config_lineage")
+    if config_lineage is not None:
+        config_lineage = _required_mapping(config_lineage, "target.config_lineage")
+        if set(config_lineage) != {
+            "confirmed_text_sha256",
+            "observed_raw_sha256",
+            "canonical_snapshot_sha256",
+            "generation_id",
+            "manifest_sha256",
+            "historical_raw_snapshot_observed",
+        }:
+            raise ReviewEvidenceBundleError(
+                "target_binding_mismatch",
+                "target config-lineage projection fields are invalid",
+            )
+        for field in (
+            "confirmed_text_sha256",
+            "observed_raw_sha256",
+            "canonical_snapshot_sha256",
+            "manifest_sha256",
+        ):
+            _required_sha256(config_lineage.get(field), f"target.config_lineage.{field}")
+        generation_id = _required_text(
+            config_lineage.get("generation_id"),
+            "target.config_lineage.generation_id",
+        )
+        if re.fullmatch(r"lineage-[0-9a-f]{24}", generation_id) is None:
+            raise ReviewEvidenceBundleError(
+                "target_binding_mismatch",
+                "target config-lineage generation id is invalid",
+            )
+        if (
+            config_lineage.get("confirmed_text_sha256") != target.get("confirmed_config_sha256")
+            or config_lineage.get("historical_raw_snapshot_observed") is not False
+        ):
+            raise ReviewEvidenceBundleError(
+                "target_binding_mismatch",
+                "target config-lineage projection does not reconcile",
+            )
     _required_text(target.get("quality_profile"), "target.quality_profile")
     if target.get("provisioner_version") != PROVISIONER_VERSION:
         raise ReviewEvidenceBundleError("invalid_provisioner_version", "unsupported review evidence provisioner")
@@ -301,6 +402,11 @@ def validate_review_evidence_bundle(bundle_dir: Path) -> ValidatedReviewEvidence
     package_descriptors: dict[str, Mapping[str, Any]] = {}
     for name in sorted(REQUIRED_PACKAGE_NAMES):
         descriptor = _required_mapping(packages[name], f"packages.{name}")
+        _validate_package_descriptor_schema(
+            name,
+            descriptor,
+            target_scope=target_scope,
+        )
         package_descriptors[name] = descriptor
         root_path = _require_safe_relative_path(descriptor.get("root"), f"packages.{name}.root")
         if root_path == PurePosixPath("."):
@@ -322,7 +428,6 @@ def validate_review_evidence_bundle(bundle_dir: Path) -> ValidatedReviewEvidence
                 raise ReviewEvidenceBundleError(
                     "invalid_package_partition", f"package roots overlap: {left_name} and {right_name}"
                 )
-
     development_dataset_sha256 = _required_sha256(
         package_descriptors["model_development"].get("dataset_sha256"),
         "packages.model_development.dataset_sha256",
@@ -344,6 +449,19 @@ def validate_review_evidence_bundle(bundle_dir: Path) -> ValidatedReviewEvidence
             "qualification_application_not_independent",
             "model development, policy qualification, and target application require distinct dataset snapshots",
         )
+    for package_name, descriptor in package_descriptors.items():
+        for path_field in sorted(descriptor):
+            if path_field == "manifest_path" or not path_field.endswith("_path"):
+                continue
+            artifact_name = path_field.removesuffix("_path")
+            _validate_declared_file(
+                inventory,
+                package_roots[package_name],
+                descriptor,
+                path_field=path_field,
+                sha_field=f"{artifact_name}_sha256",
+                label=f"packages.{package_name}.{artifact_name}",
+            )
     _validate_declared_file(
         inventory,
         package_roots["model_development"],
@@ -455,15 +573,22 @@ def validate_review_evidence_bundle(bundle_dir: Path) -> ValidatedReviewEvidence
     )
     version_inputs = _required_mapping(policy_payload.get("version_inputs"), "selective policy version_inputs")
     qualification = _required_mapping(version_inputs.get("qualification"), "selective policy qualification")
-    if (
-        policy_payload.get("artifact_type") != "selective_policy"
-        or policy_payload.get("status") != "qualified"
-        or qualification.get("qualified") is not True
-        or qualification.get("policy_status") != "qualified"
-        or qualification.get("acceptance_status") != "qualified"
-        or qualification.get("calibration_certified") is not True
-        or qualification.get("audit_qualified") is not True
-    ):
+    legacy_policy_qualified = (
+        policy_payload.get("artifact_type") == "selective_policy"
+        and policy_payload.get("status") == "qualified"
+        and qualification.get("qualified") is True
+        and qualification.get("policy_status") == "qualified"
+        and qualification.get("acceptance_status") == "qualified"
+        and qualification.get("calibration_certified") is True
+        and qualification.get("audit_qualified") is True
+    )
+    target_policy_frozen = (
+        target_scope
+        and policy_payload.get("artifact_type") == "selective_policy"
+        and policy_payload.get("status") in {"qualified", "review_only"}
+        and qualification.get("policy_status") == policy_payload.get("status")
+    )
+    if not legacy_policy_qualified and not target_policy_frozen:
         raise ReviewEvidenceBundleError(
             "selective_policy_not_qualified",
             "the frozen selective policy does not carry qualified calibration and audit evidence",
@@ -516,17 +641,84 @@ def validate_review_evidence_bundle(bundle_dir: Path) -> ValidatedReviewEvidence
         )
         for name in ("dataset", "predictions", "decisions", "root_contract")
     }
-    try:
-        application_validation = validate_selective_policy_application_binding(
-            _require_inventory_path(inventory, policy_relative, "qualified selective policy"),
-            application_paths["decisions"],
-            application_paths["predictions"],
-            application_paths["dataset"],
-            application_paths["root_contract"],
-            model_manifest_path,
-        )
-    except (ClassifierError, OSError, ValueError, SelectivePolicyError) as exc:
-        raise ReviewEvidenceBundleError("invalid_target_application_evidence", str(exc)) from exc
+    if target_scope:
+        target_paths = {
+            name: _declared_file_path(
+                inventory,
+                package_roots["target_application"],
+                application,
+                path_field=f"{name}_path",
+                sha_field=f"{name}_sha256",
+                label=f"packages.target_application.{name}",
+            )
+            for name in (
+                "target_audit_plan",
+                "target_audit_labels",
+                "target_qualification",
+                "target_frozen_application",
+                "target_prelabel_commitment",
+            )
+        }
+        try:
+            frozen_validation = validate_target_audit_application_binding(
+                _require_inventory_path(inventory, policy_relative, "frozen selective policy"),
+                target_paths["target_frozen_application"],
+                application_paths["predictions"],
+                application_paths["dataset"],
+                application_paths["root_contract"],
+                model_manifest_path,
+            )
+            expected_application = build_target_qualified_application(
+                _load_json(target_paths["target_frozen_application"], "target frozen application"),
+                _load_json(target_paths["target_audit_plan"], "target audit plan"),
+                target_paths["target_audit_labels"],
+                _load_json(target_paths["target_qualification"], "target qualification"),
+                commitment_path=target_paths["target_prelabel_commitment"],
+            )
+            declared_application = _load_json(
+                application_paths["decisions"],
+                "target qualified application",
+            )
+            if (
+                frozen_validation.get("application")
+                != _load_json(target_paths["target_frozen_application"], "target frozen application")
+                or expected_application != declared_application
+            ):
+                raise TargetFinitePopulationError(
+                    "target qualified application does not match its frozen audit evidence"
+                )
+            application_validation = {
+                "candidate_ids": sorted(row["candidate_id"] for row in declared_application["decisions"]),
+                "candidate_population_sha256": _canonical_sha256(
+                    [
+                        {
+                            "candidate_id": row["candidate_id"],
+                            "candidate_fingerprint": row["candidate_fingerprint"],
+                        }
+                        for row in declared_application["decisions"]
+                    ]
+                ),
+            }
+        except (
+            ClassifierError,
+            OSError,
+            ValueError,
+            SelectivePolicyError,
+            TargetFinitePopulationError,
+        ) as exc:
+            raise ReviewEvidenceBundleError("invalid_target_application_evidence", str(exc)) from exc
+    else:
+        try:
+            application_validation = validate_selective_policy_application_binding(
+                _require_inventory_path(inventory, policy_relative, "qualified selective policy"),
+                application_paths["decisions"],
+                application_paths["predictions"],
+                application_paths["dataset"],
+                application_paths["root_contract"],
+                model_manifest_path,
+            )
+        except (ClassifierError, OSError, ValueError, SelectivePolicyError) as exc:
+            raise ReviewEvidenceBundleError("invalid_target_application_evidence", str(exc)) from exc
     if (
         application_validation.get("candidate_population_sha256") != declared_population_sha256
         or len(application_validation.get("candidate_ids", [])) != declared_population_count
@@ -564,6 +756,36 @@ def validate_review_evidence_bundle(bundle_dir: Path) -> ValidatedReviewEvidence
     except (BroadcastApiError, OSError, ValueError) as exc:
         raise ReviewEvidenceBundleError("invalid_review_queue_bindings", str(exc)) from exc
     bindings = _required_mapping(queue.get("bindings"), "review queue bindings")
+    if target_scope:
+        required_qualification_bindings = {
+            "qualification_dataset",
+            "qualification_predictions",
+            "qualification_decisions",
+        }
+        if not required_qualification_bindings.issubset(bindings):
+            raise ReviewEvidenceBundleError(
+                "target_binding_mismatch",
+                "target review queue qualification bindings must be complete",
+            )
+        queue_target_bindings = _required_mapping(
+            queue.get("target_bindings"),
+            "review queue target_bindings",
+        )
+        expected_target_projection = {
+            "target_run_id": target["run_id"],
+            "source_sha256": source_sha256,
+            "root_contract_sha256": root_contract_sha256,
+            "candidate_population_sha256": declared_population_sha256,
+            "confirmed_config_sha256": target["confirmed_config_sha256"],
+        }
+        if any(
+            queue_target_bindings.get(name) != value
+            for name, value in expected_target_projection.items()
+        ):
+            raise ReviewEvidenceBundleError(
+                "target_binding_mismatch",
+                "review queue exact target bindings do not match the server target manifest",
+            )
     binding_packages = {
         "model": "model_development",
         "training_report": "model_development",
@@ -580,6 +802,11 @@ def validate_review_evidence_bundle(bundle_dir: Path) -> ValidatedReviewEvidence
         "decisions": "target_application",
         "review_timing": "target_application",
         "contract": "target_application",
+        "target_audit_plan": "target_application",
+        "target_audit_labels": "target_application",
+        "target_qualification": "target_application",
+        "target_frozen_application": "target_application",
+        "target_prelabel_commitment": "target_application",
     }
     for binding_name, raw_binding in bindings.items():
         binding = _required_mapping(raw_binding, f"review queue bindings.{binding_name}")
@@ -621,6 +848,26 @@ def validate_review_evidence_bundle(bundle_dir: Path) -> ValidatedReviewEvidence
             raise ReviewEvidenceBundleError(
                 "target_binding_mismatch", f"review queue {binding_name} binding does not match the declared package"
             )
+    non_target_consumer_paths = _declared_non_target_consumer_paths(
+        inventory,
+        package_roots,
+        package_descriptors,
+        bindings,
+        binding_packages,
+    )
+    if target_scope:
+        try:
+            validate_target_label_non_leakage(
+                target_paths["target_audit_labels"],
+                non_target_consumer_paths,
+                plan_path=target_paths["target_audit_plan"],
+                commitment_path=target_paths["target_prelabel_commitment"],
+            )
+        except (OSError, ValueError, TargetFinitePopulationError) as exc:
+            raise ReviewEvidenceBundleError(
+                "invalid_target_application_evidence",
+                str(exc),
+            ) from exc
     _validate_queue_coverage(queue, max_windows=max_windows)
     reconciliation_descriptor = _required_mapping(manifest.get("reconciliation"), "reconciliation")
     reconciliation_relative = _require_safe_relative_path(reconciliation_descriptor.get("path"), "reconciliation.path")
@@ -735,6 +982,119 @@ def discover_review_evidence_bundles(
     return results
 
 
+def _validate_trusted_prelabel_commitment_anchor(
+    bundle: ValidatedReviewEvidenceBundle,
+    trusted_root: Path | None,
+) -> None:
+    if bundle.manifest.get("artifact_type") != TARGET_BUNDLE_ARTIFACT_TYPE:
+        return
+    if trusted_root is None:
+        raise ReviewEvidenceBundleError(
+            "prelabel_commitment_anchor_required",
+            "target review evidence requires the canonical server pre-label commitment registry",
+        )
+    queue = _load_json(bundle.queue_path, "target review queue")
+    bindings = _required_mapping(queue.get("bindings"), "target review queue bindings")
+
+    def bound_artifact(name: str) -> Path:
+        descriptor = _required_mapping(
+            bindings.get(name),
+            f"target review queue bindings.{name}",
+        )
+        relative = _require_safe_relative_path(
+            descriptor.get("path"),
+            f"target review queue bindings.{name}.path",
+        )
+        artifact = _contained_nonlink_file(
+            bundle.root,
+            bundle.root.joinpath(*relative.parts),
+            name.replace("_", " "),
+        )
+        if sha256_file(artifact) != _required_sha256(
+            descriptor.get("sha256"),
+            f"target review queue bindings.{name}.sha256",
+        ):
+            raise ReviewEvidenceBundleError(
+                "prelabel_commitment_mismatch",
+                f"target review queue {name} changed after bundle validation",
+            )
+        return artifact
+
+    plan_path = bound_artifact("target_audit_plan")
+    bundled_record = bound_artifact("target_prelabel_commitment")
+    plan = _load_json(plan_path, "target audit plan")
+    descriptor = _required_mapping(
+        plan.get("external_commitment"),
+        "target audit plan external commitment",
+    )
+    record_name = _required_text(
+        descriptor.get("record_name"),
+        "target audit plan external commitment record_name",
+    )
+    if Path(record_name).name != record_name:
+        raise ReviewEvidenceBundleError(
+            "prelabel_commitment_mismatch",
+            "target audit plan commitment record name is unsafe",
+        )
+    try:
+        anchored_record_bytes, registry_records = capture_target_prelabel_registry(
+            trusted_root,
+            record_name=record_name,
+        )
+    except FileNotFoundError as exc:
+        raise ReviewEvidenceBundleError(
+            "prelabel_commitment_anchor_missing",
+            "the exact target commitment was not pre-registered in the canonical server registry",
+        ) from exc
+    except (OSError, TargetFinitePopulationError) as exc:
+        raise ReviewEvidenceBundleError(
+            "unsafe_bundle_path",
+            f"canonical server pre-label commitment registry is unsafe: {exc}",
+        ) from exc
+    try:
+        bundled_record_bytes = capture_target_prelabel_commitment_file(bundled_record)
+    except (OSError, TargetFinitePopulationError) as exc:
+        raise ReviewEvidenceBundleError(
+            "unsafe_bundle_path",
+            f"bundled target pre-label commitment is unsafe: {exc}",
+        ) from exc
+    if anchored_record_bytes != bundled_record_bytes:
+        raise ReviewEvidenceBundleError(
+            "prelabel_commitment_conflict",
+            "bundle commitment differs from the canonical server pre-label commitment",
+        )
+    try:
+        validate_target_prelabel_commitment_bytes(
+            plan,
+            anchored_record_bytes,
+            record_name=record_name,
+        )
+    except (OSError, ValueError, TargetFinitePopulationError) as exc:
+        raise ReviewEvidenceBundleError(
+            "prelabel_commitment_mismatch",
+            f"canonical target pre-label commitment is invalid: {exc}",
+        ) from exc
+    target_key = _required_sha256(
+        descriptor.get("target_key"),
+        "target audit plan external commitment target_key",
+    )
+    for candidate_name, candidate_bytes in registry_records:
+        if candidate_name == record_name:
+            continue
+        try:
+            candidate_payload = json.loads(candidate_bytes.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise ReviewEvidenceBundleError(
+                "prelabel_commitment_conflict",
+                "canonical server pre-label commitment registry contains an invalid record",
+            ) from exc
+        if isinstance(candidate_payload, dict) and candidate_payload.get("target_key") == target_key:
+            raise ReviewEvidenceBundleError(
+                "prelabel_commitment_conflict",
+                "canonical server registry contains duplicate commitments for one target",
+            )
+
+
 def activate_review_evidence_bundle(
     bundle_dir: Path,
     output_dir: Path,
@@ -749,10 +1109,15 @@ def activate_review_evidence_bundle(
     on_stage: Callable[[str, float], None] | None = None,
     on_commit_started: Callable[[], None] | None = None,
     minimum_free_bytes: int = 0,
+    trusted_prelabel_commitment_root: Path | None = None,
 ) -> ActivatedReviewEvidence:
     """Stage, re-hash, and atomically activate a qualified review queue for one run."""
 
     bundle = validate_review_evidence_bundle(bundle_dir)
+    _validate_trusted_prelabel_commitment_anchor(
+        bundle,
+        trusted_prelabel_commitment_root,
+    )
     if expected_bundle_id is not None and bundle.manifest.get("bundle_id") != expected_bundle_id:
         raise ReviewEvidenceBundleError("bundle_identity_mismatch", "requested bundle id changed before copy")
     if expected_bundle_manifest_sha256 is not None and bundle.bundle_sha256 != _required_sha256(
@@ -1268,6 +1633,66 @@ def _require_inventory_path(inventory: Mapping[str, Mapping[str, Any]], relative
     return path
 
 
+def _validate_package_descriptor_schema(
+    package_name: str,
+    descriptor: Mapping[str, Any],
+    *,
+    target_scope: bool,
+) -> None:
+    if package_name == "model_development":
+        required_artifacts = _MODEL_DEVELOPMENT_REQUIRED_ARTIFACTS
+        optional_artifacts = _NON_TARGET_OPTIONAL_ARTIFACTS
+    elif package_name == "policy_qualification":
+        required_artifacts = _POLICY_QUALIFICATION_REQUIRED_ARTIFACTS
+        optional_artifacts = _NON_TARGET_OPTIONAL_ARTIFACTS
+    elif package_name == "target_application":
+        required_artifacts = _TARGET_APPLICATION_REQUIRED_ARTIFACTS | (
+            _TARGET_SCOPE_REQUIRED_ARTIFACTS if target_scope else frozenset()
+        )
+        optional_artifacts = frozenset()
+    else:
+        raise ReviewEvidenceBundleError(
+            "invalid_package_descriptor",
+            f"unsupported package descriptor: {package_name}",
+        )
+
+    required_fields = {"root", "manifest_path"}
+    for artifact_name in required_artifacts:
+        required_fields.update(
+            {f"{artifact_name}_path", f"{artifact_name}_sha256"}
+        )
+    optional_fields = {
+        field
+        for artifact_name in optional_artifacts
+        for field in (
+            f"{artifact_name}_path",
+            f"{artifact_name}_sha256",
+        )
+    }
+    actual_fields = set(descriptor)
+    missing = sorted(required_fields - actual_fields)
+    unknown = sorted(actual_fields - required_fields - optional_fields)
+    if missing or unknown:
+        raise ReviewEvidenceBundleError(
+            "invalid_package_descriptor",
+            (
+                f"packages.{package_name} fields are not exact; "
+                f"missing={missing!r}, unknown={unknown!r}"
+            ),
+        )
+    for artifact_name in optional_artifacts:
+        path_field = f"{artifact_name}_path"
+        sha_field = f"{artifact_name}_sha256"
+        if (path_field in descriptor) != (sha_field in descriptor):
+            raise ReviewEvidenceBundleError(
+                "invalid_package_descriptor",
+                (
+                    f"packages.{package_name}.{artifact_name} "
+                    "path/hash must appear together"
+                ),
+            )
+
+
 def _validate_declared_file(
     inventory: Mapping[str, Mapping[str, Any]],
     package_root: PurePosixPath,
@@ -1328,6 +1753,884 @@ def _optional_declared_file_path(
         path_field=path_field,
         sha_field=sha_field,
         label=label,
+    )
+
+
+def _declared_non_target_consumer_paths(
+    inventory: Mapping[str, Mapping[str, Any]],
+    package_roots: Mapping[str, PurePosixPath],
+    package_descriptors: Mapping[str, Mapping[str, Any]],
+    bindings: Mapping[str, Any],
+    binding_packages: Mapping[str, str],
+) -> list[Path]:
+    package_names = ("model_development", "policy_qualification")
+    declared: dict[str, str] = {}
+    authority_dependencies: dict[str, set[str]] = {
+        package_name: set() for package_name in package_names
+    }
+    authority_manifests: list[tuple[str, PurePosixPath]] = []
+    for package_name in package_names:
+        package_root = package_roots[package_name]
+        descriptor = package_descriptors[package_name]
+        for field, raw_value in descriptor.items():
+            if not isinstance(field, str) or not field.endswith("_path"):
+                continue
+            relative = _require_safe_relative_path(
+                raw_value,
+                f"packages.{package_name}.{field}",
+            )
+            if not relative.is_relative_to(package_root):
+                raise ReviewEvidenceBundleError(
+                    "invalid_package_partition",
+                    f"packages.{package_name}.{field} is outside its package root",
+                )
+            _require_inventory_path(
+                inventory,
+                relative,
+                f"packages.{package_name}.{field}",
+            )
+            if field != "manifest_path":
+                artifact_name = field.removesuffix("_path")
+                _validate_declared_file(
+                    inventory,
+                    package_root,
+                    descriptor,
+                    path_field=field,
+                    sha_field=f"{artifact_name}_sha256",
+                    label=f"packages.{package_name}.{artifact_name}",
+                )
+            declared[relative.as_posix()] = package_name
+            if field in {
+                "manifest_path",
+                "dataset_path",
+                "annotation_resolution_path",
+            }:
+                authority_manifests.append((package_name, relative))
+    for binding_name, raw_binding in bindings.items():
+        package_name = binding_packages.get(binding_name)
+        if package_name not in package_names:
+            continue
+        binding = _required_mapping(raw_binding, f"review queue bindings.{binding_name}")
+        relative = _require_safe_relative_path(
+            binding.get("path"),
+            f"review queue bindings.{binding_name}.path",
+        )
+        if not relative.is_relative_to(package_roots[package_name]):
+            raise ReviewEvidenceBundleError(
+                "invalid_package_partition",
+                f"review queue binding {binding_name} is outside {package_name}",
+            )
+        _require_inventory_path(
+            inventory,
+            relative,
+            f"review queue bindings.{binding_name}.path",
+        )
+        declared[relative.as_posix()] = package_name
+        if binding_name in {"model", "policy"}:
+            authority_manifests.append((package_name, relative))
+
+    for package_name, manifest_relative in sorted(set(authority_manifests)):
+        manifest_path = _require_inventory_path(
+            inventory,
+            manifest_relative,
+            f"{package_name} authority manifest",
+        )
+        payload = _load_json(manifest_path, f"{package_name} authority manifest")
+        if payload.get("artifact_type") == "candidate_annotation_resolution":
+            adjudication_relative = _validated_annotation_adjudication_queue(
+                payload,
+                resolution_relative=manifest_relative,
+                package_root=package_roots[package_name],
+                inventory=inventory,
+                label=f"{package_name} annotation resolution",
+            )
+            if adjudication_relative is not None:
+                declared[adjudication_relative.as_posix()] = package_name
+        for (
+            semantic_key,
+            raw_path,
+            raw_sha256,
+            allow_declared_relocation_on_mismatch,
+        ) in _extract_authority_manifest_paths(
+            payload,
+            label=f"{package_name} authority manifest",
+        ):
+            candidate, dependency_package = _resolve_declared_manifest_path(
+                raw_path,
+                raw_sha256=raw_sha256,
+                semantic_key=semantic_key,
+                declaring_manifest=manifest_relative,
+                declaring_package=package_name,
+                package_root=package_roots[package_name],
+                package_roots=package_roots,
+                inventory=inventory,
+                already_declared=declared,
+                allow_declared_relocation_on_mismatch=(
+                    allow_declared_relocation_on_mismatch
+                ),
+                label=f"{package_name} authority manifest path",
+            )
+            declared[candidate.as_posix()] = dependency_package
+            authority_dependencies[package_name].add(dependency_package)
+
+    allowed_dependencies = {
+        "model_development": {"model_development"},
+        "policy_qualification": {"policy_qualification", "model_development"},
+    }
+    for package_name, dependencies in authority_dependencies.items():
+        if not dependencies <= allowed_dependencies[package_name]:
+            raise ReviewEvidenceBundleError(
+                "invalid_package_partition",
+                f"{package_name} has forbidden authority dependencies: {sorted(dependencies)!r}",
+            )
+
+    actual = {
+        relative
+        for relative in inventory
+        if any(
+            PurePosixPath(relative).is_relative_to(package_roots[package_name])
+            for package_name in package_names
+        )
+    }
+    unexplained = sorted(actual - set(declared))
+    if unexplained:
+        preview = unexplained[:10]
+        raise ReviewEvidenceBundleError(
+            "undeclared_non_target_artifact",
+            (
+                "non-target package contains files outside its validated manifest/binding "
+                f"lineage: {preview!r} ({len(unexplained)} total)"
+            ),
+        )
+    return [
+        _require_inventory_path(
+            inventory,
+            PurePosixPath(relative),
+            "declared non-target consumer artifact",
+        )
+        for relative in sorted(declared)
+    ]
+
+
+def _validated_annotation_adjudication_queue(
+    resolution: Mapping[str, Any],
+    *,
+    resolution_relative: PurePosixPath,
+    package_root: PurePosixPath,
+    inventory: Mapping[str, Mapping[str, Any]],
+    label: str,
+) -> PurePosixPath | None:
+    linked_artifacts = resolution.get("linked_artifacts")
+    fixed_candidates = [
+        PurePosixPath(relative)
+        for relative in inventory
+        if PurePosixPath(relative).is_relative_to(package_root)
+        and PurePosixPath(relative).name == ADJUDICATION_QUEUE_NAME
+    ]
+    if linked_artifacts is None:
+        if fixed_candidates:
+            raise ReviewEvidenceBundleError(
+                "invalid_authority_manifest",
+                f"{label} has an independent adjudication queue without a validated link",
+            )
+        return None
+    linked_artifacts = _closed_authority_mapping(
+        linked_artifacts,
+        required={"adjudication_queue", "derived_tracking_contract"},
+        allowed={"adjudication_queue", "derived_tracking_contract"},
+        label=f"{label}.linked_artifacts",
+    )
+    if linked_artifacts.get("adjudication_queue") != ADJUDICATION_QUEUE_NAME:
+        raise ReviewEvidenceBundleError(
+            "invalid_authority_manifest",
+            (
+                f"{label}.linked_artifacts.adjudication_queue must be "
+                f"{ADJUDICATION_QUEUE_NAME!r}"
+            ),
+        )
+    adjudication_relative = resolution_relative.parent / ADJUDICATION_QUEUE_NAME
+    if (
+        not adjudication_relative.is_relative_to(package_root)
+        or len(fixed_candidates) != 1
+        or set(fixed_candidates) != {adjudication_relative}
+    ):
+        raise ReviewEvidenceBundleError(
+            "invalid_authority_manifest",
+            f"{label} adjudication queue is missing, duplicated, or outside its package",
+        )
+    adjudication_path = _require_inventory_path(
+        inventory,
+        adjudication_relative,
+        f"{label} adjudication queue",
+    )
+    queue = _load_json(adjudication_path, f"{label} adjudication queue")
+    queue = _closed_authority_mapping(
+        queue,
+        required={
+            "schema_version",
+            "artifact_type",
+            "source_resolution",
+            "candidate_count",
+            "candidates",
+        },
+        allowed={
+            "schema_version",
+            "artifact_type",
+            "source_resolution",
+            "candidate_count",
+            "candidates",
+        },
+        label=f"{label}.adjudication_queue",
+    )
+    embedded_candidates = resolution.get("adjudication_queue")
+    if not isinstance(embedded_candidates, list):
+        raise ReviewEvidenceBundleError(
+            "invalid_authority_manifest",
+            f"{label}.adjudication_queue must be a list",
+        )
+    candidate_count = queue.get("candidate_count")
+    if (
+        queue.get("schema_version") != "1.0"
+        or queue.get("artifact_type")
+        != "candidate_annotation_adjudication_queue"
+        or queue.get("source_resolution") != resolution_relative.name
+        or isinstance(candidate_count, bool)
+        or not isinstance(candidate_count, int)
+        or candidate_count != len(embedded_candidates)
+        or queue.get("candidates") != embedded_candidates
+    ):
+        raise ReviewEvidenceBundleError(
+            "invalid_authority_manifest",
+            f"{label} adjudication queue does not exactly match its resolution",
+        )
+    return adjudication_relative
+
+
+def _extract_authority_manifest_paths(
+    value: Mapping[str, Any],
+    *,
+    label: str,
+) -> list[tuple[str, str, str, bool]]:
+    artifact_type = value.get("artifact_type")
+    allowed_path_locations: set[tuple[str | int, ...]] = set()
+    if artifact_type == "candidate_classifier_model":
+        paths = _extract_model_manifest_paths(
+            value,
+            label=label,
+            allowed_path_locations=allowed_path_locations,
+        )
+    elif artifact_type == "selective_policy":
+        paths = _extract_policy_manifest_paths(
+            value,
+            label=label,
+            allowed_path_locations=allowed_path_locations,
+        )
+    elif artifact_type == "candidate_dataset":
+        paths = _extract_dataset_manifest_paths(
+            value,
+            label=label,
+            allowed_path_locations=allowed_path_locations,
+        )
+    elif artifact_type == "candidate_annotation_resolution":
+        paths = _extract_annotation_manifest_paths(
+            value,
+            label=label,
+            allowed_path_locations=allowed_path_locations,
+        )
+    else:
+        raise ReviewEvidenceBundleError(
+            "invalid_authority_manifest",
+            f"{label} has unsupported artifact_type {artifact_type!r}",
+        )
+    _reject_unknown_authority_path_fields(
+        value,
+        allowed_path_locations,
+        label=label,
+    )
+    return paths
+
+
+def _extract_model_manifest_paths(
+    value: Mapping[str, Any],
+    *,
+    label: str,
+    allowed_path_locations: set[tuple[str | int, ...]],
+) -> list[tuple[str, str, str, bool]]:
+    allowed_fields = {
+        "schema_version",
+        "artifact_type",
+        "model_version",
+        "weights_path",
+        "weights_sha256",
+        "training_report_path",
+        "training_report_sha256",
+        "class_order",
+        "supported_classes",
+        "supported_mask",
+        "architecture",
+        "input_contract",
+        "preprocessing",
+        "state_shapes",
+        "calibration",
+        "data_binding",
+        "training_config",
+        "seed",
+        "code_sha256",
+        "runtime",
+    }
+    manifest = _closed_authority_mapping(
+        value,
+        required={
+            "artifact_type",
+            "weights_path",
+            "weights_sha256",
+            "training_report_path",
+            "training_report_sha256",
+        },
+        allowed=allowed_fields,
+        label=label,
+    )
+    paths = []
+    for semantic_key in ("weights", "training_report"):
+        path_field = f"{semantic_key}_path"
+        sha_field = f"{semantic_key}_sha256"
+        allowed_path_locations.add((path_field,))
+        paths.append(
+            (
+                semantic_key,
+                _required_text(manifest.get(path_field), f"{label}.{path_field}"),
+                _required_sha256(manifest.get(sha_field), f"{label}.{sha_field}"),
+                False,
+            )
+        )
+    return paths
+
+
+def _extract_policy_manifest_paths(
+    value: Mapping[str, Any],
+    *,
+    label: str,
+    allowed_path_locations: set[tuple[str | int, ...]],
+) -> list[tuple[str, str, str, bool]]:
+    policy = _closed_authority_mapping(
+        value,
+        required={"artifact_type"},
+        allowed={
+            "schema_version",
+            "artifact_type",
+            "generated_at",
+            "status",
+            "policy_version",
+            "version_inputs",
+            "inferential_unit",
+            "evaluation_cohorts",
+            "qualification_evidence",
+            "decisions_artifact",
+            "thresholds",
+            "rules",
+            "targets",
+            "lineage",
+            "calibration",
+            "audit",
+        },
+        label=label,
+    )
+    paths: list[tuple[str, str, str, bool]] = []
+    decisions_artifact = policy.get("decisions_artifact")
+    if decisions_artifact is not None:
+        descriptor = _closed_authority_mapping(
+            decisions_artifact,
+            required={"path", "sha256"},
+            allowed={"path", "sha256", "content_sha256"},
+            label=f"{label}.decisions_artifact",
+        )
+        allowed_path_locations.add(("decisions_artifact", "path"))
+        paths.append(
+            _authority_descriptor_path(
+                "decisions",
+                descriptor,
+                label=f"{label}.decisions_artifact",
+            )
+        )
+
+    version_inputs = policy.get("version_inputs")
+    if version_inputs is not None:
+        version_inputs = _closed_authority_mapping(
+            version_inputs,
+            required=set(),
+            allowed={
+                "schema_version",
+                "version_algorithm",
+                "algorithm_versions",
+                "inferential_unit",
+                "evaluation_cohorts",
+                "config",
+                "qualification",
+                "qualification_evidence",
+                "thresholds",
+                "rules",
+                "targets",
+                "lineage",
+                "calibration_sha256",
+                "audit_sha256",
+                "decisions_content_sha256",
+            },
+            label=f"{label}.version_inputs",
+        )
+        paths.extend(
+            _extract_policy_lineage_paths(
+                version_inputs.get("lineage"),
+                location=("version_inputs", "lineage"),
+                label=f"{label}.version_inputs.lineage",
+                allowed_path_locations=allowed_path_locations,
+            )
+        )
+    paths.extend(
+        _extract_policy_lineage_paths(
+            policy.get("lineage"),
+            location=("lineage",),
+            label=f"{label}.lineage",
+            allowed_path_locations=allowed_path_locations,
+        )
+    )
+    return paths
+
+
+def _extract_policy_lineage_paths(
+    raw_lineage: Any,
+    *,
+    location: tuple[str | int, ...],
+    label: str,
+    allowed_path_locations: set[tuple[str | int, ...]],
+) -> list[tuple[str, str, str, bool]]:
+    if raw_lineage is None:
+        return []
+    descriptor_names = {
+        "predictions",
+        "dataset_manifest",
+        "annotation_resolution",
+        "resolved_tracking_contract",
+        "model_manifest",
+        "training_report",
+        "model_weights",
+        "policy_roles",
+    }
+    lineage = _closed_authority_mapping(
+        raw_lineage,
+        required=set(),
+        allowed=descriptor_names
+        | {"source_contract_sha256", "dataset_version", "model_version"},
+        label=label,
+    )
+    paths = []
+    for descriptor_name in sorted(descriptor_names):
+        raw_descriptor = lineage.get(descriptor_name)
+        if raw_descriptor is None:
+            continue
+        descriptor = _closed_authority_mapping(
+            raw_descriptor,
+            required={"path", "sha256"},
+            allowed={"path", "sha256"},
+            label=f"{label}.{descriptor_name}",
+        )
+        allowed_path_locations.add((*location, descriptor_name, "path"))
+        paths.append(
+            _authority_descriptor_path(
+                descriptor_name,
+                descriptor,
+                label=f"{label}.{descriptor_name}",
+            )
+        )
+    return paths
+
+
+def _extract_dataset_manifest_paths(
+    value: Mapping[str, Any],
+    *,
+    label: str,
+    allowed_path_locations: set[tuple[str | int, ...]],
+) -> list[tuple[str, str, str, bool]]:
+    dataset = _closed_authority_mapping(
+        value,
+        required={"artifact_type", "sources", "samples"},
+        allowed={
+            "schema_version",
+            "artifact_type",
+            "builder_version",
+            "dataset_version",
+            "preprocessing_runtime",
+            "contract",
+            "source_mapping",
+            "frame_offsets",
+            "tensor_contract",
+            "summary",
+            "sources",
+            "samples",
+            "purpose",
+        },
+        label=label,
+    )
+    paths: list[tuple[str, str, str, bool]] = []
+    for descriptor_name in ("contract", "source_mapping"):
+        raw_descriptor = dataset.get(descriptor_name)
+        if raw_descriptor is None:
+            continue
+        if isinstance(raw_descriptor, Mapping) and set(raw_descriptor) == {
+            "sha256"
+        }:
+            _required_sha256(
+                raw_descriptor.get("sha256"),
+                f"{label}.{descriptor_name}.sha256",
+            )
+            continue
+        descriptor = _closed_authority_mapping(
+            raw_descriptor,
+            required={"path", "sha256"},
+            allowed={"schema_version", "path", "sha256"},
+            label=f"{label}.{descriptor_name}",
+        )
+        allowed_path_locations.add((descriptor_name, "path"))
+        paths.append(
+            _authority_descriptor_path(
+                descriptor_name,
+                descriptor,
+                label=f"{label}.{descriptor_name}",
+            )
+        )
+
+    sources = dataset.get("sources")
+    if not isinstance(sources, list):
+        raise ReviewEvidenceBundleError(
+            "invalid_authority_manifest",
+            f"{label}.sources must be a list",
+        )
+    source_fields = {
+        "path",
+        "sha256",
+        "width",
+        "height",
+        "frame_count",
+        "fps",
+        "variant_id",
+        "group_id",
+        "temporal_group",
+        "split_group",
+        "candidate_ids",
+        "requested_decode_mode",
+        "effective_decode_mode",
+    }
+    for index, raw_source in enumerate(sources):
+        source = _closed_authority_mapping(
+            raw_source,
+            required=set(),
+            allowed=source_fields,
+            label=f"{label}.sources[{index}]",
+        )
+        if ("path" in source) != ("sha256" in source):
+            raise ReviewEvidenceBundleError(
+                "invalid_authority_manifest",
+                f"{label}.sources[{index}] path/hash must appear together",
+            )
+        if "path" in source:
+            allowed_path_locations.add(("sources", index, "path"))
+            paths.append(
+                _authority_descriptor_path(
+                    f"source_{index}",
+                    source,
+                    label=f"{label}.sources[{index}]",
+                )
+            )
+
+    samples = dataset.get("samples")
+    if not isinstance(samples, list):
+        raise ReviewEvidenceBundleError(
+            "invalid_authority_manifest",
+            f"{label}.samples must be a list",
+        )
+    sample_fields = {
+        "sample_id",
+        "candidate_id",
+        "detector_source",
+        "frame_index",
+        "frames",
+        "bbox_requested_pixels",
+        "bbox_clamped_pixels",
+        "bbox_normalized",
+        "confidence",
+        "crop_windows",
+        "variant_id",
+        "group_id",
+        "temporal_group",
+        "split_group",
+        "artifacts",
+    }
+    artifact_names = {"tight_tensor", "context_tensor", "review_montage"}
+    for sample_index, raw_sample in enumerate(samples):
+        sample = _closed_authority_mapping(
+            raw_sample,
+            required={"candidate_id"},
+            allowed=sample_fields,
+            label=f"{label}.samples[{sample_index}]",
+        )
+        raw_artifacts = sample.get("artifacts")
+        if raw_artifacts is None:
+            continue
+        artifacts = _closed_authority_mapping(
+            raw_artifacts,
+            required=artifact_names,
+            allowed=artifact_names,
+            label=f"{label}.samples[{sample_index}].artifacts",
+        )
+        for artifact_name in sorted(artifact_names):
+            descriptor = _closed_authority_mapping(
+                artifacts[artifact_name],
+                required={"path", "sha256"},
+                allowed={
+                    "path",
+                    "sha256",
+                    "size_bytes",
+                    "shape",
+                    "dtype",
+                    "color_space",
+                },
+                label=(
+                    f"{label}.samples[{sample_index}]."
+                    f"artifacts.{artifact_name}"
+                ),
+            )
+            allowed_path_locations.add(
+                ("samples", sample_index, "artifacts", artifact_name, "path")
+            )
+            paths.append(
+                _authority_descriptor_path(
+                    f"sample_{sample_index}_{artifact_name}",
+                    descriptor,
+                    label=(
+                        f"{label}.samples[{sample_index}]."
+                        f"artifacts.{artifact_name}"
+                    ),
+                )
+            )
+    return paths
+
+
+def _extract_annotation_manifest_paths(
+    value: Mapping[str, Any],
+    *,
+    label: str,
+    allowed_path_locations: set[tuple[str | int, ...]],
+) -> list[tuple[str, str, str, bool]]:
+    annotation = _closed_authority_mapping(
+        value,
+        required={"artifact_type"},
+        allowed={
+            "schema_version",
+            "artifact_type",
+            "qualification_scope",
+            "training_eligible",
+            "reusable",
+            "source_contract",
+            "source_vote_ledger",
+            "source_dataset_manifest",
+            "evidence_hash_policy",
+            "linked_artifacts",
+            "derived_tracking_contract",
+            "min_confidence",
+            "summary",
+            "ledger_header",
+            "vote_history",
+            "resolutions",
+            "adjudication_queue",
+        },
+        label=label,
+    )
+    paths: list[tuple[str, str, str, bool]] = []
+    descriptors = {
+        "source_contract": {"path", "sha256"},
+        "source_vote_ledger": {
+            "path",
+            "sha256",
+            "schema_version",
+            "contract_sha256",
+            "dataset_version",
+            "evidence_manifest_sha256",
+        },
+        "source_dataset_manifest": {
+            "path",
+            "sha256",
+            "dataset_version",
+            "sample_count",
+        },
+        "derived_tracking_contract": {"path", "sha256"},
+    }
+    for descriptor_name, allowed_fields in descriptors.items():
+        raw_descriptor = annotation.get(descriptor_name)
+        if raw_descriptor is None:
+            continue
+        descriptor = _closed_authority_mapping(
+            raw_descriptor,
+            required={"path", "sha256"},
+            allowed=allowed_fields,
+            label=f"{label}.{descriptor_name}",
+        )
+        allowed_path_locations.add((descriptor_name, "path"))
+        paths.append(
+            _authority_descriptor_path(
+                descriptor_name,
+                descriptor,
+                label=f"{label}.{descriptor_name}",
+                allow_declared_relocation_on_mismatch=(
+                    descriptor_name == "source_contract"
+                ),
+            )
+        )
+    linked_artifacts = annotation.get("linked_artifacts")
+    if linked_artifacts is not None:
+        _closed_authority_mapping(
+            linked_artifacts,
+            required={"adjudication_queue", "derived_tracking_contract"},
+            allowed={"adjudication_queue", "derived_tracking_contract"},
+            label=f"{label}.linked_artifacts",
+        )
+    return paths
+
+
+def _authority_descriptor_path(
+    semantic_key: str,
+    descriptor: Mapping[str, Any],
+    *,
+    label: str,
+    allow_declared_relocation_on_mismatch: bool = False,
+) -> tuple[str, str, str, bool]:
+    return (
+        semantic_key,
+        _required_text(descriptor.get("path"), f"{label}.path"),
+        _required_sha256(descriptor.get("sha256"), f"{label}.sha256"),
+        allow_declared_relocation_on_mismatch,
+    )
+
+
+def _closed_authority_mapping(
+    value: Any,
+    *,
+    required: set[str],
+    allowed: set[str],
+    label: str,
+) -> Mapping[str, Any]:
+    if not isinstance(value, Mapping):
+        raise ReviewEvidenceBundleError(
+            "invalid_authority_manifest",
+            f"{label} must be an object",
+        )
+    fields = set(value)
+    missing = sorted(required - fields)
+    unknown = sorted(
+        (str(field) for field in fields - allowed),
+    )
+    if missing or unknown:
+        raise ReviewEvidenceBundleError(
+            "invalid_authority_manifest",
+            f"{label} fields are not exact; missing={missing!r}, unknown={unknown!r}",
+        )
+    return value
+
+
+def _reject_unknown_authority_path_fields(
+    value: Any,
+    allowed_locations: set[tuple[str | int, ...]],
+    *,
+    label: str,
+    location: tuple[str | int, ...] = (),
+) -> None:
+    if isinstance(value, Mapping):
+        for raw_key, child in value.items():
+            key = str(raw_key)
+            child_location = (*location, key)
+            if (key == "path" or key.endswith("_path")) and child_location not in allowed_locations:
+                raise ReviewEvidenceBundleError(
+                    "invalid_authority_manifest",
+                    f"{label} contains an unrecognized path field at {child_location!r}",
+                )
+            _reject_unknown_authority_path_fields(
+                child,
+                allowed_locations,
+                label=label,
+                location=child_location,
+            )
+    elif isinstance(value, list):
+        for index, child in enumerate(value):
+            _reject_unknown_authority_path_fields(
+                child,
+                allowed_locations,
+                label=label,
+                location=(*location, index),
+            )
+
+
+def _resolve_declared_manifest_path(
+    raw_path: str,
+    *,
+    raw_sha256: str | None,
+    semantic_key: str,
+    declaring_manifest: PurePosixPath,
+    declaring_package: str,
+    package_root: PurePosixPath,
+    package_roots: Mapping[str, PurePosixPath],
+    inventory: Mapping[str, Mapping[str, Any]],
+    already_declared: Mapping[str, str],
+    label: str,
+    allow_declared_relocation_on_mismatch: bool = False,
+) -> tuple[PurePosixPath, str]:
+    relative = _require_safe_relative_path(raw_path, label)
+    candidates = (
+        declaring_manifest.parent / relative,
+        package_root / relative,
+    )
+    for candidate in candidates:
+        normalized = PurePosixPath(*candidate.parts)
+        if normalized.is_relative_to(package_root) and normalized.as_posix() in inventory:
+            if raw_sha256 is not None and inventory[normalized.as_posix()]["sha256"] != _required_sha256(
+                raw_sha256,
+                f"{label} {semantic_key}_sha256",
+            ):
+                if allow_declared_relocation_on_mismatch:
+                    continue
+                raise ReviewEvidenceBundleError(
+                    "undeclared_non_target_artifact",
+                    f"{label} hash does not match its inventoried file",
+                )
+            return normalized, declaring_package
+    if raw_sha256 is None:
+        raise ReviewEvidenceBundleError(
+            "undeclared_non_target_artifact",
+            (
+                f"{label} cannot use a relocated authoritative binding without "
+                f"{semantic_key}_sha256"
+            ),
+        )
+    expected_sha256 = _required_sha256(
+        raw_sha256,
+        f"{label} {semantic_key}_sha256",
+    )
+    allowed_dependency_packages = {declaring_package}
+    if declaring_package == "policy_qualification":
+        allowed_dependency_packages.add("model_development")
+    authoritative_matches = [
+        (PurePosixPath(candidate), dependency_package)
+        for candidate, dependency_package in already_declared.items()
+        if dependency_package in allowed_dependency_packages
+        and PurePosixPath(candidate).is_relative_to(package_roots[dependency_package])
+        and PurePosixPath(candidate).name == relative.name
+        and inventory[candidate]["sha256"] == expected_sha256
+    ]
+    if len(authoritative_matches) == 1:
+        return authoritative_matches[0]
+    raise ReviewEvidenceBundleError(
+        "undeclared_non_target_artifact",
+        (
+            f"{label} does not resolve to an inventoried file or one unique "
+            f"allowed already-authoritative binding for {declaring_package}"
+        ),
     )
 
 

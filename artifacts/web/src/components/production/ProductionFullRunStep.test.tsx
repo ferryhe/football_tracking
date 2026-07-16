@@ -1303,6 +1303,52 @@ describe("ProductionFullRunStep", () => {
     expect(api.submitReview).not.toHaveBeenCalled();
   });
 
+  it("hosts the shared config-lineage reconfirmation action in Production", async () => {
+    const input = await fixture();
+    const existing = await trackingState(input);
+    const parent = parentAt(existing, "needs_review");
+    const onReconfirmConfigLineage = vi.fn();
+    const state: BroadcastReviewEvidenceState = {
+      status: "blocked",
+      blockerCode: "confirmed_config_lineage_reconfirmation_required",
+      recoveryAction: "Reconfirm the production configuration.",
+      configLineageReconfirmation: {
+        targetRunId: parent.run_id,
+        confirmedConfigName: input.confirmedConfig.name,
+        confirmedTextSha256: input.confirmedConfig.sha256,
+        expectedObservedRawSha256: "c".repeat(64),
+        workflowBindings: { workflow_id: input.confirmedConfig.workflow_id },
+      },
+    };
+    api.runData = parent;
+    api.controller = controllerFor({
+      parent,
+      state: "needs_review",
+      review: reviewResponse([]),
+    });
+    api.reviewEvidence = reviewEvidenceFor(state, {
+      stepProps: { state, onReconfirmConfigLineage },
+    });
+    const view = renderStep(input, existing.state, parent.run_id, true);
+
+    await screen.findByTestId("broadcast-review-evidence-step");
+    await view.user.type(screen.getByLabelText("Operator ID"), "operator-1");
+    await view.user.type(
+      screen.getByLabelText("Independent reviewer ID"),
+      "reviewer-1",
+    );
+    await view.user.click(
+      screen.getByRole("button", {
+        name: "Reconfirm production configuration",
+      }),
+    );
+
+    expect(onReconfirmConfigLineage).toHaveBeenCalledWith({
+      operatorId: "operator-1",
+      reviewerId: "reviewer-1",
+    });
+  });
+
   it("fails closed when ready evidence does not match the selective review queue", async () => {
     const input = await fixture();
     const existing = await trackingState(input);

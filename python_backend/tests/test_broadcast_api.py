@@ -31,6 +31,7 @@ from football_tracking.api.broadcast_api import (
     publish_broadcast_facade,
     publish_json_exclusive,
     validate_broadcast_quality_report,
+    validate_review_queue_activation,
     validate_review_queue_bindings,
 )
 from football_tracking.api.dependencies import get_service
@@ -320,6 +321,245 @@ class BroadcastRequestSchemaTests(unittest.TestCase):
 
 
 class BroadcastReviewBindingTests(unittest.TestCase):
+    @staticmethod
+    def _write_target_finite_queue_fixture(
+        root: Path,
+    ) -> tuple[Path, dict[str, Any], list[dict[str, Any]]]:
+        queue_path = root / "selective_review_queue.v1.json"
+        base_binding_names = (
+            "review_timing",
+            "policy",
+            "decisions",
+            "model",
+            "training_report",
+            "model_weights",
+            "dataset",
+            "predictions",
+            "contract",
+            "annotation_resolution",
+            "resolved_tracking_contract",
+            "policy_roles",
+        )
+        qualification_binding_names = (
+            "qualification_dataset",
+            "qualification_predictions",
+            "qualification_decisions",
+        )
+        target_binding_names = (
+            "target_audit_plan",
+            "target_audit_labels",
+            "target_qualification",
+            "target_frozen_application",
+            "target_prelabel_commitment",
+        )
+        bindings: dict[str, dict[str, str]] = {}
+        for name in base_binding_names + qualification_binding_names + target_binding_names:
+            artifact_path = root / f"{name}.json"
+            payload = (
+                {"artifact_type": "candidate_dataset", "samples": []}
+                if name == "dataset"
+                else {"artifact_type": name}
+            )
+            _write_json(artifact_path, payload)
+            bindings[name] = {
+                "path": artifact_path.name,
+                "sha256": _sha256(artifact_path),
+            }
+        queue = {
+            "schema_version": "1.0",
+            "artifact_type": "target_finite_population_review_queue",
+            "qualification_scope": "target_finite_population",
+            "review_item_count": 1,
+            "bindings": bindings,
+            "items": [
+                {
+                    "review_item_id": "window-1",
+                    "candidates": [
+                        {
+                            "candidate_id": "candidate-1",
+                            "candidate_fingerprint": "e" * 64,
+                            "evidence": {"sha256": "f" * 64},
+                        }
+                    ],
+                }
+            ],
+        }
+        _write_json(queue_path, queue)
+        actions = [
+            BroadcastReviewAction(
+                action_id="action-1",
+                review_item_id="window-1",
+                candidate_id="candidate-1",
+                reviewer_id="operator",
+                action="mark_unknown",
+            ).model_dump(mode="json")
+        ]
+        return queue_path, queue, actions
+
+    def test_target_finite_population_action_envelope_binds_target_artifacts(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            queue_path, queue, actions = self._write_target_finite_queue_fixture(
+                Path(temp_dir)
+            )
+            qualification_binding_names = (
+                "qualification_dataset",
+                "qualification_predictions",
+                "qualification_decisions",
+            )
+            target_binding_names = (
+                "target_audit_plan",
+                "target_audit_labels",
+                "target_qualification",
+                "target_frozen_application",
+                "target_prelabel_commitment",
+            )
+
+            envelope = build_review_action_envelope(queue_path, actions)
+
+            bindings = envelope["actions"][0]["bindings"]
+            for name in qualification_binding_names + target_binding_names:
+                self.assertEqual(queue["bindings"][name]["sha256"], bindings[f"{name}_sha256"])
+
+            del queue["bindings"]["target_audit_plan"]
+            del queue["bindings"]["target_audit_labels"]
+            _write_json(queue_path, queue)
+            with self.assertRaises(BroadcastApiError) as caught:
+                build_review_action_envelope(queue_path, actions)
+            self.assertEqual(
+                "target review queue target audit bindings must be complete: "
+                "['target_audit_labels', 'target_audit_plan']",
+                str(caught.exception),
+            )
+
+    def test_target_finite_population_api_rejects_each_missing_qualification_binding(
+        self,
+    ) -> None:
+        qualification_binding_names = (
+            "qualification_dataset",
+            "qualification_predictions",
+            "qualification_decisions",
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir).resolve()
+            queue_path, queue, actions = self._write_target_finite_queue_fixture(root)
+            for missing_name in qualification_binding_names:
+                removed = queue["bindings"].pop(missing_name)
+                _write_json(queue_path, queue)
+                try:
+                    for boundary_name, boundary in (
+                        (
+                            "core_validation",
+                            lambda: validate_review_queue_bindings(
+                                queue_path,
+                                trusted_root=root,
+                            ),
+                        ),
+                        (
+                            "action_envelope",
+                            lambda: build_review_action_envelope(queue_path, actions),
+                        ),
+                        (
+                            "activation",
+                            lambda: validate_review_queue_activation(root, queue_path),
+                        ),
+                    ):
+                        with (
+                            self.subTest(
+                                missing_name=missing_name,
+                                boundary=boundary_name,
+                            ),
+                            mock.patch(
+                                "football_tracking.api.broadcast_api._validate_target_review_queue_chain"
+                            ),
+                            self.assertRaisesRegex(
+                                BroadcastApiError,
+                                "qualification|incomplete",
+                            ),
+                        ):
+                            boundary()
+                finally:
+                    queue["bindings"][missing_name] = removed
+                    _write_json(queue_path, queue)
+
+    def test_target_finite_population_api_rejects_absent_qualification_binding_set(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir).resolve()
+            queue_path, queue, actions = self._write_target_finite_queue_fixture(root)
+            for name in (
+                "qualification_dataset",
+                "qualification_predictions",
+                "qualification_decisions",
+            ):
+                del queue["bindings"][name]
+            _write_json(queue_path, queue)
+
+            for boundary_name, boundary in (
+                (
+                    "core_validation",
+                    lambda: validate_review_queue_bindings(
+                        queue_path,
+                        trusted_root=root,
+                    ),
+                ),
+                (
+                    "action_envelope",
+                    lambda: build_review_action_envelope(queue_path, actions),
+                ),
+                (
+                    "activation",
+                    lambda: validate_review_queue_activation(root, queue_path),
+                ),
+            ):
+                with (
+                    self.subTest(boundary=boundary_name),
+                    mock.patch(
+                        "football_tracking.api.broadcast_api._validate_target_review_queue_chain"
+                    ),
+                    self.assertRaisesRegex(
+                        BroadcastApiError,
+                        "qualification|incomplete",
+                    ),
+                ):
+                    boundary()
+
+    def test_legacy_queue_still_allows_complete_optional_qualification_bindings(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir).resolve()
+            queue_path, queue, actions = self._write_target_finite_queue_fixture(root)
+            queue["artifact_type"] = "selective_review_queue"
+            del queue["qualification_scope"]
+            for name in (
+                "target_audit_plan",
+                "target_audit_labels",
+                "target_qualification",
+                "target_frozen_application",
+                "target_prelabel_commitment",
+            ):
+                del queue["bindings"][name]
+            _write_json(queue_path, queue)
+
+            validated_queue, _ = validate_review_queue_bindings(
+                queue_path,
+                trusted_root=root,
+            )
+            envelope = build_review_action_envelope(queue_path, actions)
+
+            self.assertEqual(queue, validated_queue)
+            action_bindings = envelope["actions"][0]["bindings"]
+            for name in (
+                "qualification_dataset",
+                "qualification_predictions",
+                "qualification_decisions",
+            ):
+                self.assertEqual(
+                    queue["bindings"][name]["sha256"],
+                    action_bindings[f"{name}_sha256"],
+                )
+
     def test_server_builds_exact_queue_and_candidate_bindings(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

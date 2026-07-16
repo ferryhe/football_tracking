@@ -556,10 +556,24 @@ export const translations = {
           "Cancellation is unavailable after commit starts.",
         retry: "Retry import",
         retrying: "Retrying import…",
+        reconfirmConfigTitle: "Reconfirm production configuration",
+        reconfirmConfigDescription:
+          "Review the current server-authored configuration identity, then record two independent identities.",
+        targetRun: "Target run",
+        confirmedConfig: "Confirmed configuration",
+        confirmedTextSha256: "Confirmed canonical SHA-256",
+        observedRawSha256: "Current observed SHA-256",
+        workflowIdentity: "Workflow identity",
+        operatorId: "Operator ID",
+        reviewerId: "Independent reviewer ID",
+        identitiesMustDiffer: "Operator and reviewer must be different people.",
+        reconfirmConfig: "Reconfirm production configuration",
+        reconfirmingConfig: "Reconfirming production configuration…",
         loading: "Loading review-evidence state…",
         loadFailed: "Could not load the review-evidence state.",
         prepareFailed: "Could not prepare the review evidence.",
         cancelFailed: "Could not cancel the review-evidence import.",
+        reconfirmFailed: "Could not reconfirm the production configuration.",
         ambiguousBundleRecovery:
           "Keep exactly one compatible bundle in the managed inbox, then refresh.",
         insufficientCapacityRecovery:
@@ -576,6 +590,10 @@ export const translations = {
               "Retry the same review-evidence bundle and terminal job.",
             inspect_or_replace_review_evidence_generation:
               "Inspect or replace the invalid review-evidence generation.",
+            reconfirm_production_config:
+              "Review and reconfirm the current production configuration.",
+            inspect_production_config_lineage:
+              "Inspect the production configuration lineage before retrying.",
           })[action] ?? action,
       },
       setup: {
@@ -1602,10 +1620,24 @@ export const translations = {
         cancelUnavailableDuringCommit: "提交开始后不能再取消。",
         retry: "重试导入",
         retrying: "正在重试导入…",
+        reconfirmConfigTitle: "重新确认生产配置",
+        reconfirmConfigDescription:
+          "请核对服务端生成的当前配置身份，并填写两个相互独立的操作身份。",
+        targetRun: "目标任务",
+        confirmedConfig: "已确认配置",
+        confirmedTextSha256: "已确认规范文本 SHA-256",
+        observedRawSha256: "当前原始文件 SHA-256",
+        workflowIdentity: "工作流身份",
+        operatorId: "操作人 ID",
+        reviewerId: "独立复核人 ID",
+        identitiesMustDiffer: "操作人与复核人必须是不同人员。",
+        reconfirmConfig: "重新确认生产配置",
+        reconfirmingConfig: "正在重新确认生产配置…",
         loading: "正在加载复核证据状态…",
         loadFailed: "无法加载复核证据状态。",
         prepareFailed: "无法准备复核证据。",
         cancelFailed: "无法取消复核证据导入。",
+        reconfirmFailed: "无法重新确认生产配置。",
         ambiguousBundleRecovery:
           "请在受管收件箱中只保留一个兼容证据包，然后刷新。",
         insufficientCapacityRecovery:
@@ -1620,6 +1652,9 @@ export const translations = {
             retry_review_evidence_import: "请使用同一证据包和终态子任务重试。",
             inspect_or_replace_review_evidence_generation:
               "请检查或替换无效的复核证据代次。",
+            reconfirm_production_config: "请核对并重新确认当前生产配置。",
+            inspect_production_config_lineage:
+              "请先检查生产配置谱系，再尝试恢复。",
           })[action] ?? action,
       },
       setup: {

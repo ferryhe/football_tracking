@@ -39,6 +39,7 @@ let cancelMutation: Record<string, unknown>;
 let evidenceQuery: Record<string, unknown>;
 let importMutation: Record<string, unknown>;
 let operationQuery: Record<string, unknown>;
+let reconfirmMutation: Record<string, unknown>;
 let reviewQuery: Record<string, unknown>;
 
 vi.mock("wouter", () => ({
@@ -138,6 +139,7 @@ vi.mock("@workspace/api-client-react", () => ({
     error: null,
     isLoading: false,
   }),
+  useReconfirmBroadcastConfigLineage: () => reconfirmMutation,
   useRecomputeBroadcastTrajectory: idleMutation,
   useRenderBroadcastHybrid: idleMutation,
   useSubmitBroadcastReviewActions: idleMutation,
@@ -165,6 +167,7 @@ beforeEach(() => {
   host.prepare.mockResolvedValue({ run_id: "import-job-1" });
   host.cancel.mockResolvedValue(undefined);
   host.refresh.mockResolvedValue(undefined);
+  reconfirmMutation = idleMutation();
   evidenceQuery = {
     data: {
       run_id: "parent-run",

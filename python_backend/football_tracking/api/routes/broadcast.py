@@ -1,9 +1,13 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import JSONResponse
 
 from football_tracking.api.dependencies import get_service
 from football_tracking.api.schemas import (
+    BroadcastConfigLineageBlockerResponse,
+    BroadcastConfigLineageReconfirmationRequest,
+    BroadcastConfigLineageReconfirmationResponse,
     BroadcastOperationResponse,
     BroadcastRenderRequest,
     BroadcastReviewActionsRequest,
@@ -15,8 +19,47 @@ from football_tracking.api.schemas import (
     BroadcastTrajectoryRecomputeRequest,
 )
 from football_tracking.api.service import ApiService
+from football_tracking.config_lineage import ConfigLineageError
 
 router = APIRouter()
+
+
+@router.post(
+    "/runs/{run_id}/broadcast/config-lineage-reconfirmation",
+    response_model=BroadcastConfigLineageReconfirmationResponse,
+    responses={
+        404: {"description": "Run not found"},
+        409: {
+            "model": BroadcastConfigLineageBlockerResponse,
+            "description": "Stable config-lineage blocker",
+        },
+    },
+)
+def reconfirm_broadcast_config_lineage(
+    run_id: str,
+    request: BroadcastConfigLineageReconfirmationRequest,
+    service: ApiService = Depends(get_service),
+) -> BroadcastConfigLineageReconfirmationResponse | JSONResponse:
+    try:
+        return BroadcastConfigLineageReconfirmationResponse(
+            **service.reconfirm_broadcast_config_lineage(run_id, request.model_dump(mode="json"))
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=f"Run not found: {run_id}") from exc
+    except ConfigLineageError as exc:
+        return JSONResponse(
+            status_code=409,
+            content={
+                "status": "blocked",
+                "blocker_code": exc.code,
+                "detail": str(exc),
+                "retryable": False,
+            },
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @router.get(

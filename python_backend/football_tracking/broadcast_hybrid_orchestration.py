@@ -111,6 +111,18 @@ _VALIDATED_CLASSIFIER_GENERATIONS: dict[Path, tuple[tuple[str, str], ...]] = {}
 _VALIDATED_TRAJECTORY_GENERATIONS: dict[Path, tuple[tuple[str, str], ...]] = {}
 _VALIDATED_CAMERA_GENERATIONS: dict[Path, tuple[tuple[str, str], ...]] = {}
 _VALIDATED_RENDER_GENERATIONS: dict[Path, tuple[tuple[str, str], ...]] = {}
+_QUALIFICATION_BINDING_NAMES = {
+    "qualification_dataset",
+    "qualification_predictions",
+    "qualification_decisions",
+}
+_TARGET_AUDIT_BINDING_NAMES = {
+    "target_audit_plan",
+    "target_audit_labels",
+    "target_qualification",
+    "target_frozen_application",
+    "target_prelabel_commitment",
+}
 
 
 class BroadcastHybridOrchestrationError(RuntimeError):
@@ -132,8 +144,7 @@ def preflight_recompute_reviewed_trajectory(run_dir: Path) -> dict[str, Any]:
     actions_path = run_dir / "review_decisions.json"
     queue, queue_sha256 = _load_json_snapshot(queue_path, "selective review queue")
     actions, actions_sha256 = _load_json_snapshot(actions_path, "review decisions")
-    if queue.get("artifact_type") != "selective_review_queue":
-        raise BroadcastHybridOrchestrationError("selective review queue artifact_type is invalid")
+    _validate_queue_envelope(queue)
     if actions.get("artifact_type") != "selective_review_actions":
         raise BroadcastHybridOrchestrationError("review decisions artifact_type is invalid")
     raw_actions = actions.get("actions")
@@ -218,8 +229,7 @@ def recompute_reviewed_trajectory(
     actions_path = run_dir / "review_decisions.json"
     queue, queue_sha256 = _load_json_snapshot(queue_path, "selective review queue")
     actions, actions_sha256 = _load_json_snapshot(actions_path, "review decisions")
-    if queue.get("artifact_type") != "selective_review_queue":
-        raise BroadcastHybridOrchestrationError("selective review queue artifact_type is invalid")
+    _validate_queue_envelope(queue)
     if actions.get("artifact_type") != "selective_review_actions":
         raise BroadcastHybridOrchestrationError("review decisions artifact_type is invalid")
     raw_actions = actions.get("actions")
@@ -266,6 +276,11 @@ def recompute_reviewed_trajectory(
             qualification_dataset_manifest_path=bound.get("qualification_dataset"),
             qualification_predictions_path=bound.get("qualification_predictions"),
             qualification_decisions_path=bound.get("qualification_decisions"),
+            target_audit_plan_path=bound.get("target_audit_plan"),
+            target_audit_labels_path=bound.get("target_audit_labels"),
+            target_qualification_path=bound.get("target_qualification"),
+            target_frozen_application_path=bound.get("target_frozen_application"),
+            target_prelabel_commitment_path=bound.get("target_prelabel_commitment"),
         )
         review_created = True
     _raise_if_cancelled(should_cancel)
@@ -748,6 +763,7 @@ def rollback_uncommitted_final_public_artifacts(run_dir: Path) -> None:
 
 
 def _resolve_queue_bindings(queue_path: Path, queue: dict[str, Any]) -> dict[str, Path]:
+    target_finite_queue = _validate_queue_envelope(queue)
     raw_bindings = _required_mapping(queue.get("bindings"), "queue.bindings")
     required = {
         "review_timing",
@@ -763,17 +779,27 @@ def _resolve_queue_bindings(queue_path: Path, queue: dict[str, Any]) -> dict[str
         "resolved_tracking_contract",
         "policy_roles",
     }
-    qualification = {
-        "qualification_dataset",
-        "qualification_predictions",
-        "qualification_decisions",
-    }
-    present_qualification = set(raw_bindings) & qualification
-    if present_qualification and present_qualification != qualification:
+    present_qualification = set(raw_bindings) & _QUALIFICATION_BINDING_NAMES
+    if present_qualification and present_qualification != _QUALIFICATION_BINDING_NAMES:
         raise BroadcastHybridOrchestrationError(
             "selective review queue qualification binding keys are incomplete"
         )
+    if target_finite_queue and present_qualification != _QUALIFICATION_BINDING_NAMES:
+        raise BroadcastHybridOrchestrationError(
+            "target finite-population queue qualification bindings must be complete"
+        )
     required |= present_qualification
+    present_target = set(raw_bindings) & _TARGET_AUDIT_BINDING_NAMES
+    if target_finite_queue:
+        if present_target != _TARGET_AUDIT_BINDING_NAMES:
+            raise BroadcastHybridOrchestrationError(
+                "target finite-population queue audit bindings must be complete"
+            )
+        required |= _TARGET_AUDIT_BINDING_NAMES
+    elif present_target:
+        raise BroadcastHybridOrchestrationError(
+            "legacy selective review queue may not carry target audit bindings"
+        )
     if set(raw_bindings) != required:
         raise BroadcastHybridOrchestrationError("selective review queue binding keys are incomplete or unexpected")
     resolved: dict[str, Path] = {}
@@ -801,6 +827,24 @@ def _resolve_queue_bindings(queue_path: Path, queue: dict[str, Any]) -> dict[str
     ):
         raise BroadcastHybridOrchestrationError("queue-bound training report is not in the bound model package")
     return resolved
+
+
+def _validate_queue_envelope(queue: dict[str, Any]) -> bool:
+    artifact_type = queue.get("artifact_type")
+    if artifact_type == "selective_review_queue":
+        if "target_bindings" in queue or queue.get("qualification_scope") == "target_finite_population":
+            raise BroadcastHybridOrchestrationError(
+                "legacy selective review queue may not carry target audit bindings"
+            )
+        return False
+    if artifact_type == "target_finite_population_review_queue":
+        if queue.get("schema_version") != "1.0" or queue.get("qualification_scope") != "target_finite_population":
+            raise BroadcastHybridOrchestrationError(
+                "target finite-population review queue envelope is invalid"
+            )
+        _required_mapping(queue.get("target_bindings"), "queue.target_bindings")
+        return True
+    raise BroadcastHybridOrchestrationError("selective review queue artifact_type is invalid")
 
 
 def _source_video_from_dataset(dataset_path: Path) -> tuple[Path, str]:
@@ -1153,8 +1197,7 @@ def _validate_materialization(
 ) -> dict[str, Any]:
     queue, queue_sha256 = _load_json_snapshot(queue_path, "selective review queue")
     actions, actions_sha256 = _load_json_snapshot(actions_path, "review decisions")
-    if queue.get("artifact_type") != "selective_review_queue":
-        raise BroadcastHybridOrchestrationError("selective review queue artifact_type is invalid")
+    _validate_queue_envelope(queue)
     if actions.get("artifact_type") != "selective_review_actions":
         raise BroadcastHybridOrchestrationError("review decisions artifact_type is invalid")
     bound = _resolve_queue_bindings(queue_path, queue)
@@ -1194,6 +1237,11 @@ def _validate_materialization(
                     qualification_dataset_manifest_path=bound.get("qualification_dataset"),
                     qualification_predictions_path=bound.get("qualification_predictions"),
                     qualification_decisions_path=bound.get("qualification_decisions"),
+                    target_audit_plan_path=bound.get("target_audit_plan"),
+                    target_audit_labels_path=bound.get("target_audit_labels"),
+                    target_qualification_path=bound.get("target_qualification"),
+                    target_frozen_application_path=bound.get("target_frozen_application"),
+                    target_prelabel_commitment_path=bound.get("target_prelabel_commitment"),
                 )
             except (OSError, SelectiveReviewError, ValueError) as exc:
                 raise BroadcastHybridOrchestrationError(

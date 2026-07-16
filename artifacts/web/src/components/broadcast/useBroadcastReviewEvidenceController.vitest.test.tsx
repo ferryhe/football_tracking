@@ -19,17 +19,39 @@ import {
 import { translations } from "@/lib/i18n";
 
 const manifestSha256 = "a".repeat(64);
+const confirmedTextSha256 = "b".repeat(64);
+const observedRawSha256 = "c".repeat(64);
+
+function configLineageChallenge() {
+  return {
+    target_run_id: "parent-run",
+    confirmed_config_name: "generated/production.yaml",
+    confirmed_text_sha256: confirmedTextSha256,
+    expected_observed_raw_sha256: observedRawSha256,
+    workflow_bindings: {
+      workflow_id: "workflow-1",
+      accepted_trial: {
+        run_id: "trial-1",
+        record_sha256: "d".repeat(64),
+        notes_sha256: "e".repeat(64),
+      },
+    },
+  };
+}
 
 const api = vi.hoisted(() => ({
   cancel: vi.fn(),
   importEvidence: vi.fn(),
+  reconfirmConfigLineage: vi.fn(),
   refetchEvidence: vi.fn(),
   resetCancel: vi.fn(),
   resetImport: vi.fn(),
+  resetReconfirm: vi.fn(),
   useCancelRun: vi.fn(),
   useGetBroadcastReviewEvidence: vi.fn(),
   useGetRun: vi.fn(),
   useImportBroadcastReviewEvidence: vi.fn(),
+  useReconfirmBroadcastConfigLineage: vi.fn(),
 }));
 
 vi.mock("@workspace/api-client-react", () => ({
@@ -41,18 +63,21 @@ vi.mock("@workspace/api-client-react", () => ({
     "review-windows",
     runId,
   ],
+  getGetConfigQueryKey: (name: string) => ["config", name],
   getGetRunQueryKey: (runId: string) => ["run", runId],
   getListArtifactsQueryKey: (runId: string) => ["artifacts", runId],
   useCancelRun: api.useCancelRun,
   useGetBroadcastReviewEvidence: api.useGetBroadcastReviewEvidence,
   useGetRun: api.useGetRun,
   useImportBroadcastReviewEvidence: api.useImportBroadcastReviewEvidence,
+  useReconfirmBroadcastConfigLineage: api.useReconfirmBroadcastConfigLineage,
 }));
 
 let evidenceQuery: Record<string, unknown>;
 let operationQuery: Record<string, unknown>;
 let importMutation: Record<string, unknown>;
 let cancelMutation: Record<string, unknown>;
+let reconfirmMutation: Record<string, unknown>;
 let queryClient: QueryClient;
 
 function availableBundle(bundleId = "bundle-qualified-1") {
@@ -126,13 +151,26 @@ beforeEach(() => {
     mutateAsync: api.cancel,
     reset: api.resetCancel,
   };
+  reconfirmMutation = {
+    error: null,
+    isPending: false,
+    mutateAsync: api.reconfirmConfigLineage,
+    reset: api.resetReconfirm,
+  };
   api.refetchEvidence.mockResolvedValue(undefined);
   api.importEvidence.mockResolvedValue({ run_id: "import-job-1" });
   api.cancel.mockResolvedValue(undefined);
+  api.reconfirmConfigLineage.mockResolvedValue({
+    run_id: "parent-run",
+    status: "reconfirmed",
+  });
   api.useGetBroadcastReviewEvidence.mockImplementation(() => evidenceQuery);
   api.useGetRun.mockImplementation(() => operationQuery);
   api.useImportBroadcastReviewEvidence.mockImplementation(() => importMutation);
   api.useCancelRun.mockImplementation(() => cancelMutation);
+  api.useReconfirmBroadcastConfigLineage.mockImplementation(
+    () => reconfirmMutation,
+  );
 });
 
 describe("useBroadcastReviewEvidenceController", () => {
@@ -382,6 +420,183 @@ describe("useBroadcastReviewEvidenceController", () => {
     await waitFor(() =>
       expect(queryClient.invalidateQueries).toHaveBeenCalled(),
     );
+  });
+
+  it("submits only the current server challenge with explicit independent identities and blocks double clicks", async () => {
+    let resolveReconfirmation!: (value: {
+      run_id: string;
+      status: string;
+    }) => void;
+    api.reconfirmConfigLineage.mockReturnValue(
+      new Promise<{ run_id: string; status: string }>((resolve) => {
+        resolveReconfirmation = resolve;
+      }),
+    );
+    evidenceQuery = {
+      ...evidenceQuery,
+      data: {
+        run_id: "parent-run",
+        status: "blocked",
+        blocker_code: "confirmed_config_lineage_reconfirmation_required",
+        recovery_action: "reconfirm_production_config",
+        bundles: [],
+        config_lineage_reconfirmation: configLineageChallenge(),
+      },
+    };
+    const { result } = renderController();
+
+    expect(result.current.stepProps.state.configLineageReconfirmation).toEqual({
+      targetRunId: "parent-run",
+      confirmedConfigName: "generated/production.yaml",
+      confirmedTextSha256,
+      expectedObservedRawSha256: observedRawSha256,
+      workflowBindings: configLineageChallenge().workflow_bindings,
+    });
+
+    await act(async () => {
+      const reconfirm = result.current.stepProps.onReconfirmConfigLineage!;
+      void reconfirm({ operatorId: "operator-1", reviewerId: "reviewer-1" });
+      void reconfirm({ operatorId: "operator-1", reviewerId: "reviewer-1" });
+    });
+
+    expect(api.reconfirmConfigLineage).toHaveBeenCalledTimes(1);
+    expect(api.reconfirmConfigLineage).toHaveBeenCalledWith({
+      runId: "parent-run",
+      data: {
+        target_run_id: "parent-run",
+        confirmed_config_name: "generated/production.yaml",
+        confirmed_text_sha256: confirmedTextSha256,
+        expected_observed_raw_sha256: observedRawSha256,
+        workflow_bindings: configLineageChallenge().workflow_bindings,
+        operator_id: "operator-1",
+        reviewer_id: "reviewer-1",
+      },
+    });
+
+    resolveReconfirmation({ run_id: "parent-run", status: "reconfirmed" });
+    await waitFor(() =>
+      expect(queryClient.invalidateQueries).toHaveBeenCalledWith({
+        queryKey: ["config", "generated/production.yaml"],
+      }),
+    );
+  });
+
+  it("keeps a StrictMode reconfirmation double-click to one exact POST", async () => {
+    let resolveReconfirmation!: (value: {
+      run_id: string;
+      status: string;
+    }) => void;
+    api.reconfirmConfigLineage.mockReturnValue(
+      new Promise<{ run_id: string; status: string }>((resolve) => {
+        resolveReconfirmation = resolve;
+      }),
+    );
+    evidenceQuery = {
+      ...evidenceQuery,
+      data: {
+        run_id: "parent-run",
+        status: "blocked",
+        blocker_code: "confirmed_config_lineage_reconfirmation_required",
+        recovery_action: "reconfirm_production_config",
+        bundles: [],
+        config_lineage_reconfirmation: configLineageChallenge(),
+      },
+    };
+
+    function Host() {
+      const controller = useBroadcastReviewEvidenceController({
+        runId: "parent-run",
+        enabled: true,
+      });
+      return <BroadcastReviewEvidenceStep {...controller.stepProps} />;
+    }
+
+    const user = userEvent.setup();
+    render(
+      <StrictMode>
+        <Host />
+      </StrictMode>,
+      { wrapper },
+    );
+    await user.type(screen.getByLabelText("Operator ID"), "operator-1");
+    await user.type(
+      screen.getByLabelText("Independent reviewer ID"),
+      "reviewer-1",
+    );
+    await user.dblClick(
+      screen.getByRole("button", {
+        name: "Reconfirm production configuration",
+      }),
+    );
+
+    expect(api.reconfirmConfigLineage).toHaveBeenCalledTimes(1);
+    await act(async () => {
+      resolveReconfirmation({ run_id: "parent-run", status: "reconfirmed" });
+    });
+    await waitFor(() =>
+      expect(queryClient.invalidateQueries).toHaveBeenCalled(),
+    );
+  });
+
+  it("fails closed for an incomplete, foreign, or non-reconfirmation challenge", () => {
+    evidenceQuery = {
+      ...evidenceQuery,
+      data: {
+        run_id: "parent-run",
+        status: "blocked",
+        blocker_code: "confirmed_config_lineage_reconfirmation_required",
+        recovery_action: "reconfirm_production_config",
+        bundles: [],
+        config_lineage_reconfirmation: {
+          ...configLineageChallenge(),
+          target_run_id: "foreign-run",
+        },
+      },
+    };
+    const foreign = renderController();
+    expect(
+      foreign.result.current.stepProps.state.configLineageReconfirmation,
+    ).toBeNull();
+    expect(
+      foreign.result.current.stepProps.onReconfirmConfigLineage,
+    ).toBeUndefined();
+    foreign.unmount();
+
+    evidenceQuery = {
+      ...evidenceQuery,
+      data: {
+        run_id: "parent-run",
+        status: "blocked",
+        blocker_code: "confirmed_config_lineage_reconfirmation_required",
+        recovery_action: "reconfirm_production_config",
+        bundles: [],
+        config_lineage_reconfirmation: {
+          ...configLineageChallenge(),
+          expected_observed_raw_sha256: "",
+        },
+      },
+    };
+    const incomplete = renderController();
+    expect(
+      incomplete.result.current.stepProps.onReconfirmConfigLineage,
+    ).toBeUndefined();
+    incomplete.unmount();
+
+    evidenceQuery = {
+      ...evidenceQuery,
+      data: {
+        run_id: "parent-run",
+        status: "blocked",
+        blocker_code: "config_lineage_snapshot_mismatch",
+        recovery_action: "inspect_production_config_lineage",
+        bundles: [],
+        config_lineage_reconfirmation: configLineageChallenge(),
+      },
+    };
+    const wrongBlocker = renderController();
+    expect(
+      wrongBlocker.result.current.stepProps.onReconfirmConfigLineage,
+    ).toBeUndefined();
   });
 
   it("shows progress, cancels the active child, and prohibits cancellation while committing", async () => {
@@ -765,6 +980,17 @@ describe("useBroadcastReviewEvidenceController", () => {
     const cancelFailure = renderController();
     expect(cancelFailure.result.current.error).toMatchObject({
       kind: "cancel",
+    });
+    cancelFailure.unmount();
+
+    cancelMutation = { ...cancelMutation, error: null };
+    reconfirmMutation = {
+      ...reconfirmMutation,
+      error: new Error("Reconfirmation failed"),
+    };
+    const reconfirmFailure = renderController();
+    expect(reconfirmFailure.result.current.error).toMatchObject({
+      kind: "reconfirm",
     });
   });
 

@@ -800,6 +800,79 @@ class BroadcastReviewEvidenceImportRequest(BaseModel):
     retry_from_job_id: str | None = Field(default=None, min_length=1, max_length=200)
 
 
+class BroadcastConfigLineageReconfirmationRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    target_run_id: str = Field(min_length=1)
+    confirmed_config_name: str = Field(min_length=1)
+    confirmed_text_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    expected_observed_raw_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    workflow_bindings: dict[str, Any]
+    operator_id: str = Field(min_length=1, max_length=200)
+    reviewer_id: str = Field(min_length=1, max_length=200)
+
+    @field_validator("target_run_id", "confirmed_config_name")
+    @classmethod
+    def validate_authority_identity(cls, value: str) -> str:
+        if value != value.strip():
+            raise ValueError("authority identity must be trimmed text")
+        return value
+
+    @field_validator("operator_id", "reviewer_id")
+    @classmethod
+    def validate_identity(cls, value: str) -> str:
+        if not value.strip() or value != value.strip():
+            raise ValueError("identity must be non-empty trimmed text")
+        return value
+
+    @model_validator(mode="after")
+    def validate_independent_reviewer(self) -> BroadcastConfigLineageReconfirmationRequest:
+        if self.operator_id == self.reviewer_id:
+            raise ValueError("operator and independent reviewer must differ")
+        return self
+
+
+class BroadcastConfigLineageReconfirmationResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    run_id: str
+    status: Literal["reconfirmed"]
+    generation_id: str = Field(pattern=r"^lineage-[0-9a-f]{24}$")
+    manifest_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    confirmed_text_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    observed_raw_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    canonical_snapshot_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    lineage_generation_id: str = Field(pattern=r"^lineage-[0-9a-f]{24}$")
+    historical_raw_snapshot_observed: Literal[False]
+
+
+class BroadcastConfigLineageReconfirmationChallenge(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    target_run_id: str = Field(min_length=1)
+    confirmed_config_name: str = Field(min_length=1)
+    confirmed_text_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    expected_observed_raw_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    workflow_bindings: dict[str, Any]
+
+
+ConfigLineageBlockerCode = Literal[
+    "confirmed_config_lineage_reconfirmation_required",
+    "config_lineage_snapshot_unsafe",
+    "config_lineage_snapshot_mismatch",
+    "config_lineage_reconfirmation_conflict",
+]
+
+
+class BroadcastConfigLineageBlockerResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["blocked"]
+    blocker_code: ConfigLineageBlockerCode
+    detail: str
+    retryable: bool = False
+
+
 class BroadcastReviewEvidenceRevokeResponse(BaseModel):
     run_id: str
     status: Literal["revoked"]
@@ -880,6 +953,7 @@ class BroadcastReviewEvidenceStateResponse(BaseModel):
     capacity: BroadcastReviewEvidenceCapacity | None = None
     blocking_reasons: list[str] = Field(default_factory=list)
     message: str | None = None
+    config_lineage_reconfirmation: BroadcastConfigLineageReconfirmationChallenge | None = None
 
 
 class BroadcastReviewEvidenceArtifact(BaseModel):

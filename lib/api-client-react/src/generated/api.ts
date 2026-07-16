@@ -32,6 +32,9 @@ import type {
   ArtifactSummary,
   AssetGroup,
   BallAuditReport,
+  BroadcastConfigLineageBlockerResponse,
+  BroadcastConfigLineageReconfirmationRequest,
+  BroadcastConfigLineageReconfirmationResponse,
   BroadcastOperationResponse,
   BroadcastRenderRequest,
   BroadcastReviewActionsRequest,
@@ -2356,6 +2359,120 @@ export function useGetBallAuditReport<
 
   return { ...query, queryKey: queryOptions.queryKey };
 }
+
+/**
+ * @summary Reconfirm Broadcast Config Lineage
+ */
+export const getReconfirmBroadcastConfigLineageUrl = (runId: string) => {
+  return `/api/runs/${encodePathSegmented(runId)}/broadcast/config-lineage-reconfirmation`;
+};
+
+export const reconfirmBroadcastConfigLineage = async (
+  runId: string,
+  broadcastConfigLineageReconfirmationRequest: BroadcastConfigLineageReconfirmationRequest,
+  options?: RequestInit,
+): Promise<BroadcastConfigLineageReconfirmationResponse> => {
+  return customFetch<BroadcastConfigLineageReconfirmationResponse>(
+    getReconfirmBroadcastConfigLineageUrl(runId),
+    {
+      ...options,
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...options?.headers },
+      body: JSON.stringify(broadcastConfigLineageReconfirmationRequest),
+    },
+  );
+};
+
+export const getReconfirmBroadcastConfigLineageMutationOptions = <
+  TError = ErrorType<
+    void | BroadcastConfigLineageBlockerResponse | HTTPValidationError
+  >,
+  TContext = unknown,
+>(options?: {
+  mutation?: UseMutationOptions<
+    Awaited<ReturnType<typeof reconfirmBroadcastConfigLineage>>,
+    TError,
+    {
+      runId: string;
+      data: BodyType<BroadcastConfigLineageReconfirmationRequest>;
+    },
+    TContext
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}): UseMutationOptions<
+  Awaited<ReturnType<typeof reconfirmBroadcastConfigLineage>>,
+  TError,
+  {
+    runId: string;
+    data: BodyType<BroadcastConfigLineageReconfirmationRequest>;
+  },
+  TContext
+> => {
+  const mutationKey = ["reconfirmBroadcastConfigLineage"];
+  const { mutation: mutationOptions, request: requestOptions } = options
+    ? options.mutation &&
+      "mutationKey" in options.mutation &&
+      options.mutation.mutationKey
+      ? options
+      : { ...options, mutation: { ...options.mutation, mutationKey } }
+    : { mutation: { mutationKey }, request: undefined };
+
+  const mutationFn: MutationFunction<
+    Awaited<ReturnType<typeof reconfirmBroadcastConfigLineage>>,
+    {
+      runId: string;
+      data: BodyType<BroadcastConfigLineageReconfirmationRequest>;
+    }
+  > = (props) => {
+    const { runId, data } = props ?? {};
+
+    return reconfirmBroadcastConfigLineage(runId, data, requestOptions);
+  };
+
+  return { mutationFn, ...mutationOptions };
+};
+
+export type ReconfirmBroadcastConfigLineageMutationResult = NonNullable<
+  Awaited<ReturnType<typeof reconfirmBroadcastConfigLineage>>
+>;
+export type ReconfirmBroadcastConfigLineageMutationBody =
+  BodyType<BroadcastConfigLineageReconfirmationRequest>;
+export type ReconfirmBroadcastConfigLineageMutationError = ErrorType<
+  void | BroadcastConfigLineageBlockerResponse | HTTPValidationError
+>;
+
+/**
+ * @summary Reconfirm Broadcast Config Lineage
+ */
+export const useReconfirmBroadcastConfigLineage = <
+  TError = ErrorType<
+    void | BroadcastConfigLineageBlockerResponse | HTTPValidationError
+  >,
+  TContext = unknown,
+>(options?: {
+  mutation?: UseMutationOptions<
+    Awaited<ReturnType<typeof reconfirmBroadcastConfigLineage>>,
+    TError,
+    {
+      runId: string;
+      data: BodyType<BroadcastConfigLineageReconfirmationRequest>;
+    },
+    TContext
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}): UseMutationResult<
+  Awaited<ReturnType<typeof reconfirmBroadcastConfigLineage>>,
+  TError,
+  {
+    runId: string;
+    data: BodyType<BroadcastConfigLineageReconfirmationRequest>;
+  },
+  TContext
+> => {
+  return useMutation(
+    getReconfirmBroadcastConfigLineageMutationOptions(options),
+  );
+};
 
 /**
  * @summary Render Broadcast Hybrid

@@ -82,6 +82,17 @@ from football_tracking.broadcast_hybrid_orchestration import (
 from football_tracking.calibration import build_pitch_calibration_from_field_polygon
 from football_tracking.chunk_runner import run_high_recall_windows, run_temporal_chunks
 from football_tracking.config import DEFAULT_HIGH_RECALL_MAX_TOTAL_FRAMES, AppConfig, load_config
+from football_tracking.config_lineage import (
+    CONFIG_LINEAGE_CONFLICT,
+    CONFIG_LINEAGE_MISMATCH,
+    CONFIG_LINEAGE_REQUIRED,
+    CONFIG_LINEAGE_UNSAFE,
+    ConfigLineageError,
+    capture_config_bytes,
+    capture_regular_file_stat,
+    load_config_lineage_reconfirmation,
+    reconfirm_config_lineage,
+)
 from football_tracking.events import compact_event_candidate_summary
 from football_tracking.final_artifact_manifest import finalize_ai_candidate
 from football_tracking.follow_cam import FollowCamGenerator
@@ -149,6 +160,14 @@ _READY_BROADCAST_STRONG_OUTPUT_ROOTS = frozenset({"broadcast_generations", "broa
 _ReadyIdentityToken = tuple[int, int, int, int, int, int]
 
 _CONFIRMED_CONFIG_CHANGED_AFTER_CONFIRMATION = "confirmed_config_changed_after_confirmation"
+_CONFIG_LINEAGE_BLOCKERS = frozenset(
+    {
+        CONFIG_LINEAGE_REQUIRED,
+        CONFIG_LINEAGE_UNSAFE,
+        CONFIG_LINEAGE_MISMATCH,
+        CONFIG_LINEAGE_CONFLICT,
+    }
+)
 
 
 class _ReviewEvidenceTargetContextError(RuntimeError):
@@ -493,6 +512,9 @@ class ApiService:
         self.outputs_dir = repo_root / "outputs"
         self.run_outputs_dir = self.outputs_dir / "runs"
         self.review_evidence_inbox_dir = self.outputs_dir / "review_evidence_inbox"
+        self.target_prelabel_commitment_registry = (
+            self.outputs_dir / "target_prelabel_commitments"
+        )
         self.data_dir = repo_root / "data"
         self.registry_path = repo_root / "data" / "run_registry.json"
         self.registry_lock_path = repo_root / "data" / "run_registry.lock"
@@ -4719,6 +4741,283 @@ class ApiService:
                     return deepcopy(run)
                 raise KeyError(run_id)
 
+    def reconfirm_broadcast_config_lineage(self, run_id: str, request: dict[str, Any]) -> dict[str, Any]:
+        """Append one independently reviewed canonical configuration generation."""
+
+        self._assert_service_open()
+        with self._lock:
+            self._assert_service_open_locked()
+            with self._registry_transaction() as registry:
+                parent = next((item for item in registry["runs"] if item.get("run_id") == run_id), None)
+                if parent is None:
+                    raise KeyError(run_id)
+                if parent.get("source") != "broadcast_hybrid":
+                    raise RuntimeError(f"Run is not a broadcast_hybrid run: {run_id}")
+                if parent.get("status") != "completed":
+                    raise RuntimeError(f"Broadcast run must be completed before review operations: {run_id}")
+                output_dir = Path(parent["output_dir"]).resolve()
+                if self.outputs_dir.resolve() not in output_dir.parents:
+                    raise RuntimeError(f"Broadcast run output is outside the outputs root: {run_id}")
+                return self._reconfirm_broadcast_config_lineage_in_transaction(
+                    run_id,
+                    request,
+                    parent=parent,
+                    registry=registry,
+                )
+
+    def _reconfirm_broadcast_config_lineage_in_transaction(
+        self,
+        run_id: str,
+        request: dict[str, Any],
+        *,
+        parent: dict[str, Any],
+        registry: dict[str, Any],
+    ) -> dict[str, Any]:
+        challenge = self._broadcast_config_lineage_reconfirmation_authority(
+            parent,
+            registry=registry,
+        )
+        confirmed_name = challenge["confirmed_config_name"]
+        confirmed_sha256 = challenge["confirmed_text_sha256"]
+        config_path_value = parent.get("config_path")
+        assert isinstance(config_path_value, str)
+        authoritative_workflow_bindings = challenge["workflow_bindings"]
+        if (
+            request.get("target_run_id") != run_id
+            or request.get("target_run_id") != challenge["target_run_id"]
+            or request.get("confirmed_config_name") != confirmed_name
+            or request.get("confirmed_text_sha256") != confirmed_sha256
+        ):
+            raise ConfigLineageError(
+                CONFIG_LINEAGE_MISMATCH,
+                "config lineage reconfirmation challenge does not match current server-derived authority",
+            )
+        workflow_bindings = request.get("workflow_bindings")
+        if not isinstance(workflow_bindings, dict):
+            raise ConfigLineageError(
+                CONFIG_LINEAGE_MISMATCH,
+                "config lineage workflow bindings are malformed",
+            )
+        if workflow_bindings != authoritative_workflow_bindings:
+            raise ConfigLineageError(
+                CONFIG_LINEAGE_MISMATCH,
+                "config lineage workflow bindings do not match server-derived authority",
+            )
+        operator_id = request.get("operator_id")
+        reviewer_id = request.get("reviewer_id")
+        observed_raw_sha256 = request.get("expected_observed_raw_sha256")
+        try:
+            generation = reconfirm_config_lineage(
+                trusted_config_root=self.config_dir,
+                observed_config_path=Path(config_path_value),
+                lineage_root=self._config_lineage_root(),
+                target_run_id=run_id,
+                confirmed_config_name=confirmed_name,
+                confirmed_text_sha256=confirmed_sha256,
+                expected_observed_raw_sha256=observed_raw_sha256,
+                workflow_bindings=authoritative_workflow_bindings,
+                operator_id=operator_id,
+                reviewer_id=reviewer_id,
+            )
+        except ConfigLineageError:
+            raise
+        manifest_sha256 = generation.manifest_sha256
+        canonical_snapshot_sha256 = generation.canonical_snapshot_sha256
+        if (
+            not isinstance(manifest_sha256, str)
+            or re.fullmatch(r"[0-9a-f]{64}", manifest_sha256) is None
+            or not isinstance(canonical_snapshot_sha256, str)
+            or re.fullmatch(r"[0-9a-f]{64}", canonical_snapshot_sha256) is None
+        ):
+            raise ConfigLineageError(
+                CONFIG_LINEAGE_UNSAFE,
+                "config lineage secure read digests are unavailable",
+            )
+        operation_id = f"config-lineage-{generation.generation_id.removeprefix('lineage-')}"
+        operation = {
+            "run_id": operation_id,
+            "source": "config_lineage_reconfirmation",
+            "status": "completed",
+            "created_at": _utc_now_iso(),
+            "started_at": None,
+            "completed_at": _utc_now_iso(),
+            "config_name": confirmed_name,
+            "config_path": config_path_value,
+            "input_video": parent.get("input_video"),
+            "parent_run_id": run_id,
+            "output_dir": str(generation.generation_dir),
+            "modules_enabled": {},
+            "artifacts": [],
+            "stats": {},
+            "progress": None,
+            "notes": json.dumps(generation.manifest["projection"], sort_keys=True, separators=(",", ":")),
+            "error": None,
+            "broadcast": {
+                "operation": "config_lineage_reconfirmation",
+                "generation_id": generation.generation_id,
+                "manifest_sha256": manifest_sha256,
+                "canonical_snapshot_sha256": canonical_snapshot_sha256,
+                "workflow_bindings": deepcopy(authoritative_workflow_bindings),
+                "operator_id": operator_id,
+                "reviewer_id": reviewer_id,
+                "idempotent": generation.idempotent,
+            },
+        }
+        existing = next(
+            (
+                item
+                for item in registry["runs"]
+                if item.get("source") == "config_lineage_reconfirmation" and item.get("parent_run_id") == run_id
+            ),
+            None,
+        )
+        if existing is not None:
+            existing_metadata = existing.get("broadcast") if isinstance(existing.get("broadcast"), dict) else {}
+            if (
+                existing.get("run_id") != operation_id
+                or existing_metadata.get("generation_id") != generation.generation_id
+                or existing_metadata.get("manifest_sha256") != manifest_sha256
+                or existing_metadata.get("workflow_bindings") != authoritative_workflow_bindings
+            ):
+                raise ConfigLineageError(
+                    CONFIG_LINEAGE_CONFLICT,
+                    "config lineage reconfirmation conflict",
+                )
+            operation = deepcopy(existing)
+        else:
+            registry["runs"].append(operation)
+        return {
+            "run_id": run_id,
+            "status": "reconfirmed",
+            "generation_id": generation.generation_id,
+            "manifest_sha256": manifest_sha256,
+            **generation.manifest["projection"],
+        }
+
+    def _broadcast_config_lineage_reconfirmation_authority(
+        self,
+        parent: dict[str, Any],
+        *,
+        registry: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Derive current reconfirmation authority without trusting client input."""
+
+        notes = parent.get("notes")
+        if notes is None:
+            raise ConfigLineageError(
+                CONFIG_LINEAGE_REQUIRED,
+                "review evidence target confirmation record is required",
+            )
+        try:
+            confirmation = json.loads(notes) if isinstance(notes, str) else notes
+        except json.JSONDecodeError as exc:
+            raise ConfigLineageError(
+                CONFIG_LINEAGE_MISMATCH,
+                "review evidence target confirmation record is malformed",
+            ) from exc
+        if not isinstance(confirmation, dict):
+            raise ConfigLineageError(
+                CONFIG_LINEAGE_MISMATCH,
+                "review evidence target confirmation record is malformed",
+            )
+        confirmed_name = confirmation.get("confirmed_config_name")
+        confirmed_sha256 = confirmation.get("expected_config_sha256")
+        if confirmed_name is None:
+            raise ConfigLineageError(
+                CONFIG_LINEAGE_REQUIRED,
+                "review evidence target confirmation record has no config name",
+            )
+        if (
+            not isinstance(confirmed_name, str)
+            or not confirmed_name.strip()
+            or confirmed_name != confirmed_name.strip()
+        ):
+            raise ConfigLineageError(
+                CONFIG_LINEAGE_MISMATCH,
+                "review evidence target confirmation config name is malformed",
+            )
+        if confirmed_sha256 is None:
+            raise ConfigLineageError(
+                CONFIG_LINEAGE_REQUIRED,
+                "review evidence target confirmation record has no config SHA-256",
+            )
+        if not isinstance(confirmed_sha256, str) or re.fullmatch(r"[0-9a-f]{64}", confirmed_sha256) is None:
+            raise ConfigLineageError(
+                CONFIG_LINEAGE_MISMATCH,
+                "review evidence target confirmation config SHA-256 is malformed",
+            )
+        config_path_value = parent.get("config_path")
+        if config_path_value is None:
+            raise ConfigLineageError(
+                CONFIG_LINEAGE_REQUIRED,
+                "review evidence target confirmed config is required",
+            )
+        if not isinstance(config_path_value, str) or not config_path_value.strip():
+            raise ConfigLineageError(
+                CONFIG_LINEAGE_MISMATCH,
+                "review evidence target confirmed config authority is malformed",
+            )
+        try:
+            authoritative_workflow_bindings = self._derive_config_lineage_workflow_bindings(
+                parent,
+                Path(config_path_value),
+                registry=registry,
+            )
+        except ConfigLineageError:
+            raise
+        except (ValueError, RuntimeError) as exc:
+            raise ConfigLineageError(
+                CONFIG_LINEAGE_MISMATCH,
+                "config lineage registry authority does not match the target",
+            ) from exc
+        target_run_id = parent.get("run_id")
+        if (
+            not isinstance(target_run_id, str)
+            or not target_run_id
+            or target_run_id != target_run_id.strip()
+        ):
+            raise ConfigLineageError(
+                CONFIG_LINEAGE_MISMATCH,
+                "review evidence target run identity is malformed",
+            )
+        return {
+            "target_run_id": target_run_id,
+            "confirmed_config_name": confirmed_name,
+            "confirmed_text_sha256": confirmed_sha256,
+            "workflow_bindings": authoritative_workflow_bindings,
+        }
+
+    def _broadcast_config_lineage_reconfirmation_challenge(
+        self,
+        parent: dict[str, Any],
+        *,
+        registry: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Build a current server-authored challenge without trusting client-derived lineage."""
+
+        authority = self._broadcast_config_lineage_reconfirmation_authority(
+            parent,
+            registry=registry,
+        )
+        config_path_value = parent.get("config_path")
+        assert isinstance(config_path_value, str)
+        try:
+            _, inspection = capture_config_bytes(
+                self.config_dir,
+                Path(config_path_value),
+            )
+        except ConfigLineageError:
+            raise
+        if inspection.confirmed_text_sha256 != authority["confirmed_text_sha256"]:
+            raise ConfigLineageError(
+                CONFIG_LINEAGE_MISMATCH,
+                "confirmed production config canonical digest does not match the target confirmation",
+            )
+        return {
+            **authority,
+            "expected_observed_raw_sha256": inspection.observed_raw_sha256,
+        }
+
     def get_broadcast_review_evidence(self, run_id: str) -> dict[str, Any]:
         parent, output_dir = self._broadcast_run_output(run_id)
         queue_path = output_dir / "selective_review_queue.v1.json"
@@ -4738,6 +5037,29 @@ class ApiService:
                             queue_path,
                         )
         except _ReviewEvidenceTargetContextError as exc:
+            blocker: ConfigLineageError = ConfigLineageError(exc.code, str(exc))
+            challenge: dict[str, Any] | None = None
+            if exc.code == CONFIG_LINEAGE_REQUIRED:
+                try:
+                    with self._lock:
+                        with self._registry_file_lock():
+                            challenge_registry = self._read_registry()
+                            challenge_parent = self._review_evidence_parent_from_registry(
+                                challenge_registry,
+                                run_id,
+                                output_dir,
+                            )
+                            challenge = self._broadcast_config_lineage_reconfirmation_challenge(
+                                challenge_parent,
+                                registry=challenge_registry,
+                            )
+                except ConfigLineageError as challenge_error:
+                    blocker = challenge_error
+            recovery_action = (
+                "reconfirm_production_config"
+                if blocker.code == CONFIG_LINEAGE_REQUIRED and challenge is not None
+                else "inspect_production_config_lineage"
+            )
             return {
                 "run_id": run_id,
                 "status": "blocked",
@@ -4746,14 +5068,15 @@ class ApiService:
                 "queue_sha256": None,
                 "stage": "confirmation_invalidated",
                 "progress_percent": 0.0,
-                "blocker_code": exc.code,
-                "error_code": exc.code,
-                "recovery_action": "reconfirm_production_config",
+                "blocker_code": blocker.code,
+                "error_code": blocker.code,
+                "recovery_action": recovery_action,
                 "retryable": False,
                 "can_cancel": False,
                 "bundles": [],
-                "blocking_reasons": [exc.code],
-                "message": str(exc),
+                "blocking_reasons": [blocker.code],
+                "message": str(blocker),
+                "config_lineage_reconfirmation": challenge,
             }
         except BroadcastApiError as exc:
             return {
@@ -5194,6 +5517,7 @@ class ApiService:
                 should_cancel=should_cancel,
                 on_stage=stage_updated,
                 on_commit_started=commit_started,
+                trusted_prelabel_commitment_root=self.target_prelabel_commitment_registry,
             )
             report = {
                 "schema_version": "1.0",
@@ -5294,6 +5618,7 @@ class ApiService:
                 "review_evidence_conflict",
                 "target_binding_mismatch",
                 _CONFIRMED_CONFIG_CHANGED_AFTER_CONFIRMATION,
+                *_CONFIG_LINEAGE_BLOCKERS,
             }
             with self._lock:
                 with self._registry_transaction() as registry:
@@ -5362,7 +5687,8 @@ class ApiService:
         if not action_binding_path.is_file():
             raise RuntimeError("review evidence target action-signal binding is unavailable")
         action_signal_binding_sha256 = sha256_file(action_binding_path)
-        confirmed_config_sha256 = self._review_evidence_confirmed_config_sha256(parent)
+        config_confirmation = self._review_evidence_config_confirmation(parent)
+        confirmed_config_sha256 = config_confirmation["confirmed_text_sha256"]
         candidate_rows = contract.get("candidates")
         if not isinstance(candidate_rows, list) or not candidate_rows:
             raise RuntimeError("review evidence target candidate population is empty")
@@ -5410,7 +5736,7 @@ class ApiService:
         profile_digest = hashlib.sha256(
             json.dumps(profile_context, sort_keys=True, separators=(",", ":"), allow_nan=False).encode("utf-8")
         ).hexdigest()
-        return {
+        target = {
             "run_id": run_id,
             "source_sha256": source_sha256,
             "root_contract_sha256": contract_sha256,
@@ -5424,6 +5750,10 @@ class ApiService:
             "candidate_population_sha256": candidate_population_sha256,
             "candidate_population_count": len(population),
         }
+        projection = config_confirmation.get("projection")
+        if isinstance(projection, dict):
+            target["config_lineage"] = projection
+        return target
 
     @staticmethod
     def _review_evidence_parent_from_registry(
@@ -5505,6 +5835,9 @@ class ApiService:
         }
 
     def _review_evidence_confirmed_config_sha256(self, parent: dict[str, Any]) -> str:
+        return self._review_evidence_config_confirmation(parent)["confirmed_text_sha256"]
+
+    def _review_evidence_config_confirmation(self, parent: dict[str, Any]) -> dict[str, Any]:
         notes = parent.get("notes")
         try:
             confirmation = json.loads(notes) if isinstance(notes, str) else notes
@@ -5517,16 +5850,446 @@ class ApiService:
             raise RuntimeError("review evidence target confirmation record has no config SHA-256")
 
         config_path_value = parent.get("config_path")
-        config_path = Path(config_path_value).resolve() if isinstance(config_path_value, str) else None
-        if config_path is None or not config_path.is_file():
+        config_path = Path(config_path_value) if isinstance(config_path_value, str) else None
+        if config_path is None:
             raise RuntimeError("review evidence target confirmed config is unavailable")
-        current_config_sha256 = sha256_file(config_path)
-        if current_config_sha256 != expected_sha256:
+        try:
+            _raw_config, inspection = capture_config_bytes(self.config_dir, config_path)
+        except (OSError, ConfigLineageError) as exc:
+            code = exc.code if isinstance(exc, ConfigLineageError) else CONFIG_LINEAGE_UNSAFE
             raise _ReviewEvidenceTargetContextError(
-                _CONFIRMED_CONFIG_CHANGED_AFTER_CONFIRMATION,
-                "config changed after confirmation",
+                code,
+                "confirmed config lineage snapshot is unsafe or unreadable",
+            ) from exc
+        if inspection.observed_raw_sha256 == expected_sha256:
+            return {"confirmed_text_sha256": expected_sha256, "projection": None}
+        if inspection.confirmed_text_sha256 != expected_sha256:
+            raise _ReviewEvidenceTargetContextError(
+                CONFIG_LINEAGE_MISMATCH,
+                "confirmed config lineage snapshot does not match the confirmed text",
             )
-        return expected_sha256
+        child = self._config_lineage_child(str(parent.get("run_id") or ""))
+        if child is None:
+            raise _ReviewEvidenceTargetContextError(
+                CONFIG_LINEAGE_REQUIRED,
+                "confirmed config lineage reconfirmation is required",
+            )
+        metadata = child.get("broadcast") if isinstance(child.get("broadcast"), dict) else {}
+        workflow_bindings = metadata.get("workflow_bindings")
+        if not isinstance(workflow_bindings, dict):
+            raise _ReviewEvidenceTargetContextError(
+                CONFIG_LINEAGE_MISMATCH,
+                "config lineage operation has no authoritative workflow bindings",
+            )
+        with self._lock:
+            registry = self._read_registry()
+            try:
+                authoritative_workflow_bindings = self._derive_config_lineage_workflow_bindings(
+                    parent,
+                    config_path,
+                    registry=registry,
+                )
+                if workflow_bindings != authoritative_workflow_bindings:
+                    raise ValueError("config lineage operation workflow bindings differ from server-derived authority")
+            except (ValueError, RuntimeError, ConfigLineageError) as exc:
+                raise _ReviewEvidenceTargetContextError(CONFIG_LINEAGE_MISMATCH, str(exc)) from exc
+        try:
+            generation = load_config_lineage_reconfirmation(
+                self._config_lineage_root(),
+                target_run_id=str(parent.get("run_id") or ""),
+                trusted_config_root=self.config_dir,
+                observed_config_path=config_path,
+                confirmed_config_name=str(confirmation.get("confirmed_config_name") or config_path.name),
+                confirmed_text_sha256=expected_sha256,
+                expected_workflow_bindings=authoritative_workflow_bindings,
+            )
+        except ConfigLineageError as exc:
+            raise _ReviewEvidenceTargetContextError(exc.code, str(exc)) from exc
+        manifest_sha256 = generation.manifest_sha256
+        canonical_snapshot_sha256 = generation.canonical_snapshot_sha256
+        if (
+            not isinstance(manifest_sha256, str)
+            or re.fullmatch(r"[0-9a-f]{64}", manifest_sha256) is None
+            or not isinstance(canonical_snapshot_sha256, str)
+            or re.fullmatch(r"[0-9a-f]{64}", canonical_snapshot_sha256) is None
+        ):
+            raise _ReviewEvidenceTargetContextError(
+                CONFIG_LINEAGE_UNSAFE,
+                "config lineage secure read digests are unavailable",
+            )
+        if (
+            metadata.get("generation_id") != generation.generation_id
+            or metadata.get("manifest_sha256") != manifest_sha256
+            or metadata.get("canonical_snapshot_sha256") != canonical_snapshot_sha256
+        ):
+            raise _ReviewEvidenceTargetContextError(
+                CONFIG_LINEAGE_MISMATCH,
+                "config lineage operation and immutable generation do not match",
+            )
+        projection = {
+            "confirmed_text_sha256": expected_sha256,
+            "observed_raw_sha256": inspection.observed_raw_sha256,
+            "canonical_snapshot_sha256": generation.manifest["projection"]["canonical_snapshot_sha256"],
+            "generation_id": generation.generation_id,
+            "manifest_sha256": manifest_sha256,
+            "historical_raw_snapshot_observed": False,
+        }
+        return {"confirmed_text_sha256": expected_sha256, "projection": projection}
+
+    def _config_lineage_root(self) -> Path:
+        return self.outputs_dir / "config_lineage_reconfirmations"
+
+    def _config_lineage_child(self, parent_run_id: str) -> dict[str, Any] | None:
+        with self._lock:
+            registry = self._read_registry()
+            matches = [
+                deepcopy(item)
+                for item in registry["runs"]
+                if item.get("source") == "config_lineage_reconfirmation"
+                and item.get("parent_run_id") == parent_run_id
+                and item.get("status") == "completed"
+            ]
+        return matches[-1] if matches else None
+
+    def _derive_config_lineage_workflow_bindings(
+        self,
+        parent: dict[str, Any],
+        config_path: Path,
+        *,
+        registry: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Rebuild config-lineage workflow identity only from server-owned evidence."""
+
+        try:
+            raw_config, inspection = capture_config_bytes(self.config_dir, config_path)
+            loaded = yaml.safe_load(inspection.canonical_bytes.decode("utf-8")) or {}
+        except (OSError, UnicodeDecodeError, yaml.YAMLError, ConfigLineageError) as exc:
+            raise ConfigLineageError(
+                CONFIG_LINEAGE_UNSAFE,
+                "server cannot read authoritative production workflow metadata",
+            ) from exc
+        if not isinstance(loaded, dict):
+            raise ConfigLineageError(
+                CONFIG_LINEAGE_MISMATCH,
+                "confirmed config must contain an object",
+            )
+        metadata = loaded.get("metadata")
+        workflow = metadata.get("production_workflow") if isinstance(metadata, dict) else None
+        required_workflow_fields = {
+            "workflow_id",
+            "accepted_trial_run_id",
+            "trial_request_sha256",
+            "trial_intent_sha256",
+            "trial_patch_sha256",
+            "patch_sha256",
+            "calibration_digest",
+            "source_signature",
+        }
+        if not isinstance(workflow, dict) or not required_workflow_fields.issubset(workflow):
+            raise ConfigLineageError(
+                CONFIG_LINEAGE_MISMATCH,
+                "confirmed config production_workflow metadata is incomplete",
+            )
+        workflow_id = self._config_lineage_authority_text(
+            workflow.get("workflow_id"),
+            "workflow_id",
+        )
+        accepted_trial_run_id = self._config_lineage_authority_text(
+            workflow.get("accepted_trial_run_id"),
+            "accepted_trial_run_id",
+        )
+        authoritative_hashes = {
+            field: self._config_lineage_authority_sha256(workflow.get(field), field)
+            for field in (
+                "trial_request_sha256",
+                "trial_intent_sha256",
+                "trial_patch_sha256",
+                "patch_sha256",
+                "calibration_digest",
+            )
+        }
+        source_signature = workflow.get("source_signature")
+        if not isinstance(source_signature, dict) or set(source_signature) != {
+            "path",
+            "size_bytes",
+            "modified_at",
+        }:
+            raise ConfigLineageError(
+                CONFIG_LINEAGE_MISMATCH,
+                "confirmed config source_signature must exactly bind path, size_bytes, and modified_at",
+            )
+        source_path_value = source_signature.get("path")
+        source_size = source_signature.get("size_bytes")
+        source_modified_at = source_signature.get("modified_at")
+        if (
+            not isinstance(source_path_value, str)
+            or not source_path_value
+            or isinstance(source_size, bool)
+            or not isinstance(source_size, int)
+            or source_size < 0
+            or not isinstance(source_modified_at, str)
+            or not source_modified_at.strip()
+        ):
+            raise ConfigLineageError(
+                CONFIG_LINEAGE_MISMATCH,
+                "confirmed config source_signature values are invalid",
+            )
+        parent_source_value = parent.get("input_video")
+        if not isinstance(parent_source_value, str) or not parent_source_value:
+            raise ConfigLineageError(
+                CONFIG_LINEAGE_MISMATCH,
+                "target full run has no authoritative source path",
+            )
+        expected_source = Path(os.path.abspath(parent_source_value))
+        declared_source = Path(os.path.abspath(source_path_value))
+        try:
+            source_stat = capture_regular_file_stat(expected_source)
+        except ConfigLineageError as exc:
+            raise ConfigLineageError(
+                CONFIG_LINEAGE_UNSAFE,
+                "authoritative production source is unavailable",
+            ) from exc
+        actual_modified_at = datetime.fromtimestamp(
+            source_stat["mtime_ns"] / 1_000_000_000,
+            tz=timezone.utc,
+        ).isoformat()
+        if (
+            declared_source != expected_source
+            or source_stat["size_bytes"] != source_size
+            or actual_modified_at != source_modified_at
+        ):
+            raise ConfigLineageError(
+                CONFIG_LINEAGE_MISMATCH,
+                "confirmed config source_signature does not match the actual production source",
+            )
+        source_signature_sha256 = hashlib.sha256(
+            json.dumps(
+                source_signature,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=False,
+                allow_nan=False,
+            ).encode("utf-8")
+        ).hexdigest()
+
+        runs = [
+            item for item in registry.get("runs", []) if isinstance(item, dict) and isinstance(item.get("run_id"), str)
+        ]
+        runs_by_id = {item["run_id"]: item for item in runs}
+        accepted_trial = runs_by_id.get(accepted_trial_run_id)
+        if accepted_trial is None:
+            raise ConfigLineageError(
+                CONFIG_LINEAGE_MISMATCH,
+                "authoritative accepted trial is unavailable",
+            )
+        accepted_notes = self._config_lineage_authority_notes(
+            accepted_trial,
+            "accepted trial",
+        )
+        if (
+            accepted_notes.get("purpose") != "trial"
+            or accepted_notes.get("workflow_id") != workflow_id
+            or accepted_notes.get("trial_intent_sha256") != authoritative_hashes["trial_intent_sha256"]
+            or accepted_notes.get("calibration_digest") != authoritative_hashes["calibration_digest"]
+        ):
+            raise ConfigLineageError(
+                CONFIG_LINEAGE_MISMATCH,
+                "accepted trial notes do not match confirmed production workflow metadata",
+            )
+
+        full_runs: list[dict[str, Any]] = []
+        for run in runs:
+            try:
+                notes = self._config_lineage_authority_notes(run, "full run")
+            except ConfigLineageError:
+                continue
+            if (
+                notes.get("purpose") == "production_full"
+                and notes.get("workflow_id") == workflow_id
+                and run.get("status") in {"failed", "completed"}
+            ):
+                full_runs.append(run)
+        if len(full_runs) != 2 or str(parent.get("run_id") or "") not in {
+            str(run.get("run_id") or "") for run in full_runs
+        }:
+            raise ConfigLineageError(
+                CONFIG_LINEAGE_MISMATCH,
+                "authoritative workflow must contain exactly the failed and completed full runs",
+            )
+        for full_run in full_runs:
+            notes = self._config_lineage_authority_notes(full_run, "full run")
+            if (
+                notes.get("workflow_id") != workflow_id
+                or notes.get("expected_config_sha256") != inspection.confirmed_text_sha256
+                or notes.get("calibration_digest") != authoritative_hashes["calibration_digest"]
+                or notes.get("source_signature_sha256") != source_signature_sha256
+                or notes.get("accepted_trial_run_id") != accepted_trial_run_id
+                or notes.get("trial_request_sha256") != authoritative_hashes["trial_request_sha256"]
+            ):
+                raise ConfigLineageError(
+                    CONFIG_LINEAGE_MISMATCH,
+                    "full-run notes do not match confirmed production workflow metadata",
+                )
+        full_runs.sort(
+            key=lambda run: (
+                0 if run.get("status") == "failed" else 1,
+                str(run.get("run_id") or ""),
+            )
+        )
+        result = {
+            "workflow_id": workflow_id,
+            "accepted_trial": self._config_lineage_run_binding(
+                accepted_trial,
+                accepted_trial=True,
+            ),
+            "request": {"sha256": authoritative_hashes["trial_request_sha256"]},
+            "intent": {"sha256": authoritative_hashes["trial_intent_sha256"]},
+            "trial_patch": {"sha256": authoritative_hashes["trial_patch_sha256"]},
+            "production_patch": {"sha256": authoritative_hashes["patch_sha256"]},
+            "calibration": {"sha256": authoritative_hashes["calibration_digest"]},
+            "source_signature": {"sha256": source_signature_sha256},
+            "historical_full_runs": [self._config_lineage_run_binding(run, accepted_trial=False) for run in full_runs],
+        }
+        try:
+            self._validate_config_lineage_registry_bindings(
+                str(parent.get("run_id") or ""),
+                result,
+                registry=registry,
+            )
+        except (ValueError, RuntimeError) as exc:
+            raise ConfigLineageError(CONFIG_LINEAGE_MISMATCH, str(exc)) from exc
+        return result
+
+    @staticmethod
+    def _config_lineage_authority_notes(
+        run: dict[str, Any],
+        label: str,
+    ) -> dict[str, Any]:
+        notes = run.get("notes")
+        try:
+            parsed = json.loads(notes) if isinstance(notes, str) else notes
+        except json.JSONDecodeError as exc:
+            raise ConfigLineageError(
+                CONFIG_LINEAGE_MISMATCH,
+                f"{label} notes are invalid",
+            ) from exc
+        if not isinstance(parsed, dict):
+            raise ConfigLineageError(
+                CONFIG_LINEAGE_MISMATCH,
+                f"{label} notes are unavailable",
+            )
+        return parsed
+
+    @staticmethod
+    def _config_lineage_authority_text(value: Any, label: str) -> str:
+        if not isinstance(value, str) or not value or value != value.strip():
+            raise ConfigLineageError(
+                CONFIG_LINEAGE_MISMATCH,
+                f"production_workflow {label} must be non-empty trimmed text",
+            )
+        return value
+
+    @staticmethod
+    def _config_lineage_authority_sha256(value: Any, label: str) -> str:
+        if not isinstance(value, str) or re.fullmatch(r"[0-9a-f]{64}", value) is None:
+            raise ConfigLineageError(
+                CONFIG_LINEAGE_MISMATCH,
+                f"production_workflow {label} must be a lowercase SHA-256",
+            )
+        return value
+
+    def _validate_config_lineage_registry_bindings(
+        self,
+        parent_run_id: str,
+        workflow_bindings: dict[str, Any],
+        *,
+        registry: dict[str, Any],
+    ) -> None:
+        historical = workflow_bindings.get("historical_full_runs")
+        accepted = workflow_bindings.get("accepted_trial")
+        if not isinstance(historical, list) or len(historical) != 2 or not isinstance(accepted, dict):
+            raise ValueError("config lineage workflow history is incomplete")
+        runs_by_id = {
+            item.get("run_id"): item
+            for item in registry.get("runs", [])
+            if isinstance(item, dict) and isinstance(item.get("run_id"), str)
+        }
+        if parent_run_id not in {item.get("run_id") for item in historical if isinstance(item, dict)}:
+            raise ValueError("config lineage history must include the target full run")
+        accepted_run = runs_by_id.get(accepted.get("run_id"))
+        if accepted_run is None:
+            raise ValueError("config lineage accepted trial is unavailable")
+        self._validate_config_lineage_run_identity(accepted, accepted_run, accepted_trial=True)
+        for declared in historical:
+            if not isinstance(declared, dict):
+                raise ValueError("config lineage historical full-run identity is invalid")
+            run = runs_by_id.get(declared.get("run_id"))
+            if run is None:
+                raise ValueError("config lineage historical full run is unavailable")
+            self._validate_config_lineage_run_identity(declared, run, accepted_trial=False)
+
+    @staticmethod
+    def _validate_config_lineage_run_identity(
+        declared: dict[str, Any],
+        run: dict[str, Any],
+        *,
+        accepted_trial: bool,
+    ) -> None:
+        expected = ApiService._config_lineage_run_binding(run, accepted_trial=accepted_trial)
+        if declared != expected:
+            raise ValueError("config lineage run, notes, status, or generation identity mismatch")
+
+    @staticmethod
+    def _config_lineage_run_binding(
+        run: dict[str, Any],
+        *,
+        accepted_trial: bool,
+    ) -> dict[str, Any]:
+        notes = run.get("notes")
+        notes_bytes = (
+            notes.encode("utf-8")
+            if isinstance(notes, str)
+            else json.dumps(notes, sort_keys=True, separators=(",", ":"), allow_nan=False).encode("utf-8")
+        )
+        broadcast = run.get("broadcast") if isinstance(run.get("broadcast"), dict) else {}
+        stable_identity = {
+            "run_id": run.get("run_id"),
+            "source": run.get("source"),
+            "status": run.get("status"),
+            "created_at": run.get("created_at"),
+            "completed_at": run.get("completed_at"),
+            "config_name": run.get("config_name"),
+            "config_path": run.get("config_path"),
+            "input_video": run.get("input_video"),
+            "parent_run_id": run.get("parent_run_id"),
+            "output_dir": run.get("output_dir"),
+            "submission_id": broadcast.get("submission_id"),
+            "generation_id": broadcast.get("generation_id"),
+            "notes_sha256": hashlib.sha256(notes_bytes).hexdigest(),
+        }
+        record_sha256 = hashlib.sha256(
+            json.dumps(
+                stable_identity,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=False,
+                allow_nan=False,
+            ).encode("utf-8")
+        ).hexdigest()
+        result = {
+            "run_id": run.get("run_id"),
+            "record_sha256": record_sha256,
+            "notes_sha256": stable_identity["notes_sha256"],
+        }
+        if not accepted_trial:
+            result.update(
+                {
+                    "submission_id": broadcast.get("submission_id"),
+                    "generation_id": broadcast.get("generation_id"),
+                    "status": run.get("status"),
+                }
+            )
+        return result
 
     def _review_evidence_children(self, parent_run_id: str) -> list[dict[str, Any]]:
         with self._lock:
@@ -5558,6 +6321,7 @@ class ApiService:
                     )
                     completed_at = _utc_now_iso()
                     recovered_result: dict[str, Any] | None = None
+                    target_context_error: _ReviewEvidenceTargetContextError | None = None
                     if parent is not None:
                         parent_output = Path(parent["output_dir"]).resolve()
                         queue_path = parent_output / "selective_review_queue.v1.json"
@@ -5598,10 +6362,83 @@ class ApiService:
                                         "review_evidence_generation_id": activation.get("generation_id"),
                                         "queue_sha256": queue_sha256,
                                     }
+                            except _ReviewEvidenceTargetContextError as exc:
+                                target_context_error = exc
                             except (BroadcastApiError, OSError, ValueError):
                                 recovered_result = None
                     output_dir = Path(child["output_dir"]).resolve()
-                    if recovered_result is not None:
+                    if target_context_error is not None:
+                        blocker = ConfigLineageError(target_context_error.code, str(target_context_error))
+                        challenge: dict[str, Any] | None = None
+                        if target_context_error.code == CONFIG_LINEAGE_REQUIRED:
+                            assert parent is not None
+                            try:
+                                challenge = self._broadcast_config_lineage_reconfirmation_challenge(
+                                    parent,
+                                    registry=registry,
+                                )
+                            except ConfigLineageError as challenge_error:
+                                blocker = challenge_error
+                        recovery_action = (
+                            "reconfirm_production_config"
+                            if blocker.code == CONFIG_LINEAGE_REQUIRED and challenge is not None
+                            else "inspect_production_config_lineage"
+                        )
+                        error = str(blocker) or blocker.code
+                        child.update(
+                            {
+                                "status": "failed",
+                                "completed_at": child.get("completed_at") or completed_at,
+                                "error": error,
+                                "broadcast": {
+                                    **metadata,
+                                    "operation_status": "blocked",
+                                    "blocker_code": blocker.code,
+                                    "error_code": blocker.code,
+                                    "recovery_action": recovery_action,
+                                    "recovered": True,
+                                    "worker_exited": True,
+                                },
+                                "progress": self._failed_progress(
+                                    child.get("progress"),
+                                    child.get("started_at"),
+                                ),
+                            }
+                        )
+                        assert parent is not None
+                        parent_broadcast = parent.get("broadcast") if isinstance(parent.get("broadcast"), dict) else {}
+                        parent_review_evidence = (
+                            parent_broadcast.get("review_evidence")
+                            if isinstance(parent_broadcast.get("review_evidence"), dict)
+                            else {}
+                        )
+                        preserved_blockers = [
+                            reason
+                            for reason in parent_broadcast.get("blocking_reasons", [])
+                            if reason
+                            not in {
+                                "missing_qualified_selective_review_queue",
+                                "invalid_or_stale_selective_review_evidence",
+                                "review_evidence_bundle_not_available",
+                                *_CONFIG_LINEAGE_BLOCKERS,
+                            }
+                        ]
+                        parent["broadcast"] = {
+                            **parent_broadcast,
+                            "status": "needs_review",
+                            "blocking_reasons": list(dict.fromkeys([*preserved_blockers, blocker.code])),
+                            "review_evidence": {
+                                **parent_review_evidence,
+                                "status": "blocked",
+                                "operation_run_id": child.get("run_id"),
+                                "blocker_code": blocker.code,
+                                "error_code": blocker.code,
+                                "recovery_action": recovery_action,
+                                "message": error,
+                                "config_lineage_reconfirmation": challenge,
+                            },
+                        }
+                    elif recovered_result is not None:
                         child.update(
                             {
                                 "status": "completed",

@@ -146,7 +146,9 @@ export default function BroadcastPage() {
           ? t.broadcast.reviewEvidence.prepareFailed
           : reviewEvidence.error.kind === "cancel"
             ? t.broadcast.reviewEvidence.cancelFailed
-            : t.broadcast.reviewEvidence.loadFailed,
+            : reviewEvidence.error.kind === "reconfirm"
+              ? t.broadcast.reviewEvidence.reconfirmFailed
+              : t.broadcast.reviewEvidence.loadFailed,
       )
     : null;
   const combinedError =

@@ -1025,7 +1025,9 @@ export function ProductionFullRunStep({
             ? t.broadcast.reviewEvidence.prepareFailed
             : reviewEvidence.error.kind === "cancel"
               ? t.broadcast.reviewEvidence.cancelFailed
-              : t.broadcast.reviewEvidence.loadFailed),
+              : reviewEvidence.error.kind === "reconfirm"
+                ? t.broadcast.reviewEvidence.reconfirmFailed
+                : t.broadcast.reviewEvidence.loadFailed),
       )
     : null;
   const reviewEvidenceErrorTitle = reviewEvidence.error
@@ -1033,7 +1035,9 @@ export function ProductionFullRunStep({
       ? t.broadcast.reviewEvidence.prepareFailed
       : reviewEvidence.error.kind === "cancel"
         ? t.broadcast.reviewEvidence.cancelFailed
-        : t.broadcast.reviewEvidence.loadFailed
+        : reviewEvidence.error.kind === "reconfirm"
+          ? t.broadcast.reviewEvidence.reconfirmFailed
+          : t.broadcast.reviewEvidence.loadFailed
     : null;
   const statusGeneration =
     controller.parent?.broadcast?.status_generation?.trim() ?? "";

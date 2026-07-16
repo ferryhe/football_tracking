@@ -30,6 +30,7 @@ ANNOTATION_RESOLUTION_NAME = "annotation_resolution.v1.json"
 ADJUDICATION_QUEUE_NAME = "annotation_adjudication_queue.v1.json"
 DATASET_MANIFEST_NAME = "candidate_dataset_manifest.json"
 EVIDENCE_HASH_POLICY = "candidate-tight-context-montage-hashes-v1"
+TARGET_AUDIT_USAGE = "target_finite_population_audit_only"
 
 _VOTE_STAGES = frozenset({"primary", "adjudication"})
 _REVIEWER_TYPES = frozenset({"ai", "human"})
@@ -120,6 +121,9 @@ def resolve_candidate_annotations(
         candidate_ids=candidate_id_set,
         contract_sha256=contract_sha256,
     )
+    target_audit_only = ledger_header.get("usage") == TARGET_AUDIT_USAGE
+    if target_audit_only:
+        _validate_target_audit_ledger_header(ledger_header)
     dataset_binding = _validate_dataset_evidence(
         dataset_manifest_path,
         ledger_header=ledger_header,
@@ -151,6 +155,8 @@ def resolve_candidate_annotations(
                 votes_by_candidate.get(candidate_id, []),
                 min_confidence=threshold,
             )
+            if target_audit_only and resolution["status"] == "confirmed":
+                resolution["training_eligible"] = False
             if resolution["status"] == "confirmed":
                 additions.append(
                     {
@@ -199,7 +205,13 @@ def resolve_candidate_annotations(
 
     report = {
         "schema_version": ANNOTATION_SCHEMA_VERSION,
-        "artifact_type": "candidate_annotation_resolution",
+        "artifact_type": (
+            "target_finite_population_annotation_resolution"
+            if target_audit_only
+            else "candidate_annotation_resolution"
+        ),
+        **({"qualification_scope": "target_finite_population"} if target_audit_only else {}),
+        **({"training_eligible": False, "reusable": False} if target_audit_only else {}),
         "source_contract": {
             "path": source_contract_path.name,
             "sha256": contract_sha256,
@@ -241,7 +253,11 @@ def resolve_candidate_annotations(
     }
     queue_report = {
         "schema_version": ANNOTATION_SCHEMA_VERSION,
-        "artifact_type": "candidate_annotation_adjudication_queue",
+        "artifact_type": (
+            "target_finite_population_annotation_adjudication_queue"
+            if target_audit_only
+            else "candidate_annotation_adjudication_queue"
+        ),
         "source_resolution": ANNOTATION_RESOLUTION_NAME,
         "candidate_count": len(adjudication_queue),
         "candidates": adjudication_queue,
@@ -319,6 +335,23 @@ def validate_candidate_annotation_package(
         for field in ("dataset_version", "evidence_manifest_sha256"):
             if previous_header.get(field) != header.get(field):
                 raise ValueError(f"append-only predecessor {field} does not match the current ledger")
+        if header.get("usage") == TARGET_AUDIT_USAGE:
+            _validate_target_audit_ledger_header(previous_header)
+            for field in (
+                "usage",
+                "qualification_scope",
+                "target_run_id",
+                "target_audit_plan_sha256",
+                "target_external_commitment_sha256",
+                "target_plan_commitment_sha256",
+                "target_sampling_design_sha256",
+                "target_sample_sha256",
+                "training_eligible",
+                "calibration_eligible",
+                "reusable",
+            ):
+                if previous_header.get(field) != header.get(field):
+                    raise ValueError(f"append-only predecessor {field} does not match the target audit plan")
         previous_chain = previous_header.get("append_only_chain")
         if not isinstance(previous_chain, dict) or previous_chain.get("sequence") != chain["sequence"] - 1:
             raise ValueError("append-only ledger sequence is not consecutive")
@@ -348,7 +381,16 @@ def validate_candidate_annotation_package(
     unresolved = [row.get("candidate_id") for row in resolutions if row.get("status") != "confirmed"]
     if unresolved:
         raise ValueError(f"annotation population is not fully resolved: {sorted(unresolved)}")
-    if published.get("summary", {}).get("training_eligible_count") != len(resolutions):
+    target_audit_only = header.get("usage") == TARGET_AUDIT_USAGE
+    if target_audit_only:
+        _validate_target_audit_ledger_header(header)
+        if published.get("summary", {}).get("training_eligible_count") != 0 or any(
+            resolution.get("training_eligible") is not False for resolution in resolutions
+        ):
+            raise ValueError("target audit annotation labels must not be training eligible")
+        if any(resolution.get("resolution_source") == "existing_confirmation" for resolution in resolutions):
+            raise ValueError("target audit annotation package may not reuse existing confirmed truth")
+    elif published.get("summary", {}).get("training_eligible_count") != len(resolutions):
         raise ValueError("every development/qualification resolution must be training eligible")
     if published.get("summary", {}).get("adjudication_count") != 0:
         raise ValueError("annotation package still contains unresolved adjudication work")
@@ -510,6 +552,33 @@ def _normalize_ledger_header(
             f"vote ledger line {line_number}: dataset_version and evidence_manifest_sha256 must appear together"
         )
     return result
+
+
+def _validate_target_audit_ledger_header(header: dict[str, Any]) -> None:
+    required = {
+        "usage": TARGET_AUDIT_USAGE,
+        "qualification_scope": "target_finite_population",
+        "training_eligible": False,
+        "calibration_eligible": False,
+        "reusable": False,
+    }
+    if any(header.get(name) != value for name, value in required.items()):
+        raise ValueError("target audit ledger usage must be non-training, non-calibration, and non-reusable")
+    _plain_required_text(header.get("target_run_id"), "target audit ledger target_run_id")
+    _plain_sha256_text(header.get("target_audit_plan_sha256"), "target audit ledger plan sha256")
+    _plain_sha256_text(
+        header.get("target_external_commitment_sha256"),
+        "target audit ledger external commitment sha256",
+    )
+    _plain_sha256_text(
+        header.get("target_sampling_design_sha256"),
+        "target audit ledger sampling design sha256",
+    )
+    _plain_sha256_text(header.get("target_sample_sha256"), "target audit ledger sample sha256")
+    _plain_sha256_text(
+        header.get("target_plan_commitment_sha256"),
+        "target audit ledger plan commitment sha256",
+    )
 
 
 def _normalize_vote(

@@ -179,6 +179,35 @@ class _BoundRun:
         )
 
 
+def _configure_target_queue(bound: _BoundRun) -> dict[str, object]:
+    queue = json.loads(bound.queue_path.read_text(encoding="utf-8"))
+    for name in (
+        "qualification_dataset",
+        "qualification_predictions",
+        "qualification_decisions",
+        "target_audit_plan",
+        "target_audit_labels",
+        "target_qualification",
+        "target_frozen_application",
+        "target_prelabel_commitment",
+    ):
+        path = bound.run_dir / "inputs" / f"{name}.json"
+        _write_json(path, {"artifact_type": name})
+        bound.paths[name] = path
+        queue["bindings"][name] = {
+            "path": path.relative_to(bound.run_dir).as_posix(),
+            "sha256": _sha256(path),
+        }
+    queue["artifact_type"] = "target_finite_population_review_queue"
+    queue["qualification_scope"] = "target_finite_population"
+    queue["target_bindings"] = {
+        "target_run_id": "run-target-fixture",
+        "confirmed_config_sha256": "a" * 64,
+    }
+    _write_json(bound.queue_path, queue)
+    return queue
+
+
 def _configure_terminal_shortfall(bound: _BoundRun) -> None:
     contract_path = bound.paths["contract"]
     contract = build_tracking_contract(
@@ -845,21 +874,12 @@ class BroadcastHybridOrchestrationTests(unittest.TestCase):
         (self.fixture.run_dir / TRACK_NAME).write_bytes(b"mutated-public-copy")
         self.assertEqual(immutable_bytes, immutable_track.read_bytes())
 
-    def test_target_queue_passes_independent_qualification_bindings_to_materializer(self) -> None:
-        queue = json.loads(self.fixture.queue_path.read_text(encoding="utf-8"))
-        for name in (
-            "qualification_dataset",
-            "qualification_predictions",
-            "qualification_decisions",
-        ):
-            path = self.fixture.run_dir / "inputs" / f"{name}.json"
-            _write_json(path, {"artifact_type": name})
-            self.fixture.paths[name] = path
-            queue["bindings"][name] = {
-                "path": path.relative_to(self.fixture.run_dir).as_posix(),
-                "sha256": _sha256(path),
-            }
-        _write_json(self.fixture.queue_path, queue)
+    def test_target_queue_actions_preflight_and_recompute_preserve_exact_audit_lineage(self) -> None:
+        _configure_target_queue(self.fixture)
+        queue_sha256 = _sha256(self.fixture.queue_path)
+
+        preflight = orchestration.preflight_recompute_reviewed_trajectory(self.fixture.run_dir)
+        self.assertEqual(queue_sha256, preflight["queue_sha256"])
 
         with (
             mock.patch.object(
@@ -875,17 +895,95 @@ class BroadcastHybridOrchestrationTests(unittest.TestCase):
             ),
         ):
             orchestration.recompute_reviewed_trajectory(self.fixture.run_dir)
+            orchestration._VALIDATED_MATERIALIZATION_GENERATIONS.clear()
+            orchestration.recompute_reviewed_trajectory(self.fixture.run_dir)
 
+        self.assertEqual(2, materialize.call_count)
         for name in (
             "qualification_dataset",
             "qualification_predictions",
             "qualification_decisions",
+            "target_audit_plan",
+            "target_audit_labels",
+            "target_qualification",
+            "target_frozen_application",
+            "target_prelabel_commitment",
         ):
-            keyword = "qualification_dataset_manifest_path" if name == "qualification_dataset" else f"{name}_path"
+            keyword = {
+                "qualification_dataset": "qualification_dataset_manifest_path",
+                "target_qualification": "target_qualification_path",
+                "target_frozen_application": "target_frozen_application_path",
+                "target_prelabel_commitment": "target_prelabel_commitment_path",
+            }.get(name, f"{name}_path")
             self.assertEqual(
                 self.fixture.paths[name].resolve(),
                 materialize.call_args.kwargs[keyword].resolve(),
             )
+        review_report = json.loads(
+            next(
+                (self.fixture.run_dir / "broadcast_generations").glob(
+                    f"review-*/{MATERIALIZATION_REPORT_NAME}"
+                )
+            ).read_text(encoding="utf-8")
+        )
+        self.assertEqual(queue_sha256, review_report["bindings"]["queue"]["sha256"])
+        for name in (
+            "target_audit_plan",
+            "target_audit_labels",
+            "target_qualification",
+            "target_frozen_application",
+            "target_prelabel_commitment",
+        ):
+            self.assertEqual(
+                _sha256(self.fixture.paths[name]),
+                review_report["bindings"][name]["sha256"],
+            )
+
+    def test_target_queue_rejects_incomplete_or_unexpected_audit_lineage_before_generation(self) -> None:
+        cases = {
+            "missing qualification": "qualification_predictions",
+            "missing target audit": "target_audit_labels",
+            "unexpected binding": None,
+        }
+        for case, removed_name in cases.items():
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as temp_name:
+                bound = _BoundRun(Path(temp_name))
+                queue = _configure_target_queue(bound)
+                if removed_name is None:
+                    queue["bindings"]["unexpected"] = queue["bindings"]["target_audit_plan"]
+                else:
+                    del queue["bindings"][removed_name]
+                _write_json(bound.queue_path, queue)
+
+                with self.assertRaisesRegex(
+                    orchestration.BroadcastHybridOrchestrationError,
+                    "binding keys|bindings must be complete",
+                ):
+                    orchestration.preflight_recompute_reviewed_trajectory(bound.run_dir)
+                self.assertFalse((bound.run_dir / "broadcast_generations").exists())
+
+    def test_legacy_queue_rejects_target_audit_bindings_before_generation(self) -> None:
+        for case in ("binding", "top_level"):
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as temp_name:
+                bound = _BoundRun(Path(temp_name))
+                queue = json.loads(bound.queue_path.read_text(encoding="utf-8"))
+                if case == "binding":
+                    path = bound.run_dir / "inputs" / "target_audit_plan.json"
+                    _write_json(path, {"artifact_type": "target_audit_plan"})
+                    queue["bindings"]["target_audit_plan"] = {
+                        "path": path.relative_to(bound.run_dir).as_posix(),
+                        "sha256": _sha256(path),
+                    }
+                else:
+                    queue["target_bindings"] = {"target_run_id": "mixed-envelope"}
+                _write_json(bound.queue_path, queue)
+
+                with self.assertRaisesRegex(
+                    orchestration.BroadcastHybridOrchestrationError,
+                    "legacy selective review queue may not carry target audit bindings",
+                ):
+                    orchestration.preflight_recompute_reviewed_trajectory(bound.run_dir)
+                self.assertFalse((bound.run_dir / "broadcast_generations").exists())
 
     def test_ready_facade_revalidates_every_bound_dataset_sample_artifact(self) -> None:
         evidence = self.fixture.paths["dataset"].parent / "evidence.bin"
