@@ -25,6 +25,11 @@ from football_tracking.selective_policy import (
     validate_selective_decisions_binding,
     validate_selective_policy_application_binding,
     validate_selective_policy_evidence_binding,
+    validate_target_audit_application_binding,
+)
+from football_tracking.target_finite_population import (
+    TargetFinitePopulationError,
+    build_target_qualified_application,
 )
 from football_tracking.tracking_contracts import (
     CLASSIFICATION_LABELS,
@@ -505,6 +510,11 @@ def build_selective_review_queue(
     qualification_dataset_manifest_path: Path | None = None,
     qualification_predictions_path: Path | None = None,
     qualification_decisions_path: Path | None = None,
+    target_audit_plan_path: Path | None = None,
+    target_audit_labels_path: Path | None = None,
+    target_qualification_path: Path | None = None,
+    target_frozen_application_path: Path | None = None,
+    target_prelabel_commitment_path: Path | None = None,
     fps_overrides: dict[str, float] | None = None,
     window_seconds: float = DEFAULT_WINDOW_SECONDS,
     max_windows: int = MAX_REVIEW_WINDOWS,
@@ -526,6 +536,11 @@ def build_selective_review_queue(
         qualification_dataset_manifest_path=qualification_dataset_manifest_path,
         qualification_predictions_path=qualification_predictions_path,
         qualification_decisions_path=qualification_decisions_path,
+        target_audit_plan_path=target_audit_plan_path,
+        target_audit_labels_path=target_audit_labels_path,
+        target_qualification_path=target_qualification_path,
+        target_frozen_application_path=target_frozen_application_path,
+        target_prelabel_commitment_path=target_prelabel_commitment_path,
         fps_overrides=fps_overrides,
     )
     _, windows, selection = _select_review_candidates(
@@ -550,13 +565,23 @@ def build_selective_review_queue(
         timing_sha256 = _sha256_file(timing_path)
         queue = {
             "schema_version": REVIEW_SCHEMA_VERSION,
-            "artifact_type": "selective_review_queue",
+            "artifact_type": (
+                "target_finite_population_review_queue"
+                if bundle["target_finite_population"]
+                else "selective_review_queue"
+            ),
+            **({"qualification_scope": "target_finite_population"} if bundle["target_finite_population"] else {}),
             "generated_at": _utc_now_iso(),
             "window_seconds": float(window_seconds),
             "max_windows": max_windows,
             "review_item_count": len(windows),
             "candidate_count": sum(len(item["candidates"]) for item in windows),
             "selection": selection,
+            **(
+                {"target_bindings": bundle["target_bindings"]}
+                if bundle["target_finite_population"]
+                else {}
+            ),
             "bindings": {
                 "review_timing": {
                     "path": REVIEW_TIMING_NAME,
@@ -594,6 +619,11 @@ def materialize_selective_review_actions(
     qualification_dataset_manifest_path: Path | None = None,
     qualification_predictions_path: Path | None = None,
     qualification_decisions_path: Path | None = None,
+    target_audit_plan_path: Path | None = None,
+    target_audit_labels_path: Path | None = None,
+    target_qualification_path: Path | None = None,
+    target_frozen_application_path: Path | None = None,
+    target_prelabel_commitment_path: Path | None = None,
 ) -> dict[str, Any]:
     """Validate review actions and atomically publish annotation/correction artifacts."""
 
@@ -601,7 +631,22 @@ def materialize_selective_review_actions(
     _require_new_output_dir(output_dir)
     queue, queue_snapshot = _load_json_snapshot(queue_path, "selective review queue")
     actions_report, actions_snapshot = _load_json_snapshot(actions_path, "selective review actions")
-    _require_envelope(queue, artifact_type="selective_review_queue", name="selective review queue")
+    target_finite_queue = queue.get("artifact_type") == "target_finite_population_review_queue"
+    if target_finite_queue:
+        if (
+            queue.get("schema_version") != REVIEW_SCHEMA_VERSION
+            or queue.get("qualification_scope") != "target_finite_population"
+        ):
+            raise SelectiveReviewError("target finite-population review queue envelope is invalid")
+        queue_target_bindings = _required_object(
+            queue.get("target_bindings"),
+            "queue.target_bindings",
+        )
+    else:
+        _require_envelope(queue, artifact_type="selective_review_queue", name="selective review queue")
+        if "target_bindings" in queue:
+            raise SelectiveReviewError("legacy selective review queue may not carry target bindings")
+        queue_target_bindings = {}
     _require_envelope(actions_report, artifact_type="selective_review_actions", name="selective review actions")
 
     queue_dir = queue_snapshot.path.parent
@@ -636,7 +681,25 @@ def materialize_selective_review_actions(
     present_qualification_bindings = set(queue_bindings) & qualification_binding_names
     if present_qualification_bindings and present_qualification_bindings != qualification_binding_names:
         raise SelectiveReviewError("queue qualification bindings must be complete")
+    if target_finite_queue and present_qualification_bindings != qualification_binding_names:
+        raise SelectiveReviewError(
+            "target finite-population queue qualification bindings must be complete"
+        )
     expected_binding_names |= present_qualification_bindings
+    target_binding_names = {
+        "target_audit_plan",
+        "target_audit_labels",
+        "target_qualification",
+        "target_frozen_application",
+        "target_prelabel_commitment",
+    }
+    present_target_bindings = set(queue_bindings) & target_binding_names
+    if target_finite_queue:
+        if present_target_bindings != target_binding_names:
+            raise SelectiveReviewError("target finite-population queue bindings must be complete")
+        expected_binding_names |= target_binding_names
+    elif present_target_bindings:
+        raise SelectiveReviewError("legacy selective review queue may not carry target audit bindings")
     if set(queue_bindings) != expected_binding_names:
         raise SelectiveReviewError("queue binding keys do not match the selective review contract")
     expected_timing_binding = {"path": str(timing_binding["path"]), "sha256": timing_snapshot.sha256}
@@ -665,8 +728,17 @@ def materialize_selective_review_actions(
         qualification_dataset_manifest_path=qualification_dataset_manifest_path,
         qualification_predictions_path=qualification_predictions_path,
         qualification_decisions_path=qualification_decisions_path,
+        target_audit_plan_path=target_audit_plan_path,
+        target_audit_labels_path=target_audit_labels_path,
+        target_qualification_path=target_qualification_path,
+        target_frozen_application_path=target_frozen_application_path,
+        target_prelabel_commitment_path=target_prelabel_commitment_path,
         fps_overrides=overrides,
     )
+    if queue_target_bindings != bundle["target_bindings"]:
+        raise SelectiveReviewError(
+            "queue target bindings do not match the exact target audit plan"
+        )
     for name, descriptor in bundle["bindings"].items():
         expected = _required_object(queue_bindings.get(name), f"queue.bindings.{name}")
         if not _queue_binding_matches_supplied_input(queue_dir, expected, descriptor, label=name):
@@ -855,6 +927,11 @@ def _load_source_bundle(
     qualification_dataset_manifest_path: Path | None,
     qualification_predictions_path: Path | None,
     qualification_decisions_path: Path | None,
+    target_audit_plan_path: Path | None,
+    target_audit_labels_path: Path | None,
+    target_qualification_path: Path | None,
+    target_frozen_application_path: Path | None,
+    target_prelabel_commitment_path: Path | None,
     fps_overrides: dict[str, float] | None,
 ) -> dict[str, Any]:
     dataset, dataset_snapshot = _load_json_snapshot(dataset_manifest_path, "candidate dataset manifest")
@@ -878,13 +955,16 @@ def _load_source_bundle(
             f"strict selective policy qualification evidence is required: {', '.join(missing_evidence)}"
         )
     decisions, decisions_snapshot = _load_json_snapshot(decisions_path, "selective decisions")
+    target_artifacts: dict[str, tuple[dict[str, Any], _Snapshot]] = {}
+    target_bindings: dict[str, Any] = {}
 
     _require_envelope(dataset, artifact_type="candidate_dataset", name="candidate dataset manifest")
     _require_envelope(predictions, artifact_type="candidate_predictions", name="candidate predictions")
     _require_envelope(policy, artifact_type="selective_policy", name="selective policy")
     _require_envelope(model, artifact_type="candidate_classifier_model", name="model manifest")
     target_application = decisions.get("artifact_type") == "selective_policy_application"
-    if not target_application:
+    target_finite_population = decisions.get("artifact_type") == "target_finite_population_qualified_application"
+    if not target_application and not target_finite_population:
         _require_envelope(decisions, artifact_type="selective_decisions", name="selective decisions")
         try:
             validated_decisions = validate_selective_decisions_binding(policy_snapshot.path, decisions_snapshot.path)
@@ -912,8 +992,22 @@ def _load_source_bundle(
             if path is None
         ]
         if missing_target_evidence:
+            raise SelectiveReviewError("independent target application requires " + ", ".join(missing_target_evidence))
+    if target_finite_population:
+        missing_target_audit = [
+            name
+            for name, path in (
+                ("target audit plan", target_audit_plan_path),
+                ("target audit labels", target_audit_labels_path),
+                ("target qualification", target_qualification_path),
+                ("target frozen application", target_frozen_application_path),
+                ("target pre-label commitment", target_prelabel_commitment_path),
+            )
+            if path is None
+        ]
+        if missing_target_audit:
             raise SelectiveReviewError(
-                "independent target application requires " + ", ".join(missing_target_evidence)
+                "target finite-population application requires " + ", ".join(missing_target_audit)
             )
     _, training_report_snapshot, weights_snapshot = _load_model_package(model, model_snapshot)
     try:
@@ -945,6 +1039,58 @@ def _load_source_bundle(
             raise SelectiveReviewError(f"frozen target policy application is invalid: {exc}") from exc
         if application_validation.get("application") != decisions:
             raise SelectiveReviewError("target application changed during frozen-policy validation")
+    elif target_finite_population:
+        target_artifacts = {
+            "target_audit_plan": _load_json_snapshot(
+                Path(target_audit_plan_path),
+                "target audit plan",
+            ),
+            "target_audit_labels": _load_json_snapshot(
+                Path(target_audit_labels_path),
+                "target audit labels",
+            ),
+            "target_qualification": _load_json_snapshot(
+                Path(target_qualification_path),
+                "target qualification",
+            ),
+            "target_frozen_application": _load_json_snapshot(
+                Path(target_frozen_application_path),
+                "target frozen application",
+            ),
+            "target_prelabel_commitment": _load_json_snapshot(
+                Path(target_prelabel_commitment_path),
+                "target pre-label commitment",
+            ),
+        }
+        try:
+            frozen_validation = validate_target_audit_application_binding(
+                policy_snapshot.path,
+                target_artifacts["target_frozen_application"][1].path,
+                predictions_snapshot.path,
+                dataset_snapshot.path,
+                contract_snapshot.path,
+                model_snapshot.path,
+            )
+            expected_target_application = build_target_qualified_application(
+                target_artifacts["target_frozen_application"][0],
+                target_artifacts["target_audit_plan"][0],
+                target_artifacts["target_audit_labels"][1].path,
+                target_artifacts["target_qualification"][0],
+                commitment_path=target_artifacts["target_prelabel_commitment"][1].path,
+            )
+            target_bindings = dict(
+                _required_object(
+                    target_artifacts["target_audit_plan"][0].get("bindings"),
+                    "target audit plan bindings",
+                )
+            )
+        except (OSError, ValueError, SelectivePolicyError, TargetFinitePopulationError) as exc:
+            raise SelectiveReviewError(f"target finite-population qualification is invalid: {exc}") from exc
+        if (
+            frozen_validation.get("application") != target_artifacts["target_frozen_application"][0]
+            or expected_target_application != decisions
+        ):
+            raise SelectiveReviewError("target finite-population application changed during qualification validation")
     elif evidence_validation.get("decisions") != decisions:
         raise SelectiveReviewError("selective decisions changed during qualification evidence validation")
     evidence_bindings = _required_object(evidence_validation.get("bindings"), "qualification evidence bindings")
@@ -999,7 +1145,7 @@ def _load_source_bundle(
         raise SelectiveReviewError("dataset contract binding does not match the supplied tracking contract")
     if predictions.get("source_contract_sha256") != contract_snapshot.sha256:
         raise SelectiveReviewError("predictions contract binding does not match the supplied tracking contract")
-    if not target_application:
+    if not target_application and not target_finite_population:
         _validate_policy_lineage(
             policy,
             decisions,
@@ -1066,6 +1212,7 @@ def _load_source_bundle(
         contract_snapshot,
         decisions_snapshot,
         *qualification_snapshots.values(),
+        *(snapshot for _payload, snapshot in target_artifacts.values()),
     ]
     sources = dataset.get("sources")
     if not isinstance(sources, list) or not sources:
@@ -1229,20 +1376,17 @@ def _load_source_bundle(
         "resolved_tracking_contract": _artifact_binding(qualification_snapshots["resolved_tracking_contract"]),
         "policy_roles": _artifact_binding(qualification_snapshots["policy_roles"]),
     }
-    if target_application:
+    if target_application or target_finite_population:
         bindings.update(
             {
-                "qualification_dataset": _artifact_binding(
-                    qualification_snapshots["qualification_dataset"]
-                ),
-                "qualification_predictions": _artifact_binding(
-                    qualification_snapshots["qualification_predictions"]
-                ),
-                "qualification_decisions": _artifact_binding(
-                    qualification_snapshots["qualification_decisions"]
-                ),
+                "qualification_dataset": _artifact_binding(qualification_snapshots["qualification_dataset"]),
+                "qualification_predictions": _artifact_binding(qualification_snapshots["qualification_predictions"]),
+                "qualification_decisions": _artifact_binding(qualification_snapshots["qualification_decisions"]),
             }
         )
+    if target_finite_population:
+        for name, (_payload, snapshot) in target_artifacts.items():
+            bindings[name] = _artifact_binding(snapshot)
     return {
         "dataset_version": dataset_version,
         "bindings": bindings,
@@ -1251,6 +1395,8 @@ def _load_source_bundle(
         "snapshots": snapshots,
         "contract_snapshot": contract_snapshot,
         "dataset_snapshot": dataset_snapshot,
+        "target_finite_population": target_finite_population,
+        "target_bindings": target_bindings,
     }
 
 
@@ -1375,10 +1521,9 @@ def _queue_binding_matches_supplied_input(
         )
     if expected_path != Path(supplied_path_text).resolve():
         return False
-    return (
-        {key: value for key, value in expected.items() if key != "path"}
-        == {key: value for key, value in supplied.items() if key != "path"}
-    )
+    return {key: value for key, value in expected.items() if key != "path"} == {
+        key: value for key, value in supplied.items() if key != "path"
+    }
 
 
 def _validate_policy_lineage(
@@ -1508,17 +1653,11 @@ def _validate_actions(
             "qualification_predictions",
             "qualification_decisions",
         )
-        present_qualification_bindings = [
-            name for name in qualification_binding_names if name in queue_bindings
-        ]
-        if present_qualification_bindings and len(present_qualification_bindings) != len(
-            qualification_binding_names
-        ):
+        present_qualification_bindings = [name for name in qualification_binding_names if name in queue_bindings]
+        if present_qualification_bindings and len(present_qualification_bindings) != len(qualification_binding_names):
             raise SelectiveReviewError("queue qualification bindings must be complete")
         for binding_name in present_qualification_bindings:
-            descriptor = _required_object(
-                queue_bindings.get(binding_name), f"queue.bindings.{binding_name}"
-            )
+            descriptor = _required_object(queue_bindings.get(binding_name), f"queue.bindings.{binding_name}")
             _expect_hash(
                 bindings.get(f"{binding_name}_sha256"),
                 descriptor.get("sha256"),
@@ -2016,6 +2155,11 @@ def build_cli_main(argv: list[str] | None = None) -> int:
     parser.add_argument("--qualification-dataset-manifest", type=Path)
     parser.add_argument("--qualification-predictions", type=Path)
     parser.add_argument("--qualification-decisions", type=Path)
+    parser.add_argument("--target-audit-plan", type=Path)
+    parser.add_argument("--target-audit-labels", type=Path)
+    parser.add_argument("--target-qualification", type=Path)
+    parser.add_argument("--target-frozen-application", type=Path)
+    parser.add_argument("--target-prelabel-commitment", type=Path)
     parser.add_argument("--output-dir", required=True, type=Path)
     parser.add_argument("--fps-override", action="append", default=[])
     parser.add_argument("--window-seconds", type=float, default=DEFAULT_WINDOW_SECONDS)
@@ -2036,6 +2180,11 @@ def build_cli_main(argv: list[str] | None = None) -> int:
             qualification_dataset_manifest_path=args.qualification_dataset_manifest,
             qualification_predictions_path=args.qualification_predictions,
             qualification_decisions_path=args.qualification_decisions,
+            target_audit_plan_path=args.target_audit_plan,
+            target_audit_labels_path=args.target_audit_labels,
+            target_qualification_path=args.target_qualification,
+            target_frozen_application_path=args.target_frozen_application,
+            target_prelabel_commitment_path=args.target_prelabel_commitment,
             fps_overrides=_fps_override_arguments(args.fps_override),
             window_seconds=args.window_seconds,
             max_windows=args.max_windows,
@@ -2078,6 +2227,11 @@ def materialize_cli_main(argv: list[str] | None = None) -> int:
     parser.add_argument("--qualification-dataset-manifest", type=Path)
     parser.add_argument("--qualification-predictions", type=Path)
     parser.add_argument("--qualification-decisions", type=Path)
+    parser.add_argument("--target-audit-plan", type=Path)
+    parser.add_argument("--target-audit-labels", type=Path)
+    parser.add_argument("--target-qualification", type=Path)
+    parser.add_argument("--target-frozen-application", type=Path)
+    parser.add_argument("--target-prelabel-commitment", type=Path)
     parser.add_argument("--output-dir", required=True, type=Path)
     try:
         args = parser.parse_args(argv)
@@ -2097,6 +2251,11 @@ def materialize_cli_main(argv: list[str] | None = None) -> int:
             qualification_dataset_manifest_path=args.qualification_dataset_manifest,
             qualification_predictions_path=args.qualification_predictions,
             qualification_decisions_path=args.qualification_decisions,
+            target_audit_plan_path=args.target_audit_plan,
+            target_audit_labels_path=args.target_audit_labels,
+            target_qualification_path=args.target_qualification,
+            target_frozen_application_path=args.target_frozen_application,
+            target_prelabel_commitment_path=args.target_prelabel_commitment,
         )
     except Exception as exc:
         print(

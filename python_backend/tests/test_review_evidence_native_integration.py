@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import shutil
 import tempfile
 import time
 import unittest
+from copy import deepcopy
 from pathlib import Path
 
 import cv2
@@ -35,7 +37,13 @@ from football_tracking.candidate_classifier import (
     train_candidate_classifier,
 )
 from football_tracking.detector_candidate_contract import assign_candidate_ids, candidate_to_contract_record
-from football_tracking.review_evidence_bundle import build_review_evidence_bundle, sha256_file
+from football_tracking.review_evidence_bundle import (
+    TARGET_BUNDLE_ARTIFACT_TYPE,
+    activate_review_evidence_bundle,
+    build_review_evidence_bundle,
+    sha256_file,
+    validate_review_evidence_bundle,
+)
 from football_tracking.selective_policy import (
     SELECTIVE_APPLICATION_NAME,
     SELECTIVE_DECISIONS_NAME,
@@ -46,6 +54,7 @@ from football_tracking.selective_policy import (
     apply_frozen_selective_policy,
     build_selective_policy_roles,
     fit_selective_policy,
+    freeze_selective_policy_for_target_audit,
     validate_selective_policy_application_binding,
     validate_selective_policy_evidence_binding,
 )
@@ -55,6 +64,13 @@ from football_tracking.selective_review import (
     build_selective_review_queue,
     materialize_selective_review_actions,
 )
+from football_tracking.target_finite_population import (
+    build_target_audit_labels_from_annotation_package,
+    build_target_audit_plan,
+    build_target_qualified_application,
+    evaluate_target_audit,
+    target_prelabel_commitment_path,
+)
 from football_tracking.tracking_contracts import TRACKING_CONTRACT_REPORT_NAME, build_tracking_contract
 from football_tracking.types import Candidate
 
@@ -63,6 +79,8 @@ class ReviewEvidenceNativeIntegrationTests(unittest.TestCase):
     """Exercise the real three-population evidence chain without validator mocks."""
 
     def test_native_multi_video_chain_builds_activates_serves_and_materializes(self) -> None:
+        if os.name == "nt":
+            self.skipTest("native config lineage activation requires POSIX no-follow handles")
         with tempfile.TemporaryDirectory() as temp_name:
             root = Path(temp_name)
             source = root / "source"
@@ -239,6 +257,90 @@ class ReviewEvidenceNativeIntegrationTests(unittest.TestCase):
                 )
             finally:
                 service.close()
+
+    def test_native_target_audit_builds_validates_and_activates_real_bundle(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            root = Path(temp_name)
+            source = root / "source"
+            source.mkdir()
+            development = self._build_model_development(source / "model-development")
+            qualification = self._build_policy_qualification(
+                source / "policy-qualification",
+                development,
+            )
+            target_audit = self._build_target_finite_population_chain(
+                source / "target-finite-population",
+                development,
+                qualification,
+            )
+            target_audit_queue = target_audit["queue"]
+            self.assertEqual(
+                "target_finite_population_review_queue",
+                target_audit_queue["artifact_type"],
+            )
+            self.assertEqual(
+                {
+                    "qualification_dataset",
+                    "qualification_predictions",
+                    "qualification_decisions",
+                },
+                {
+                    name
+                    for name in target_audit_queue["bindings"]
+                    if name.startswith("qualification_")
+                },
+            )
+            self.assertEqual(
+                {"accept", "reject", "abstain"},
+                {
+                    candidate["selective_decision"]
+                    for item in target_audit_queue["items"]
+                    for candidate in item["candidates"]
+                },
+            )
+
+            draft = self._write_bundle_draft(
+                source,
+                development,
+                qualification,
+                target_audit,
+                target_audit["queue_path"],
+                target_audit["application_validation"],
+            )
+            built = build_review_evidence_bundle(source, root / "published-target-bundle")
+            validated = validate_review_evidence_bundle(built.root)
+            self.assertEqual(TARGET_BUNDLE_ARTIFACT_TYPE, validated.manifest["artifact_type"])
+            self.assertEqual(draft["bundle_id"], validated.manifest["bundle_id"])
+
+            activation_output = root / "activated-target-review"
+            activation_output.mkdir()
+            activated = activate_review_evidence_bundle(
+                built.root,
+                activation_output,
+                expected_run_id=target_audit["run_id"],
+                expected_source_sha256=sha256_file(target_audit["source"]),
+                expected_root_contract_sha256=sha256_file(target_audit["contract"]),
+                expected_bundle_id=draft["bundle_id"],
+                expected_bundle_manifest_sha256=built.bundle_sha256,
+                trusted_prelabel_commitment_root=target_audit["commitment_root"],
+            )
+            active_queue = _read_json(activated.queue_path)
+            self.assertEqual(
+                "target_finite_population_review_queue",
+                active_queue["artifact_type"],
+            )
+            self.assertEqual(
+                {
+                    "qualification_dataset",
+                    "qualification_predictions",
+                    "qualification_decisions",
+                },
+                {
+                    name
+                    for name in active_queue["bindings"]
+                    if name.startswith("qualification_")
+                },
+            )
 
     def _build_model_development(self, root: Path) -> dict[str, Path]:
         root.mkdir()
@@ -611,6 +713,354 @@ class ReviewEvidenceNativeIntegrationTests(unittest.TestCase):
             "decisions": application_dir / SELECTIVE_APPLICATION_NAME,
         }
 
+    def _build_target_finite_population_chain(
+        self,
+        root: Path,
+        development: dict[str, Path],
+        qualification: dict[str, Path],
+    ) -> dict[str, object]:
+        root.mkdir()
+        source_path = root / "source.mp4"
+        writer = cv2.VideoWriter(
+            str(source_path),
+            cv2.VideoWriter_fourcc(*"mp4v"),
+            25.0,
+            (100, 100),
+        )
+        self.assertTrue(writer.isOpened())
+        try:
+            for _frame_index in range(200):
+                frame = np.zeros((100, 100, 3), dtype=np.uint8)
+                frame[:, :, 1] = 48
+                writer.write(frame)
+        finally:
+            writer.release()
+        source_sha256 = sha256_file(source_path)
+
+        accept_ids = [f"target-accept-{index:03d}" for index in range(183)]
+        reject_ids = ["target-reject-000"]
+        abstain_ids = [f"target-abstain-{index:03d}" for index in range(185)]
+        candidate_ids = [*accept_ids, *reject_ids, *abstain_ids]
+        candidates = [
+            {
+                "candidate_id": candidate_id,
+                "frame_index": 100,
+                "bbox": [10.0, 10.0, 20.0, 20.0],
+                "confidence": 0.8,
+                "source": "detector",
+            }
+            for candidate_id in candidate_ids
+        ]
+        prior_decisions = [
+            {
+                "candidate_id": candidate_id,
+                "decision": "abstain",
+                "confidence": 0.7,
+                "reason": "prior_manual_hold",
+            }
+            for candidate_id in abstain_ids
+        ]
+        contract_path = root / TRACKING_CONTRACT_REPORT_NAME
+        _write_json(
+            contract_path,
+            build_tracking_contract(
+                source={
+                    "video_sha256": source_sha256,
+                    "fps": 25.0,
+                    "width": 100,
+                    "height": 100,
+                    "frame_count": 200,
+                },
+                frames=[{"frame_index": index, "status": "unknown"} for index in range(200)],
+                candidates=candidates,
+                decisions=prior_decisions,
+            ),
+        )
+
+        rng = np.random.default_rng(1991)
+        high_template = _write_sample(
+            root,
+            rng,
+            "target-high-template",
+            100,
+            "target-audit-variant",
+            "target-audit-group",
+            "target-audit-split",
+            [10.0, 10.0, 20.0, 20.0],
+        )
+        low_template = _write_sample(
+            root,
+            rng,
+            "target-low-template",
+            100,
+            "target-audit-variant",
+            "target-audit-group",
+            "target-audit-split",
+            [10.0, 10.0, 20.0, 20.0],
+        )
+        for template, value in ((high_template, 240), (low_template, 15)):
+            for artifact_name, shape in (
+                ("tight_tensor", (5, 3, 64, 64)),
+                ("context_tensor", (5, 3, 128, 128)),
+            ):
+                descriptor = template["artifacts"][artifact_name]
+                artifact_path = root / descriptor["path"]
+                np.save(
+                    artifact_path,
+                    np.asfortranarray(np.full(shape, value, dtype=np.uint8)),
+                    allow_pickle=False,
+                )
+                descriptor["sha256"] = sha256_file(artifact_path)
+                descriptor["size_bytes"] = artifact_path.stat().st_size
+            montage = template["artifacts"]["review_montage"]
+            montage["size_bytes"] = (root / montage["path"]).stat().st_size
+
+        samples = []
+        for candidate_id in candidate_ids:
+            template = low_template if candidate_id in reject_ids else high_template
+            sample = deepcopy(template)
+            sample.update(
+                {
+                    "sample_id": f"sample-{candidate_id}",
+                    "candidate_id": candidate_id,
+                    "frame_index": 100,
+                    "bbox_requested_pixels": [10.0, 10.0, 20.0, 20.0],
+                    "bbox_clamped_pixels": [10.0, 10.0, 20.0, 20.0],
+                    "bbox_normalized": [0.1, 0.1, 0.2, 0.2],
+                    "variant_id": "target-audit-variant",
+                    "group_id": "target-audit-group",
+                    "split_group": "target-audit-split",
+                    "temporal_group": "target-audit-temporal",
+                }
+            )
+            samples.append(sample)
+        dataset_path = root / "candidate_dataset_manifest.json"
+        dataset_version = hashlib.sha256(
+            json.dumps(candidate_ids, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+        _write_json(
+            dataset_path,
+            {
+                "schema_version": "1.0",
+                "artifact_type": "candidate_dataset",
+                "builder_version": "candidate-dataset-v1",
+                "dataset_version": dataset_version,
+                "contract": {"sha256": sha256_file(contract_path)},
+                "frame_offsets": [-2, -1, 0, 1, 2],
+                "preprocessing_runtime": _preprocessing_runtime(),
+                "tensor_contract": _tensor_contract(),
+                "summary": {
+                    "status": "ok",
+                    "sample_count": len(samples),
+                    "source_count": 1,
+                },
+                "sources": [
+                    {
+                        "path": source_path.name,
+                        "sha256": source_sha256,
+                        "variant_id": "target-audit-variant",
+                        "width": 100,
+                        "height": 100,
+                        "frame_count": 200,
+                        "fps": 25.0,
+                        "group_id": "target-audit-group",
+                        "temporal_group": "target-audit-temporal",
+                        "split_group": "target-audit-split",
+                        "candidate_ids": candidate_ids,
+                    }
+                ],
+                "samples": samples,
+            },
+        )
+        inference_dir = root / "predictions"
+        classify_candidates(
+            development["model_manifest"].parent,
+            dataset_path,
+            contract_path,
+            inference_dir,
+            batch_size=128,
+        )
+        predictions_path = inference_dir / PREDICTIONS_NAME
+
+        frozen_dir = root / "frozen"
+        frozen = freeze_selective_policy_for_target_audit(
+            qualification["policy"],
+            predictions_path,
+            dataset_path,
+            contract_path,
+            development["model_manifest"],
+            frozen_dir,
+        )
+        decision_counts = {
+            decision: sum(row["decision"] == decision for row in frozen["decisions"])
+            for decision in ("accept", "reject", "abstain")
+        }
+        self.assertEqual(
+            {"accept": 183, "reject": 1, "abstain": 185},
+            decision_counts,
+        )
+
+        commitment_root = root / "canonical-prelabel-commitments"
+        plan = build_target_audit_plan(
+            frozen,
+            target_run_id="run-native-target-audit",
+            confirmed_config_sha256="b" * 64,
+            commitment_root=commitment_root,
+        )
+        self.assertEqual(len(candidate_ids), plan["sampling_design"]["sample_size"])
+        self.assertEqual(len(candidate_ids), len(plan["sample"]))
+        commitment_path = target_prelabel_commitment_path(commitment_root, plan)
+        plan_path = root / "target_finite_population_audit_plan.v1.json"
+        _write_json(plan_path, plan)
+
+        samples_by_id = {row["candidate_id"]: row for row in samples}
+        labels = {
+            candidate_id: (
+                "equipment_or_background"
+                if candidate_id in reject_ids
+                else "match_ball"
+            )
+            for candidate_id in candidate_ids
+        }
+        header = {
+            "schema_version": "1.0",
+            "record_type": "ledger_header",
+            "contract_sha256": sha256_file(contract_path),
+            "dataset_version": dataset_version,
+            "evidence_manifest_sha256": sha256_file(dataset_path),
+            "append_only_chain": {
+                "algorithm": "sha256-ledger-chain-v1",
+                "sequence": 1,
+                "previous_ledger_sha256": None,
+            },
+            "usage": "target_finite_population_audit_only",
+            "qualification_scope": "target_finite_population",
+            "target_run_id": plan["bindings"]["target_run_id"],
+            "target_audit_plan_sha256": plan["plan_sha256"],
+            "target_external_commitment_sha256": plan["external_commitment"]["record_sha256"],
+            "target_plan_commitment_sha256": plan["plan_commitment_sha256"],
+            "target_sampling_design_sha256": plan["sampling_design_sha256"],
+            "target_sample_sha256": plan["sample_sha256"],
+            "training_eligible": False,
+            "calibration_eligible": False,
+            "reusable": False,
+        }
+        votes = []
+        for candidate_id in candidate_ids:
+            for reviewer in ("a", "b"):
+                votes.append(
+                    {
+                        "schema_version": "1.0",
+                        "record_type": "vote",
+                        "vote_id": f"{candidate_id}-{reviewer}",
+                        "candidate_id": candidate_id,
+                        "stage": "primary",
+                        "reviewer_type": "human",
+                        "annotator_id": f"native-target-reviewer-{reviewer}",
+                        "fingerprint": f"native-target-reviewer-{reviewer}-device",
+                        "label": labels[candidate_id],
+                        "confidence": 0.99,
+                        "blind": True,
+                        "created_at": "2026-07-15T10:00:00Z",
+                        "dataset_version": dataset_version,
+                        "sample_id": samples_by_id[candidate_id]["sample_id"],
+                        "evidence_sha256": sample_evidence_sha256(samples_by_id[candidate_id]),
+                    }
+                )
+        ledger_path = root / "target-votes.sequence-001.jsonl"
+        ledger_path.write_text(
+            "".join(json.dumps(row, sort_keys=True) + "\n" for row in [header, *votes]),
+            encoding="utf-8",
+        )
+        resolution_dir = root / "target-annotations"
+        resolve_candidate_annotations(
+            contract_path,
+            ledger_path,
+            resolution_dir,
+            dataset_manifest_path=dataset_path,
+        )
+        labels_manifest = build_target_audit_labels_from_annotation_package(
+            plan,
+            package_root=root,
+            contract_path=contract_path,
+            ledger_path=ledger_path,
+            dataset_manifest_path=dataset_path,
+            annotation_resolution_path=resolution_dir / ANNOTATION_RESOLUTION_NAME,
+            commitment_path=commitment_path,
+        )
+        labels_path = root / "target_finite_population_audit_labels.v1.json"
+        _write_json(labels_path, labels_manifest)
+        qualification_artifact = evaluate_target_audit(
+            plan,
+            labels_path,
+            commitment_path=commitment_path,
+        )
+        self.assertEqual("qualified", qualification_artifact["status"])
+        qualification_path = root / "target_finite_population_qualification.v1.json"
+        _write_json(qualification_path, qualification_artifact)
+        qualified_application = build_target_qualified_application(
+            frozen,
+            plan,
+            labels_path,
+            qualification_artifact,
+            commitment_path=commitment_path,
+        )
+        self.assertEqual(frozen["decisions"], qualified_application["decisions"])
+        self.assertTrue(
+            all(row["decision_scope"] == "application" for row in qualified_application["decisions"])
+        )
+        qualified_path = root / "target_finite_population_qualified_application.v1.json"
+        _write_json(qualified_path, qualified_application)
+
+        queue_path = root / "queue" / REVIEW_QUEUE_NAME
+        queue = build_selective_review_queue(
+            dataset_path,
+            predictions_path,
+            qualification["policy"],
+            development["model_manifest"],
+            contract_path,
+            root / "queue",
+            decisions_path=qualified_path,
+            annotation_resolution_path=qualification["annotation_resolution"],
+            resolved_contract_path=qualification["resolved_contract"],
+            policy_roles_path=qualification["policy_roles"],
+            qualification_dataset_manifest_path=qualification["dataset"],
+            qualification_predictions_path=qualification["predictions"],
+            qualification_decisions_path=qualification["qualification_decisions"],
+            target_audit_plan_path=plan_path,
+            target_audit_labels_path=labels_path,
+            target_qualification_path=qualification_path,
+            target_frozen_application_path=(
+                frozen_dir / "target_finite_population_application.v1.json"
+            ),
+            target_prelabel_commitment_path=commitment_path,
+            max_windows=1,
+        )
+        return {
+            "root": root,
+            "source": source_path,
+            "contract": contract_path,
+            "dataset": dataset_path,
+            "predictions": predictions_path,
+            "decisions": qualified_path,
+            "target_audit_plan": plan_path,
+            "target_audit_labels": labels_path,
+            "target_qualification": qualification_path,
+            "target_frozen_application": (
+                frozen_dir / "target_finite_population_application.v1.json"
+            ),
+            "target_prelabel_commitment": commitment_path,
+            "commitment_root": commitment_root,
+            "queue_path": queue_path,
+            "queue": queue,
+            "run_id": plan["bindings"]["target_run_id"],
+            "qualification_scope": "target_finite_population",
+            "application_validation": {
+                "candidate_population_sha256": plan["bindings"]["candidate_population_sha256"],
+                "candidate_ids": candidate_ids,
+            },
+        }
+
     def _resolve_human_annotations(
         self,
         root: Path,
@@ -679,10 +1129,12 @@ class ReviewEvidenceNativeIntegrationTests(unittest.TestCase):
         source: Path,
         development: dict[str, Path],
         qualification: dict[str, Path],
-        target: dict[str, Path],
+        target: dict[str, object],
         queue_path: Path,
         application_validation: dict[str, object],
     ) -> dict[str, object]:
+        self._prepare_declared_non_target_bundle_source(development, qualification)
+
         def relative(path: Path) -> str:
             return path.relative_to(source).as_posix()
 
@@ -704,15 +1156,33 @@ class ReviewEvidenceNativeIntegrationTests(unittest.TestCase):
             qualification["qualification_decisions"]
         )
         qualification_roles, qualification_roles_sha = package_file(qualification["policy_roles"])
-        target_dataset, target_dataset_sha = package_file(target["dataset"])
-        target_predictions, target_predictions_sha = package_file(target["predictions"])
-        target_decisions, target_decisions_sha = package_file(target["decisions"])
-        target_source, target_source_sha = package_file(target["source"])
-        target_contract, target_contract_sha = package_file(target["contract"])
+        target_dataset, target_dataset_sha = package_file(Path(target["dataset"]))
+        target_predictions, target_predictions_sha = package_file(Path(target["predictions"]))
+        target_decisions, target_decisions_sha = package_file(Path(target["decisions"]))
+        target_source, target_source_sha = package_file(Path(target["source"]))
+        target_contract, target_contract_sha = package_file(Path(target["contract"]))
+        target_scope = target.get("qualification_scope") == "target_finite_population"
+        target_audit_artifacts = {}
+        if target_scope:
+            for name in (
+                "target_audit_plan",
+                "target_audit_labels",
+                "target_qualification",
+                "target_frozen_application",
+                "target_prelabel_commitment",
+            ):
+                path, digest = package_file(Path(target[name]))
+                target_audit_artifacts[f"{name}_path"] = path
+                target_audit_artifacts[f"{name}_sha256"] = digest
         draft = {
-            "bundle_id": "review-evidence-native-multi-video-e2e",
+            "bundle_id": (
+                "review-evidence-native-target-finite-e2e"
+                if target_scope
+                else "review-evidence-native-multi-video-e2e"
+            ),
+            **({"qualification_scope": "target_finite_population"} if target_scope else {}),
             "target": {
-                "run_id": "run-native-e2e",
+                "run_id": target.get("run_id", "run-native-e2e"),
                 "source_sha256": target_source_sha,
                 "root_contract_sha256": target_contract_sha,
                 "max_review_windows": 1,
@@ -783,6 +1253,7 @@ class ReviewEvidenceNativeIntegrationTests(unittest.TestCase):
                     "source_sha256": target_source_sha,
                     "root_contract_path": target_contract,
                     "root_contract_sha256": target_contract_sha,
+                    **target_audit_artifacts,
                 },
             },
             "queue": {
@@ -792,6 +1263,48 @@ class ReviewEvidenceNativeIntegrationTests(unittest.TestCase):
         }
         _write_json(source / "review_evidence_bundle.draft.json", draft)
         return draft
+
+    def _prepare_declared_non_target_bundle_source(
+        self,
+        development: dict[str, Path],
+        qualification: dict[str, Path],
+    ) -> None:
+        development_root = development["root"]
+        qualification_root = qualification["root"]
+        undeclared = [
+            development_root / "annotation_resolution.v1.json",
+            development_root / "resolved-contract.json",
+            development_root / "input" / TRACKING_CONTRACT_REPORT_NAME,
+            *[
+                development_root / "dataset" / "samples" / sample_id / artifact_name
+                for sample_id in (
+                    "ai-unknown",
+                    "conflict",
+                    "g0-unknown",
+                    "g1-unknown",
+                    "g2-unknown",
+                    "prelabel-only",
+                    "single-vote",
+                )
+                for artifact_name in ("context.npy", "review_montage.png", "tight.npy")
+            ],
+            qualification_root / "dataset" / "annotation_resolution.v1.json",
+            qualification_root / "dataset" / PREDICTIONS_NAME,
+            qualification_root / "dataset" / "model.pt",
+            qualification_root / "dataset" / MODEL_MANIFEST_NAME,
+            qualification_root / "dataset" / "resolved-contract.json",
+            qualification_root / "dataset" / SELECTIVE_POLICY_ROLES_NAME,
+            qualification_root / "dataset" / "training_report.v1.json",
+            qualification_root / "input" / TRACKING_CONTRACT_REPORT_NAME,
+            qualification_root / "policy" / "selective_acceptance_report.v1.json",
+            qualification_root / "policy" / TRACKING_CONTRACT_REPORT_NAME,
+            qualification_root / "predictions" / TRACKING_CONTRACT_REPORT_NAME,
+            qualification_root / "tampered-qualification-predictions.json",
+        ]
+        self.assertEqual(36, len(undeclared))
+        for path in undeclared:
+            self.assertTrue(path.is_file(), f"expected undeclared fixture output is missing: {path}")
+            path.unlink()
 
     def _create_service_parent(
         self,

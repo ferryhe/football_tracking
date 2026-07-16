@@ -1228,9 +1228,7 @@ class SelectiveReviewWindowTests(unittest.TestCase):
 
 class SelectiveReviewArtifactTests(unittest.TestCase):
     def setUp(self) -> None:
-        inference_patch = patch(
-            "football_tracking.selective_policy.validate_candidate_predictions_package"
-        )
+        inference_patch = patch("football_tracking.selective_policy.validate_candidate_predictions_package")
         inference_patch.start()
         self.addCleanup(inference_patch.stop)
 
@@ -1299,6 +1297,142 @@ class SelectiveReviewArtifactTests(unittest.TestCase):
                 )
 
             self.assertEqual("complete", report["status"])
+
+    def test_target_finite_population_queue_uses_new_envelope_and_exact_audit_bindings(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            fixture = _Fixture(root, fps_by_variant={"a": 20.0, "b": 20.0})
+            application_path = root / "target_finite_population_qualified_application.v1.json"
+            application = json.loads(fixture.decisions_path.read_text(encoding="utf-8"))
+            application["artifact_type"] = "target_finite_population_qualified_application"
+            application["qualification_scope"] = "target_finite_population"
+            _write_json(application_path, application)
+            target_bindings = {
+                "target_run_id": "run-target",
+                "source_sha256": "1" * 64,
+                "root_contract_sha256": "2" * 64,
+                "candidate_population_sha256": "3" * 64,
+                "model_sha256": "4" * 64,
+                "model_version": "model-v1",
+                "confirmed_config_sha256": "5" * 64,
+                "policy_sha256": "6" * 64,
+                "policy_version": "policy-v1",
+                "thresholds_sha256": "7" * 64,
+            }
+            target_paths = {}
+            for name, artifact_type in (
+                ("target_audit_plan", "target_finite_population_audit_plan"),
+                ("target_audit_labels", "target_finite_population_audit_labels"),
+                ("target_qualification", "target_finite_population_qualification"),
+                ("target_frozen_application", "target_finite_population_application"),
+                (
+                    "target_prelabel_commitment",
+                    "target_finite_population_prelabel_commitment",
+                ),
+            ):
+                path = root / f"{name}.json"
+                payload = {
+                    "schema_version": "1.0",
+                    "artifact_type": artifact_type,
+                    "qualification_scope": "target_finite_population",
+                }
+                if name == "target_audit_plan":
+                    payload["bindings"] = target_bindings
+                _write_json(path, payload)
+                target_paths[name] = path
+
+            with (
+                patch(
+                    "football_tracking.selective_review.validate_target_audit_application_binding",
+                    return_value={
+                        "application": json.loads(target_paths["target_frozen_application"].read_text(encoding="utf-8"))
+                    },
+                ),
+                patch(
+                    "football_tracking.selective_review.build_target_qualified_application",
+                    return_value=application,
+                ),
+            ):
+                queue_dir = root / "target-finite-queue"
+                queue = build_selective_review_queue(
+                    fixture.dataset_path,
+                    fixture.predictions_path,
+                    fixture.policy_path,
+                    fixture.model_path,
+                    fixture.contract_path,
+                    queue_dir,
+                    decisions_path=application_path,
+                    annotation_resolution_path=fixture.annotation_resolution_path,
+                    resolved_contract_path=fixture.resolved_contract_path,
+                    policy_roles_path=fixture.policy_roles_path,
+                    qualification_dataset_manifest_path=fixture.dataset_path,
+                    qualification_predictions_path=fixture.predictions_path,
+                    qualification_decisions_path=fixture.decisions_path,
+                    target_audit_plan_path=target_paths["target_audit_plan"],
+                    target_audit_labels_path=target_paths["target_audit_labels"],
+                    target_qualification_path=target_paths["target_qualification"],
+                    target_frozen_application_path=target_paths["target_frozen_application"],
+                    target_prelabel_commitment_path=target_paths["target_prelabel_commitment"],
+                )
+            self.assertEqual("target_finite_population_review_queue", queue["artifact_type"])
+            self.assertEqual("target_finite_population", queue["qualification_scope"])
+            self.assertEqual(target_bindings, queue["target_bindings"])
+            self.assertTrue(
+                {
+                    "qualification_dataset",
+                    "qualification_predictions",
+                    "qualification_decisions",
+                    "target_audit_plan",
+                    "target_audit_labels",
+                    "target_qualification",
+                    "target_frozen_application",
+                    "target_prelabel_commitment",
+                }.issubset(queue["bindings"])
+            )
+            missing_qualification = json.loads(json.dumps(queue))
+            for binding_name in (
+                "qualification_dataset",
+                "qualification_predictions",
+                "qualification_decisions",
+            ):
+                missing_qualification["bindings"].pop(binding_name)
+            tampered_queue_path = queue_dir / "target-queue-without-qualification.json"
+            _write_json(tampered_queue_path, missing_qualification)
+            actions_path = root / "target-actions-without-qualification.json"
+            _write_json(
+                actions_path,
+                {
+                    "schema_version": "1.0",
+                    "artifact_type": "selective_review_actions",
+                    "actions": _complete_queue_actions(tampered_queue_path),
+                },
+            )
+            with self.assertRaisesRegex(
+                SelectiveReviewError,
+                "target finite-population queue qualification bindings must be complete",
+            ):
+                materialize_selective_review_actions(
+                    tampered_queue_path,
+                    actions_path,
+                    fixture.dataset_path,
+                    fixture.predictions_path,
+                    fixture.policy_path,
+                    fixture.model_path,
+                    fixture.contract_path,
+                    root / "target-round-without-qualification",
+                    decisions_path=application_path,
+                    annotation_resolution_path=fixture.annotation_resolution_path,
+                    resolved_contract_path=fixture.resolved_contract_path,
+                    policy_roles_path=fixture.policy_roles_path,
+                    qualification_dataset_manifest_path=fixture.dataset_path,
+                    qualification_predictions_path=fixture.predictions_path,
+                    qualification_decisions_path=fixture.decisions_path,
+                    target_audit_plan_path=target_paths["target_audit_plan"],
+                    target_audit_labels_path=target_paths["target_audit_labels"],
+                    target_qualification_path=target_paths["target_qualification"],
+                    target_frozen_application_path=target_paths["target_frozen_application"],
+                    target_prelabel_commitment_path=target_paths["target_prelabel_commitment"],
+                )
 
     def test_large_audit_population_is_deterministically_bounded_and_fair(self) -> None:
         with tempfile.TemporaryDirectory() as raw:

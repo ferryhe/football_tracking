@@ -2,13 +2,15 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import tempfile
 import threading
 import time
 import unittest
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from unittest import mock
 
+import yaml
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -17,10 +19,21 @@ from football_tracking.api.dependencies import get_service
 from football_tracking.api.routes.broadcast import router as broadcast_router
 from football_tracking.api.schemas import BroadcastReviewEvidenceImportRequest
 from football_tracking.api.service import ApiService
-from football_tracking.candidate_annotations import sample_evidence_sha256
+from football_tracking.candidate_annotations import (
+    ADJUDICATION_QUEUE_NAME,
+    sample_evidence_sha256,
+)
+from football_tracking.config_lineage import (
+    CONFIG_LINEAGE_CONFLICT,
+    CONFIG_LINEAGE_MISMATCH,
+    CONFIG_LINEAGE_REQUIRED,
+    CONFIG_LINEAGE_UNSAFE,
+    ConfigLineageError,
+)
 from football_tracking.review_evidence_bundle import (
     BUNDLE_MANIFEST_NAME,
     ReviewEvidenceBundleError,
+    _resolve_declared_manifest_path,
     activate_review_evidence_bundle,
     build_review_evidence_bundle,
     discover_review_evidence_bundles,
@@ -57,6 +70,484 @@ class ReviewEvidenceBundleTests(unittest.TestCase):
             patcher.stop()
         self.temp.cleanup()
 
+    def test_policy_authority_resolves_only_unique_model_development_dependency(self) -> None:
+        model_sha256 = "1" * 64
+        policy_sha256 = "2" * 64
+        target_sha256 = "3" * 64
+        package_roots = {
+            "model_development": PurePosixPath("model-development"),
+            "policy_qualification": PurePosixPath("policy-qualification"),
+            "target_application": PurePosixPath("target-application"),
+        }
+        inventory = {
+            "model-development/model/model_manifest.v1.json": {"sha256": model_sha256},
+            "policy-qualification/policy/selective_policy.v1.json": {"sha256": policy_sha256},
+            "target-application/target_labels.v1.json": {"sha256": target_sha256},
+        }
+        declared = {
+            path: package_name
+            for path, package_name in (
+                (
+                    "model-development/model/model_manifest.v1.json",
+                    "model_development",
+                ),
+                (
+                    "policy-qualification/policy/selective_policy.v1.json",
+                    "policy_qualification",
+                ),
+                (
+                    "target-application/target_labels.v1.json",
+                    "target_application",
+                ),
+            )
+        }
+
+        resolved, dependency_package = _resolve_declared_manifest_path(
+            "model_manifest.v1.json",
+            raw_sha256=model_sha256,
+            semantic_key="model_manifest",
+            declaring_manifest=PurePosixPath(
+                "policy-qualification/policy/selective_policy.v1.json"
+            ),
+            declaring_package="policy_qualification",
+            package_root=package_roots["policy_qualification"],
+            package_roots=package_roots,
+            inventory=inventory,
+            already_declared=declared,
+            label="policy authority manifest path",
+        )
+
+        self.assertEqual(
+            PurePosixPath("model-development/model/model_manifest.v1.json"),
+            resolved,
+        )
+        self.assertEqual("model_development", dependency_package)
+        for declaring_package, dependency_sha256, dependency_name in (
+            ("model_development", policy_sha256, "selective_policy.v1.json"),
+            ("policy_qualification", target_sha256, "target_labels.v1.json"),
+        ):
+            with (
+                self.subTest(
+                    declaring_package=declaring_package,
+                    dependency_name=dependency_name,
+                ),
+                self.assertRaises(ReviewEvidenceBundleError) as caught,
+            ):
+                _resolve_declared_manifest_path(
+                    dependency_name,
+                    raw_sha256=dependency_sha256,
+                    semantic_key="dependency",
+                    declaring_manifest=package_roots[declaring_package] / "manifest.json",
+                    declaring_package=declaring_package,
+                    package_root=package_roots[declaring_package],
+                    package_roots=package_roots,
+                    inventory=inventory,
+                    already_declared=declared,
+                    label=f"{declaring_package} authority manifest path",
+                )
+            self.assertEqual("undeclared_non_target_artifact", caught.exception.code)
+
+        annotation_contract_sha256 = "4" * 64
+        annotation_derived_sha256 = "5" * 64
+        annotation_direct = (
+            "model-development/annotations/tracking_contract.v2.json"
+        )
+        annotation_authoritative = (
+            "model-development/dataset/tracking_contract.v2.json"
+        )
+        inventory.update(
+            {
+                annotation_direct: {"sha256": annotation_derived_sha256},
+                annotation_authoritative: {"sha256": annotation_contract_sha256},
+            }
+        )
+        declared[annotation_direct] = "model_development"
+        declared[annotation_authoritative] = "model_development"
+        with self.assertRaises(ReviewEvidenceBundleError) as strict_caught:
+            _resolve_declared_manifest_path(
+                "tracking_contract.v2.json",
+                raw_sha256=annotation_contract_sha256,
+                semantic_key="source_contract",
+                declaring_manifest=PurePosixPath(
+                    "model-development/annotations/annotation_resolution.v1.json"
+                ),
+                declaring_package="model_development",
+                package_root=package_roots["model_development"],
+                package_roots=package_roots,
+                inventory=inventory,
+                already_declared=declared,
+                label="strict authority manifest path",
+            )
+        self.assertEqual(
+            "undeclared_non_target_artifact",
+            strict_caught.exception.code,
+        )
+
+        relocated, relocated_package = _resolve_declared_manifest_path(
+            "tracking_contract.v2.json",
+            raw_sha256=annotation_contract_sha256,
+            semantic_key="source_contract",
+            declaring_manifest=PurePosixPath(
+                "model-development/annotations/annotation_resolution.v1.json"
+            ),
+            declaring_package="model_development",
+            package_root=package_roots["model_development"],
+            package_roots=package_roots,
+            inventory=inventory,
+            already_declared=declared,
+            label="annotation source contract path",
+            allow_declared_relocation_on_mismatch=True,
+        )
+        self.assertEqual(PurePosixPath(annotation_authoritative), relocated)
+        self.assertEqual("model_development", relocated_package)
+
+    def test_config_lineage_route_returns_stable_typed_blocker(self) -> None:
+        class BlockedService:
+            def __init__(self, code: str) -> None:
+                self.code = code
+
+            def reconfirm_broadcast_config_lineage(
+                self,
+                run_id: str,
+                request: dict[str, object],
+            ) -> dict[str, object]:
+                del run_id, request
+                raise ConfigLineageError(
+                    self.code,
+                    f"config lineage blocked: {self.code}",
+                )
+
+        app = FastAPI()
+        app.include_router(broadcast_router)
+        client = TestClient(app)
+        payload = {
+            "expected_observed_raw_sha256": "1" * 64,
+            "workflow_bindings": {},
+            "operator_id": "operator-1",
+            "reviewer_id": "reviewer-1",
+        }
+        for code in (
+            CONFIG_LINEAGE_REQUIRED,
+            CONFIG_LINEAGE_UNSAFE,
+            CONFIG_LINEAGE_MISMATCH,
+            CONFIG_LINEAGE_CONFLICT,
+        ):
+            with self.subTest(code=code):
+                app.dependency_overrides[get_service] = lambda code=code: BlockedService(code)
+                response = client.post(
+                    "/runs/run-1/broadcast/config-lineage-reconfirmation",
+                    json=payload,
+                )
+                self.assertEqual(409, response.status_code)
+                self.assertEqual(
+                    {
+                        "status": "blocked",
+                        "blocker_code": code,
+                        "detail": f"config lineage blocked: {code}",
+                        "retryable": False,
+                    },
+                    response.json(),
+                )
+
+    def test_config_lineage_service_classifies_authority_and_registry_failures(self) -> None:
+        repo = self.root / "lineage-service-repo"
+        for name in ("config", "data", "outputs", "weights"):
+            (repo / name).mkdir(parents=True)
+        service = ApiService(repo)
+        output_dir = repo / "outputs" / "run-fixture"
+        output_dir.mkdir()
+        config_path = repo / "config" / "fixture.yaml"
+        config_path.write_text("input_video: fixture.mp4\n", encoding="utf-8")
+        registry = service._read_registry()
+        registry["runs"].append(
+            {
+                "run_id": "run-fixture",
+                "source": "broadcast_hybrid",
+                "status": "completed",
+                "config_name": "fixture.yaml",
+                "config_path": str(config_path),
+                "input_video": str(repo / "data" / "fixture.mp4"),
+                "parent_run_id": None,
+                "output_dir": str(output_dir),
+                "notes": json.dumps(
+                    {
+                        "confirmed_config_name": "fixture.yaml",
+                        "expected_config_sha256": "b" * 64,
+                    }
+                ),
+                "broadcast": {},
+            }
+        )
+        service._write_registry(registry)
+        request = {
+            "expected_observed_raw_sha256": "1" * 64,
+            "workflow_bindings": {},
+            "operator_id": "operator-1",
+            "reviewer_id": "reviewer-1",
+        }
+        try:
+            registry = service._read_registry()
+            parent = next(item for item in registry["runs"] if item["run_id"] == "run-fixture")
+            parent["notes"] = None
+            service._write_registry(registry)
+            with self.assertRaises(ConfigLineageError) as missing:
+                service.reconfirm_broadcast_config_lineage("run-fixture", request)
+            self.assertEqual(CONFIG_LINEAGE_REQUIRED, missing.exception.code)
+
+            registry = service._read_registry()
+            parent = next(item for item in registry["runs"] if item["run_id"] == "run-fixture")
+            parent["notes"] = "{"
+            service._write_registry(registry)
+            with self.assertRaises(ConfigLineageError) as malformed:
+                service.reconfirm_broadcast_config_lineage("run-fixture", request)
+            self.assertEqual(CONFIG_LINEAGE_MISMATCH, malformed.exception.code)
+
+            registry = service._read_registry()
+            parent = next(item for item in registry["runs"] if item["run_id"] == "run-fixture")
+            parent["notes"] = json.dumps(
+                {
+                    "confirmed_config_name": "fixture.yaml",
+                    "expected_config_sha256": "b" * 64,
+                }
+            )
+            parent["config_path"] = None
+            service._write_registry(registry)
+            with self.assertRaises(ConfigLineageError) as missing_config:
+                service.reconfirm_broadcast_config_lineage("run-fixture", request)
+            self.assertEqual(CONFIG_LINEAGE_REQUIRED, missing_config.exception.code)
+
+            registry = service._read_registry()
+            parent = next(item for item in registry["runs"] if item["run_id"] == "run-fixture")
+            parent["config_path"] = []
+            service._write_registry(registry)
+            with self.assertRaises(ConfigLineageError) as malformed_config:
+                service.reconfirm_broadcast_config_lineage("run-fixture", request)
+            self.assertEqual(CONFIG_LINEAGE_MISMATCH, malformed_config.exception.code)
+
+            registry = service._read_registry()
+            parent = next(item for item in registry["runs"] if item["run_id"] == "run-fixture")
+            parent["config_path"] = str(config_path)
+            service._write_registry(registry)
+            with mock.patch.object(
+                service,
+                "_derive_config_lineage_workflow_bindings",
+                side_effect=ValueError("registry binding mismatch"),
+            ):
+                with self.assertRaises(ConfigLineageError) as mismatch:
+                    service.reconfirm_broadcast_config_lineage("run-fixture", request)
+            self.assertEqual(CONFIG_LINEAGE_MISMATCH, mismatch.exception.code)
+
+            with (
+                mock.patch.object(
+                    service,
+                    "_derive_config_lineage_workflow_bindings",
+                    return_value={},
+                ),
+                mock.patch(
+                    "football_tracking.api.service.reconfirm_config_lineage",
+                    side_effect=ConfigLineageError(CONFIG_LINEAGE_UNSAFE, "unsafe config path"),
+                ),
+            ):
+                with self.assertRaises(ConfigLineageError) as unsafe:
+                    service.reconfirm_broadcast_config_lineage("run-fixture", request)
+            self.assertEqual(CONFIG_LINEAGE_UNSAFE, unsafe.exception.code)
+
+            with (
+                mock.patch.object(
+                    service,
+                    "_derive_config_lineage_workflow_bindings",
+                    return_value={},
+                ),
+                mock.patch(
+                    "football_tracking.api.service.reconfirm_config_lineage",
+                    side_effect=ConfigLineageError(CONFIG_LINEAGE_CONFLICT, "different generation exists"),
+                ),
+            ):
+                with self.assertRaises(ConfigLineageError) as conflict:
+                    service.reconfirm_broadcast_config_lineage("run-fixture", request)
+            self.assertEqual(CONFIG_LINEAGE_CONFLICT, conflict.exception.code)
+
+            registry = service._read_registry()
+            registry["runs"].append(
+                {
+                    "run_id": "config-lineage-different",
+                    "source": "config_lineage_reconfirmation",
+                    "status": "completed",
+                    "parent_run_id": "run-fixture",
+                    "broadcast": {
+                        "generation_id": "lineage-differentdifferentdiffe",
+                        "manifest_sha256": "f" * 64,
+                        "workflow_bindings": {},
+                    },
+                }
+            )
+            service._write_registry(registry)
+            fake_generation = mock.Mock(
+                generation_id="lineage-aaaaaaaaaaaaaaaaaaaaaaaa",
+                generation_dir=repo / "outputs" / "generation",
+                manifest={
+                    "projection": {
+                        "confirmed_text_sha256": "b" * 64,
+                        "observed_raw_sha256": "1" * 64,
+                        "canonical_snapshot_sha256": "c" * 64,
+                        "lineage_generation_id": "lineage-aaaaaaaaaaaaaaaaaaaaaaaa",
+                        "historical_raw_snapshot_observed": False,
+                    }
+                },
+                idempotent=True,
+                manifest_sha256="d" * 64,
+                canonical_snapshot_sha256="c" * 64,
+            )
+            with (
+                mock.patch.object(
+                    service,
+                    "_derive_config_lineage_workflow_bindings",
+                    return_value={},
+                ),
+                mock.patch(
+                    "football_tracking.api.service.reconfirm_config_lineage",
+                    return_value=fake_generation,
+                ),
+            ):
+                with self.assertRaises(ConfigLineageError) as existing_conflict:
+                    service.reconfirm_broadcast_config_lineage("run-fixture", request)
+            self.assertEqual(CONFIG_LINEAGE_CONFLICT, existing_conflict.exception.code)
+        finally:
+            service.close()
+
+    def test_config_lineage_reconfirmation_serializes_authority_publication_and_registration(self) -> None:
+        repo = self.root / "lineage-transaction-repo"
+        for name in ("config", "data", "outputs", "weights"):
+            (repo / name).mkdir(parents=True)
+        first = ApiService(repo)
+        second = ApiService(repo)
+        output_dir = repo / "outputs" / "run-fixture"
+        output_dir.mkdir()
+        config_path = repo / "config" / "fixture.yaml"
+        config_path.write_text("input_video: fixture.mp4\n", encoding="utf-8")
+        confirmation = {
+            "confirmed_config_name": "fixture.yaml",
+            "expected_config_sha256": "b" * 64,
+        }
+        registry = first._read_registry()
+        registry["runs"].append(
+            {
+                "run_id": "run-fixture",
+                "source": "broadcast_hybrid",
+                "status": "completed",
+                "config_name": "fixture.yaml",
+                "config_path": str(config_path),
+                "input_video": str(repo / "data" / "fixture.mp4"),
+                "parent_run_id": None,
+                "output_dir": str(output_dir),
+                "notes": json.dumps(confirmation),
+                "broadcast": {},
+            }
+        )
+        first._write_registry(registry)
+        request = {
+            "expected_observed_raw_sha256": "1" * 64,
+            "workflow_bindings": {},
+            "operator_id": "operator-1",
+            "reviewer_id": "reviewer-1",
+        }
+        fake_generation = mock.Mock(
+            generation_id="lineage-aaaaaaaaaaaaaaaaaaaaaaaa",
+            generation_dir=repo / "outputs" / "generation",
+            manifest={
+                "projection": {
+                    "confirmed_text_sha256": "b" * 64,
+                    "observed_raw_sha256": "1" * 64,
+                    "canonical_snapshot_sha256": "c" * 64,
+                    "lineage_generation_id": "lineage-aaaaaaaaaaaaaaaaaaaaaaaa",
+                    "historical_raw_snapshot_observed": False,
+                }
+            },
+            idempotent=False,
+            manifest_sha256="d" * 64,
+            canonical_snapshot_sha256="c" * 64,
+        )
+        publication_started = threading.Event()
+        allow_publication = threading.Event()
+        update_started = threading.Event()
+        update_finished = threading.Event()
+        notes_mutated = threading.Event()
+        reconfirmation_result: list[dict[str, object]] = []
+        reconfirmation_errors: list[BaseException] = []
+
+        def pause_at_old_race_boundary(**_kwargs: object) -> mock.Mock:
+            publication_started.set()
+            if not allow_publication.wait(timeout=5):
+                raise TimeoutError("test did not release config-lineage publication")
+            return fake_generation
+
+        def reconfirm() -> None:
+            try:
+                reconfirmation_result.append(first.reconfirm_broadcast_config_lineage("run-fixture", request))
+            except BaseException as exc:  # pragma: no cover - reported by the assertions below
+                reconfirmation_errors.append(exc)
+
+        def update_notes_if_unconfirmed() -> None:
+            update_started.set()
+            try:
+                with second._registry_transaction() as current:
+                    child_exists = any(
+                        item.get("source") == "config_lineage_reconfirmation"
+                        and item.get("parent_run_id") == "run-fixture"
+                        for item in current["runs"]
+                    )
+                    if child_exists:
+                        return
+                    parent = next(item for item in current["runs"] if item.get("run_id") == "run-fixture")
+                    changed = dict(confirmation)
+                    changed["expected_config_sha256"] = "e" * 64
+                    parent["notes"] = json.dumps(changed)
+                    notes_mutated.set()
+            finally:
+                update_finished.set()
+
+        try:
+            with (
+                mock.patch.object(first, "_derive_config_lineage_workflow_bindings", return_value={}),
+                mock.patch.object(second, "_derive_config_lineage_workflow_bindings", return_value={}),
+                mock.patch(
+                    "football_tracking.api.service.reconfirm_config_lineage",
+                    side_effect=pause_at_old_race_boundary,
+                ),
+            ):
+                reconfirm_thread = threading.Thread(target=reconfirm)
+                reconfirm_thread.start()
+                self.assertTrue(publication_started.wait(timeout=5))
+                update_thread = threading.Thread(target=update_notes_if_unconfirmed)
+                update_thread.start()
+                self.assertTrue(update_started.wait(timeout=5))
+                update_completed_at_boundary = update_finished.wait(timeout=1)
+                allow_publication.set()
+                reconfirm_thread.join(timeout=5)
+                update_thread.join(timeout=5)
+
+                self.assertFalse(reconfirm_thread.is_alive())
+                self.assertFalse(update_thread.is_alive())
+                self.assertFalse(update_completed_at_boundary)
+                self.assertEqual([], reconfirmation_errors)
+                self.assertEqual("reconfirmed", reconfirmation_result[0]["status"])
+                self.assertFalse(notes_mutated.is_set())
+                self.assertTrue(update_finished.is_set())
+
+                replay = second.reconfirm_broadcast_config_lineage("run-fixture", request)
+                self.assertEqual(reconfirmation_result[0], replay)
+                children = [
+                    item
+                    for item in second._read_registry()["runs"]
+                    if item.get("source") == "config_lineage_reconfirmation"
+                    and item.get("parent_run_id") == "run-fixture"
+                ]
+                self.assertEqual(1, len(children))
+        finally:
+            allow_publication.set()
+            first.close()
+            second.close()
+
     def test_builder_publishes_self_contained_bundle_and_validator_rehashes_it(self) -> None:
         self._write_fixture()
 
@@ -69,6 +560,766 @@ class ReviewEvidenceBundleTests(unittest.TestCase):
         inventory_paths = {row["path"] for row in validated.manifest["inventory"]}
         self.assertNotIn("review_evidence_bundle.draft.json", inventory_paths)
         self.assertNotIn(BUNDLE_MANIFEST_NAME, inventory_paths)
+
+    def test_builder_and_validator_reject_unknown_package_descriptor_artifact(
+        self,
+    ) -> None:
+        draft = self._write_fixture()
+        clean = build_review_evidence_bundle(self.source, self.root / "clean-published")
+        smuggled_relative = "policy-qualification/smuggled-target-labels.bin"
+        smuggled_payload = b"candidate-1\x00match_ball\x00secret-target-truth"
+        smuggled_source = self.source / smuggled_relative
+        smuggled_source.write_bytes(smuggled_payload)
+        policy_descriptor = draft["packages"]["policy_qualification"]
+        policy_descriptor["smuggled_target_labels_path"] = smuggled_relative
+        policy_descriptor["smuggled_target_labels_sha256"] = hashlib.sha256(
+            smuggled_payload
+        ).hexdigest()
+        self._write_json(self.source / "review_evidence_bundle.draft.json", draft)
+
+        with self.assertRaises(ReviewEvidenceBundleError) as build_caught:
+            build_review_evidence_bundle(self.source, self.root / "smuggled-build")
+        self.assertEqual("invalid_package_descriptor", build_caught.exception.code)
+
+        smuggled_published = clean.root / smuggled_relative
+        smuggled_published.write_bytes(smuggled_payload)
+        manifest = json.loads(clean.manifest_path.read_text(encoding="utf-8"))
+        manifest["packages"]["policy_qualification"][
+            "smuggled_target_labels_path"
+        ] = smuggled_relative
+        manifest["packages"]["policy_qualification"][
+            "smuggled_target_labels_sha256"
+        ] = hashlib.sha256(smuggled_payload).hexdigest()
+        manifest["inventory"].append(
+            {
+                "path": smuggled_relative,
+                "sha256": hashlib.sha256(smuggled_payload).hexdigest(),
+                "size_bytes": len(smuggled_payload),
+            }
+        )
+        manifest["inventory"].sort(key=lambda row: row["path"])
+        self._write_json(clean.manifest_path, manifest)
+
+        with self.assertRaises(ReviewEvidenceBundleError) as validate_caught:
+            validate_review_evidence_bundle(clean.root)
+        self.assertEqual("invalid_package_descriptor", validate_caught.exception.code)
+
+    def test_builder_rejects_removed_adjudication_alias_half_pairs(self) -> None:
+        for missing_field in (
+            "adjudication_queue_path",
+            "adjudication_queue_sha256",
+        ):
+            with self.subTest(missing_field=missing_field):
+                draft = self._write_fixture()
+                queue_relative = (
+                    "model-development/annotation_adjudication_queue.v1.json"
+                )
+                queue_path = self.source / queue_relative
+                self._write_json(
+                    queue_path,
+                    {
+                        "schema_version": "1.0",
+                        "artifact_type": "candidate_annotation_adjudication_queue",
+                    },
+                )
+                pair = {
+                    "adjudication_queue_path": queue_relative,
+                    "adjudication_queue_sha256": sha256_file(queue_path),
+                }
+                del pair[missing_field]
+                draft["packages"]["model_development"].update(pair)
+                self._write_json(
+                    self.source / "review_evidence_bundle.draft.json",
+                    draft,
+                )
+
+                with self.assertRaises(ReviewEvidenceBundleError) as caught:
+                    build_review_evidence_bundle(
+                        self.source,
+                        self.root / f"half-pair-{missing_field}",
+                    )
+                self.assertEqual("invalid_package_descriptor", caught.exception.code)
+
+    def test_removed_adjudication_alias_rejects_binary_smuggling_on_build_and_validation(
+        self,
+    ) -> None:
+        for package_name, package_root in (
+            ("model_development", "model-development"),
+            ("policy_qualification", "policy-qualification"),
+        ):
+            with self.subTest(package_name=package_name):
+                draft = self._write_fixture()
+                clean = build_review_evidence_bundle(
+                    self.source,
+                    self.root / f"clean-alias-{package_name}",
+                )
+                queue_relative = (
+                    f"{package_root}/annotation_adjudication_queue.v1.json"
+                )
+                binary_truth = b"candidate-1\x00match_ball\x00target-truth"
+                queue_path = self.source / queue_relative
+                queue_path.write_bytes(binary_truth)
+                draft["packages"][package_name].update(
+                    {
+                        "adjudication_queue_path": queue_relative,
+                        "adjudication_queue_sha256": hashlib.sha256(
+                            binary_truth
+                        ).hexdigest(),
+                    }
+                )
+                self._write_json(
+                    self.source / "review_evidence_bundle.draft.json",
+                    draft,
+                )
+                try:
+                    with self.assertRaises(ReviewEvidenceBundleError) as build_caught:
+                        build_review_evidence_bundle(
+                            self.source,
+                            self.root / f"alias-smuggle-{package_name}",
+                        )
+                    self.assertEqual(
+                        "invalid_package_descriptor",
+                        build_caught.exception.code,
+                    )
+                finally:
+                    queue_path.unlink()
+
+                published_queue = clean.root / queue_relative
+                published_queue.write_bytes(binary_truth)
+                manifest = json.loads(
+                    clean.manifest_path.read_text(encoding="utf-8")
+                )
+                manifest["packages"][package_name].update(
+                    {
+                        "adjudication_queue_path": queue_relative,
+                        "adjudication_queue_sha256": hashlib.sha256(
+                            binary_truth
+                        ).hexdigest(),
+                    }
+                )
+                manifest["inventory"].append(
+                    {
+                        "path": queue_relative,
+                        "sha256": hashlib.sha256(binary_truth).hexdigest(),
+                        "size_bytes": len(binary_truth),
+                    }
+                )
+                manifest["inventory"].sort(key=lambda row: row["path"])
+                self._write_json(clean.manifest_path, manifest)
+                with self.assertRaises(
+                    ReviewEvidenceBundleError
+                ) as validate_caught:
+                    validate_review_evidence_bundle(clean.root)
+                self.assertEqual(
+                    "invalid_package_descriptor",
+                    validate_caught.exception.code,
+                )
+
+    def test_linked_adjudication_queue_requires_fixed_name_for_both_packages(
+        self,
+    ) -> None:
+        for package_name in ("model_development", "policy_qualification"):
+            with self.subTest(package_name=package_name, mode="build"):
+                draft = self._write_fixture()
+                queue_path = self._configure_linked_adjudication_queue(
+                    draft,
+                    package_name,
+                    linked_name="renamed-adjudication-queue.json",
+                )
+                try:
+                    with self.assertRaises(ReviewEvidenceBundleError) as caught:
+                        build_review_evidence_bundle(
+                            self.source,
+                            self.root / f"wrong-queue-name-{package_name}",
+                        )
+                    self.assertEqual(
+                        "invalid_authority_manifest",
+                        caught.exception.code,
+                    )
+                finally:
+                    queue_path.unlink()
+
+            with self.subTest(package_name=package_name, mode="published"):
+                draft = self._write_fixture()
+                queue_path = self._configure_linked_adjudication_queue(
+                    draft,
+                    package_name,
+                )
+                try:
+                    built = build_review_evidence_bundle(
+                        self.source,
+                        self.root / f"published-wrong-queue-name-{package_name}",
+                    )
+                finally:
+                    queue_path.unlink()
+                manifest = json.loads(
+                    built.manifest_path.read_text(encoding="utf-8")
+                )
+                descriptor = manifest["packages"][package_name]
+                annotation_relative = descriptor["annotation_resolution_path"]
+                annotation_path = built.root / annotation_relative
+                annotation = json.loads(
+                    annotation_path.read_text(encoding="utf-8")
+                )
+                annotation["linked_artifacts"][
+                    "adjudication_queue"
+                ] = "renamed-adjudication-queue.json"
+                self._write_json(annotation_path, annotation)
+                self._refresh_published_file_binding(
+                    manifest,
+                    built.root,
+                    annotation_relative,
+                    descriptor=descriptor,
+                    sha_field="annotation_resolution_sha256",
+                )
+                if package_name == "policy_qualification":
+                    self._refresh_published_annotation_queue_binding(
+                        manifest,
+                        built.root,
+                        annotation_relative,
+                    )
+                self._write_json(built.manifest_path, manifest)
+
+                with self.assertRaises(ReviewEvidenceBundleError) as caught:
+                    validate_review_evidence_bundle(built.root)
+                self.assertEqual(
+                    "invalid_authority_manifest",
+                    caught.exception.code,
+                )
+
+    def test_linked_adjudication_queue_semantics_are_exact_for_both_packages(
+        self,
+    ) -> None:
+        mutations = {
+            "schema_version": {"schema_version": "2.0"},
+            "artifact_type": {
+                "artifact_type": "candidate_annotation_resolution",
+            },
+            "source_resolution": {
+                "source_resolution": "other-resolution.json",
+            },
+            "candidate_count": {"candidate_count": 2},
+            "candidates": {
+                "candidates": [{"candidate_id": "different-candidate"}],
+            },
+            "extra_field": {"target_truth": "smuggled"},
+        }
+        for package_name in ("model_development", "policy_qualification"):
+            for case_name, overrides in mutations.items():
+                with self.subTest(
+                    package_name=package_name,
+                    case=case_name,
+                    mode="build",
+                ):
+                    draft = self._write_fixture()
+                    queue_path = self._configure_linked_adjudication_queue(
+                        draft,
+                        package_name,
+                        queue_overrides=overrides,
+                    )
+                    try:
+                        with self.assertRaises(
+                            ReviewEvidenceBundleError
+                        ) as caught:
+                            build_review_evidence_bundle(
+                                self.source,
+                                self.root
+                                / (
+                                    "invalid-queue-build-"
+                                    f"{package_name}-{case_name}"
+                                ),
+                            )
+                        self.assertEqual(
+                            "invalid_authority_manifest",
+                            caught.exception.code,
+                        )
+                    finally:
+                        queue_path.unlink()
+
+                with self.subTest(
+                    package_name=package_name,
+                    case=case_name,
+                    mode="published",
+                ):
+                    draft = self._write_fixture()
+                    queue_path = self._configure_linked_adjudication_queue(
+                        draft,
+                        package_name,
+                    )
+                    try:
+                        built = build_review_evidence_bundle(
+                            self.source,
+                            self.root
+                            / (
+                                "invalid-queue-published-"
+                                f"{package_name}-{case_name}"
+                            ),
+                        )
+                    finally:
+                        queue_path.unlink()
+                    manifest = json.loads(
+                        built.manifest_path.read_text(encoding="utf-8")
+                    )
+                    descriptor = manifest["packages"][package_name]
+                    queue_relative = (
+                        PurePosixPath(descriptor["annotation_resolution_path"])
+                        .parent
+                        .joinpath(ADJUDICATION_QUEUE_NAME)
+                        .as_posix()
+                    )
+                    published_queue = built.root / queue_relative
+                    queue = json.loads(
+                        published_queue.read_text(encoding="utf-8")
+                    )
+                    queue.update(overrides)
+                    self._write_json(published_queue, queue)
+                    self._refresh_published_file_binding(
+                        manifest,
+                        built.root,
+                        queue_relative,
+                    )
+                    self._write_json(built.manifest_path, manifest)
+
+                    with self.assertRaises(
+                        ReviewEvidenceBundleError
+                    ) as caught:
+                        validate_review_evidence_bundle(built.root)
+                    self.assertEqual(
+                        "invalid_authority_manifest",
+                        caught.exception.code,
+                    )
+
+    def test_exact_linked_adjudication_queue_is_derived_for_both_packages(
+        self,
+    ) -> None:
+        for package_name in ("model_development", "policy_qualification"):
+            with self.subTest(package_name=package_name):
+                draft = self._write_fixture()
+                queue_path = self._configure_linked_adjudication_queue(
+                    draft,
+                    package_name,
+                )
+                try:
+                    built = build_review_evidence_bundle(
+                        self.source,
+                        self.root / f"exact-queue-{package_name}",
+                    )
+                finally:
+                    queue_path.unlink()
+                validated = validate_review_evidence_bundle(built.root)
+                descriptor = validated.manifest["packages"][package_name]
+                expected_relative = (
+                    PurePosixPath(descriptor["annotation_resolution_path"])
+                    .parent
+                    .joinpath(ADJUDICATION_QUEUE_NAME)
+                    .as_posix()
+                )
+                self.assertIn(
+                    expected_relative,
+                    {
+                        row["path"]
+                        for row in validated.manifest["inventory"]
+                    },
+                )
+
+    def test_unlinked_adjudication_queue_is_rejected_for_both_packages(
+        self,
+    ) -> None:
+        for package_name in ("model_development", "policy_qualification"):
+            with self.subTest(package_name=package_name):
+                draft = self._write_fixture()
+                descriptor = draft["packages"][package_name]
+                annotation_relative = PurePosixPath(
+                    descriptor["annotation_resolution_path"]
+                )
+                queue_path = (
+                    self.source
+                    / annotation_relative.parent
+                    / ADJUDICATION_QUEUE_NAME
+                )
+                self._write_json(
+                    queue_path,
+                    {
+                        "schema_version": "1.0",
+                        "artifact_type": (
+                            "candidate_annotation_adjudication_queue"
+                        ),
+                        "source_resolution": annotation_relative.name,
+                        "candidate_count": 0,
+                        "candidates": [],
+                    },
+                )
+                try:
+                    with self.assertRaises(
+                        ReviewEvidenceBundleError
+                    ) as caught:
+                        build_review_evidence_bundle(
+                            self.source,
+                            self.root / f"unlinked-queue-{package_name}",
+                        )
+                    self.assertEqual(
+                        "invalid_authority_manifest",
+                        caught.exception.code,
+                    )
+                finally:
+                    queue_path.unlink()
+
+    def test_previous_vote_ledger_remains_optional_for_non_target_packages(
+        self,
+    ) -> None:
+        draft = self._write_fixture()
+        for package_name in ("model_development", "policy_qualification"):
+            descriptor = draft["packages"][package_name]
+            descriptor["previous_vote_ledger_path"] = descriptor[
+                "vote_ledger_path"
+            ]
+            descriptor["previous_vote_ledger_sha256"] = descriptor[
+                "vote_ledger_sha256"
+            ]
+        self._write_json(
+            self.source / "review_evidence_bundle.draft.json",
+            draft,
+        )
+
+        built = build_review_evidence_bundle(
+            self.source,
+            self.root / "previous-ledger-compatible",
+        )
+        validate_review_evidence_bundle(built.root)
+
+    def test_target_finite_population_bundle_uses_new_legacy_rejecting_envelope(self) -> None:
+        from football_tracking import target_finite_population as target_module
+
+        draft = self._write_fixture()
+        target = draft["target"]
+        exact_target_bindings = {
+            "target_run_id": target["run_id"],
+            "source_sha256": target["source_sha256"],
+            "root_contract_sha256": target["root_contract_sha256"],
+            "candidate_population_sha256": target["candidate_population_sha256"],
+            "model_sha256": "7" * 64,
+            "model_version": "model-v1",
+            "confirmed_config_sha256": target["confirmed_config_sha256"],
+            "policy_sha256": "8" * 64,
+            "policy_version": "policy-v1",
+            "thresholds_sha256": "9" * 64,
+        }
+        plan_sha256 = "a" * 64
+        commitment_sha256 = "b" * 64
+        design_sha256 = "c" * 64
+        sample_sha256 = "d" * 64
+        application_content_sha256 = "e" * 64
+        qualification_sha256 = "f" * 64
+        external_commitment_sha256 = "0" * 64
+        for package_name, replacement_id, contract_names in (
+            (
+                "model_development",
+                "development-only-candidate",
+                ("source_contract", "resolved_contract"),
+            ),
+            (
+                "policy_qualification",
+                "qualification-only-candidate",
+                ("source_contract",),
+            ),
+        ):
+            descriptor = draft["packages"][package_name]
+            for contract_name in contract_names:
+                path = self.source / descriptor[f"{contract_name}_path"]
+                contract = json.loads(path.read_text(encoding="utf-8"))
+                contract["candidates"][0]["candidate_id"] = replacement_id
+                self._write_json(path, contract)
+                descriptor[f"{contract_name}_sha256"] = sha256_file(path)
+        target_artifacts = {}
+        for name, artifact_type in (
+            ("target_audit_plan", "target_finite_population_audit_plan"),
+            ("target_audit_labels", "target_finite_population_audit_labels"),
+            ("target_qualification", "target_finite_population_qualification"),
+            ("target_frozen_application", "target_finite_population_application"),
+            ("target_prelabel_commitment", "target_finite_population_prelabel_commitment"),
+        ):
+            relative = f"target-application/{name}.json"
+            path = self.source / relative
+            payload = {
+                "schema_version": "1.0",
+                "artifact_type": artifact_type,
+                "qualification_scope": "target_finite_population",
+            }
+            if name == "target_audit_plan":
+                payload.update(
+                    {
+                        "bindings": exact_target_bindings,
+                        "plan_sha256": plan_sha256,
+                        "plan_commitment_sha256": commitment_sha256,
+                        "sampling_design_sha256": design_sha256,
+                        "sample_sha256": sample_sha256,
+                        "frozen_application_content_sha256": application_content_sha256,
+                        "external_commitment": {
+                            "record_sha256": external_commitment_sha256,
+                        },
+                    }
+                )
+            elif name == "target_audit_labels":
+                payload.update(
+                    {
+                        "plan_sha256": plan_sha256,
+                        "plan_commitment_sha256": commitment_sha256,
+                        "sampling_design_sha256": design_sha256,
+                        "sample_sha256": sample_sha256,
+                        "external_commitment_sha256": external_commitment_sha256,
+                    }
+                )
+            elif name == "target_qualification":
+                payload.update(
+                    {
+                        "bindings": exact_target_bindings,
+                        "plan_sha256": plan_sha256,
+                        "qualification_sha256": qualification_sha256,
+                        "external_commitment_sha256": external_commitment_sha256,
+                    }
+                )
+            elif name == "target_prelabel_commitment":
+                payload.update(
+                    {
+                        "plan_sha256": plan_sha256,
+                        "plan_commitment_sha256": commitment_sha256,
+                        "sample_sha256": sample_sha256,
+                    }
+                )
+            else:
+                payload.update(
+                    {
+                        "target_binding_evidence": {
+                            key: value
+                            for key, value in exact_target_bindings.items()
+                            if key not in {"target_run_id", "confirmed_config_sha256"}
+                        },
+                        "application_content_sha256": application_content_sha256,
+                    }
+                )
+            self._write_json(path, payload)
+            target_artifacts[name] = relative
+            descriptor = draft["packages"]["target_application"]
+            descriptor[f"{name}_path"] = relative
+            descriptor[f"{name}_sha256"] = sha256_file(path)
+
+        decisions_path = self.source / "target-application/decisions.json"
+        declared_application = json.loads(decisions_path.read_text(encoding="utf-8"))
+        declared_application["schema_version"] = "1.0"
+        declared_application["artifact_type"] = "target_finite_population_qualified_application"
+        declared_application["qualification_scope"] = "target_finite_population"
+        declared_application["bindings"] = exact_target_bindings
+        declared_application["plan_sha256"] = plan_sha256
+        declared_application["qualification_sha256"] = qualification_sha256
+        declared_application["external_commitment_sha256"] = external_commitment_sha256
+        self._write_json(decisions_path, declared_application)
+        draft["packages"]["target_application"]["decisions_sha256"] = sha256_file(decisions_path)
+
+        queue_path = self.source / "selective_review_queue.v1.json"
+        queue = json.loads(queue_path.read_text(encoding="utf-8"))
+        queue["artifact_type"] = "target_finite_population_review_queue"
+        queue["qualification_scope"] = "target_finite_population"
+        queue["target_bindings"] = exact_target_bindings
+        queue["bindings"]["decisions"]["sha256"] = sha256_file(decisions_path)
+        for name, relative in target_artifacts.items():
+            queue["bindings"][name] = {
+                "path": relative,
+                "sha256": sha256_file(self.source / relative),
+            }
+        self._write_json(queue_path, queue)
+        draft["qualification_scope"] = "target_finite_population"
+        draft["queue"]["sha256"] = sha256_file(queue_path)
+        self._write_json(self.source / "review_evidence_bundle.draft.json", draft)
+
+        frozen_payload = json.loads(
+            (self.source / target_artifacts["target_frozen_application"]).read_text(encoding="utf-8")
+        )
+        copied_real_row = {
+            "candidate_id": "candidate-1",
+            "candidate_fingerprint": self._fixture_candidate_fingerprint(),
+            "label": "match_ball",
+            "evidence_sha256": "6" * 64,
+        }
+        normalized_plan = {
+            "population": [
+                {
+                    "candidate_id": copied_real_row["candidate_id"],
+                    "candidate_fingerprint": copied_real_row["candidate_fingerprint"],
+                }
+            ],
+            "plan_sha256": plan_sha256,
+            "external_commitment": {
+                "record_sha256": external_commitment_sha256,
+            },
+            "plan_commitment_sha256": commitment_sha256,
+            "sampling_design_sha256": design_sha256,
+            "sample_sha256": sample_sha256,
+        }
+        normalized_labels = [copied_real_row]
+        normalized_labels_manifest = {"annotation_package": {}}
+        leakage_validation = mock.Mock(wraps=target_module.validate_target_label_non_leakage)
+        with (
+            mock.patch(
+                "football_tracking.review_evidence_bundle.validate_target_audit_application_binding",
+                return_value={"application": frozen_payload},
+            ),
+            mock.patch(
+                "football_tracking.review_evidence_bundle.build_target_qualified_application",
+                return_value=declared_application,
+            ),
+            mock.patch(
+                "football_tracking.review_evidence_bundle.validate_target_label_non_leakage",
+                leakage_validation,
+            ),
+            mock.patch(
+                "football_tracking.api.broadcast_api.validate_target_prelabel_commitment",
+            ),
+            mock.patch(
+                "football_tracking.target_finite_population._validated_plan",
+                return_value=normalized_plan,
+            ),
+            mock.patch(
+                "football_tracking.target_finite_population._validated_labels",
+                return_value=(normalized_labels, normalized_labels_manifest),
+            ),
+            mock.patch(
+                "football_tracking.review_evidence_bundle._validate_trusted_prelabel_commitment_anchor",
+            ),
+        ):
+            built = build_review_evidence_bundle(self.source, self.root / "target-published")
+            validated = validate_review_evidence_bundle(built.root)
+            model_manifest_path = (
+                self.source
+                / draft["packages"]["model_development"]["manifest_path"]
+            )
+            original_model_manifest = model_manifest_path.read_bytes()
+            original_queue = queue_path.read_bytes()
+            original_draft = (
+                self.source / "review_evidence_bundle.draft.json"
+            ).read_bytes()
+            smuggled_nested_path = (
+                model_manifest_path.parent / "smuggled-target-labels.bin"
+            )
+            smuggled_nested_path.write_bytes(
+                b"candidate-1\x00match_ball\x00nested-target-truth"
+            )
+            model_manifest = json.loads(
+                model_manifest_path.read_text(encoding="utf-8")
+            )
+            model_manifest["unrecognized_authority"] = {
+                "path": smuggled_nested_path.name,
+                "sha256": sha256_file(smuggled_nested_path),
+            }
+            self._write_json(model_manifest_path, model_manifest)
+            queue["bindings"]["model"]["sha256"] = sha256_file(model_manifest_path)
+            self._write_json(queue_path, queue)
+            draft["queue"]["sha256"] = sha256_file(queue_path)
+            self._write_json(
+                self.source / "review_evidence_bundle.draft.json",
+                draft,
+            )
+            try:
+                with self.assertRaises(ReviewEvidenceBundleError) as nested_caught:
+                    build_review_evidence_bundle(
+                        self.source,
+                        self.root / "nested-authority-smuggling",
+                    )
+                self.assertEqual(
+                    "invalid_authority_manifest",
+                    nested_caught.exception.code,
+                )
+            finally:
+                model_manifest_path.write_bytes(original_model_manifest)
+                queue_path.write_bytes(original_queue)
+                (
+                    self.source / "review_evidence_bundle.draft.json"
+                ).write_bytes(original_draft)
+                smuggled_nested_path.unlink()
+                queue = json.loads(queue_path.read_text(encoding="utf-8"))
+                draft = json.loads(
+                    (
+                        self.source / "review_evidence_bundle.draft.json"
+                    ).read_text(encoding="utf-8")
+                )
+            legacy_digests = {
+                sha256_file(self.source / target_artifacts["target_audit_labels"]),
+                "1" * 64,
+                "2" * 64,
+            }
+            for package_root in ("model-development", "policy-qualification"):
+                leaked_path = self.source / package_root / "copied-target-label-row.json"
+                self._write_json(
+                    leaked_path,
+                    {
+                        "training_rows": [copied_real_row],
+                        "undeclared_text_padding": "development-only " * 8192,
+                    },
+                )
+                self.assertGreater(leaked_path.stat().st_size, 128 * 1024)
+                self.assertTrue(
+                    all(
+                        digest not in leaked_path.read_text(encoding="utf-8")
+                        for digest in legacy_digests
+                    )
+                )
+                try:
+                    with (
+                        self.subTest(package_root=package_root),
+                        self.assertRaises(ReviewEvidenceBundleError) as caught,
+                    ):
+                        build_review_evidence_bundle(
+                            self.source,
+                            self.root / f"leaked-{package_root}",
+                        )
+                    self.assertEqual(
+                        "undeclared_non_target_artifact",
+                        caught.exception.code,
+                    )
+                finally:
+                    leaked_path.unlink()
+            activation_output = self.root / "target-activation"
+            activation_output.mkdir()
+            activated = activate_review_evidence_bundle(
+                built.root,
+                activation_output,
+                expected_run_id=target["run_id"],
+                expected_source_sha256=target["source_sha256"],
+                expected_root_contract_sha256=target["root_contract_sha256"],
+            )
+            self.assertTrue(activated.queue_path.is_file())
+
+        self.assertEqual("2.0", validated.manifest["schema_version"])
+        self.assertEqual(
+            "target_finite_population_review_evidence_bundle",
+            validated.manifest["artifact_type"],
+        )
+        self.assertEqual(
+            "target_finite_population_review_queue",
+            json.loads(validated.queue_path.read_text(encoding="utf-8"))["artifact_type"],
+        )
+        scanned_roots = set()
+        published_scan_sets = []
+        for call in leakage_validation.call_args_list:
+            scan_root = Path(call.kwargs["plan_path"]).parents[1]
+            scanned = {
+                Path(path).relative_to(scan_root)
+                for path in call.args[1]
+            }
+            if scan_root == built.root:
+                published_scan_sets.append(scanned)
+            for relative in scanned:
+                scanned_roots.add(relative.parts[0])
+        self.assertEqual({"model-development", "policy-qualification"}, scanned_roots)
+        expected_published_scan = {
+            path.relative_to(built.root)
+            for package_root in ("model-development", "policy-qualification")
+            for path in (built.root / package_root).rglob("*")
+            if path.is_file()
+        }
+        self.assertTrue(published_scan_sets)
+        self.assertTrue(
+            all(scanned == expected_published_scan for scanned in published_scan_sets)
+        )
 
     def test_builder_rebases_nested_producer_queue_onto_bundle_root(self) -> None:
         draft = self._write_fixture()
@@ -174,12 +1425,12 @@ class ReviewEvidenceBundleTests(unittest.TestCase):
 
     def test_validator_rejects_qualification_dataset_reused_for_application(self) -> None:
         draft = self._write_fixture()
-        draft["packages"]["policy_qualification"]["dataset_path"] = (
-            draft["packages"]["target_application"]["dataset_path"]
-        )
-        draft["packages"]["policy_qualification"]["dataset_sha256"] = (
-            draft["packages"]["target_application"]["dataset_sha256"]
-        )
+        draft["packages"]["policy_qualification"]["dataset_path"] = draft["packages"]["target_application"][
+            "dataset_path"
+        ]
+        draft["packages"]["policy_qualification"]["dataset_sha256"] = draft["packages"]["target_application"][
+            "dataset_sha256"
+        ]
         # It also crosses the package boundary, but independence is checked first.
         self._write_json(self.source / "review_evidence_bundle.draft.json", draft)
 
@@ -241,9 +1492,7 @@ class ReviewEvidenceBundleTests(unittest.TestCase):
     def test_validator_enforces_real_json_file_limit_at_the_exact_boundary(self) -> None:
         self._write_fixture()
         built = build_review_evidence_bundle(self.source, self.root / "published")
-        largest_json_size = max(
-            path.stat().st_size for path in built.root.rglob("*.json") if path.is_file()
-        )
+        largest_json_size = max(path.stat().st_size for path in built.root.rglob("*.json") if path.is_file())
 
         with mock.patch(
             "football_tracking.review_evidence_bundle.MAX_JSON_BYTES",
@@ -425,9 +1674,7 @@ class ReviewEvidenceBundleTests(unittest.TestCase):
 
         def mutate_source_after_copy(*args: object, **kwargs: object) -> None:
             real_copy(*args, **kwargs)
-            (built.root / "target-application" / "timing.json").write_text(
-                '{"mutated":true}\n', encoding="utf-8"
-            )
+            (built.root / "target-application" / "timing.json").write_text('{"mutated":true}\n', encoding="utf-8")
 
         with (
             mock.patch.object(
@@ -583,15 +1830,15 @@ class ReviewEvidenceBundleTests(unittest.TestCase):
             state = service.get_broadcast_review_evidence("run-fixture")
 
             self.assertEqual("blocked", state["status"])
-            self.assertEqual("confirmed_config_changed_after_confirmation", state["blocker_code"])
-            self.assertEqual("confirmed_config_changed_after_confirmation", state["error_code"])
+            self.assertEqual("config_lineage_snapshot_mismatch", state["blocker_code"])
+            self.assertEqual("config_lineage_snapshot_mismatch", state["error_code"])
             self.assertEqual(
-                ["confirmed_config_changed_after_confirmation"],
+                ["config_lineage_snapshot_mismatch"],
                 state["blocking_reasons"],
             )
-            self.assertEqual("config changed after confirmation", state["message"])
+            self.assertIn("does not match", state["message"])
             self.assertEqual([], state["bundles"])
-            with self.assertRaisesRegex(RuntimeError, "config changed after confirmation"):
+            with self.assertRaisesRegex(RuntimeError, "does not match"):
                 service.import_broadcast_review_evidence(
                     "run-fixture",
                     {
@@ -617,7 +1864,164 @@ class ReviewEvidenceBundleTests(unittest.TestCase):
             self.assertEqual(200, discovered.status_code)
             self.assertEqual("blocked", discovered.json()["status"])
             self.assertEqual(409, rejected.status_code)
-            self.assertEqual("config changed after confirmation", rejected.json()["detail"])
+            self.assertIn("does not match", rejected.json()["detail"])
+        finally:
+            service.close()
+
+    def test_service_reconfirms_crlf_lineage_and_revalidates_it_before_import(self) -> None:
+        draft = self._write_fixture()
+        service, _ = self._create_service_parent(draft)
+        try:
+            parent = service.get_run("run-fixture")
+            config_path = Path(parent["config_path"])
+            config_path.write_bytes(config_path.read_bytes().replace(b"\r\n", b"\n").replace(b"\n", b"\r\n"))
+            registry = service._read_registry()
+            target = next(item for item in registry["runs"] if item["run_id"] == "run-fixture")
+            confirmation = json.loads(target["notes"])
+            confirmation["expected_config_sha256"] = hashlib.sha256(
+                config_path.read_bytes().replace(b"\r\n", b"\n")
+            ).hexdigest()
+            target["notes"] = json.dumps(confirmation, sort_keys=True, separators=(",", ":"))
+            service._write_registry(registry)
+            required = service.get_broadcast_review_evidence("run-fixture")
+            self.assertEqual("blocked", required["status"])
+            self.assertEqual(
+                "confirmed_config_lineage_reconfirmation_required",
+                required["blocker_code"],
+            )
+
+            registry = service._read_registry()
+            target = next(item for item in registry["runs"] if item["run_id"] == "run-fixture")
+            target["broadcast"]["submission_id"] = "submission-completed"
+            target["broadcast"]["generation_id"] = "generation-completed"
+            accepted_trial = {
+                **json.loads(json.dumps(target)),
+                "run_id": "trial-accepted",
+                "source": "tracking",
+                "status": "completed",
+                "parent_run_id": None,
+                "output_dir": str(self.root / "trial-accepted"),
+                "notes": json.dumps(
+                    {
+                        "purpose": "trial",
+                        "workflow_id": "workflow-1",
+                        "trial_intent_sha256": "2" * 64,
+                        "calibration_digest": "5" * 64,
+                    },
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+                "broadcast": {},
+            }
+            failed = {
+                **json.loads(json.dumps(target)),
+                "run_id": "run-failed",
+                "status": "failed",
+                "output_dir": str(self.root / "run-failed"),
+                "notes": target["notes"],
+                "broadcast": {
+                    **target["broadcast"],
+                    "submission_id": "submission-failed",
+                    "generation_id": "generation-failed",
+                },
+            }
+            registry["runs"].extend([accepted_trial, failed])
+            service._write_registry(registry)
+            target = service.get_run("run-fixture")
+            workflow_bindings = service._derive_config_lineage_workflow_bindings(
+                target,
+                config_path,
+                registry=service._read_registry(),
+            )
+            for field in (
+                "workflow_id",
+                "accepted_trial",
+                "request",
+                "intent",
+                "trial_patch",
+                "production_patch",
+                "calibration",
+                "source_signature",
+                "historical_full_runs",
+            ):
+                tampered = json.loads(json.dumps(workflow_bindings))
+                if field == "workflow_id":
+                    tampered[field] = "workflow-tampered"
+                elif field == "historical_full_runs":
+                    tampered[field][0]["record_sha256"] = "f" * 64
+                elif field == "accepted_trial":
+                    tampered[field]["record_sha256"] = "f" * 64
+                else:
+                    tampered[field]["sha256"] = "f" * 64
+                with (
+                    self.subTest(authoritative_field=field),
+                    self.assertRaisesRegex(
+                        ConfigLineageError,
+                        "server-derived authority",
+                    ),
+                ):
+                    service.reconfirm_broadcast_config_lineage(
+                        "run-fixture",
+                        {
+                            "expected_observed_raw_sha256": sha256_file(config_path),
+                            "workflow_bindings": tampered,
+                            "operator_id": "operator-1",
+                            "reviewer_id": "reviewer-1",
+                        },
+                    )
+            if os.name == "nt":
+                with self.assertRaises(ConfigLineageError) as unsupported:
+                    service.reconfirm_broadcast_config_lineage(
+                        "run-fixture",
+                        {
+                            "expected_observed_raw_sha256": sha256_file(config_path),
+                            "workflow_bindings": workflow_bindings,
+                            "operator_id": "operator-1",
+                            "reviewer_id": "reviewer-1",
+                        },
+                    )
+                self.assertEqual(CONFIG_LINEAGE_UNSAFE, unsupported.exception.code)
+                return
+            response = service.reconfirm_broadcast_config_lineage(
+                "run-fixture",
+                {
+                    "expected_observed_raw_sha256": sha256_file(config_path),
+                    "workflow_bindings": workflow_bindings,
+                    "operator_id": "operator-1",
+                    "reviewer_id": "reviewer-1",
+                },
+            )
+            self.assertEqual("reconfirmed", response["status"])
+            self.assertFalse(response["historical_raw_snapshot_observed"])
+            parent_after = service.get_run("run-fixture")
+            self.assertEqual(
+                target["broadcast"]["blocking_reasons"],
+                parent_after["broadcast"]["blocking_reasons"],
+            )
+
+            draft["target"] = service._review_evidence_target(
+                "run-fixture",
+                Path(target["output_dir"]),
+                parent=parent_after,
+            )
+            self._write_json(self.source / "review_evidence_bundle.draft.json", draft)
+            build_review_evidence_bundle(
+                self.source,
+                service.review_evidence_inbox_dir / "lineage-fixture",
+            )
+            available = service.get_broadcast_review_evidence("run-fixture")
+            self.assertEqual("available", available["status"])
+
+            config_path.write_bytes(b"input_video: tampered.mp4\r\n")
+            with self.assertRaisesRegex(RuntimeError, "does not match"):
+                service.import_broadcast_review_evidence(
+                    "run-fixture",
+                    {
+                        "bundle_id": "review-evidence-fixture",
+                        "bundle_manifest_sha256": available["bundles"][0]["bundle_manifest_sha256"],
+                    },
+                )
+            self.assertEqual([], service._review_evidence_children("run-fixture"))
         finally:
             service.close()
 
@@ -892,9 +2296,7 @@ class ReviewEvidenceBundleTests(unittest.TestCase):
             self.assertEqual("completed", recovered["status"])
             self.assertTrue(recovered["broadcast"]["recovered"])
             self.assertEqual("ready", parent["broadcast"]["review_evidence"]["status"])
-            self.assertTrue(
-                (Path(recovered["output_dir"]) / "review_evidence_import_report.v1.json").is_file()
-            )
+            self.assertTrue((Path(recovered["output_dir"]) / "review_evidence_import_report.v1.json").is_file())
         finally:
             recovered_service.close()
 
@@ -968,10 +2370,7 @@ class ReviewEvidenceBundleTests(unittest.TestCase):
             )
             terminal = self._wait_for_terminal(service, queued["run_id"])
             result = terminal["broadcast"]["result"]
-            path = (
-                "/runs/run-fixture/broadcast/review-evidence/"
-                f"{result['review_evidence_generation_id']}"
-            )
+            path = f"/runs/run-fixture/broadcast/review-evidence/{result['review_evidence_generation_id']}"
             app = FastAPI()
             app.include_router(broadcast_router)
             app.dependency_overrides[get_service] = lambda: service
@@ -1064,12 +2463,7 @@ class ReviewEvidenceBundleTests(unittest.TestCase):
             action_thread.join(timeout=5.0)
             revoke_thread.join(timeout=5.0)
 
-            generation_dir = (
-                parent_output
-                / "review_evidence"
-                / "generations"
-                / result["review_evidence_generation_id"]
-            )
+            generation_dir = parent_output / "review_evidence" / "generations" / result["review_evidence_generation_id"]
             decisions_exist = (parent_output / "review_decisions.json").is_file()
             revocation_exists = (generation_dir / "review_evidence_revocation.v1.json").is_file()
             queue_exists = (parent_output / "selective_review_queue.v1.json").is_file()
@@ -1131,12 +2525,7 @@ class ReviewEvidenceBundleTests(unittest.TestCase):
         )
         terminal = self._wait_for_terminal(service, queued["run_id"])
         result = terminal["broadcast"]["result"]
-        generation_dir = (
-            parent_output
-            / "review_evidence"
-            / "generations"
-            / result["review_evidence_generation_id"]
-        )
+        generation_dir = parent_output / "review_evidence" / "generations" / result["review_evidence_generation_id"]
         self._write_json(
             generation_dir / "review_evidence_revocation.v1.json",
             {
@@ -1223,6 +2612,10 @@ class ReviewEvidenceBundleTests(unittest.TestCase):
             service.close()
 
     def _create_service_parent(self, draft: dict[str, object]) -> tuple[ApiService, Path]:
+        if os.name == "nt":
+            self.skipTest(
+                "Windows review-evidence config lineage fails closed until a native handle-relative backend exists"
+            )
         repo = self.root / "repo"
         for name in ("config", "data", "outputs", "weights"):
             (repo / name).mkdir(parents=True, exist_ok=True)
@@ -1230,8 +2623,40 @@ class ReviewEvidenceBundleTests(unittest.TestCase):
         parent_output = repo / "outputs" / "runs" / "fixture" / "run-fixture"
         parent_output.mkdir(parents=True)
         config_path = repo / "config" / "fixture.yaml"
-        config_path.write_text("input_video: fixture.mp4\n", encoding="utf-8")
+        source_path = self.source / "target-application" / "source.mp4"
+        source_stat = source_path.stat()
+        workflow_metadata = {
+            "workflow_id": "workflow-1",
+            "accepted_trial_run_id": "trial-accepted",
+            "trial_request_sha256": "1" * 64,
+            "trial_intent_sha256": "2" * 64,
+            "trial_patch_sha256": "3" * 64,
+            "patch_sha256": "4" * 64,
+            "calibration_digest": "5" * 64,
+            "source_signature": {
+                "path": str(source_path.resolve()),
+                "size_bytes": source_stat.st_size,
+                "mtime_ns": source_stat.st_mtime_ns,
+            },
+        }
+        config_path.write_text(
+            yaml.safe_dump(
+                {
+                    "input_video": "fixture.mp4",
+                    "metadata": {"production_workflow": workflow_metadata},
+                },
+                sort_keys=True,
+            ),
+            encoding="utf-8",
+        )
         expected_config_sha256 = sha256_file(config_path)
+        source_signature_sha256 = hashlib.sha256(
+            json.dumps(
+                workflow_metadata["source_signature"],
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
         contract_bytes = (self.source / "target-application" / "root-contract.json").read_bytes()
         (parent_output / "tracking_contract.v2.json").write_bytes(contract_bytes)
         self._write_json(
@@ -1249,7 +2674,7 @@ class ReviewEvidenceBundleTests(unittest.TestCase):
                 "completed_at": "2026-07-15T00:01:00+00:00",
                 "config_name": "fixture.yaml",
                 "config_path": str(config_path),
-                "input_video": str(self.source / "target-application" / "source.mp4"),
+                "input_video": str(source_path),
                 "parent_run_id": None,
                 "output_dir": str(parent_output),
                 "modules_enabled": {"broadcast_hybrid": True},
@@ -1272,8 +2697,13 @@ class ReviewEvidenceBundleTests(unittest.TestCase):
                     {
                         "schema_version": "1.0",
                         "purpose": "production_full",
+                        "workflow_id": workflow_metadata["workflow_id"],
                         "confirmed_config_name": "fixture.yaml",
                         "expected_config_sha256": expected_config_sha256,
+                        "calibration_digest": workflow_metadata["calibration_digest"],
+                        "source_signature_sha256": source_signature_sha256,
+                        "accepted_trial_run_id": workflow_metadata["accepted_trial_run_id"],
+                        "trial_request_sha256": workflow_metadata["trial_request_sha256"],
                     },
                     sort_keys=True,
                     separators=(",", ":"),
@@ -1288,7 +2718,9 @@ class ReviewEvidenceBundleTests(unittest.TestCase):
             parent=registry["runs"][-1],
         )
         self._write_json(self.source / "review_evidence_bundle.draft.json", draft)
-        self.assertEqual(draft["target"]["root_contract_sha256"], sha256_file(parent_output / "tracking_contract.v2.json"))
+        self.assertEqual(
+            draft["target"]["root_contract_sha256"], sha256_file(parent_output / "tracking_contract.v2.json")
+        )
         return service, parent_output
 
     def _wait_for_terminal(self, service: ApiService, run_id: str) -> dict[str, object]:
@@ -1299,6 +2731,104 @@ class ReviewEvidenceBundleTests(unittest.TestCase):
                 return run
             time.sleep(0.01)
         self.fail(f"run did not become terminal: {run_id}")
+
+    def _configure_linked_adjudication_queue(
+        self,
+        draft: dict[str, object],
+        package_name: str,
+        *,
+        linked_name: str = ADJUDICATION_QUEUE_NAME,
+        queue_overrides: dict[str, object] | None = None,
+    ) -> Path:
+        descriptor = draft["packages"][package_name]
+        annotation_relative = PurePosixPath(
+            descriptor["annotation_resolution_path"]
+        )
+        annotation_path = self.source / annotation_relative
+        candidates = [
+            {
+                "candidate_id": f"{package_name}-candidate",
+                "reason": "conflicting_votes",
+            }
+        ]
+        annotation = json.loads(annotation_path.read_text(encoding="utf-8"))
+        annotation["adjudication_queue"] = candidates
+        annotation["linked_artifacts"] = {
+            "adjudication_queue": linked_name,
+            "derived_tracking_contract": PurePosixPath(
+                descriptor["resolved_contract_path"]
+            ).name,
+        }
+        self._write_json(annotation_path, annotation)
+        descriptor["annotation_resolution_sha256"] = sha256_file(
+            annotation_path
+        )
+        if package_name == "policy_qualification":
+            queue_path = self.source / "selective_review_queue.v1.json"
+            review_queue = json.loads(queue_path.read_text(encoding="utf-8"))
+            review_queue["bindings"]["annotation_resolution"][
+                "sha256"
+            ] = sha256_file(annotation_path)
+            self._write_json(queue_path, review_queue)
+            draft["queue"]["sha256"] = sha256_file(queue_path)
+
+        adjudication_path = annotation_path.parent / linked_name
+        payload: dict[str, object] = {
+            "schema_version": "1.0",
+            "artifact_type": "candidate_annotation_adjudication_queue",
+            "source_resolution": annotation_relative.name,
+            "candidate_count": len(candidates),
+            "candidates": candidates,
+        }
+        if queue_overrides is not None:
+            payload.update(queue_overrides)
+        self._write_json(adjudication_path, payload)
+        self._write_json(
+            self.source / "review_evidence_bundle.draft.json",
+            draft,
+        )
+        return adjudication_path
+
+    @staticmethod
+    def _refresh_published_file_binding(
+        manifest: dict[str, object],
+        root: Path,
+        relative: str,
+        *,
+        descriptor: dict[str, object] | None = None,
+        sha_field: str | None = None,
+    ) -> None:
+        path = root / relative
+        digest = sha256_file(path)
+        if descriptor is not None and sha_field is not None:
+            descriptor[sha_field] = digest
+        for row in manifest["inventory"]:
+            if row["path"] == relative:
+                row["sha256"] = digest
+                row["size_bytes"] = path.stat().st_size
+                return
+        raise AssertionError(f"missing inventory row: {relative}")
+
+    def _refresh_published_annotation_queue_binding(
+        self,
+        manifest: dict[str, object],
+        root: Path,
+        annotation_relative: str,
+    ) -> None:
+        queue_relative = manifest["queue"]["path"]
+        queue_path = root / queue_relative
+        review_queue = json.loads(queue_path.read_text(encoding="utf-8"))
+        review_queue["bindings"]["annotation_resolution"][
+            "sha256"
+        ] = sha256_file(root / annotation_relative)
+        self._write_json(queue_path, review_queue)
+        self._refresh_published_file_binding(
+            manifest,
+            root,
+            queue_relative,
+            descriptor=manifest["queue"],
+            sha_field="sha256",
+        )
 
     def _write_fixture(self) -> dict[str, object]:
         source_sha = hashlib.sha256(b"fixture-video").hexdigest()
@@ -1377,6 +2907,32 @@ class ReviewEvidenceBundleTests(unittest.TestCase):
             path = self.source / relative
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_bytes(content)
+        self._write_json(
+            self.source / "model-development/model.json",
+            {
+                "schema_version": "1.0",
+                "artifact_type": "candidate_classifier_model",
+                "weights_path": "model.pt",
+                "weights_sha256": sha256_file(
+                    self.source / "model-development/model.pt"
+                ),
+                "training_report_path": "training.json",
+                "training_report_sha256": sha256_file(
+                    self.source / "model-development/training.json"
+                ),
+            },
+        )
+        for relative in (
+            "model-development/annotation.json",
+            "policy-qualification/annotation.json",
+        ):
+            self._write_json(
+                self.source / relative,
+                {
+                    "schema_version": "1.0",
+                    "artifact_type": "candidate_annotation_resolution",
+                },
+            )
 
         artifacts = {
             "tight_tensor": self._artifact_descriptor("target-application/evidence/tight.bin"),
@@ -1415,11 +2971,7 @@ class ReviewEvidenceBundleTests(unittest.TestCase):
         candidate_fingerprint = self._fixture_candidate_fingerprint()
         self._write_json(
             self.source / "target-application/predictions.json",
-            {
-                "predictions": [
-                    {"candidate_id": "candidate-1", "candidate_fingerprint": candidate_fingerprint}
-                ]
-            },
+            {"predictions": [{"candidate_id": "candidate-1", "candidate_fingerprint": candidate_fingerprint}]},
         )
         self._write_json(
             self.source / "target-application/decisions.json",
@@ -1438,15 +2990,19 @@ class ReviewEvidenceBundleTests(unittest.TestCase):
             ("model-development/development-dataset.json", "development"),
             ("policy-qualification/qualification-dataset.json", "qualification"),
         ):
+            dataset_path = self.source / package_name
+            source_path = dataset_path.parent / f"{prefix}-source.mp4"
+            source_path.write_bytes(f"{prefix}-video".encode())
             self._write_json(
-                self.source / package_name,
+                dataset_path,
                 {
                     "artifact_type": "candidate_dataset",
                     "samples": [{"candidate_id": f"{prefix}-candidate"}],
                     "sources": [
                         {
+                            "path": source_path.name,
                             "variant_id": f"{prefix}-variant",
-                            "sha256": hashlib.sha256(f"{prefix}-video".encode()).hexdigest(),
+                            "sha256": sha256_file(source_path),
                             "group_id": f"{prefix}-group",
                             "split_group": f"{prefix}-split",
                             "temporal_group": f"{prefix}-temporal",
@@ -1539,9 +3095,7 @@ class ReviewEvidenceBundleTests(unittest.TestCase):
                     "root": "model-development",
                     "manifest_path": "model-development/model.json",
                     "dataset_path": "model-development/development-dataset.json",
-                    "dataset_sha256": sha256_file(
-                        self.source / "model-development/development-dataset.json"
-                    ),
+                    "dataset_sha256": sha256_file(self.source / "model-development/development-dataset.json"),
                     "source_contract_path": "model-development/source-contract.json",
                     "source_contract_sha256": sha256_file(self.source / "model-development/source-contract.json"),
                     "vote_ledger_path": "model-development/votes.jsonl",
@@ -1555,9 +3109,7 @@ class ReviewEvidenceBundleTests(unittest.TestCase):
                     "root": "policy-qualification",
                     "manifest_path": "policy-qualification/policy.json",
                     "dataset_path": "policy-qualification/qualification-dataset.json",
-                    "dataset_sha256": sha256_file(
-                        self.source / "policy-qualification/qualification-dataset.json"
-                    ),
+                    "dataset_sha256": sha256_file(self.source / "policy-qualification/qualification-dataset.json"),
                     "policy_path": "policy-qualification/policy.json",
                     "policy_sha256": sha256_file(self.source / "policy-qualification/policy.json"),
                     "source_contract_path": "policy-qualification/source-contract.json",
@@ -1567,7 +3119,9 @@ class ReviewEvidenceBundleTests(unittest.TestCase):
                     "annotation_resolution_path": "policy-qualification/annotation.json",
                     "annotation_resolution_sha256": sha256_file(self.source / "policy-qualification/annotation.json"),
                     "resolved_contract_path": "policy-qualification/resolved-contract.json",
-                    "resolved_contract_sha256": sha256_file(self.source / "policy-qualification/resolved-contract.json"),
+                    "resolved_contract_sha256": sha256_file(
+                        self.source / "policy-qualification/resolved-contract.json"
+                    ),
                     "predictions_path": "policy-qualification/predictions.json",
                     "predictions_sha256": sha256_file(self.source / "policy-qualification/predictions.json"),
                     "decisions_path": "policy-qualification/decisions.json",

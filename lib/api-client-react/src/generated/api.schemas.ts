@@ -1051,6 +1051,63 @@ export interface BallAuditReport {
   review_events?: BallAuditReviewEvent[];
 }
 
+export type BroadcastConfigLineageBlockerResponseBlockerCode =
+  (typeof BroadcastConfigLineageBlockerResponseBlockerCode)[keyof typeof BroadcastConfigLineageBlockerResponseBlockerCode];
+
+export const BroadcastConfigLineageBlockerResponseBlockerCode = {
+  confirmed_config_lineage_reconfirmation_required:
+    "confirmed_config_lineage_reconfirmation_required",
+  config_lineage_snapshot_unsafe: "config_lineage_snapshot_unsafe",
+  config_lineage_snapshot_mismatch: "config_lineage_snapshot_mismatch",
+  config_lineage_reconfirmation_conflict:
+    "config_lineage_reconfirmation_conflict",
+} as const;
+
+export interface BroadcastConfigLineageBlockerResponse {
+  status: "blocked";
+  blocker_code: BroadcastConfigLineageBlockerResponseBlockerCode;
+  detail: string;
+  retryable?: boolean;
+}
+
+export type BroadcastConfigLineageReconfirmationRequestWorkflowBindings = {
+  [key: string]: unknown;
+};
+
+export interface BroadcastConfigLineageReconfirmationRequest {
+  /** @pattern ^[0-9a-f]{64}$ */
+  expected_observed_raw_sha256: string;
+  workflow_bindings: BroadcastConfigLineageReconfirmationRequestWorkflowBindings;
+  /**
+   * @minLength 1
+   * @maxLength 200
+   */
+  operator_id: string;
+  /**
+   * @minLength 1
+   * @maxLength 200
+   */
+  reviewer_id: string;
+}
+
+export interface BroadcastConfigLineageReconfirmationResponse {
+  run_id: string;
+  status: "reconfirmed";
+  /** @pattern ^lineage-[0-9a-f]{24}$ */
+  generation_id: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  manifest_sha256: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  confirmed_text_sha256: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  observed_raw_sha256: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  canonical_snapshot_sha256: string;
+  /** @pattern ^lineage-[0-9a-f]{24}$ */
+  lineage_generation_id: string;
+  historical_raw_snapshot_observed: false;
+}
+
 export interface BroadcastOperationDetails {
   review_decisions_sha256?: string | null;
   message?: string | null;
