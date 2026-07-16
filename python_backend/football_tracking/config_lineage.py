@@ -84,7 +84,7 @@ class _AnchoredDir:
         self.path = path
         self.anchor_descriptor = anchor_descriptor
         self.anchor_name = anchor_name
-        self._chain_links: list[tuple[int, str, tuple[int, int, int, int, int]]] = []
+        self._chain_links: list[tuple[int, str, tuple[int, int]]] = []
         details = os.fstat(descriptor)
         if not stat.S_ISDIR(details.st_mode):
             os.close(descriptor)
@@ -92,7 +92,7 @@ class _AnchoredDir:
                 CONFIG_LINEAGE_UNSAFE,
                 "config lineage anchored node is not a directory",
             )
-        self.identity = _stat_token(details)
+        self.identity = _directory_identity(details)
 
     def __enter__(self) -> "_AnchoredDir":
         return self
@@ -218,14 +218,15 @@ class _AnchoredDir:
             _stat_token(after),
             _stat_token(replay),
         )
-        if (
-            len(set(tokens)) != 1
-            or not stat.S_ISREG(after.st_mode)
-            or int(after.st_nlink) != 1
-        ):
+        if len(set(tokens)) != 1 or not stat.S_ISREG(after.st_mode):
             raise ConfigLineageError(
                 CONFIG_LINEAGE_UNSAFE,
                 "config lineage snapshot unsafe: anchored file identity changed",
+            )
+        if int(after.st_nlink) != 1:
+            raise ConfigLineageError(
+                CONFIG_LINEAGE_UNSAFE,
+                "config lineage snapshot unsafe: hard link or identity alias is forbidden",
             )
         self.assert_current()
         return b"".join(chunks), {
@@ -479,7 +480,7 @@ def _opened_entry_identity(
     name: str,
     *,
     directory: bool,
-) -> tuple[int, int, int, int, int]:
+) -> tuple[int, int] | tuple[int, int, int, int, int]:
     flags = (
         _directory_open_flags()
         if directory
@@ -490,7 +491,8 @@ def _opened_entry_identity(
     )
     descriptor = os.open(name, flags, dir_fd=parent_descriptor)
     try:
-        return _stat_token(os.fstat(descriptor))
+        details = os.fstat(descriptor)
+        return _directory_identity(details) if directory else _stat_token(details)
     finally:
         os.close(descriptor)
 
@@ -512,7 +514,7 @@ def _single_component(name: str, label: str) -> str:
 
 
 def _verify_directory_identity(directory: _AnchoredDir) -> None:
-    if _stat_token(os.fstat(directory.descriptor)) != directory.identity:
+    if _directory_identity(os.fstat(directory.descriptor)) != directory.identity:
         raise ConfigLineageError(
             CONFIG_LINEAGE_UNSAFE,
             "config lineage anchored directory identity changed",
@@ -530,7 +532,7 @@ def _verify_directory_identity(directory: _AnchoredDir) -> None:
                 "config lineage anchored directory entry is unavailable",
             ) from exc
         try:
-            identity = _stat_token(os.fstat(descriptor))
+            identity = _directory_identity(os.fstat(descriptor))
         finally:
             os.close(descriptor)
         if identity != expected_identity:
@@ -700,7 +702,7 @@ def _anchored_generation(
 
 def _anchored_visible_generation_names(generations: _AnchoredDir) -> list[str]:
     names_before = generations.names()
-    identities: dict[str, tuple[int, int, int, int, int]] = {}
+    identities: dict[str, tuple[int, int]] = {}
     for name in names_before:
         if name.startswith("."):
             raise ConfigLineageError(
@@ -1134,7 +1136,17 @@ def _validated_workflow_bindings(value: Mapping[str, Any]) -> dict[str, Any]:
             CONFIG_LINEAGE_MISMATCH,
             "config lineage snapshot mismatch: workflow bindings are incomplete or contain extras",
         )
-    normalized = json.loads(json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False))
+    try:
+        normalized = json.loads(
+            json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False)
+        )
+    except ConfigLineageError:
+        raise
+    except (TypeError, ValueError) as exc:
+        raise ConfigLineageError(
+            CONFIG_LINEAGE_MISMATCH,
+            "config lineage snapshot mismatch: workflow bindings must be JSON-serializable",
+        ) from exc
     if not isinstance(normalized.get("workflow_id"), str) or not normalized["workflow_id"].strip():
         raise ConfigLineageError(
             CONFIG_LINEAGE_MISMATCH,
@@ -1227,6 +1239,10 @@ def _stat_token(value: os.stat_result) -> tuple[int, int, int, int, int]:
         int(value.st_mtime_ns),
         int(getattr(value, "st_ctime_ns", 0)),
     )
+
+
+def _directory_identity(value: os.stat_result) -> tuple[int, int]:
+    return (int(value.st_dev), int(value.st_ino))
 
 
 def _safe_run_id(value: Any) -> str:

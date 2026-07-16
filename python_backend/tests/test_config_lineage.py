@@ -10,6 +10,7 @@ from unittest.mock import patch
 
 import football_tracking.config_lineage as config_lineage_module
 from football_tracking.config_lineage import (
+    CONFIG_LINEAGE_MISMATCH,
     CONFIG_LINEAGE_UNSAFE,
     ConfigLineageError,
     inspect_config_bytes,
@@ -54,6 +55,46 @@ def _bindings() -> dict[str, object]:
 
 
 class ConfigCanonicalizationTests(unittest.TestCase):
+    def test_workflow_bindings_serialization_failures_are_typed_mismatches(self) -> None:
+        for invalid_value in ({"not-json"}, None):
+            with self.subTest(kind="circular" if invalid_value is None else "non-serializable"):
+                bindings = _bindings()
+                if invalid_value is None:
+                    bindings["request"] = bindings
+                else:
+                    bindings["request"] = invalid_value
+                with self.assertRaises(ConfigLineageError) as caught:
+                    config_lineage_module._validated_workflow_bindings(bindings)
+                self.assertEqual(CONFIG_LINEAGE_MISMATCH, caught.exception.code)
+                self.assertEqual(
+                    "config lineage snapshot mismatch: workflow bindings must be JSON-serializable",
+                    str(caught.exception),
+                )
+
+    def test_workflow_binding_serialization_preserves_domain_errors(self) -> None:
+        unsafe_error = ConfigLineageError(CONFIG_LINEAGE_UNSAFE, "unsafe-domain")
+
+        class HostileDict(dict[str, object]):
+            def items(self):
+                raise unsafe_error
+
+        class HostileList(list[object]):
+            def __iter__(self):
+                raise unsafe_error
+
+        for kind, hostile_value in (
+            ("dict", HostileDict({"value": 1})),
+            ("list", HostileList([1])),
+        ):
+            with self.subTest(kind=kind):
+                bindings = _bindings()
+                bindings["request"] = {"nested": hostile_value}
+                with self.assertRaises(ConfigLineageError) as caught:
+                    config_lineage_module._validated_workflow_bindings(bindings)
+                self.assertIs(unsafe_error, caught.exception)
+                self.assertEqual(CONFIG_LINEAGE_UNSAFE, caught.exception.code)
+                self.assertEqual("unsafe-domain", str(caught.exception))
+
     def test_crlf_and_lf_have_same_canonical_digest(self) -> None:
         crlf = inspect_config_bytes(b"first: 1\r\nsecond: 2\r\n")
         lf = inspect_config_bytes(b"first: 1\nsecond: 2\n")
@@ -159,6 +200,16 @@ class ConfigLineagePublicationTests(unittest.TestCase):
         values.update(overrides)
         return reconfirm_config_lineage(**values)
 
+    def test_owned_directory_metadata_changes_do_not_change_its_identity(self) -> None:
+        probe = self.root / "identity-probe"
+        with config_lineage_module._open_absolute_directory(
+            self.root,
+            create=False,
+        ) as directory:
+            directory.write_exclusive(probe.name, b"ok\n")
+            directory.assert_current()
+        self.assertEqual(b"ok\n", probe.read_bytes())
+
     def test_publish_is_append_only_and_idempotent(self) -> None:
         first = self._publish()
         second = self._publish()
@@ -239,8 +290,10 @@ class ConfigLineagePublicationTests(unittest.TestCase):
             os.link(self.config_path, hardlink)
         except OSError:
             self.skipTest("hard links are unavailable")
-        with self.assertRaisesRegex(ConfigLineageError, "hard link|alias"):
+        with self.assertRaises(ConfigLineageError) as caught:
             self._publish()
+        self.assertEqual(CONFIG_LINEAGE_UNSAFE, caught.exception.code)
+        self.assertIn("hard link or identity alias", str(caught.exception))
 
     def test_symlinked_observed_file_is_rejected(self) -> None:
         target = self.config_root / "target.yaml"

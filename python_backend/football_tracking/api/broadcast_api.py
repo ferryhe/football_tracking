@@ -195,8 +195,12 @@ def build_review_action_envelope(
         "target_prelabel_commitment_sha256": "target_prelabel_commitment",
     }
     if target_finite_queue:
-        if not set(target_binding_fields.values()).issubset(queue_bindings):
-            raise BroadcastApiError("target review queue qualification bindings must be complete")
+        missing_target_bindings = set(target_binding_fields.values()) - set(queue_bindings)
+        if missing_target_bindings:
+            raise BroadcastApiError(
+                "target review queue target audit bindings must be complete: "
+                f"{sorted(missing_target_bindings)}"
+            )
         binding_fields.update(target_binding_fields)
     elif set(target_binding_fields.values()) & set(queue_bindings):
         raise BroadcastApiError("legacy review queue may not carry target finite-population bindings")

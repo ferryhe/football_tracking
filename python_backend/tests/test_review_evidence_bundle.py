@@ -14,6 +14,7 @@ import yaml
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+import football_tracking.config_lineage as config_lineage_module
 from football_tracking.api.broadcast_api import BroadcastApiError
 from football_tracking.api.dependencies import get_service
 from football_tracking.api.routes.broadcast import router as broadcast_router
@@ -366,6 +367,45 @@ class ReviewEvidenceBundleTests(unittest.TestCase):
                 with self.assertRaises(ConfigLineageError) as conflict:
                     service.reconfirm_broadcast_config_lineage("run-fixture", request)
             self.assertEqual(CONFIG_LINEAGE_CONFLICT, conflict.exception.code)
+
+            circular_bindings = {
+                name: {}
+                for name in config_lineage_module._REQUIRED_WORKFLOW_BINDINGS
+            }
+            circular_bindings["workflow_id"] = "workflow-1"
+            circular_bindings["historical_full_runs"] = []
+            circular_bindings["request"] = circular_bindings
+            serialization_request = {
+                **request,
+                "workflow_bindings": circular_bindings,
+            }
+
+            def validate_workflow_bindings(**kwargs: object) -> None:
+                config_lineage_module._validated_workflow_bindings(
+                    kwargs["workflow_bindings"],
+                )
+
+            with (
+                mock.patch.object(
+                    service,
+                    "_derive_config_lineage_workflow_bindings",
+                    return_value=circular_bindings,
+                ),
+                mock.patch(
+                    "football_tracking.api.service.reconfirm_config_lineage",
+                    side_effect=validate_workflow_bindings,
+                ),
+            ):
+                with self.assertRaises(ConfigLineageError) as serialization:
+                    service.reconfirm_broadcast_config_lineage(
+                        "run-fixture",
+                        serialization_request,
+                    )
+            self.assertEqual(CONFIG_LINEAGE_MISMATCH, serialization.exception.code)
+            self.assertEqual(
+                "config lineage snapshot mismatch: workflow bindings must be JSON-serializable",
+                str(serialization.exception),
+            )
 
             registry = service._read_registry()
             registry["runs"].append(

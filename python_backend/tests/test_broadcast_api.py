@@ -263,10 +263,16 @@ class BroadcastReviewBindingTests(unittest.TestCase):
             for name in qualification_binding_names + target_binding_names:
                 self.assertEqual(queue["bindings"][name]["sha256"], bindings[f"{name}_sha256"])
 
+            del queue["bindings"]["target_audit_plan"]
             del queue["bindings"]["target_audit_labels"]
             _write_json(queue_path, queue)
-            with self.assertRaisesRegex(BroadcastApiError, "target|qualification bindings"):
+            with self.assertRaises(BroadcastApiError) as caught:
                 build_review_action_envelope(queue_path, actions)
+            self.assertEqual(
+                "target review queue target audit bindings must be complete: "
+                "['target_audit_labels', 'target_audit_plan']",
+                str(caught.exception),
+            )
 
     def test_target_finite_population_api_rejects_each_missing_qualification_binding(
         self,
