@@ -7,5 +7,7 @@
 import type { BroadcastReviewAction } from "./broadcastReviewAction";
 
 export interface BroadcastReviewActionsRequest {
+  /** @pattern ^[0-9a-f]{64}$ */
+  queue_sha256: string;
   actions: BroadcastReviewAction[];
 }

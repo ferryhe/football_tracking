@@ -680,6 +680,21 @@ class BroadcastHybridOrchestrationTests(unittest.TestCase):
             binding_path.resolve(),
         )
 
+    def test_action_signal_binding_accepts_a_byte_identical_relocated_source(self) -> None:
+        relocated_source = self.fixture.run_dir / "activated-source.avi"
+        relocated_source.write_bytes(self.fixture.source_video.read_bytes())
+
+        binding_path = orchestration._validate_action_signal_binding(
+            self.fixture.run_dir,
+            source_video=relocated_source,
+            source_contract_sha256=_sha256(self.fixture.paths["contract"]),
+        )
+
+        self.assertEqual(
+            (self.fixture.run_dir / orchestration.ACTION_SIGNAL_BINDING_NAME).resolve(),
+            binding_path.resolve(),
+        )
+
     def test_terminal_shortfall_semantic_revalidation_rejects_tampered_evidence(self) -> None:
         cases = ("binding_gap", "multiple_temporal_events", "report_gap")
         for case in cases:
@@ -695,9 +710,7 @@ class BroadcastHybridOrchestrationTests(unittest.TestCase):
                     temporal = json.loads(temporal_path.read_text(encoding="utf-8"))
                     temporal["boundary_events"].append(dict(temporal["boundary_events"][0]))
                     _write_json(temporal_path, temporal)
-                    binding["terminal_shortfall_evidence"]["temporal_chunks_report_sha256"] = _sha256(
-                        temporal_path
-                    )
+                    binding["terminal_shortfall_evidence"]["temporal_chunks_report_sha256"] = _sha256(temporal_path)
                 else:
                     report_path = bound.run_dir / "action_signal_report.v1.json"
                     report = json.loads(report_path.read_text(encoding="utf-8"))
@@ -718,6 +731,20 @@ class BroadcastHybridOrchestrationTests(unittest.TestCase):
                         source_video=bound.source_video,
                         source_contract_sha256=_sha256(bound.paths["contract"]),
                     )
+
+    def test_action_signal_binding_rejects_a_relocated_source_with_different_content(self) -> None:
+        relocated_source = self.fixture.run_dir / "activated-source.avi"
+        relocated_source.write_bytes(b"different-content")
+
+        with self.assertRaisesRegex(
+            orchestration.BroadcastHybridOrchestrationError,
+            "different source video",
+        ):
+            orchestration._validate_action_signal_binding(
+                self.fixture.run_dir,
+                source_video=relocated_source,
+                source_contract_sha256=_sha256(self.fixture.paths["contract"]),
+            )
 
     def test_exclusive_publication_rejects_a_dangling_target_symlink(self) -> None:
         with tempfile.TemporaryDirectory() as external_dir:
@@ -817,6 +844,48 @@ class BroadcastHybridOrchestrationTests(unittest.TestCase):
         immutable_bytes = immutable_track.read_bytes()
         (self.fixture.run_dir / TRACK_NAME).write_bytes(b"mutated-public-copy")
         self.assertEqual(immutable_bytes, immutable_track.read_bytes())
+
+    def test_target_queue_passes_independent_qualification_bindings_to_materializer(self) -> None:
+        queue = json.loads(self.fixture.queue_path.read_text(encoding="utf-8"))
+        for name in (
+            "qualification_dataset",
+            "qualification_predictions",
+            "qualification_decisions",
+        ):
+            path = self.fixture.run_dir / "inputs" / f"{name}.json"
+            _write_json(path, {"artifact_type": name})
+            self.fixture.paths[name] = path
+            queue["bindings"][name] = {
+                "path": path.relative_to(self.fixture.run_dir).as_posix(),
+                "sha256": _sha256(path),
+            }
+        _write_json(self.fixture.queue_path, queue)
+
+        with (
+            mock.patch.object(
+                orchestration,
+                "materialize_selective_review_actions",
+                side_effect=_fake_materialize,
+            ) as materialize,
+            mock.patch.object(orchestration, "classify_candidates", side_effect=_fake_classify),
+            mock.patch.object(
+                orchestration,
+                "solve_global_ball_trajectory",
+                side_effect=_fake_solve_trajectory,
+            ),
+        ):
+            orchestration.recompute_reviewed_trajectory(self.fixture.run_dir)
+
+        for name in (
+            "qualification_dataset",
+            "qualification_predictions",
+            "qualification_decisions",
+        ):
+            keyword = "qualification_dataset_manifest_path" if name == "qualification_dataset" else f"{name}_path"
+            self.assertEqual(
+                self.fixture.paths[name].resolve(),
+                materialize.call_args.kwargs[keyword].resolve(),
+            )
 
     def test_ready_facade_revalidates_every_bound_dataset_sample_artifact(self) -> None:
         evidence = self.fixture.paths["dataset"].parent / "evidence.bin"

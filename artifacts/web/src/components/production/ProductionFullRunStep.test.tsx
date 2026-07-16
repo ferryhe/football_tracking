@@ -17,6 +17,10 @@ import type {
   RunRecord,
 } from "@workspace/api-client-react";
 
+import type {
+  BroadcastReviewEvidenceState,
+  BroadcastReviewEvidenceStepProps,
+} from "@/components/broadcast/BroadcastReviewEvidenceStep";
 import { LanguageProvider } from "@/contexts/LanguageContext";
 import type { BroadcastWorkflowController } from "@/hooks/useBroadcastWorkflowController";
 import { PRODUCTION_BROADCAST_DELIVERY_ARTIFACTS } from "@/lib/broadcastDelivery";
@@ -57,6 +61,7 @@ const api = vi.hoisted(() => ({
   runsOptions: [] as unknown[],
   currentRunOptions: [] as unknown[],
   controllerInputs: [] as unknown[],
+  reviewEvidenceInputs: [] as unknown[],
   configRefetch: vi.fn(),
   inputRefetch: vi.fn(),
   acceptedTrialRunRefetch: vi.fn(),
@@ -77,12 +82,28 @@ const api = vi.hoisted(() => ({
   renderBroadcast: vi.fn(),
   cancelWorkflow: vi.fn(),
   refreshWorkflow: vi.fn(),
+  refreshReviewEvidence: vi.fn(),
+  reviewEvidence: null as unknown as {
+    stepProps: BroadcastReviewEvidenceStepProps;
+    isLoading: boolean;
+    isReady: boolean;
+    readyIdentity: { generationId: string; queueSha256: string } | null;
+    error: { kind: "load" | "prepare" | "cancel"; cause: unknown } | null;
+    refresh: () => Promise<void>;
+  },
 }));
 
 vi.mock("@/hooks/useBroadcastWorkflowController", () => ({
   useBroadcastWorkflowController: (input: unknown) => {
     api.controllerInputs.push(input);
     return api.controller;
+  },
+}));
+
+vi.mock("@/components/broadcast/useBroadcastReviewEvidenceController", () => ({
+  useBroadcastReviewEvidenceController: (input: unknown) => {
+    api.reviewEvidenceInputs.push(input);
+    return api.reviewEvidence;
   },
 }));
 
@@ -414,6 +435,36 @@ function controllerFor(
   };
 }
 
+function reviewEvidenceFor(
+  state: BroadcastReviewEvidenceState = {
+    status: "ready",
+    generationId: "review-evidence-generation-1",
+    queueSha256: "1".repeat(64),
+  },
+  overrides: Partial<{
+    stepProps: BroadcastReviewEvidenceStepProps;
+    isLoading: boolean;
+    isReady: boolean;
+    error: { kind: "load" | "prepare" | "cancel"; cause: unknown } | null;
+  }> = {},
+) {
+  const isReady = state.status === "ready";
+  return {
+    stepProps: { state },
+    isLoading: false,
+    isReady,
+    readyIdentity: isReady
+      ? {
+          generationId: state.generationId ?? "review-evidence-generation-1",
+          queueSha256: state.queueSha256 ?? "1".repeat(64),
+        }
+      : null,
+    error: null,
+    refresh: api.refreshReviewEvidence,
+    ...overrides,
+  };
+}
+
 function reviewCandidate(): BroadcastReviewCandidate {
   return {
     candidate_id: "candidate-1",
@@ -476,9 +527,7 @@ function reviewResponse(
               candidates,
             },
           ],
-    ...(terminalTailReview
-      ? { terminal_tail_review: terminalTailReview }
-      : {}),
+    ...(terminalTailReview ? { terminal_tail_review: terminalTailReview } : {}),
   };
 }
 
@@ -774,6 +823,7 @@ beforeEach(() => {
   api.runsOptions = [];
   api.currentRunOptions = [];
   api.controllerInputs = [];
+  api.reviewEvidenceInputs = [];
   api.configRefetch.mockReset();
   api.inputRefetch.mockReset().mockImplementation(async () => ({
     isError: false,
@@ -807,11 +857,13 @@ beforeEach(() => {
   api.renderBroadcast.mockReset().mockResolvedValue(undefined);
   api.cancelWorkflow.mockReset().mockResolvedValue(undefined);
   api.refreshWorkflow.mockReset().mockResolvedValue(undefined);
+  api.refreshReviewEvidence.mockReset().mockResolvedValue(undefined);
   api.runsData = [];
   api.runData = null;
   api.acceptedTrialRunData = null;
   api.acceptedTrialArtifacts = [];
   api.controller = controllerFor();
+  api.reviewEvidence = reviewEvidenceFor();
 });
 
 afterEach(() => {
@@ -1199,6 +1251,85 @@ describe("ProductionFullRunStep", () => {
     expect(screen.queryByTestId("production-start-full-run")).toBeNull();
   });
 
+  it("hosts blocked review evidence in Production and refreshes both shared states", async () => {
+    const input = await fixture();
+    const existing = await trackingState(input);
+    const parent = parentAt(existing, "needs_review");
+    api.runData = parent;
+    api.controller = controllerFor({
+      parent,
+      state: "needs_review",
+      review: reviewResponse([]),
+    });
+    api.reviewEvidence = reviewEvidenceFor({
+      status: "blocked",
+      blockerCode: "insufficient_capacity",
+      recoveryAction: "Free managed evidence capacity, then retry.",
+      capacity: {
+        requiredFreeBytes: 96 * 1024 * 1024,
+        availableFreeBytes: 32 * 1024 * 1024,
+        status: "insufficient",
+      },
+    });
+    const view = renderStep(input, existing.state, parent.run_id, true);
+
+    expect(
+      await screen.findByTestId("broadcast-review-evidence-step"),
+    ).toHaveTextContent("insufficient_capacity");
+    expect(screen.getByText("32.0 MB")).toBeVisible();
+    expect(
+      screen.getByRole("button", { name: /retry import/i }),
+    ).toBeDisabled();
+    expect(
+      screen.queryByRole("button", {
+        name: /continue without candidate decisions/i,
+      }),
+    ).toBeNull();
+    expect(
+      api.reviewEvidenceInputs.some(
+        (value) =>
+          (value as { runId?: string; enabled?: boolean }).runId ===
+            parent.run_id && (value as { enabled?: boolean }).enabled === true,
+      ),
+    ).toBe(true);
+
+    await view.user.click(
+      screen.getByTestId("production-review-evidence-refresh"),
+    );
+    await waitFor(() => {
+      expect(api.refreshWorkflow).toHaveBeenCalledTimes(1);
+      expect(api.refreshReviewEvidence).toHaveBeenCalledTimes(1);
+    });
+    expect(api.submitReview).not.toHaveBeenCalled();
+  });
+
+  it("fails closed when ready evidence does not match the selective review queue", async () => {
+    const input = await fixture();
+    const existing = await trackingState(input);
+    const parent = parentAt(existing, "needs_review");
+    api.runData = parent;
+    api.controller = controllerFor({
+      parent,
+      state: "needs_review",
+      review: reviewResponse([reviewCandidate()]),
+    });
+    api.reviewEvidence = reviewEvidenceFor({
+      status: "ready",
+      generationId: "review-evidence-generation-stale",
+      queueSha256: "2".repeat(64),
+    });
+    renderStep(input, existing.state, parent.run_id);
+
+    expect(
+      await screen.findByTestId("production-review-evidence-stale"),
+    ).toHaveTextContent(/evidence changed/i);
+    expect(
+      screen.queryByRole("button", { name: /submit review decisions/i }),
+    ).toBeNull();
+    expect(screen.queryByLabelText(/reviewer id/i)).toBeNull();
+    expect(api.submitReview).not.toHaveBeenCalled();
+  });
+
   it("submits an explicit zero-candidate review exactly once under StrictMode", async () => {
     const input = await fixture();
     const existing = await trackingState(input);
@@ -1216,6 +1347,9 @@ describe("ProductionFullRunStep", () => {
         screen.getByTestId("production-full-run-status"),
       ).toHaveTextContent(/needs review/i),
     );
+    expect(
+      await screen.findByTestId("broadcast-review-evidence-step"),
+    ).toHaveTextContent(/review evidence ready/i);
     await view.user.dblClick(
       await screen.findByRole("button", {
         name: /continue without candidate decisions/i,
@@ -1255,9 +1389,9 @@ describe("ProductionFullRunStep", () => {
     expect(
       await screen.findByTestId("production-terminal-tail-review"),
     ).toHaveTextContent(/reports 5194 frames/i);
-    expect(screen.getByTestId("production-terminal-tail-review")).toHaveTextContent(
-      /final 2 source frames \(0\.1s\)/i,
-    );
+    expect(
+      screen.getByTestId("production-terminal-tail-review"),
+    ).toHaveTextContent(/final 2 source frames \(0\.1s\)/i);
     expect(screen.getByLabelText(/reviewer id/i)).toBeVisible();
     const submit = screen.getByRole("button", {
       name: /continue without candidate decisions/i,
@@ -1265,7 +1399,9 @@ describe("ProductionFullRunStep", () => {
     expect(submit).toBeDisabled();
 
     await view.user.click(
-      screen.getByLabelText(/verified product excludes this damaged terminal tail/i),
+      screen.getByLabelText(
+        /verified product excludes this damaged terminal tail/i,
+      ),
     );
     expect(submit).toBeEnabled();
     await view.user.click(submit);
@@ -1315,7 +1451,9 @@ describe("ProductionFullRunStep", () => {
         name: /continue without candidate decisions/i,
       }),
     ).toBeNull();
-    expect(screen.getByText("missing_qualified_selective_review_queue")).toBeVisible();
+    expect(
+      screen.getByText("missing_qualified_selective_review_queue"),
+    ).toBeVisible();
 
     const reviewer = screen.getByLabelText(/reviewer id/i);
     await view.user.clear(reviewer);

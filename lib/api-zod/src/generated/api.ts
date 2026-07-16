@@ -1030,6 +1030,10 @@ export const listRunsResponseBroadcastStatusGenerationOneRegExp = new RegExp(
 );
 export const listRunsResponseBroadcastRequestOneTrajectoryGenerationIdOneRegExp =
   new RegExp("^trajectory-[0-9a-f]{24}$");
+export const listRunsResponseBroadcastRequestOneBundleManifestSha256OneRegExp =
+  new RegExp("^[0-9a-f]{64}$");
+export const listRunsResponseBroadcastResultOneQueueSha256OneRegExp =
+  new RegExp("^[0-9a-f]{64}$");
 export const listRunsResponseBroadcastCommitStartedDefault = false;
 export const listRunsResponseBroadcastCancelRequestedDefault = false;
 export const listRunsResponseBroadcastLastOperationOneRecoveredDefault = false;
@@ -1150,7 +1154,10 @@ export const ListRunsResponseItem = zod.object({
       camera_generation_id: zod.union([zod.string(), zod.null()]).optional(),
       render_generation_id: zod.union([zod.string(), zod.null()]).optional(),
       operation: zod
-        .union([zod.enum(["recompute", "render"]), zod.null()])
+        .union([
+          zod.enum(["recompute", "render", "review_evidence_import"]),
+          zod.null(),
+        ])
         .optional(),
       operation_status: zod
         .union([
@@ -1159,9 +1166,12 @@ export const ListRunsResponseItem = zod.object({
             "running",
             "reconciling",
             "committing",
+            "copying",
+            "validating",
             "completed",
             "failed",
             "cancelled",
+            "blocked",
             "metadata_conflict",
           ]),
           zod.null(),
@@ -1191,6 +1201,18 @@ export const ListRunsResponseItem = zod.object({
               .optional(),
             target_width: zod.union([zod.number(), zod.null()]).optional(),
             target_height: zod.union([zod.number(), zod.null()]).optional(),
+            bundle_id: zod.union([zod.string(), zod.null()]).optional(),
+            bundle_manifest_sha256: zod
+              .union([
+                zod
+                  .string()
+                  .regex(
+                    listRunsResponseBroadcastRequestOneBundleManifestSha256OneRegExp,
+                  ),
+                zod.null(),
+              ])
+              .optional(),
+            retry_from_job_id: zod.union([zod.string(), zod.null()]).optional(),
           }),
           zod.null(),
         ])
@@ -1207,6 +1229,19 @@ export const ListRunsResponseItem = zod.object({
               .optional(),
             render_generation_id: zod
               .union([zod.string(), zod.null()])
+              .optional(),
+            review_evidence_generation_id: zod
+              .union([zod.string(), zod.null()])
+              .optional(),
+            queue_sha256: zod
+              .union([
+                zod
+                  .string()
+                  .regex(
+                    listRunsResponseBroadcastResultOneQueueSha256OneRegExp,
+                  ),
+                zod.null(),
+              ])
               .optional(),
           }),
           zod.null(),
@@ -1495,6 +1530,10 @@ export const listAssetGroupsResponseRunsItemBroadcastStatusGenerationOneRegExp =
   new RegExp("^[0-9a-f]{64}$");
 export const listAssetGroupsResponseRunsItemBroadcastRequestOneTrajectoryGenerationIdOneRegExp =
   new RegExp("^trajectory-[0-9a-f]{24}$");
+export const listAssetGroupsResponseRunsItemBroadcastRequestOneBundleManifestSha256OneRegExp =
+  new RegExp("^[0-9a-f]{64}$");
+export const listAssetGroupsResponseRunsItemBroadcastResultOneQueueSha256OneRegExp =
+  new RegExp("^[0-9a-f]{64}$");
 export const listAssetGroupsResponseRunsItemBroadcastCommitStartedDefault = false;
 export const listAssetGroupsResponseRunsItemBroadcastCancelRequestedDefault = false;
 export const listAssetGroupsResponseRunsItemBroadcastLastOperationOneRecoveredDefault = false;
@@ -1519,6 +1558,10 @@ export const listAssetGroupsResponseOutputsItemBroadcastStatusGenerationOneRegEx
   new RegExp("^[0-9a-f]{64}$");
 export const listAssetGroupsResponseOutputsItemBroadcastRequestOneTrajectoryGenerationIdOneRegExp =
   new RegExp("^trajectory-[0-9a-f]{24}$");
+export const listAssetGroupsResponseOutputsItemBroadcastRequestOneBundleManifestSha256OneRegExp =
+  new RegExp("^[0-9a-f]{64}$");
+export const listAssetGroupsResponseOutputsItemBroadcastResultOneQueueSha256OneRegExp =
+  new RegExp("^[0-9a-f]{64}$");
 export const listAssetGroupsResponseOutputsItemBroadcastCommitStartedDefault = false;
 export const listAssetGroupsResponseOutputsItemBroadcastCancelRequestedDefault = false;
 export const listAssetGroupsResponseOutputsItemBroadcastLastOperationOneRecoveredDefault = false;
@@ -1690,7 +1733,10 @@ export const ListAssetGroupsResponseItem = zod.object({
               .union([zod.string(), zod.null()])
               .optional(),
             operation: zod
-              .union([zod.enum(["recompute", "render"]), zod.null()])
+              .union([
+                zod.enum(["recompute", "render", "review_evidence_import"]),
+                zod.null(),
+              ])
               .optional(),
             operation_status: zod
               .union([
@@ -1699,9 +1745,12 @@ export const ListAssetGroupsResponseItem = zod.object({
                   "running",
                   "reconciling",
                   "committing",
+                  "copying",
+                  "validating",
                   "completed",
                   "failed",
                   "cancelled",
+                  "blocked",
                   "metadata_conflict",
                 ]),
                 zod.null(),
@@ -1739,6 +1788,20 @@ export const ListAssetGroupsResponseItem = zod.object({
                   target_height: zod
                     .union([zod.number(), zod.null()])
                     .optional(),
+                  bundle_id: zod.union([zod.string(), zod.null()]).optional(),
+                  bundle_manifest_sha256: zod
+                    .union([
+                      zod
+                        .string()
+                        .regex(
+                          listAssetGroupsResponseRunsItemBroadcastRequestOneBundleManifestSha256OneRegExp,
+                        ),
+                      zod.null(),
+                    ])
+                    .optional(),
+                  retry_from_job_id: zod
+                    .union([zod.string(), zod.null()])
+                    .optional(),
                 }),
                 zod.null(),
               ])
@@ -1755,6 +1818,19 @@ export const ListAssetGroupsResponseItem = zod.object({
                     .optional(),
                   render_generation_id: zod
                     .union([zod.string(), zod.null()])
+                    .optional(),
+                  review_evidence_generation_id: zod
+                    .union([zod.string(), zod.null()])
+                    .optional(),
+                  queue_sha256: zod
+                    .union([
+                      zod
+                        .string()
+                        .regex(
+                          listAssetGroupsResponseRunsItemBroadcastResultOneQueueSha256OneRegExp,
+                        ),
+                      zod.null(),
+                    ])
                     .optional(),
                 }),
                 zod.null(),
@@ -2118,7 +2194,10 @@ export const ListAssetGroupsResponseItem = zod.object({
               .union([zod.string(), zod.null()])
               .optional(),
             operation: zod
-              .union([zod.enum(["recompute", "render"]), zod.null()])
+              .union([
+                zod.enum(["recompute", "render", "review_evidence_import"]),
+                zod.null(),
+              ])
               .optional(),
             operation_status: zod
               .union([
@@ -2127,9 +2206,12 @@ export const ListAssetGroupsResponseItem = zod.object({
                   "running",
                   "reconciling",
                   "committing",
+                  "copying",
+                  "validating",
                   "completed",
                   "failed",
                   "cancelled",
+                  "blocked",
                   "metadata_conflict",
                 ]),
                 zod.null(),
@@ -2167,6 +2249,20 @@ export const ListAssetGroupsResponseItem = zod.object({
                   target_height: zod
                     .union([zod.number(), zod.null()])
                     .optional(),
+                  bundle_id: zod.union([zod.string(), zod.null()]).optional(),
+                  bundle_manifest_sha256: zod
+                    .union([
+                      zod
+                        .string()
+                        .regex(
+                          listAssetGroupsResponseOutputsItemBroadcastRequestOneBundleManifestSha256OneRegExp,
+                        ),
+                      zod.null(),
+                    ])
+                    .optional(),
+                  retry_from_job_id: zod
+                    .union([zod.string(), zod.null()])
+                    .optional(),
                 }),
                 zod.null(),
               ])
@@ -2183,6 +2279,19 @@ export const ListAssetGroupsResponseItem = zod.object({
                     .optional(),
                   render_generation_id: zod
                     .union([zod.string(), zod.null()])
+                    .optional(),
+                  review_evidence_generation_id: zod
+                    .union([zod.string(), zod.null()])
+                    .optional(),
+                  queue_sha256: zod
+                    .union([
+                      zod
+                        .string()
+                        .regex(
+                          listAssetGroupsResponseOutputsItemBroadcastResultOneQueueSha256OneRegExp,
+                        ),
+                      zod.null(),
+                    ])
                     .optional(),
                 }),
                 zod.null(),
@@ -2416,6 +2525,11 @@ export const getRunResponseBroadcastStatusGenerationOneRegExp = new RegExp(
 );
 export const getRunResponseBroadcastRequestOneTrajectoryGenerationIdOneRegExp =
   new RegExp("^trajectory-[0-9a-f]{24}$");
+export const getRunResponseBroadcastRequestOneBundleManifestSha256OneRegExp =
+  new RegExp("^[0-9a-f]{64}$");
+export const getRunResponseBroadcastResultOneQueueSha256OneRegExp = new RegExp(
+  "^[0-9a-f]{64}$",
+);
 export const getRunResponseBroadcastCommitStartedDefault = false;
 export const getRunResponseBroadcastCancelRequestedDefault = false;
 export const getRunResponseBroadcastLastOperationOneRecoveredDefault = false;
@@ -2534,7 +2648,10 @@ export const GetRunResponse = zod.object({
       camera_generation_id: zod.union([zod.string(), zod.null()]).optional(),
       render_generation_id: zod.union([zod.string(), zod.null()]).optional(),
       operation: zod
-        .union([zod.enum(["recompute", "render"]), zod.null()])
+        .union([
+          zod.enum(["recompute", "render", "review_evidence_import"]),
+          zod.null(),
+        ])
         .optional(),
       operation_status: zod
         .union([
@@ -2543,9 +2660,12 @@ export const GetRunResponse = zod.object({
             "running",
             "reconciling",
             "committing",
+            "copying",
+            "validating",
             "completed",
             "failed",
             "cancelled",
+            "blocked",
             "metadata_conflict",
           ]),
           zod.null(),
@@ -2575,6 +2695,18 @@ export const GetRunResponse = zod.object({
               .optional(),
             target_width: zod.union([zod.number(), zod.null()]).optional(),
             target_height: zod.union([zod.number(), zod.null()]).optional(),
+            bundle_id: zod.union([zod.string(), zod.null()]).optional(),
+            bundle_manifest_sha256: zod
+              .union([
+                zod
+                  .string()
+                  .regex(
+                    getRunResponseBroadcastRequestOneBundleManifestSha256OneRegExp,
+                  ),
+                zod.null(),
+              ])
+              .optional(),
+            retry_from_job_id: zod.union([zod.string(), zod.null()]).optional(),
           }),
           zod.null(),
         ])
@@ -2591,6 +2723,17 @@ export const GetRunResponse = zod.object({
               .optional(),
             render_generation_id: zod
               .union([zod.string(), zod.null()])
+              .optional(),
+            review_evidence_generation_id: zod
+              .union([zod.string(), zod.null()])
+              .optional(),
+            queue_sha256: zod
+              .union([
+                zod
+                  .string()
+                  .regex(getRunResponseBroadcastResultOneQueueSha256OneRegExp),
+                zod.null(),
+              ])
               .optional(),
           }),
           zod.null(),
@@ -3114,6 +3257,9 @@ export const SubmitBroadcastReviewActionsParams = zod.object({
   run_id: zod.coerce.string(),
 });
 
+export const submitBroadcastReviewActionsBodyQueueSha256RegExp = new RegExp(
+  "^[0-9a-f]{64}$",
+);
 export const submitBroadcastReviewActionsBodyActionsItemActionIdMax = 200;
 
 export const submitBroadcastReviewActionsBodyActionsItemReviewItemIdMax = 200;
@@ -3123,6 +3269,9 @@ export const submitBroadcastReviewActionsBodyActionsItemCandidateIdMax = 300;
 export const submitBroadcastReviewActionsBodyActionsItemReviewerIdMax = 200;
 
 export const SubmitBroadcastReviewActionsBody = zod.object({
+  queue_sha256: zod
+    .string()
+    .regex(submitBroadcastReviewActionsBodyQueueSha256RegExp),
   actions: zod.array(
     zod.object({
       action_id: zod
@@ -3196,6 +3345,352 @@ export const SubmitBroadcastReviewActionsResponse = zod.object({
       message: zod.union([zod.string(), zod.null()]).optional(),
     })
     .optional(),
+});
+
+/**
+ * @summary Get Broadcast Review Evidence
+ */
+export const GetBroadcastReviewEvidenceParams = zod.object({
+  run_id: zod.coerce.string(),
+});
+
+export const getBroadcastReviewEvidenceResponseQueueSha256OneRegExp =
+  new RegExp("^[0-9a-f]{64}$");
+export const getBroadcastReviewEvidenceResponseProgressPercentDefault = 0;
+export const getBroadcastReviewEvidenceResponseProgressPercentMin = 0;
+export const getBroadcastReviewEvidenceResponseProgressPercentMax = 100;
+
+export const getBroadcastReviewEvidenceResponseRetryableDefault = false;
+export const getBroadcastReviewEvidenceResponseCanCancelDefault = false;
+export const getBroadcastReviewEvidenceResponseBundlesItemBundleManifestSha256OneRegExp =
+  new RegExp("^[0-9a-f]{64}$");
+export const getBroadcastReviewEvidenceResponseBundlesItemQueueSha256OneRegExp =
+  new RegExp("^[0-9a-f]{64}$");
+export const getBroadcastReviewEvidenceResponseBundlesItemTotalSizeBytesOneMin = 0;
+
+export const getBroadcastReviewEvidenceResponseBundlesItemRequiredFreeBytesOneMin = 0;
+
+export const getBroadcastReviewEvidenceResponseBundlesItemAvailableFreeBytesOneMin = 0;
+
+export const getBroadcastReviewEvidenceResponseBundlesItemAttemptQuotaBytesOneMin = 0;
+
+export const getBroadcastReviewEvidenceResponseBundlesItemProvisionerLimitsOneMaxFilesExclusiveMin = 0;
+
+export const getBroadcastReviewEvidenceResponseBundlesItemProvisionerLimitsOneMaxBundleBytesExclusiveMin = 0;
+
+export const getBroadcastReviewEvidenceResponseBundlesItemProvisionerLimitsOneMaxSingleFileBytesExclusiveMin = 0;
+
+export const getBroadcastReviewEvidenceResponseCapacityOneTotalSizeBytesOneMin = 0;
+
+export const getBroadcastReviewEvidenceResponseCapacityOneRequiredFreeBytesOneMin = 0;
+
+export const getBroadcastReviewEvidenceResponseCapacityOneAvailableFreeBytesOneMin = 0;
+
+export const getBroadcastReviewEvidenceResponseCapacityOneAttemptQuotaBytesOneMin = 0;
+
+export const getBroadcastReviewEvidenceResponseCapacityOneProvisionerLimitsOneMaxFilesExclusiveMin = 0;
+
+export const getBroadcastReviewEvidenceResponseCapacityOneProvisionerLimitsOneMaxBundleBytesExclusiveMin = 0;
+
+export const getBroadcastReviewEvidenceResponseCapacityOneProvisionerLimitsOneMaxSingleFileBytesExclusiveMin = 0;
+
+export const GetBroadcastReviewEvidenceResponse = zod.object({
+  run_id: zod.string(),
+  status: zod.enum([
+    "not_available",
+    "available",
+    "queued",
+    "copying",
+    "validating",
+    "committing",
+    "ready",
+    "failed",
+    "cancelled",
+    "blocked",
+  ]),
+  active_job_id: zod.union([zod.string(), zod.null()]).optional(),
+  retry_from_job_id: zod.union([zod.string(), zod.null()]).optional(),
+  generation_id: zod.union([zod.string(), zod.null()]).optional(),
+  queue_sha256: zod
+    .union([
+      zod
+        .string()
+        .regex(getBroadcastReviewEvidenceResponseQueueSha256OneRegExp),
+      zod.null(),
+    ])
+    .optional(),
+  stage: zod.union([zod.string(), zod.null()]).optional(),
+  progress_percent: zod
+    .number()
+    .min(getBroadcastReviewEvidenceResponseProgressPercentMin)
+    .max(getBroadcastReviewEvidenceResponseProgressPercentMax)
+    .default(getBroadcastReviewEvidenceResponseProgressPercentDefault),
+  blocker_code: zod.union([zod.string(), zod.null()]).optional(),
+  error_code: zod.union([zod.string(), zod.null()]).optional(),
+  recovery_action: zod.union([zod.string(), zod.null()]).optional(),
+  retryable: zod
+    .boolean()
+    .default(getBroadcastReviewEvidenceResponseRetryableDefault),
+  can_cancel: zod
+    .boolean()
+    .default(getBroadcastReviewEvidenceResponseCanCancelDefault),
+  bundles: zod
+    .array(
+      zod.object({
+        status: zod.enum(["available", "not_applicable", "invalid"]),
+        bundle_id: zod.union([zod.string(), zod.null()]).optional(),
+        bundle_manifest_sha256: zod
+          .union([
+            zod
+              .string()
+              .regex(
+                getBroadcastReviewEvidenceResponseBundlesItemBundleManifestSha256OneRegExp,
+              ),
+            zod.null(),
+          ])
+          .optional(),
+        queue_sha256: zod
+          .union([
+            zod
+              .string()
+              .regex(
+                getBroadcastReviewEvidenceResponseBundlesItemQueueSha256OneRegExp,
+              ),
+            zod.null(),
+          ])
+          .optional(),
+        total_size_bytes: zod
+          .union([
+            zod
+              .number()
+              .min(
+                getBroadcastReviewEvidenceResponseBundlesItemTotalSizeBytesOneMin,
+              ),
+            zod.null(),
+          ])
+          .optional(),
+        required_free_bytes: zod
+          .union([
+            zod
+              .number()
+              .min(
+                getBroadcastReviewEvidenceResponseBundlesItemRequiredFreeBytesOneMin,
+              ),
+            zod.null(),
+          ])
+          .optional(),
+        available_free_bytes: zod
+          .union([
+            zod
+              .number()
+              .min(
+                getBroadcastReviewEvidenceResponseBundlesItemAvailableFreeBytesOneMin,
+              ),
+            zod.null(),
+          ])
+          .optional(),
+        attempt_quota_bytes: zod
+          .union([
+            zod
+              .number()
+              .min(
+                getBroadcastReviewEvidenceResponseBundlesItemAttemptQuotaBytesOneMin,
+              ),
+            zod.null(),
+          ])
+          .optional(),
+        capacity_status: zod
+          .union([zod.enum(["sufficient", "insufficient"]), zod.null()])
+          .optional(),
+        retention: zod
+          .union([
+            zod.object({
+              policy: zod.literal("manual-audit-retention-v1"),
+              retain_until: zod.string(),
+              automatic_delete: zod.boolean(),
+            }),
+            zod.null(),
+          ])
+          .optional(),
+        provisioner_limits: zod
+          .union([
+            zod.object({
+              max_files: zod
+                .number()
+                .gt(
+                  getBroadcastReviewEvidenceResponseBundlesItemProvisionerLimitsOneMaxFilesExclusiveMin,
+                ),
+              max_bundle_bytes: zod
+                .number()
+                .gt(
+                  getBroadcastReviewEvidenceResponseBundlesItemProvisionerLimitsOneMaxBundleBytesExclusiveMin,
+                ),
+              max_single_file_bytes: zod
+                .number()
+                .gt(
+                  getBroadcastReviewEvidenceResponseBundlesItemProvisionerLimitsOneMaxSingleFileBytesExclusiveMin,
+                ),
+            }),
+            zod.null(),
+          ])
+          .optional(),
+        inbox_entry: zod.string(),
+        error_code: zod.union([zod.string(), zod.null()]).optional(),
+        error: zod.union([zod.string(), zod.null()]).optional(),
+      }),
+    )
+    .optional(),
+  capacity: zod
+    .union([
+      zod.object({
+        total_size_bytes: zod
+          .union([
+            zod
+              .number()
+              .min(
+                getBroadcastReviewEvidenceResponseCapacityOneTotalSizeBytesOneMin,
+              ),
+            zod.null(),
+          ])
+          .optional(),
+        required_free_bytes: zod
+          .union([
+            zod
+              .number()
+              .min(
+                getBroadcastReviewEvidenceResponseCapacityOneRequiredFreeBytesOneMin,
+              ),
+            zod.null(),
+          ])
+          .optional(),
+        available_free_bytes: zod
+          .union([
+            zod
+              .number()
+              .min(
+                getBroadcastReviewEvidenceResponseCapacityOneAvailableFreeBytesOneMin,
+              ),
+            zod.null(),
+          ])
+          .optional(),
+        attempt_quota_bytes: zod
+          .union([
+            zod
+              .number()
+              .min(
+                getBroadcastReviewEvidenceResponseCapacityOneAttemptQuotaBytesOneMin,
+              ),
+            zod.null(),
+          ])
+          .optional(),
+        capacity_status: zod
+          .union([zod.enum(["sufficient", "insufficient"]), zod.null()])
+          .optional(),
+        retention: zod
+          .union([
+            zod.object({
+              policy: zod.literal("manual-audit-retention-v1"),
+              retain_until: zod.string(),
+              automatic_delete: zod.boolean(),
+            }),
+            zod.null(),
+          ])
+          .optional(),
+        provisioner_limits: zod
+          .union([
+            zod.object({
+              max_files: zod
+                .number()
+                .gt(
+                  getBroadcastReviewEvidenceResponseCapacityOneProvisionerLimitsOneMaxFilesExclusiveMin,
+                ),
+              max_bundle_bytes: zod
+                .number()
+                .gt(
+                  getBroadcastReviewEvidenceResponseCapacityOneProvisionerLimitsOneMaxBundleBytesExclusiveMin,
+                ),
+              max_single_file_bytes: zod
+                .number()
+                .gt(
+                  getBroadcastReviewEvidenceResponseCapacityOneProvisionerLimitsOneMaxSingleFileBytesExclusiveMin,
+                ),
+            }),
+            zod.null(),
+          ])
+          .optional(),
+      }),
+      zod.null(),
+    ])
+    .optional(),
+  blocking_reasons: zod.array(zod.string()).optional(),
+  message: zod.union([zod.string(), zod.null()]).optional(),
+});
+
+/**
+ * @summary Import Broadcast Review Evidence
+ */
+export const ImportBroadcastReviewEvidenceParams = zod.object({
+  run_id: zod.coerce.string(),
+});
+
+export const importBroadcastReviewEvidenceBodyBundleIdMax = 96;
+
+export const importBroadcastReviewEvidenceBodyBundleManifestSha256RegExp =
+  new RegExp("^[0-9a-f]{64}$");
+export const importBroadcastReviewEvidenceBodyRetryFromJobIdOneMax = 200;
+
+export const ImportBroadcastReviewEvidenceBody = zod.object({
+  bundle_id: zod
+    .string()
+    .min(1)
+    .max(importBroadcastReviewEvidenceBodyBundleIdMax),
+  bundle_manifest_sha256: zod
+    .string()
+    .regex(importBroadcastReviewEvidenceBodyBundleManifestSha256RegExp),
+  retry_from_job_id: zod
+    .union([
+      zod
+        .string()
+        .min(1)
+        .max(importBroadcastReviewEvidenceBodyRetryFromJobIdOneMax),
+      zod.null(),
+    ])
+    .optional(),
+});
+
+/**
+ * @summary Revoke Broadcast Review Evidence
+ */
+export const RevokeBroadcastReviewEvidenceParams = zod.object({
+  run_id: zod.coerce.string(),
+  generation_id: zod.coerce.string(),
+});
+
+export const revokeBroadcastReviewEvidenceQueryQueueSha256RegExp = new RegExp(
+  "^[0-9a-f]{64}$",
+);
+
+export const RevokeBroadcastReviewEvidenceQueryParams = zod.object({
+  queue_sha256: zod.coerce
+    .string()
+    .regex(revokeBroadcastReviewEvidenceQueryQueueSha256RegExp),
+});
+
+export const revokeBroadcastReviewEvidenceResponseGenerationIdRegExp =
+  new RegExp("^review-evidence-[0-9a-f]{24}$");
+export const revokeBroadcastReviewEvidenceResponseQueueSha256RegExp =
+  new RegExp("^[0-9a-f]{64}$");
+
+export const RevokeBroadcastReviewEvidenceResponse = zod.object({
+  run_id: zod.string(),
+  status: zod.literal("revoked"),
+  generation_id: zod
+    .string()
+    .regex(revokeBroadcastReviewEvidenceResponseGenerationIdRegExp),
+  queue_sha256: zod
+    .string()
+    .regex(revokeBroadcastReviewEvidenceResponseQueueSha256RegExp),
+  revoked_at: zod.string(),
 });
 
 /**
@@ -3595,6 +4090,10 @@ export const cancelRunResponseBroadcastStatusGenerationOneRegExp = new RegExp(
 );
 export const cancelRunResponseBroadcastRequestOneTrajectoryGenerationIdOneRegExp =
   new RegExp("^trajectory-[0-9a-f]{24}$");
+export const cancelRunResponseBroadcastRequestOneBundleManifestSha256OneRegExp =
+  new RegExp("^[0-9a-f]{64}$");
+export const cancelRunResponseBroadcastResultOneQueueSha256OneRegExp =
+  new RegExp("^[0-9a-f]{64}$");
 export const cancelRunResponseBroadcastCommitStartedDefault = false;
 export const cancelRunResponseBroadcastCancelRequestedDefault = false;
 export const cancelRunResponseBroadcastLastOperationOneRecoveredDefault = false;
@@ -3715,7 +4214,10 @@ export const CancelRunResponse = zod.object({
       camera_generation_id: zod.union([zod.string(), zod.null()]).optional(),
       render_generation_id: zod.union([zod.string(), zod.null()]).optional(),
       operation: zod
-        .union([zod.enum(["recompute", "render"]), zod.null()])
+        .union([
+          zod.enum(["recompute", "render", "review_evidence_import"]),
+          zod.null(),
+        ])
         .optional(),
       operation_status: zod
         .union([
@@ -3724,9 +4226,12 @@ export const CancelRunResponse = zod.object({
             "running",
             "reconciling",
             "committing",
+            "copying",
+            "validating",
             "completed",
             "failed",
             "cancelled",
+            "blocked",
             "metadata_conflict",
           ]),
           zod.null(),
@@ -3756,6 +4261,18 @@ export const CancelRunResponse = zod.object({
               .optional(),
             target_width: zod.union([zod.number(), zod.null()]).optional(),
             target_height: zod.union([zod.number(), zod.null()]).optional(),
+            bundle_id: zod.union([zod.string(), zod.null()]).optional(),
+            bundle_manifest_sha256: zod
+              .union([
+                zod
+                  .string()
+                  .regex(
+                    cancelRunResponseBroadcastRequestOneBundleManifestSha256OneRegExp,
+                  ),
+                zod.null(),
+              ])
+              .optional(),
+            retry_from_job_id: zod.union([zod.string(), zod.null()]).optional(),
           }),
           zod.null(),
         ])
@@ -3772,6 +4289,19 @@ export const CancelRunResponse = zod.object({
               .optional(),
             render_generation_id: zod
               .union([zod.string(), zod.null()])
+              .optional(),
+            review_evidence_generation_id: zod
+              .union([zod.string(), zod.null()])
+              .optional(),
+            queue_sha256: zod
+              .union([
+                zod
+                  .string()
+                  .regex(
+                    cancelRunResponseBroadcastResultOneQueueSha256OneRegExp,
+                  ),
+                zod.null(),
+              ])
               .optional(),
           }),
           zod.null(),

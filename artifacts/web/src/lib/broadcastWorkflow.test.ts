@@ -984,6 +984,7 @@ function reviewResponse(
   return {
     run_id: "broadcast-parent",
     status: "ready",
+    queue_sha256: "1".repeat(64),
     review_item_count: 1,
     items: [
       {
@@ -1027,6 +1028,7 @@ test("review builder covers every candidate exactly once in queue order", () => 
     ["broadcast-review-0001", "broadcast-review-0002"],
   );
   assert.equal(result.value.actions[1].noise_subtype, "player_body_or_shoe");
+  assert.equal(result.value.queue_sha256, "1".repeat(64));
 });
 
 test("review builder accepts mark_unknown", () => {
@@ -1043,6 +1045,7 @@ test("review builder publishes an exact empty envelope for a zero-candidate queu
     {
       run_id: "broadcast-parent",
       status: "ready",
+      queue_sha256: "2".repeat(64),
       review_item_count: 0,
       items: [],
     },
@@ -1051,6 +1054,20 @@ test("review builder publishes an exact empty envelope for a zero-candidate queu
   );
   assert.equal(result.ok, true);
   if (result.ok) assert.deepEqual(result.value.actions, []);
+});
+
+test("review builder rejects a missing or noncanonical queue SHA", () => {
+  for (const queueSha256 of [undefined, "A".repeat(64)]) {
+    const response = reviewResponse([candidate("candidate-1")]);
+    response.queue_sha256 = queueSha256;
+    const result = validateAndBuildBroadcastReviewActions(
+      response,
+      [{ candidate_id: "candidate-1", action: "confirm_ball" }],
+      "operator-ui",
+    );
+    assert.equal(result.ok, false);
+    assert.match(result.messages.join(" "), /queue SHA-256/);
+  }
 });
 
 test("review builder rejects a missing candidate decision", () => {

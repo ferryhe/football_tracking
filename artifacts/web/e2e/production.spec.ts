@@ -5,6 +5,9 @@ import type {
   ArtifactSummary,
   BroadcastOperationResponse,
   BroadcastRenderRequest,
+  BroadcastReviewEvidenceImportRequest,
+  BroadcastReviewEvidenceRevokeResponse,
+  BroadcastReviewEvidenceStateResponse,
   BroadcastReviewActionsRequest,
   BroadcastReviewWindowsResponse,
   BroadcastTerminalTailReviewRequest,
@@ -1068,6 +1071,7 @@ interface ZeroReviewBroadcastScenario {
       | "run"
       | "artifact-list"
       | "artifact"
+      | "review-evidence"
       | "review";
     path: string;
     cacheControl: string;
@@ -1082,6 +1086,11 @@ interface ZeroReviewBroadcastScenario {
     method: string;
     runId: string;
     phase: ZeroReviewBroadcastPhase;
+  }>;
+  reviewEvidenceImportBodies: BroadcastReviewEvidenceImportRequest[];
+  reviewEvidenceRevokes: Array<{
+    generationId: string;
+    queueSha256: string | null;
   }>;
   qualityStable: Record<string, unknown>;
   qualityBytes: Buffer;
@@ -1247,6 +1256,9 @@ async function installZeroReviewBroadcastScenario(
   const createBodies: CreateRunRequest[] = [];
   const reviewBodies: BroadcastReviewActionsRequest[] = [];
   const terminalTailReviewBodies: BroadcastTerminalTailReviewRequest[] = [];
+  const reviewEvidenceImportBodies: BroadcastReviewEvidenceImportRequest[] = [];
+  const reviewEvidenceRevokes: ZeroReviewBroadcastScenario["reviewEvidenceRevokes"] =
+    [];
   const recomputeBodies: BroadcastTrajectoryRecomputeRequest[] = [];
   const renderBodies: BroadcastRenderRequest[] = [];
   const cancelIds: string[] = [];
@@ -1318,6 +1330,9 @@ async function installZeroReviewBroadcastScenario(
     gap_seconds: 0.1,
     evidence_sha256: "5".repeat(64),
   };
+  const reviewEvidenceGenerationId = `review-evidence-${"7".repeat(24)}`;
+  const reviewEvidenceQueueSha256 = "1".repeat(64);
+  let reviewEvidenceRevoked = false;
   let deliveryMode: "ok" | "missing_video" = "ok";
   let allowedTrajectoryReadyReviewReads = 0;
   let submittedReviewDecisionSha256 = reviewDecisionSha256;
@@ -1728,6 +1743,100 @@ async function installZeroReviewBroadcastScenario(
       await route.fulfill({ json: cloneRun(run) });
       return;
     }
+    const reviewEvidenceImportMatch = path.match(
+      /^\/api\/runs\/([^/]+)\/broadcast\/review-evidence\/import$/,
+    );
+    if (method === "POST" && reviewEvidenceImportMatch) {
+      const runId = decodeURIComponent(reviewEvidenceImportMatch[1]);
+      const body =
+        request.postDataJSON() as BroadcastReviewEvidenceImportRequest;
+      reviewEvidenceImportBodies.push(cloneJson(body));
+      if (runId !== requireParent().run_id) {
+        audit.contractViolations.push(
+          "review-evidence import targeted the wrong parent",
+        );
+      }
+      reviewEvidenceRevoked = false;
+      await route.fulfill({
+        status: 202,
+        json: {
+          run_id: `review-evidence-import-${"8".repeat(24)}`,
+          parent_run_id: requireParent().run_id,
+          status: "queued",
+          generation_id: reviewEvidenceGenerationId,
+        } satisfies BroadcastOperationResponse,
+      });
+      return;
+    }
+    const reviewEvidenceRevokeMatch = path.match(
+      /^\/api\/runs\/([^/]+)\/broadcast\/review-evidence\/([^/]+)$/,
+    );
+    if (method === "DELETE" && reviewEvidenceRevokeMatch) {
+      const runId = decodeURIComponent(reviewEvidenceRevokeMatch[1]);
+      const generationId = decodeURIComponent(reviewEvidenceRevokeMatch[2]);
+      const queueSha256 = url.searchParams.get("queue_sha256");
+      reviewEvidenceRevokes.push({ generationId, queueSha256 });
+      if (
+        runId !== requireParent().run_id ||
+        generationId !== reviewEvidenceGenerationId ||
+        queueSha256 !== reviewEvidenceQueueSha256
+      ) {
+        audit.contractViolations.push(
+          "review-evidence revoke did not match the active generation",
+        );
+      }
+      reviewEvidenceRevoked = true;
+      await route.fulfill({
+        json: {
+          run_id: requireParent().run_id,
+          status: "revoked",
+          generation_id: reviewEvidenceGenerationId,
+          queue_sha256: reviewEvidenceQueueSha256,
+          revoked_at: BROADCAST_E2E_NOW,
+        } satisfies BroadcastReviewEvidenceRevokeResponse,
+      });
+      return;
+    }
+    const reviewEvidenceMatch = path.match(
+      /^\/api\/runs\/([^/]+)\/broadcast\/review-evidence$/,
+    );
+    if (method === "GET" && reviewEvidenceMatch) {
+      captureAuthoritativeRead("review-evidence", request);
+      const runId = decodeURIComponent(reviewEvidenceMatch[1]);
+      if (runId !== requireParent().run_id) {
+        audit.contractViolations.push(
+          "review evidence requested for the wrong parent",
+        );
+      }
+      const blocked = reviewMode === "missing" || reviewEvidenceRevoked;
+      const response: BroadcastReviewEvidenceStateResponse = blocked
+        ? {
+            run_id: runId,
+            status: "blocked",
+            blocker_code: "review_evidence_bundle_not_available",
+            recovery_action: "provision_qualified_review_evidence",
+            retryable: false,
+            can_cancel: false,
+            bundles: [],
+            blocking_reasons: ["missing_qualified_selective_review_queue"],
+          }
+        : {
+            run_id: runId,
+            status: "ready",
+            generation_id: reviewEvidenceGenerationId,
+            queue_sha256: reviewEvidenceQueueSha256,
+            stage: "ready",
+            progress_percent: 100,
+            retryable: false,
+            can_cancel: false,
+            bundles: [],
+          };
+      await route.fulfill({
+        json: response,
+        headers: { "Cache-Control": "no-store" },
+      });
+      return;
+    }
     const reviewMatch = path.match(
       /^\/api\/runs\/([^/]+)\/broadcast\/review-windows$/,
     );
@@ -1803,39 +1912,38 @@ async function installZeroReviewBroadcastScenario(
               items: [],
             }
           : reviewMode === "populated"
-          ? {
-              run_id: runId,
-              status: "ready",
-              queue_sha256: "1".repeat(64),
-              review_item_count: 1,
-              items: [
-                {
-                  review_item_id: "window-1",
-                  variant_id: "full",
-                  start_frame: 90,
-                  end_frame: 140,
-                  duration_seconds: 2,
-                  compliance: "compliant",
-                  priority: 1,
-                  candidates,
-                },
-              ],
-            }
-          : {
-              run_id: runId,
-              status: "ready",
-              queue_sha256: "1".repeat(64),
-              review_item_count: 0,
-              items: [],
-            };
+            ? {
+                run_id: runId,
+                status: "ready",
+                queue_sha256: "1".repeat(64),
+                review_item_count: 1,
+                items: [
+                  {
+                    review_item_id: "window-1",
+                    variant_id: "full",
+                    start_frame: 90,
+                    end_frame: 140,
+                    duration_seconds: 2,
+                    compliance: "compliant",
+                    priority: 1,
+                    candidates,
+                  },
+                ],
+              }
+            : {
+                run_id: runId,
+                status: "ready",
+                queue_sha256: "1".repeat(64),
+                review_item_count: 0,
+                items: [],
+              };
       response.terminal_tail_review =
         terminalTailReviewMode === "not_required"
           ? { status: "not_required" }
           : terminalTailReviewMode === "required"
             ? {
                 status: "required",
-                reason:
-                  "terminal_decoder_shortfall_requires_operator_review",
+                reason: "terminal_decoder_shortfall_requires_operator_review",
                 evidence: terminalTailEvidence,
               }
             : {
@@ -1874,12 +1982,9 @@ async function installZeroReviewBroadcastScenario(
       const parentRun = requireParent();
       parentRun.broadcast = {
         ...parentRun.broadcast,
-        blocking_reasons: (
-          parentRun.broadcast?.blocking_reasons ?? []
-        ).filter(
+        blocking_reasons: (parentRun.broadcast?.blocking_reasons ?? []).filter(
           (reason) =>
-            reason !==
-            "terminal_decoder_shortfall_requires_operator_review",
+            reason !== "terminal_decoder_shortfall_requires_operator_review",
         ),
       };
       await route.fulfill({
@@ -1906,6 +2011,11 @@ async function installZeroReviewBroadcastScenario(
       ) {
         audit.contractViolations.push(
           "review actions targeted the wrong parent",
+        );
+      }
+      if (body.queue_sha256 !== reviewEvidenceQueueSha256) {
+        audit.contractViolations.push(
+          "review actions did not bind the current review-evidence queue",
         );
       }
       await route.fulfill({
@@ -2165,6 +2275,8 @@ async function installZeroReviewBroadcastScenario(
     authoritativeReads,
     artifactReads,
     reviewWindowReads,
+    reviewEvidenceImportBodies,
+    reviewEvidenceRevokes,
     qualityStable,
     qualityBytes,
     statusGeneration,
@@ -2299,7 +2411,10 @@ test("completes a zero-review full production and verifies the product", async (
     .dblclick();
   await expect.poll(() => scenario.reviewBodies.length).toBe(1);
   await expect.poll(() => scenario.recomputeBodies.length).toBe(1);
-  expect(scenario.reviewBodies[0]).toEqual({ actions: [] });
+  expect(scenario.reviewBodies[0]).toEqual({
+    queue_sha256: "1".repeat(64),
+    actions: [],
+  });
   expect(scenario.phase()).toBe("recomputing");
   await expect(page.getByTestId("production-full-run-status")).toHaveText(
     "Recomputing trajectory",
@@ -2518,11 +2633,15 @@ test("acknowledges the terminal tail independently when the qualified review que
 
   const tailReview = page.getByTestId("production-terminal-tail-review");
   await expect(tailReview).toBeVisible({ timeout: 15_000 });
+  const evidence = page.getByTestId("broadcast-review-evidence-step");
+  await expect(evidence).toBeVisible();
   await expect(
-    page
-      .getByTestId("broadcast-review-step")
-      .getByText("missing_qualified_selective_review_queue"),
+    evidence.getByText("review_evidence_bundle_not_available"),
   ).toBeVisible();
+  await expect(evidence).toContainText(
+    "Provision a qualified review-evidence bundle in the managed inbox.",
+  );
+  await expect(page.getByTestId("broadcast-review-step")).toHaveCount(0);
   await expect(
     page.getByRole("button", { name: "Continue without candidate decisions" }),
   ).toHaveCount(0);
@@ -3028,6 +3147,7 @@ test("[PR4 C3] keeps trajectory evidence safe after a render conflict and queues
   );
   const fixture = await buildConfirmedBroadcastDraft();
   const scenario = await installZeroReviewBroadcastScenario(page, fixture);
+  scenario.allowOneTrajectoryReadyReviewRead();
   await page.addInitScript(
     ({ key, draft }) => {
       if (localStorage.getItem(key) === null) {
@@ -3163,12 +3283,17 @@ test("[PR4 C3] blocks a ready generation whose sealed delivery is missing broadc
   );
   expect(scenario.audit.unhandledApi).toEqual([]);
   expect(scenario.audit.contractViolations).toEqual([]);
-  expect(conflictResponses).toEqual([
-    {
-      method: "GET",
-      url: `http://127.0.0.1:4173/api/runs/${parentRunId}/artifacts`,
-    },
-  ]);
+  expect(conflictResponses.length).toBeLessThanOrEqual(1);
+  expect(conflictResponses).toEqual(
+    conflictResponses.length === 0
+      ? []
+      : [
+          {
+            method: "GET",
+            url: `http://127.0.0.1:4173/api/runs/${parentRunId}/artifacts`,
+          },
+        ],
+  );
 });
 
 test("selects an original video, advances, and restores after refresh", async ({

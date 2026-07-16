@@ -16,6 +16,7 @@ import torch
 
 from football_tracking.candidate_classifier import (
     CLASS_LABELS,
+    MAX_BATCH_SIZE,
     MODEL_MANIFEST_NAME,
     MODEL_WEIGHTS_NAME,
     PREDICTIONS_NAME,
@@ -27,6 +28,8 @@ from football_tracking.candidate_classifier import (
     load_candidate_classifier,
     train_candidate_classifier,
     train_cli_main,
+    validate_candidate_classifier_package,
+    validate_candidate_predictions_package,
 )
 from football_tracking.tracking_contracts import (
     CLASSIFICATION_LABELS,
@@ -36,6 +39,152 @@ from football_tracking.tracking_contracts import (
 
 
 class CandidateClassifierTests(unittest.TestCase):
+    def test_batch_size_limit_accepts_128_and_rejects_larger_values_before_loading(self) -> None:
+        from football_tracking import candidate_classifier
+
+        with tempfile.TemporaryDirectory() as temp_name:
+            root = Path(temp_name)
+            inputs = _write_training_inputs(root)
+            package = root / "model"
+            train_candidate_classifier(
+                inputs["dataset"],
+                inputs["resolution"],
+                inputs["contract"],
+                package,
+                config=TrainingConfig(epochs=1, batch_size=MAX_BATCH_SIZE, seed=127),
+            )
+            source_contract = _write_inference_contract(root, inputs["candidates"])
+            predictions_dir = root / "predictions"
+            predictions = classify_candidates(
+                package,
+                inputs["dataset"],
+                source_contract,
+                predictions_dir,
+                batch_size=MAX_BATCH_SIZE,
+            )
+            self.assertEqual(MAX_BATCH_SIZE, predictions["inference"]["batch_size"])
+            self.assertEqual(
+                predictions,
+                validate_candidate_predictions_package(
+                    package,
+                    inputs["dataset"],
+                    source_contract,
+                    predictions_dir / PREDICTIONS_NAME,
+                ),
+            )
+
+            for rejected in (MAX_BATCH_SIZE + 1, 10**12):
+                with self.subTest(operation="train", batch_size=rejected), patch.object(
+                    candidate_classifier,
+                    "_load_dataset_manifest",
+                    side_effect=AssertionError("dataset or tensors loaded"),
+                ), self.assertRaisesRegex(ClassifierError, "between 1 and 128"):
+                    train_candidate_classifier(
+                        root / "unused-dataset.json",
+                        root / "unused-resolution.json",
+                        root / "unused-contract.json",
+                        root / f"rejected-training-{rejected}",
+                        config=TrainingConfig(epochs=1, batch_size=rejected),
+                    )
+
+                with self.subTest(operation="classify", batch_size=rejected), patch.object(
+                    candidate_classifier,
+                    "_load_candidate_classifier_with_bindings",
+                    side_effect=AssertionError("model loaded"),
+                ), self.assertRaisesRegex(ClassifierError, "between 1 and 128"):
+                    classify_candidates(
+                        root / "unused-model",
+                        root / "unused-dataset.json",
+                        root / "unused-contract.json",
+                        root / f"rejected-predictions-{rejected}",
+                        batch_size=rejected,
+                    )
+
+                with self.subTest(operation="predict", batch_size=rejected), patch.object(
+                    candidate_classifier,
+                    "_stack_batch",
+                    side_effect=AssertionError("tensor batch loaded"),
+                ), self.assertRaisesRegex(ClassifierError, "between 1 and 128"):
+                    candidate_classifier._predict_logits(
+                        candidate_classifier.CandidateClassifier(),
+                        [{}],
+                        rejected,
+                    )
+
+                malicious_path = root / f"malicious-predictions-{rejected}.json"
+                _write_json(
+                    malicious_path,
+                    {"inference": {"device": "cpu", "batch_size": rejected}},
+                )
+                with self.subTest(operation="validate", batch_size=rejected), patch.object(
+                    candidate_classifier,
+                    "classify_candidates",
+                    side_effect=AssertionError("inference invoked"),
+                ), self.assertRaisesRegex(ClassifierError, "between 1 and 128"):
+                    validate_candidate_predictions_package(
+                        root / "unused-model",
+                        root / "unused-dataset.json",
+                        root / "unused-contract.json",
+                        malicious_path,
+                    )
+
+    def test_model_package_rejects_oversized_training_batch_before_weight_or_tensor_loading(self) -> None:
+        from football_tracking import candidate_classifier
+
+        with tempfile.TemporaryDirectory() as temp_name:
+            root = Path(temp_name)
+            inputs = _write_training_inputs(root)
+            package = root / "model"
+            train_candidate_classifier(
+                inputs["dataset"],
+                inputs["resolution"],
+                inputs["contract"],
+                package,
+                config=TrainingConfig(epochs=1, batch_size=2, seed=129),
+            )
+            manifest_path = package / MODEL_MANIFEST_NAME
+            report_path = package / TRAINING_REPORT_NAME
+            manifest = _read_json(manifest_path)
+            report = _read_json(report_path)
+            manifest["training_config"]["batch_size"] = MAX_BATCH_SIZE + 1
+            report["training_config"]["batch_size"] = MAX_BATCH_SIZE + 1
+            version_inputs = {
+                "weights_sha256": manifest["weights_sha256"],
+                "data_binding": manifest["data_binding"],
+                "training_config": manifest["training_config"],
+                "calibration": manifest["calibration"],
+                "supported_mask": manifest["supported_mask"],
+                "class_order": manifest["class_order"],
+                "architecture": manifest["architecture"],
+                "input_contract": manifest["input_contract"],
+                "code_sha256": manifest["code_sha256"],
+                "runtime": manifest["runtime"],
+            }
+            model_version = hashlib.sha256(
+                json.dumps(version_inputs, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()
+            ).hexdigest()
+            manifest["model_version"] = model_version
+            report["model_version"] = model_version
+            _write_json(report_path, report)
+            manifest["training_report_sha256"] = _sha256(report_path)
+            _write_json(manifest_path, manifest)
+
+            with patch.object(
+                candidate_classifier.torch,
+                "load",
+                side_effect=AssertionError("weights loaded"),
+            ), patch.object(
+                candidate_classifier,
+                "_load_examples",
+                side_effect=AssertionError("tensors loaded"),
+            ), self.assertRaisesRegex(ClassifierError, "between 1 and 128"):
+                validate_candidate_classifier_package(
+                    package,
+                    inputs["dataset"],
+                    inputs["resolution"],
+                    inputs["contract"],
+                )
+
     def test_cpu_training_filters_truth_builds_leak_free_split_and_calibrates(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:
             root = Path(temp_name)
@@ -50,11 +199,18 @@ class CandidateClassifierTests(unittest.TestCase):
                 config=TrainingConfig(epochs=2, batch_size=3, learning_rate=0.01, seed=17),
             )
             model, manifest = load_candidate_classifier(package)
+            validated_package = validate_candidate_classifier_package(
+                package,
+                inputs["dataset"],
+                inputs["resolution"],
+                inputs["contract"],
+            )
             package_files_exist = all(
                 (package / name).is_file() for name in (MODEL_WEIGHTS_NAME, MODEL_MANIFEST_NAME, TRAINING_REPORT_NAME)
             )
 
         self.assertEqual(tuple(CLASSIFICATION_LABELS), CLASS_LABELS)
+        self.assertEqual(manifest["model_version"], validated_package["manifest"]["model_version"])
         self.assertEqual(list(CLASS_LABELS), manifest["class_order"])
         self.assertLess(sum(parameter.numel() for parameter in model.parameters()), 100_000)
         self.assertTrue(all(parameter.device.type == "cpu" for parameter in model.parameters()))
@@ -84,6 +240,59 @@ class CandidateClassifierTests(unittest.TestCase):
         self.assertEqual("cpu", manifest["runtime"]["device"])
         self.assertTrue(package_files_exist)
 
+    def test_strict_package_validation_recomputes_metrics_instead_of_trusting_self_consistent_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            root = Path(temp_name)
+            inputs = _write_training_inputs(root)
+            package = root / "model"
+            train_candidate_classifier(
+                inputs["dataset"],
+                inputs["resolution"],
+                inputs["contract"],
+                package,
+                config=TrainingConfig(epochs=1, batch_size=3, learning_rate=0.01, seed=19),
+            )
+            manifest_path = package / MODEL_MANIFEST_NAME
+            report_path = package / TRAINING_REPORT_NAME
+            manifest = _read_json(manifest_path)
+            report = _read_json(report_path)
+            forged_temperature = float(manifest["calibration"]["temperature"]) + 0.25
+            manifest["calibration"]["temperature"] = forged_temperature
+            report["calibration"]["temperature"] = forged_temperature
+            version_inputs = {
+                "weights_sha256": manifest["weights_sha256"],
+                "data_binding": manifest["data_binding"],
+                "training_config": manifest["training_config"],
+                "calibration": manifest["calibration"],
+                "supported_mask": manifest["supported_mask"],
+                "class_order": manifest["class_order"],
+                "architecture": manifest["architecture"],
+                "input_contract": manifest["input_contract"],
+                "code_sha256": manifest["code_sha256"],
+                "runtime": manifest["runtime"],
+            }
+            forged_model_version = hashlib.sha256(
+                json.dumps(
+                    version_inputs,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    allow_nan=False,
+                ).encode("utf-8")
+            ).hexdigest()
+            manifest["model_version"] = forged_model_version
+            report["model_version"] = forged_model_version
+            _write_json(report_path, report)
+            manifest["training_report_sha256"] = _sha256(report_path)
+            _write_json(manifest_path, manifest)
+
+            with self.assertRaisesRegex(ClassifierError, "calibration metrics do not reproduce"):
+                validate_candidate_classifier_package(
+                    package,
+                    inputs["dataset"],
+                    inputs["resolution"],
+                    inputs["contract"],
+                )
+
     def test_inference_masks_missing_classes_and_preserves_confirmed_unknown_and_decisions(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:
             root = Path(temp_name)
@@ -100,11 +309,19 @@ class CandidateClassifierTests(unittest.TestCase):
             output_dir = root / "predictions"
 
             predictions = classify_candidates(package, inputs["dataset"], source_contract, output_dir, batch_size=4)
+            validated_predictions = validate_candidate_predictions_package(
+                package,
+                inputs["dataset"],
+                source_contract,
+                output_dir / PREDICTIONS_NAME,
+            )
             derived = json.loads((output_dir / TRACKING_CONTRACT_REPORT_NAME).read_text(encoding="utf-8"))
             source = json.loads(source_contract.read_text(encoding="utf-8"))
             predictions_exist = (output_dir / PREDICTIONS_NAME).is_file()
 
         unsupported = set(CLASS_LABELS) - {"match_ball", "equipment_or_background", "unknown"}
+        self.assertEqual({"device": "cpu", "batch_size": 4}, predictions["inference"])
+        self.assertEqual(predictions, validated_predictions)
         by_candidate = {row["candidate_id"]: row for row in predictions["predictions"]}
         self.assertEqual(set(inputs["candidate_ids"]), set(by_candidate))
         for row in predictions["predictions"]:
@@ -434,6 +651,9 @@ class CandidateClassifierTests(unittest.TestCase):
             manifest = _read_json(inputs["dataset"])
             manifest["contract"] = {"sha256": _sha256(source_contract)}
             _write_json(inputs["dataset"], manifest)
+            bound_source_contract = Path(inputs["dataset"]).parent / source_contract.name
+            shutil.copyfile(source_contract, bound_source_contract)
+            self.assertEqual(_sha256(source_contract), _sha256(bound_source_contract))
             manifest_sha256 = _sha256(inputs["dataset"])
             ledger_path = root / "votes.jsonl"
             records: list[dict[str, object]] = [

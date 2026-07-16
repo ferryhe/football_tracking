@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import math
 import os
 import subprocess
-import sys
 import tempfile
 import unittest
+from contextlib import redirect_stderr, redirect_stdout
 from copy import deepcopy
 from dataclasses import asdict
 from pathlib import Path
@@ -41,8 +42,10 @@ from football_tracking.selective_review import (
     SelectiveReviewError,
     _select_review_candidates,
     _selection_report,
+    build_cli_main,
     build_review_windows,
     build_selective_review_queue,
+    materialize_cli_main,
     materialize_selective_review_actions,
 )
 from football_tracking.tracking_benchmark import build_benchmark_report
@@ -854,7 +857,7 @@ def _queue_action(
     queue = json.loads(queue_path.read_text(encoding="utf-8"))
     item = next(item for item in queue["items"] if any(c["candidate_id"] == candidate_id for c in item["candidates"]))
     candidate = next(c for c in item["candidates"] if c["candidate_id"] == candidate_id)
-    return {
+    result = {
         "action_id": action_id,
         "review_item_id": item["review_item_id"],
         "candidate_id": candidate_id,
@@ -880,6 +883,14 @@ def _queue_action(
         },
         **extra,
     }
+    for name in (
+        "qualification_dataset",
+        "qualification_predictions",
+        "qualification_decisions",
+    ):
+        if name in queue["bindings"]:
+            result["bindings"][f"{name}_sha256"] = queue["bindings"][name]["sha256"]
+    return result
 
 
 def _complete_queue_actions(queue_path: Path) -> list[dict[str, object]]:
@@ -928,6 +939,17 @@ def _run_cli(command: list[str]) -> subprocess.CompletedProcess[str]:
         check=False,
         env=environment,
     )
+
+
+def _run_cli_main(function: Any, arguments: list[str]) -> subprocess.CompletedProcess[str]:
+    stdout = io.StringIO()
+    stderr = io.StringIO()
+    with redirect_stdout(stdout), redirect_stderr(stderr):
+        try:
+            returncode = function(arguments)
+        except SystemExit as exc:
+            returncode = int(exc.code or 0)
+    return subprocess.CompletedProcess(arguments, returncode, stdout.getvalue(), stderr.getvalue())
 
 
 def _make_policy_inputs_reviewable(inputs: dict[str, Path]) -> None:
@@ -1205,6 +1227,79 @@ class SelectiveReviewWindowTests(unittest.TestCase):
 
 
 class SelectiveReviewArtifactTests(unittest.TestCase):
+    def setUp(self) -> None:
+        inference_patch = patch(
+            "football_tracking.selective_policy.validate_candidate_predictions_package"
+        )
+        inference_patch.start()
+        self.addCleanup(inference_patch.stop)
+
+    def test_target_application_queue_carries_qualification_bindings_through_materialization(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            fixture = _Fixture(root, fps_by_variant={"a": 20.0, "b": 20.0})
+            application_path = root / "selective_policy_application.v1.json"
+            application = json.loads(fixture.decisions_path.read_text(encoding="utf-8"))
+            application["artifact_type"] = "selective_policy_application"
+            _write_json(application_path, application)
+
+            with patch(
+                "football_tracking.selective_review.validate_selective_policy_application_binding",
+                return_value={"application": application},
+            ):
+                queue_dir = root / "target-queue"
+                queue = build_selective_review_queue(
+                    fixture.dataset_path,
+                    fixture.predictions_path,
+                    fixture.policy_path,
+                    fixture.model_path,
+                    fixture.contract_path,
+                    queue_dir,
+                    decisions_path=application_path,
+                    annotation_resolution_path=fixture.annotation_resolution_path,
+                    resolved_contract_path=fixture.resolved_contract_path,
+                    policy_roles_path=fixture.policy_roles_path,
+                    qualification_dataset_manifest_path=fixture.dataset_path,
+                    qualification_predictions_path=fixture.predictions_path,
+                    qualification_decisions_path=fixture.decisions_path,
+                )
+                self.assertTrue(
+                    {
+                        "qualification_dataset",
+                        "qualification_predictions",
+                        "qualification_decisions",
+                    }.issubset(queue["bindings"])
+                )
+                queue_path = queue_dir / "selective_review_queue.v1.json"
+                actions_path = root / "target-actions.json"
+                _write_json(
+                    actions_path,
+                    {
+                        "schema_version": "1.0",
+                        "artifact_type": "selective_review_actions",
+                        "actions": _complete_queue_actions(queue_path),
+                    },
+                )
+                report = materialize_selective_review_actions(
+                    queue_path,
+                    actions_path,
+                    fixture.dataset_path,
+                    fixture.predictions_path,
+                    fixture.policy_path,
+                    fixture.model_path,
+                    fixture.contract_path,
+                    root / "target-round",
+                    decisions_path=application_path,
+                    annotation_resolution_path=fixture.annotation_resolution_path,
+                    resolved_contract_path=fixture.resolved_contract_path,
+                    policy_roles_path=fixture.policy_roles_path,
+                    qualification_dataset_manifest_path=fixture.dataset_path,
+                    qualification_predictions_path=fixture.predictions_path,
+                    qualification_decisions_path=fixture.decisions_path,
+                )
+
+            self.assertEqual("complete", report["status"])
+
     def test_large_audit_population_is_deterministically_bounded_and_fair(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
@@ -1860,10 +1955,7 @@ class SelectiveReviewArtifactTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
             fixture = _Fixture(root, fps_by_variant={"a": 20.0, "b": None})
-            script = Path(__file__).resolve().parents[1] / "scripts" / "build_selective_review_queue.py"
             command = [
-                sys.executable,
-                str(script),
                 "--dataset-manifest",
                 str(fixture.dataset_path),
                 "--predictions",
@@ -1891,17 +1983,17 @@ class SelectiveReviewArtifactTests(unittest.TestCase):
                 "--max-windows",
                 "30",
             ]
-            success = _run_cli(command)
+            success = _run_cli_main(build_cli_main, command)
             self.assertEqual(0, success.returncode, success.stderr)
             self.assertEqual("", success.stderr)
             self.assertTrue(json.loads(success.stdout)["ok"])
 
-            help_result = _run_cli([sys.executable, str(script), "--help"])
+            help_result = _run_cli_main(build_cli_main, ["--help"])
             self.assertEqual(0, help_result.returncode)
             self.assertEqual("", help_result.stderr)
             self.assertIn("usage:", help_result.stdout.lower())
 
-            failure = _run_cli([sys.executable, str(script), "--dataset-manifest", str(fixture.dataset_path)])
+            failure = _run_cli_main(build_cli_main, ["--dataset-manifest", str(fixture.dataset_path)])
             self.assertNotEqual(0, failure.returncode)
             self.assertEqual("", failure.stdout)
             self.assertEqual(1, len(failure.stderr.splitlines()))
@@ -1920,10 +2012,7 @@ class SelectiveReviewArtifactTests(unittest.TestCase):
                 actions_path,
                 {"schema_version": "1.0", "artifact_type": "selective_review_actions", "actions": actions},
             )
-            script = Path(__file__).resolve().parents[1] / "scripts" / "materialize_selective_review_actions.py"
             command = [
-                sys.executable,
-                str(script),
                 "--queue",
                 str(queue_path),
                 "--actions",
@@ -1949,17 +2038,17 @@ class SelectiveReviewArtifactTests(unittest.TestCase):
                 "--output-dir",
                 str(root / "round"),
             ]
-            success = _run_cli(command)
+            success = _run_cli_main(materialize_cli_main, command)
             self.assertEqual(0, success.returncode, success.stderr)
             self.assertEqual("", success.stderr)
             self.assertTrue(json.loads(success.stdout)["ok"])
 
-            help_result = _run_cli([sys.executable, str(script), "--help"])
+            help_result = _run_cli_main(materialize_cli_main, ["--help"])
             self.assertEqual(0, help_result.returncode)
             self.assertEqual("", help_result.stderr)
             self.assertIn("usage:", help_result.stdout.lower())
 
-            failure = _run_cli([sys.executable, str(script), "--queue", str(queue_path)])
+            failure = _run_cli_main(materialize_cli_main, ["--queue", str(queue_path)])
             self.assertNotEqual(0, failure.returncode)
             self.assertEqual("", failure.stdout)
             self.assertEqual(1, len(failure.stderr.splitlines()))

@@ -6,8 +6,6 @@ import sys
 from collections.abc import Sequence
 from pathlib import Path
 
-from football_tracking.candidate_annotations import resolve_candidate_annotations
-
 
 class _JsonArgumentParser(argparse.ArgumentParser):
     def error(self, message: str) -> None:
@@ -29,6 +27,9 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    from football_tracking.candidate_annotations import resolve_candidate_annotations
+
     try:
         args = build_parser().parse_args(argv)
         report = resolve_candidate_annotations(

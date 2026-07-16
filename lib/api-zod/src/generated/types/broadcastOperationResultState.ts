@@ -10,5 +10,7 @@ export interface BroadcastOperationResultState {
   trajectory_generation_id?: string | null;
   camera_generation_id?: string | null;
   render_generation_id?: string | null;
+  review_evidence_generation_id?: string | null;
+  queue_sha256?: string | null;
   [key: string]: unknown;
 }

@@ -4,6 +4,7 @@ import hashlib
 import json
 import math
 import os
+import stat
 import tempfile
 import uuid
 from collections import Counter, defaultdict
@@ -11,7 +12,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from string import hexdigits
-from typing import Any
+from typing import Any, BinaryIO
 
 from football_tracking.tracking_contracts import (
     CLASSIFICATION_LABELS,
@@ -45,6 +46,8 @@ class _FileSnapshot:
     path: Path
     sha256: str
     label: str
+    stat_token: tuple[int, int, int, int, int] | None = None
+    regular_no_follow: bool = False
 
 
 def sample_evidence_sha256(sample: dict[str, Any]) -> str:
@@ -112,7 +115,7 @@ def resolve_candidate_annotations(
     candidate_id_set = set(candidate_ids)
 
     contract_sha256 = contract_snapshot.sha256
-    ledger_header, raw_votes, votes, ledger_snapshot = load_vote_ledger(
+    ledger_header, raw_votes, all_votes, ledger_snapshot = load_vote_ledger(
         ledger_path,
         candidate_ids=candidate_id_set,
         contract_sha256=contract_sha256,
@@ -120,12 +123,13 @@ def resolve_candidate_annotations(
     dataset_binding = _validate_dataset_evidence(
         dataset_manifest_path,
         ledger_header=ledger_header,
-        votes=votes,
+        votes=all_votes,
         candidate_ids=candidate_id_set,
+        source_contract_path=source_contract_path,
         contract_sha256=contract_sha256,
     )
     votes_by_candidate: dict[str, list[dict[str, Any]]] = defaultdict(list)
-    for vote in votes:
+    for vote in _effective_votes(all_votes):
         votes_by_candidate[vote["candidate_id"]].append(vote)
 
     classifications = [dict(row) for row in contract["classifications"]]
@@ -184,6 +188,10 @@ def resolve_candidate_annotations(
         classifications=[*classifications, *additions],
         decisions=contract["decisions"],
     )
+    # Annotation resolution is a reproducible transformation of immutable
+    # evidence.  Reuse the source contract timestamp instead of letting the
+    # contract builder inject wall-clock time on every validation pass.
+    derived_contract["generated_at"] = contract.get("generated_at")
     if derived_contract["validation_errors"]:
         raise ValueError(f"derived tracking contract is invalid: {derived_contract['validation_errors']}")
     derived_contract_bytes = _json_bytes(derived_contract)
@@ -193,11 +201,14 @@ def resolve_candidate_annotations(
         "schema_version": ANNOTATION_SCHEMA_VERSION,
         "artifact_type": "candidate_annotation_resolution",
         "source_contract": {
-            "path": str(source_contract_path),
+            "path": source_contract_path.name,
             "sha256": contract_sha256,
         },
         "source_vote_ledger": {
-            "path": str(ledger_path),
+            # This is a portable audit filename. Strict package validation
+            # resolves and replays the ledger from its explicit descriptor;
+            # unlike source_contract.path, it is not dataset-relative.
+            "path": ledger_path.name,
             "sha256": ledger_snapshot.sha256,
             "schema_version": LEDGER_SCHEMA_VERSION,
             "contract_sha256": ledger_header["contract_sha256"],
@@ -254,6 +265,132 @@ def resolve_candidate_annotations(
     return report
 
 
+def validate_candidate_annotation_package(
+    contract_path: Path,
+    ledger_path: Path,
+    dataset_manifest_path: Path,
+    annotation_resolution_path: Path,
+    previous_ledger_path: Path | None = None,
+) -> dict[str, Any]:
+    """Re-resolve an append-only blind-review ledger and compare the published resolution exactly."""
+
+    contract_path = Path(contract_path).resolve()
+    ledger_path = Path(ledger_path).resolve()
+    dataset_manifest_path = Path(dataset_manifest_path).resolve()
+    annotation_resolution_path = Path(annotation_resolution_path).resolve()
+    published_bytes, published_snapshot = _capture_file_snapshot(
+        annotation_resolution_path, "published annotation resolution"
+    )
+    published = _parse_json_object_bytes(published_bytes, "published annotation resolution")
+    header = published.get("ledger_header")
+    chain = header.get("append_only_chain") if isinstance(header, dict) else None
+    if (
+        not isinstance(chain, dict)
+        or chain.get("algorithm") != "sha256-ledger-chain-v1"
+        or not isinstance(chain.get("sequence"), int)
+        or isinstance(chain.get("sequence"), bool)
+        or chain["sequence"] <= 0
+    ):
+        raise ValueError("annotation ledger requires an append-only sha256 chain declaration")
+    previous = chain.get("previous_ledger_sha256")
+    if chain["sequence"] == 1:
+        if previous is not None:
+            raise ValueError("the first annotation ledger sequence may not name a predecessor")
+    else:
+        previous_sha256 = _plain_sha256_text(previous, "append_only_chain.previous_ledger_sha256")
+        if previous_ledger_path is None:
+            raise ValueError("non-initial annotation ledger requires its predecessor ledger")
+        previous_ledger_path = Path(previous_ledger_path).resolve()
+        previous_bytes, _ = _capture_file_snapshot(previous_ledger_path, "previous vote ledger")
+        if hashlib.sha256(previous_bytes).hexdigest() != previous_sha256:
+            raise ValueError("append-only predecessor ledger sha256 does not match the chain declaration")
+        contract, contract_snapshot = _load_tracking_contract_snapshot(contract_path)
+        candidate_ids = {str(candidate["candidate_id"]) for candidate in contract["candidates"]}
+        previous_header, previous_raw_votes, _, _ = load_vote_ledger(
+            previous_ledger_path,
+            candidate_ids=candidate_ids,
+            contract_sha256=contract_snapshot.sha256,
+        )
+        _, current_raw_votes, _, _ = load_vote_ledger(
+            ledger_path,
+            candidate_ids=candidate_ids,
+            contract_sha256=contract_snapshot.sha256,
+        )
+        for field in ("dataset_version", "evidence_manifest_sha256"):
+            if previous_header.get(field) != header.get(field):
+                raise ValueError(f"append-only predecessor {field} does not match the current ledger")
+        previous_chain = previous_header.get("append_only_chain")
+        if not isinstance(previous_chain, dict) or previous_chain.get("sequence") != chain["sequence"] - 1:
+            raise ValueError("append-only ledger sequence is not consecutive")
+        if current_raw_votes[: len(previous_raw_votes)] != previous_raw_votes:
+            raise ValueError("current vote history is not a strict append-only extension of its predecessor")
+        if len(current_raw_votes) <= len(previous_raw_votes):
+            raise ValueError("a new append-only ledger sequence must append at least one vote event")
+
+    with tempfile.TemporaryDirectory(prefix="candidate-annotation-validate-") as temporary:
+        output_dir = Path(temporary) / "resolved"
+        recomputed = resolve_candidate_annotations(
+            contract_path,
+            ledger_path,
+            output_dir,
+            min_confidence=float(published.get("min_confidence", 0.8)),
+            dataset_manifest_path=dataset_manifest_path,
+        )
+        if recomputed != published:
+            raise ValueError("published annotation resolution does not match the append-only vote ledger")
+        for name in (ADJUDICATION_QUEUE_NAME, TRACKING_CONTRACT_REPORT_NAME):
+            published_path = annotation_resolution_path.parent / name
+            if not published_path.is_file() or published_path.read_bytes() != (output_dir / name).read_bytes():
+                raise ValueError(f"published annotation companion artifact does not match recomputation: {name}")
+    resolutions = published.get("resolutions")
+    if not isinstance(resolutions, list) or not resolutions:
+        raise ValueError("annotation resolution must contain a non-empty resolved population")
+    unresolved = [row.get("candidate_id") for row in resolutions if row.get("status") != "confirmed"]
+    if unresolved:
+        raise ValueError(f"annotation population is not fully resolved: {sorted(unresolved)}")
+    if published.get("summary", {}).get("training_eligible_count") != len(resolutions):
+        raise ValueError("every development/qualification resolution must be training eligible")
+    if published.get("summary", {}).get("adjudication_count") != 0:
+        raise ValueError("annotation package still contains unresolved adjudication work")
+    contract, contract_snapshot = _load_tracking_contract_snapshot(contract_path)
+    candidate_ids = {str(candidate["candidate_id"]) for candidate in contract["candidates"]}
+    _, _, all_votes, _ = load_vote_ledger(
+        ledger_path,
+        candidate_ids=candidate_ids,
+        contract_sha256=contract_snapshot.sha256,
+    )
+    effective_by_candidate: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for vote in _effective_votes(all_votes):
+        effective_by_candidate[vote["candidate_id"]].append(vote)
+    for resolution in resolutions:
+        candidate_id = str(resolution["candidate_id"])
+        votes = effective_by_candidate.get(candidate_id, [])
+        primary = [vote for vote in votes if vote["stage"] == "primary"]
+        adjudication = [vote for vote in votes if vote["stage"] == "adjudication"]
+        if (
+            len(primary) != 2
+            or any(vote["reviewer_type"] != "human" or vote["blind"] is not True for vote in primary)
+            or len({vote["annotator_id"] for vote in primary}) != 2
+            or len({vote["fingerprint"] for vote in primary}) != 2
+        ):
+            raise ValueError(
+                f"candidate {candidate_id!r} requires two independent blind human primary votes"
+            )
+        if resolution.get("resolution_source") == "human_adjudication":
+            if (
+                len(adjudication) != 1
+                or adjudication[0]["reviewer_type"] != "human"
+                or adjudication[0]["annotator_id"] in {vote["annotator_id"] for vote in primary}
+                or adjudication[0]["fingerprint"] in {vote["fingerprint"] for vote in primary}
+            ):
+                raise ValueError(f"candidate {candidate_id!r} requires an independent human adjudicator")
+        elif adjudication:
+            raise ValueError(f"candidate {candidate_id!r} carries unexpected adjudication votes")
+    if hashlib.sha256(annotation_resolution_path.read_bytes()).hexdigest() != published_snapshot.sha256:
+        raise ValueError("published annotation resolution changed during validation")
+    return published
+
+
 def _load_tracking_contract_snapshot(path: Path) -> tuple[dict[str, Any], _FileSnapshot]:
     raw_bytes, snapshot = _capture_file_snapshot(path, "source tracking contract")
     raw = _parse_json_object_bytes(raw_bytes, "source tracking contract")
@@ -278,6 +415,7 @@ def _load_tracking_contract_snapshot(path: Path) -> tuple[dict[str, Any], _FileS
             value = []
         collections[name] = value
     contract = build_tracking_contract(source=raw.get("source"), **collections)
+    contract["generated_at"] = raw.get("generated_at")
     errors.extend(str(error) for error in source_errors if error)
     errors.extend(str(error) for error in contract["validation_errors"])
     if errors:
@@ -334,6 +472,7 @@ def load_vote_ledger(
         vote_ids.add(vote_id)
         raw_votes.append(raw)
         normalized_votes.append(normalized)
+    _validate_supersession_events(normalized_votes)
     return ledger_header, raw_votes, normalized_votes, snapshot
 
 
@@ -417,6 +556,10 @@ def _normalize_vote(
         "blind": blind,
         "created_at": created_at,
     }
+    if "supersedes_vote_id" in raw:
+        result["supersedes_vote_id"] = _required_text(
+            raw.get("supersedes_vote_id"), "supersedes_vote_id", line_number
+        )
     dataset_bound = "dataset_version" in ledger_header
     sample_bound = "sample_id" in raw or "evidence_sha256" in raw or "dataset_version" in raw
     if dataset_bound and not all(name in raw for name in ("dataset_version", "sample_id", "evidence_sha256")):
@@ -438,6 +581,43 @@ def _normalize_vote(
         else:
             result[name] = _sha256_text(raw.get(name), name, line_number)
     return result
+
+
+def _validate_supersession_events(votes: list[dict[str, Any]]) -> None:
+    prior: dict[str, dict[str, Any]] = {}
+    superseded: set[str] = set()
+    for vote in votes:
+        supersedes = vote.get("supersedes_vote_id")
+        if supersedes is not None:
+            previous = prior.get(supersedes)
+            if previous is None:
+                raise ValueError(f"vote {vote['vote_id']!r} supersedes an absent or later vote")
+            if supersedes in superseded:
+                raise ValueError(f"vote {supersedes!r} has multiple superseding events")
+            if vote["stage"] != previous["stage"]:
+                raise ValueError("a superseding vote must retain the primary or adjudication stage")
+            if previous["stage"] != "adjudication":
+                raise ValueError("only an adjudication vote may be superseded")
+            if vote["reviewer_type"] != "human" or previous["reviewer_type"] != "human":
+                raise ValueError("vote correction events must remain human")
+            if vote["candidate_id"] != previous["candidate_id"]:
+                raise ValueError("a superseding vote must retain the candidate identity")
+            if (
+                vote["annotator_id"] != previous["annotator_id"]
+                or vote["fingerprint"] != previous["fingerprint"]
+            ):
+                raise ValueError("a superseding vote must be issued by the same reviewer identity")
+            current_time = datetime.fromisoformat(str(vote["created_at"]).replace("Z", "+00:00"))
+            previous_time = datetime.fromisoformat(str(previous["created_at"]).replace("Z", "+00:00"))
+            if current_time <= previous_time:
+                raise ValueError("a superseding vote must be timestamped after the replaced event")
+            superseded.add(supersedes)
+        prior[vote["vote_id"]] = vote
+
+
+def _effective_votes(votes: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    superseded = {str(vote["supersedes_vote_id"]) for vote in votes if "supersedes_vote_id" in vote}
+    return [vote for vote in votes if vote["vote_id"] not in superseded]
 
 
 def _resolve_existing_confirmed(
@@ -635,6 +815,7 @@ def _validate_dataset_evidence(
     ledger_header: dict[str, Any],
     votes: list[dict[str, Any]],
     candidate_ids: set[str],
+    source_contract_path: Path,
     contract_sha256: str,
 ) -> dict[str, Any] | None:
     has_dataset_binding = "dataset_version" in ledger_header or "evidence_manifest_sha256" in ledger_header
@@ -659,6 +840,18 @@ def _validate_dataset_evidence(
     contract_descriptor = manifest.get("contract")
     if not isinstance(contract_descriptor, dict) or contract_descriptor.get("sha256") != contract_sha256:
         raise ValueError("candidate dataset manifest contract sha256 does not match the source tracking contract")
+    bound_contract_path = manifest_path.parent / source_contract_path.name
+    try:
+        _, bound_contract_snapshot = _capture_regular_file_snapshot(
+            bound_contract_path,
+            "dataset-sibling source contract binding",
+        )
+    except ValueError as exc:
+        raise ValueError(
+            "dataset-sibling source contract binding is missing or is not a stable regular non-link file"
+        ) from exc
+    if bound_contract_snapshot.sha256 != contract_sha256:
+        raise ValueError("dataset-sibling source contract binding sha256 does not match the source tracking contract")
     if manifest.get("frame_offsets") != [-2, -1, 0, 1, 2]:
         raise ValueError("candidate dataset manifest must bind the five frame offsets [-2,-1,0,1,2]")
     expected_tensor_contract = {
@@ -676,7 +869,7 @@ def _validate_dataset_evidence(
         raise ValueError("candidate dataset manifest must contain samples")
     samples_by_candidate: dict[str, dict[str, Any]] = {}
     sample_ids: set[str] = set()
-    evidence_snapshots = [manifest_snapshot]
+    evidence_snapshots = [manifest_snapshot, bound_contract_snapshot]
     manifest_root = manifest_path.parent.resolve()
     for index, sample in enumerate(raw_samples):
         if not isinstance(sample, dict):
@@ -709,7 +902,7 @@ def _validate_dataset_evidence(
 
     return {
         "source": {
-            "path": str(manifest_path),
+            "path": manifest_path.name,
             "sha256": manifest_sha256,
             "dataset_version": dataset_version,
             "sample_count": len(raw_samples),
@@ -895,6 +1088,124 @@ def _capture_file_snapshot(path: Path, label: str) -> tuple[bytes, _FileSnapshot
     return raw_bytes, _FileSnapshot(path=path, sha256=hashlib.sha256(raw_bytes).hexdigest(), label=label)
 
 
+def _capture_regular_file_snapshot(path: Path, label: str) -> tuple[bytes, _FileSnapshot]:
+    path = Path(path)
+    try:
+        with _open_regular_file_no_follow(path) as handle:
+            before = os.fstat(handle.fileno())
+            if not stat.S_ISREG(before.st_mode):
+                raise ValueError(f"{label} must be a regular file")
+            raw_bytes = handle.read()
+            after = os.fstat(handle.fileno())
+            current = path.lstat()
+    except (OSError, ValueError) as exc:
+        raise ValueError(f"could not capture stable regular {label}: {path}: {exc}") from exc
+    token = _stat_token(after)
+    if (
+        _stat_token(before) != token
+        or _stat_token(current) != token
+        or not stat.S_ISREG(current.st_mode)
+        or _stat_is_link_or_reparse(current)
+    ):
+        raise ValueError(f"{label} changed while its stable non-link snapshot was being captured")
+    return raw_bytes, _FileSnapshot(
+        path=path,
+        sha256=hashlib.sha256(raw_bytes).hexdigest(),
+        label=label,
+        stat_token=token,
+        regular_no_follow=True,
+    )
+
+
+def _open_regular_file_no_follow(path: Path) -> BinaryIO:
+    if os.name != "nt":
+        no_follow = getattr(os, "O_NOFOLLOW", None)
+        if no_follow is None:
+            raise ValueError("platform does not support no-follow file opens")
+        flags = os.O_RDONLY | no_follow | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NONBLOCK", 0)
+        descriptor = os.open(path, flags)
+        return os.fdopen(descriptor, "rb", closefd=True)
+
+    import ctypes
+    import msvcrt
+    from ctypes import wintypes
+
+    class FileAttributeTagInfo(ctypes.Structure):
+        _fields_ = [
+            ("file_attributes", wintypes.DWORD),
+            ("reparse_tag", wintypes.DWORD),
+        ]
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    create_file = kernel32.CreateFileW
+    create_file.argtypes = (
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.HANDLE,
+    )
+    create_file.restype = wintypes.HANDLE
+    get_file_information_ex = kernel32.GetFileInformationByHandleEx
+    get_file_information_ex.argtypes = (wintypes.HANDLE, ctypes.c_int, wintypes.LPVOID, wintypes.DWORD)
+    get_file_information_ex.restype = wintypes.BOOL
+    close_handle = kernel32.CloseHandle
+    close_handle.argtypes = (wintypes.HANDLE,)
+    close_handle.restype = wintypes.BOOL
+    raw_handle = create_file(
+        str(path),
+        0x80000000,  # GENERIC_READ
+        0x00000001,  # FILE_SHARE_READ: deny write/delete/rename while capturing
+        None,
+        3,  # OPEN_EXISTING
+        0x08200000,  # FILE_FLAG_SEQUENTIAL_SCAN | FILE_FLAG_OPEN_REPARSE_POINT
+        None,
+    )
+    invalid_handle = ctypes.c_void_p(-1).value
+    if raw_handle is None or int(raw_handle) == invalid_handle:
+        error = ctypes.get_last_error()
+        raise OSError(error, ctypes.FormatError(error), str(path))
+    descriptor: int | None = None
+    try:
+        attributes = FileAttributeTagInfo()
+        if not get_file_information_ex(raw_handle, 9, ctypes.byref(attributes), ctypes.sizeof(attributes)):
+            error = ctypes.get_last_error()
+            raise OSError(error, ctypes.FormatError(error), str(path))
+        if int(attributes.file_attributes) & 0x00000400:  # FILE_ATTRIBUTE_REPARSE_POINT
+            raise ValueError("file is a reparse point")
+        descriptor = msvcrt.open_osfhandle(
+            int(raw_handle),
+            os.O_RDONLY | getattr(os, "O_BINARY", 0),
+        )
+        return os.fdopen(descriptor, "rb", closefd=True)
+    except BaseException:
+        if descriptor is None:
+            close_handle(raw_handle)
+        else:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+        raise
+
+
+def _stat_token(value: os.stat_result) -> tuple[int, int, int, int, int]:
+    return (
+        int(value.st_dev),
+        int(value.st_ino),
+        int(value.st_size),
+        int(value.st_mtime_ns),
+        int(getattr(value, "st_ctime_ns", 0)),
+    )
+
+
+def _stat_is_link_or_reparse(value: os.stat_result) -> bool:
+    reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x00000400)
+    return stat.S_ISLNK(value.st_mode) or bool(getattr(value, "st_file_attributes", 0) & reparse_flag)
+
+
 def _parse_json_object_bytes(raw_bytes: bytes, label: str) -> dict[str, Any]:
     try:
         text = raw_bytes.decode("utf-8")
@@ -909,10 +1220,16 @@ def _parse_json_object_bytes(raw_bytes: bytes, label: str) -> dict[str, Any]:
 def _verify_unchanged_snapshots(snapshots: list[_FileSnapshot]) -> None:
     for snapshot in snapshots:
         try:
-            current_sha256 = _sha256_file(snapshot.path)
-        except OSError as exc:
+            if snapshot.regular_no_follow:
+                _, current = _capture_regular_file_snapshot(snapshot.path, snapshot.label)
+                current_sha256 = current.sha256
+                current_token = current.stat_token
+            else:
+                current_sha256 = _sha256_file(snapshot.path)
+                current_token = None
+        except (OSError, ValueError) as exc:
             raise ValueError(f"{snapshot.label} changed during annotation resolution: {exc}") from exc
-        if current_sha256 != snapshot.sha256:
+        if current_sha256 != snapshot.sha256 or current_token != snapshot.stat_token:
             raise ValueError(f"{snapshot.label} changed during annotation resolution")
 
 
@@ -937,6 +1254,12 @@ def _reject_input_output_aliases(
     ]
     if dataset_manifest_path is not None:
         input_paths.append(("source candidate dataset manifest", dataset_manifest_path))
+        input_paths.append(
+            (
+                "dataset-sibling source contract binding",
+                dataset_manifest_path.parent / source_contract_path.name,
+            )
+        )
     for input_name, input_path in input_paths:
         if any(_same_path(input_path, final_path) for final_path in final_paths):
             raise ValueError(f"output artifacts must not overwrite the {input_name}")

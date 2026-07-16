@@ -23,15 +23,18 @@ export interface BroadcastRunState {
   trajectory_generation_id?: string | null;
   camera_generation_id?: string | null;
   render_generation_id?: string | null;
-  operation?: "recompute" | "render" | null;
+  operation?: "recompute" | "render" | "review_evidence_import" | null;
   operation_status?:
     | "queued"
     | "running"
     | "reconciling"
     | "committing"
+    | "copying"
+    | "validating"
     | "completed"
     | "failed"
     | "cancelled"
+    | "blocked"
     | "metadata_conflict"
     | null;
   operation_report_status?:

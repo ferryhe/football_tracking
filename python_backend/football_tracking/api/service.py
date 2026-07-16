@@ -66,6 +66,7 @@ from football_tracking.api.broadcast_api import (
     publish_json_exclusive,
     sha256_file,
     validate_broadcast_quality_report,
+    validate_review_queue_activation,
     validate_review_queue_bindings,
 )
 from football_tracking.ball_audit import compact_ball_audit_summary
@@ -120,6 +121,13 @@ from football_tracking.player_tracks import compact_player_tracks_summary
 from football_tracking.quality import assess_video_quality
 from football_tracking.recovery_stitcher import REPORT_NAME as RECOVERY_STITCH_REPORT_NAME
 from football_tracking.recovery_stitcher import stitch_recovery_window
+from football_tracking.review_evidence_bundle import (
+    PROVISIONER_VERSION,
+    ReviewEvidenceBundleError,
+    activate_review_evidence_bundle,
+    discover_review_evidence_bundles,
+    revoke_review_evidence_activation,
+)
 from football_tracking.tracking_contracts import TRACKING_CONTRACT_REPORT_NAME, normalize_tracking_contract_payload
 
 _WINDOWS_RESERVED_NAMES = {
@@ -139,6 +147,16 @@ _MAX_READY_BROADCAST_DELIVERY_CACHE_ENTRIES = 2
 _READY_BROADCAST_COPY_CHUNK_BYTES = 1024 * 1024
 _READY_BROADCAST_STRONG_OUTPUT_ROOTS = frozenset({"broadcast_generations", "broadcast_status"})
 _ReadyIdentityToken = tuple[int, int, int, int, int, int]
+
+_CONFIRMED_CONFIG_CHANGED_AFTER_CONFIRMATION = "confirmed_config_changed_after_confirmation"
+
+
+class _ReviewEvidenceTargetContextError(RuntimeError):
+    """A stable, fail-closed review-evidence target context failure."""
+
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
 
 
 class ArtifactStatusGenerationConflict(RuntimeError):
@@ -474,6 +492,7 @@ class ApiService:
         self.config_dir = repo_root / "config"
         self.outputs_dir = repo_root / "outputs"
         self.run_outputs_dir = self.outputs_dir / "runs"
+        self.review_evidence_inbox_dir = self.outputs_dir / "review_evidence_inbox"
         self.data_dir = repo_root / "data"
         self.registry_path = repo_root / "data" / "run_registry.json"
         self.registry_lock_path = repo_root / "data" / "run_registry.lock"
@@ -514,6 +533,8 @@ class ApiService:
             self.ai_client = OpenAIResponsesClient(self.provider_settings)
             self._ensure_registry_file()
             self._recover_interrupted_broadcast_operations()
+            self._recover_interrupted_review_evidence_imports()
+            self._recover_review_evidence_revocations()
         except BaseException:
             self.close()
             raise
@@ -1338,9 +1359,7 @@ class ApiService:
     ) -> str:
         authoritative = cls._ready_broadcast_status_generation(run)
         if expected_status_generation is None:
-            raise ArtifactStatusGenerationConflict(
-                "Ready broadcast artifact access requires status_generation"
-            )
+            raise ArtifactStatusGenerationConflict("Ready broadcast artifact access requires status_generation")
         if expected_status_generation != authoritative:
             raise ArtifactStatusGenerationConflict(
                 "Ready broadcast status generation conflict: "
@@ -2855,7 +2874,7 @@ class ApiService:
 
     def _path_is_relative_to(self, path: Path, root: Path) -> bool:
         try:
-            path.relative_to(root)
+            self._normalize_filesystem_path(path).relative_to(self._normalize_filesystem_path(root))
         except ValueError:
             return False
         return True
@@ -3749,9 +3768,7 @@ class ApiService:
             return normalized
 
         expected_field_polygon = [[float(x), float(y)] for x, y in calibration.field_polygon]
-        expected_exclusions = [
-            [[float(x), float(y)] for x, y in polygon] for polygon in calibration.exclusion_polygons
-        ]
+        expected_exclusions = [[[float(x), float(y)] for x, y in polygon] for polygon in calibration.exclusion_polygons]
         filtering_raw = confirmed_raw.get("filtering")
         scene_bias_raw = confirmed_raw.get("scene_bias")
         ground_zones = scene_bias_raw.get("ground_zones") if isinstance(scene_bias_raw, dict) else None
@@ -4702,6 +4719,1150 @@ class ApiService:
                     return deepcopy(run)
                 raise KeyError(run_id)
 
+    def get_broadcast_review_evidence(self, run_id: str) -> dict[str, Any]:
+        parent, output_dir = self._broadcast_run_output(run_id)
+        queue_path = output_dir / "selective_review_queue.v1.json"
+        queue: dict[str, Any] | None = None
+        queue_sha256: str | None = None
+        try:
+            with self._lock:
+                with self._registry_file_lock():
+                    registry = self._read_registry()
+                    parent = self._review_evidence_parent_from_registry(registry, run_id, output_dir)
+                    target = self._review_evidence_target(run_id, output_dir, parent=parent)
+                    if queue_path.is_file():
+                        queue, queue_sha256 = self._validate_current_review_queue_locked(
+                            run_id,
+                            output_dir,
+                            parent,
+                            queue_path,
+                        )
+        except _ReviewEvidenceTargetContextError as exc:
+            return {
+                "run_id": run_id,
+                "status": "blocked",
+                "active_job_id": None,
+                "generation_id": None,
+                "queue_sha256": None,
+                "stage": "confirmation_invalidated",
+                "progress_percent": 0.0,
+                "blocker_code": exc.code,
+                "error_code": exc.code,
+                "recovery_action": "reconfirm_production_config",
+                "retryable": False,
+                "can_cancel": False,
+                "bundles": [],
+                "blocking_reasons": [exc.code],
+                "message": str(exc),
+            }
+        except BroadcastApiError as exc:
+            return {
+                "run_id": run_id,
+                "status": "blocked",
+                "active_job_id": None,
+                "generation_id": None,
+                "queue_sha256": None,
+                "stage": "validation_failed",
+                "progress_percent": 0.0,
+                "blocker_code": "invalid_or_stale_selective_review_evidence",
+                "error_code": "invalid_or_stale_selective_review_evidence",
+                "recovery_action": "inspect_or_replace_review_evidence_generation",
+                "retryable": False,
+                "can_cancel": False,
+                "bundles": [],
+                "blocking_reasons": ["invalid_or_stale_selective_review_evidence"],
+                "message": str(exc),
+            }
+        if queue is not None:
+            assert queue_sha256 is not None
+            activation = queue.get("activation") if isinstance(queue.get("activation"), dict) else {}
+            return {
+                "run_id": run_id,
+                "status": "ready",
+                "active_job_id": None,
+                "generation_id": activation.get("generation_id"),
+                "queue_sha256": queue_sha256,
+                "stage": "ready",
+                "progress_percent": 100.0,
+                "blocker_code": None,
+                "error_code": None,
+                "recovery_action": None,
+                "retryable": False,
+                "can_cancel": False,
+                "bundles": [],
+                "blocking_reasons": [],
+                "message": None,
+            }
+
+        children = self._review_evidence_children(run_id)
+        active = next((child for child in reversed(children) if child.get("status") in {"queued", "running"}), None)
+        if active is not None:
+            metadata = active.get("broadcast") if isinstance(active.get("broadcast"), dict) else {}
+            operation_status = metadata.get("operation_status")
+            status = (
+                operation_status if operation_status in {"queued", "copying", "validating", "committing"} else "copying"
+            )
+            progress = active.get("progress") if isinstance(active.get("progress"), dict) else {}
+            request = metadata.get("request") if isinstance(metadata.get("request"), dict) else {}
+            return {
+                "run_id": run_id,
+                "status": status,
+                "active_job_id": active["run_id"],
+                "generation_id": None,
+                "queue_sha256": None,
+                "retry_from_job_id": request.get("retry_from_job_id"),
+                "stage": status,
+                "progress_percent": float(progress.get("percent") or 0.0),
+                "blocker_code": None,
+                "error_code": None,
+                "recovery_action": None,
+                "retryable": False,
+                "can_cancel": metadata.get("commit_started") is not True,
+                "bundles": [],
+                "blocking_reasons": [],
+                "message": None,
+            }
+
+        bundles = discover_review_evidence_bundles(
+            self.review_evidence_inbox_dir,
+            run_id=run_id,
+            source_sha256=target["source_sha256"],
+            root_contract_sha256=target["root_contract_sha256"],
+            expected_target=target,
+        )
+        latest = children[-1] if children else None
+        if latest is not None and latest.get("status") in {"failed", "cancelled"}:
+            metadata = latest.get("broadcast") if isinstance(latest.get("broadcast"), dict) else {}
+            operation_status = metadata.get("operation_status")
+            lifecycle = (
+                "cancelled"
+                if latest.get("status") == "cancelled"
+                else "blocked"
+                if operation_status == "blocked"
+                else "failed"
+            )
+            error_code = metadata.get("error_code")
+            request = metadata.get("request") if isinstance(metadata.get("request"), dict) else {}
+            return {
+                "run_id": run_id,
+                "status": lifecycle,
+                "active_job_id": latest["run_id"],
+                "generation_id": None,
+                "queue_sha256": None,
+                "retry_from_job_id": latest["run_id"],
+                "stage": lifecycle,
+                "progress_percent": 0.0,
+                "blocker_code": error_code if lifecycle == "blocked" else None,
+                "error_code": error_code,
+                "recovery_action": "retry_review_evidence_import",
+                "retryable": True,
+                "can_cancel": False,
+                "bundles": bundles,
+                "blocking_reasons": [error_code] if isinstance(error_code, str) and error_code else [],
+                "message": latest.get("error"),
+            }
+        available = [bundle for bundle in bundles if bundle.get("status") == "available"]
+        invalid_codes = sorted(
+            {
+                str(bundle["error_code"])
+                for bundle in bundles
+                if bundle.get("status") == "invalid" and bundle.get("error_code")
+            }
+        )
+        blocker_code = None if available else "review_evidence_bundle_not_available"
+        capacity = None
+        if available:
+            first_available = available[0]
+            capacity = {
+                key: first_available.get(key)
+                for key in (
+                    "total_size_bytes",
+                    "required_free_bytes",
+                    "available_free_bytes",
+                    "attempt_quota_bytes",
+                    "capacity_status",
+                    "retention",
+                    "provisioner_limits",
+                )
+            }
+        return {
+            "run_id": run_id,
+            "status": "available" if available else "not_available",
+            "active_job_id": None,
+            "generation_id": None,
+            "queue_sha256": None,
+            "stage": "available" if available else "not_available",
+            "progress_percent": 0.0,
+            "blocker_code": blocker_code,
+            "error_code": None,
+            "recovery_action": "start_review_evidence_import" if available else "provision_qualified_review_evidence",
+            "retryable": False,
+            "can_cancel": False,
+            "bundles": bundles,
+            "capacity": capacity,
+            "blocking_reasons": [] if available else ["review_evidence_bundle_not_available", *invalid_codes],
+            "message": None,
+        }
+
+    def import_broadcast_review_evidence(self, run_id: str, request: dict[str, Any]) -> dict[str, Any]:
+        self._assert_service_open()
+        parent, output_dir = self._broadcast_run_output(run_id)
+        target = self._review_evidence_target(run_id, output_dir, parent=parent)
+        bundle_id = request.get("bundle_id")
+        if not isinstance(bundle_id, str) or not bundle_id.strip():
+            raise ValueError("bundle_id is required")
+        bundle_id = bundle_id.strip()
+        manifest_sha256 = request.get("bundle_manifest_sha256")
+        if not isinstance(manifest_sha256, str) or re.fullmatch(r"[0-9a-f]{64}", manifest_sha256) is None:
+            raise ValueError("bundle_manifest_sha256 must be a lowercase SHA-256")
+        retry_from_job_id = request.get("retry_from_job_id")
+        if retry_from_job_id is not None and (not isinstance(retry_from_job_id, str) or not retry_from_job_id.strip()):
+            raise ValueError("retry_from_job_id must be non-empty text")
+        bundles = discover_review_evidence_bundles(
+            self.review_evidence_inbox_dir,
+            run_id=run_id,
+            source_sha256=target["source_sha256"],
+            root_contract_sha256=target["root_contract_sha256"],
+            expected_target=target,
+        )
+        matches = [
+            item
+            for item in bundles
+            if item.get("status") == "available"
+            and item.get("bundle_id") == bundle_id
+            and item.get("bundle_manifest_sha256") == manifest_sha256
+        ]
+        if len(matches) != 1:
+            raise RuntimeError("compatible review evidence bundle is unavailable or ambiguous")
+        bundle = matches[0]
+        manifest_sha256 = str(bundle["bundle_manifest_sha256"])
+        request_identity = {
+            "parent_run_id": run_id,
+            "bundle_id": bundle_id,
+            "bundle_manifest_sha256": manifest_sha256,
+            "target": target,
+        }
+        request_digest = hashlib.sha256(
+            json.dumps(request_identity, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+        child_output: Path | None = None
+        operation_run_id = ""
+        with self._lock:
+            self._assert_service_open_locked()
+            with self._registry_transaction() as registry:
+                existing = [
+                    item
+                    for item in registry["runs"]
+                    if item.get("source") == "broadcast_review_evidence_import"
+                    and item.get("parent_run_id") == run_id
+                    and isinstance(item.get("broadcast"), dict)
+                    and item["broadcast"].get("request_digest") == request_digest
+                ]
+                completed = next(
+                    (
+                        item
+                        for item in reversed(existing)
+                        if item.get("status") == "completed"
+                        and not (
+                            isinstance(item.get("broadcast"), dict)
+                            and isinstance(item["broadcast"].get("result"), dict)
+                            and item["broadcast"]["result"].get("status") == "revoked"
+                        )
+                    ),
+                    None,
+                )
+                if completed is not None:
+                    return self._review_evidence_import_response(completed)
+                active_same = next(
+                    (item for item in reversed(existing) if item.get("status") in {"queued", "running"}), None
+                )
+                if active_same is not None:
+                    return self._review_evidence_import_response(active_same)
+                if retry_from_job_id is None and existing:
+                    raise RuntimeError("a terminal review evidence import requires explicit retry_from_job_id")
+                if retry_from_job_id is not None:
+                    retry = next((item for item in existing if item.get("run_id") == retry_from_job_id), None)
+                    retry_metadata = retry.get("broadcast") if isinstance(retry, dict) else None
+                    if (
+                        retry is None
+                        or retry.get("status") not in {"failed", "cancelled"}
+                        or not isinstance(retry_metadata, dict)
+                        or retry_metadata.get("operation_status") not in {"failed", "cancelled", "blocked"}
+                    ):
+                        raise RuntimeError("retry_from_job_id must identify a matching terminal import")
+                active = next((item for item in registry["runs"] if item.get("status") in {"queued", "running"}), None)
+                if active is not None:
+                    raise RuntimeError(f"Another run is already active: {active.get('run_id')}")
+                current_parent = next((item for item in registry["runs"] if item.get("run_id") == run_id), None)
+                if (
+                    current_parent is None
+                    or current_parent.get("source") != "broadcast_hybrid"
+                    or current_parent.get("status") != "completed"
+                ):
+                    raise RuntimeError("review evidence parent must remain a completed broadcast_hybrid run")
+                if (output_dir / "review_decisions.json").exists():
+                    raise RuntimeError("review evidence is fixed by existing review decisions")
+                operation_run_id = f"{run_id}-review-evidence-{uuid4().hex[:8]}"
+                input_video = Path(parent["input_video"]).resolve() if parent.get("input_video") else None
+                child_output = self._build_run_output_dir(run_id=operation_run_id, input_video=input_video)
+                child_output.mkdir(parents=True, exist_ok=False)
+                created_at = _utc_now_iso()
+                child = {
+                    "run_id": operation_run_id,
+                    "source": "broadcast_review_evidence_import",
+                    "status": "queued",
+                    "created_at": created_at,
+                    "started_at": None,
+                    "completed_at": None,
+                    "config_name": parent.get("config_name"),
+                    "config_path": parent.get("config_path"),
+                    "input_video": parent.get("input_video"),
+                    "parent_run_id": run_id,
+                    "output_dir": str(child_output),
+                    "modules_enabled": {"broadcast_hybrid": True},
+                    "artifacts": [],
+                    "stats": {},
+                    "broadcast": {
+                        "operation": "review_evidence_import",
+                        "operation_status": "queued",
+                        "parent_run_id": run_id,
+                        "owner_pid": os.getpid(),
+                        "owner_instance_id": self._instance_id,
+                        "request": {
+                            "bundle_id": bundle_id,
+                            "bundle_manifest_sha256": manifest_sha256,
+                            "retry_from_job_id": retry_from_job_id,
+                        },
+                        "request_digest": request_digest,
+                        "inbox_entry": bundle["inbox_entry"],
+                        "target": target,
+                        "commit_started": False,
+                    },
+                    "progress": self._initial_progress(),
+                    "notes": f"Broadcast review evidence import for {run_id}",
+                    "error": None,
+                }
+                self._attach_ai_candidate_lifecycle(child)
+                registry["runs"].append(child)
+            cancel_event = threading.Event()
+            thread = threading.Thread(
+                target=self._execute_review_evidence_import,
+                args=(operation_run_id, cancel_event),
+                name=f"football-tracking-review-evidence-{operation_run_id}",
+                daemon=True,
+            )
+            self._active_threads[operation_run_id] = thread
+            self._cancel_events[operation_run_id] = cancel_event
+        assert child_output is not None
+        try:
+            self._start_thread_or_cleanup(operation_run_id, thread, output_dir=child_output, remove_output=True)
+        except BaseException:
+            raise
+        return {
+            "run_id": operation_run_id,
+            "parent_run_id": run_id,
+            "status": "queued",
+            "reason": "review_evidence_import_queued",
+            "artifact": None,
+            "generation_id": None,
+            "details": {"bundle_manifest_sha256": manifest_sha256},
+        }
+
+    def _execute_review_evidence_import(self, operation_run_id: str, cancel_event: threading.Event) -> None:
+        child_output: Path | None = None
+        parent_run_id = ""
+        try:
+            with self._lock:
+                with self._registry_transaction() as registry:
+                    child = next((item for item in registry["runs"] if item.get("run_id") == operation_run_id), None)
+                    if child is None or child.get("source") != "broadcast_review_evidence_import":
+                        raise RuntimeError("review evidence import lineage disappeared")
+                    metadata = child.get("broadcast") if isinstance(child.get("broadcast"), dict) else {}
+                    if child.get("status") != "queued":
+                        raise RuntimeError("review evidence import is no longer queued")
+                    if cancel_event.is_set() or metadata.get("cancel_requested") is True:
+                        raise CancelledError()
+                    parent_run_id = str(child.get("parent_run_id") or "")
+                    child_output = Path(child["output_dir"]).resolve()
+                    child.update(
+                        {
+                            "status": "running",
+                            "started_at": _utc_now_iso(),
+                            "broadcast": {
+                                **metadata,
+                                "operation_status": "copying",
+                                "owner_pid": os.getpid(),
+                                "owner_instance_id": self._instance_id,
+                                "worker_exited": False,
+                            },
+                            "progress": {
+                                **self._initial_progress(),
+                                "stage": "review_evidence_copying",
+                                "percent": 10.0,
+                            },
+                        }
+                    )
+                    metadata = deepcopy(child["broadcast"])
+            parent = self.get_run(parent_run_id)
+            parent_output = Path(parent["output_dir"]).resolve()
+            inbox_entry = metadata.get("inbox_entry")
+            if not isinstance(inbox_entry, str) or Path(inbox_entry).name != inbox_entry:
+                raise ReviewEvidenceBundleError("unsafe_bundle_path", "review evidence inbox identity is invalid")
+            bundle_dir = self.review_evidence_inbox_dir / inbox_entry
+
+            def should_cancel() -> bool:
+                if cancel_event.is_set():
+                    return True
+                with self._registry_file_lock():
+                    registry = self._read_registry()
+                current = next(
+                    (item for item in registry["runs"] if item.get("run_id") == operation_run_id),
+                    None,
+                )
+                current_metadata = current.get("broadcast") if isinstance(current, dict) else None
+                return not isinstance(current_metadata, dict) or current_metadata.get("cancel_requested") is True
+
+            def stage_updated(stage: str, percent: float) -> None:
+                with self._lock:
+                    with self._registry_transaction() as registry:
+                        current = next(
+                            (item for item in registry["runs"] if item.get("run_id") == operation_run_id), None
+                        )
+                        if current is None:
+                            raise RuntimeError("review evidence import disappeared during validation")
+                        current_metadata = (
+                            current.get("broadcast") if isinstance(current.get("broadcast"), dict) else {}
+                        )
+                        if current_metadata.get("commit_started") is True:
+                            raise RuntimeError("review evidence import validation advanced after commit")
+                        current["broadcast"] = {**current_metadata, "operation_status": stage}
+                        current["progress"] = {
+                            **self._initial_progress(),
+                            "stage": f"review_evidence_{stage}",
+                            "percent": percent,
+                        }
+
+            def commit_started() -> None:
+                with self._lock:
+                    with self._registry_transaction() as registry:
+                        current = next(
+                            (item for item in registry["runs"] if item.get("run_id") == operation_run_id), None
+                        )
+                        current_parent = next(
+                            (item for item in registry["runs"] if item.get("run_id") == parent_run_id), None
+                        )
+                        if current is None:
+                            raise RuntimeError("review evidence import disappeared before commit")
+                        if current_parent is None:
+                            raise RuntimeError("review evidence parent disappeared before commit")
+                        current_metadata = (
+                            current.get("broadcast") if isinstance(current.get("broadcast"), dict) else {}
+                        )
+                        if cancel_event.is_set() or current_metadata.get("cancel_requested") is True:
+                            raise CancelledError()
+                        current_target = self._review_evidence_target(
+                            parent_run_id,
+                            parent_output,
+                            parent=current_parent,
+                        )
+                        if current_target != target:
+                            raise ReviewEvidenceBundleError(
+                                "target_binding_mismatch",
+                                "review evidence target context changed before commit",
+                            )
+                        current["broadcast"] = {
+                            **current_metadata,
+                            "operation_status": "committing",
+                            "commit_started": True,
+                        }
+                        current["progress"] = {
+                            **self._initial_progress(),
+                            "stage": "review_evidence_committing",
+                            "percent": 90.0,
+                        }
+
+            target = metadata.get("target") if isinstance(metadata.get("target"), dict) else {}
+            activation = activate_review_evidence_bundle(
+                bundle_dir,
+                parent_output,
+                expected_run_id=parent_run_id,
+                expected_source_sha256=str(target.get("source_sha256") or ""),
+                expected_root_contract_sha256=str(target.get("root_contract_sha256") or ""),
+                expected_target=target,
+                expected_bundle_id=str(metadata.get("request", {}).get("bundle_id") or ""),
+                expected_bundle_manifest_sha256=str(metadata.get("request", {}).get("bundle_manifest_sha256") or ""),
+                should_cancel=should_cancel,
+                on_stage=stage_updated,
+                on_commit_started=commit_started,
+            )
+            report = {
+                "schema_version": "1.0",
+                "artifact_type": "broadcast_review_evidence_import_report",
+                "status": "succeeded",
+                "operation_run_id": operation_run_id,
+                "parent_run_id": parent_run_id,
+                "request_digest": metadata.get("request_digest"),
+                "generation_id": activation.generation_id,
+                "queue_sha256": activation.queue_sha256,
+                "idempotent_activation": activation.idempotent,
+            }
+            assert child_output is not None
+            report_sha256 = publish_json_exclusive(
+                child_output / "review_evidence_import_report.v1.json", report, trusted_root=child_output
+            )
+            quality_report = publish_broadcast_facade(parent_output)
+            completed_at = _utc_now_iso()
+            with self._lock:
+                with self._registry_transaction() as registry:
+                    child = next((item for item in registry["runs"] if item.get("run_id") == operation_run_id), None)
+                    parent = next((item for item in registry["runs"] if item.get("run_id") == parent_run_id), None)
+                    if child is None or parent is None:
+                        raise RuntimeError("review evidence import registry lineage disappeared after commit")
+                    child_metadata = child.get("broadcast") if isinstance(child.get("broadcast"), dict) else {}
+                    child.update(
+                        {
+                            "status": "completed",
+                            "completed_at": completed_at,
+                            "error": None,
+                            "broadcast": {
+                                **child_metadata,
+                                "operation_status": "completed",
+                                "worker_exited": True,
+                                "result": {
+                                    "status": "completed",
+                                    "review_evidence_generation_id": activation.generation_id,
+                                    "queue_sha256": activation.queue_sha256,
+                                    "report_sha256": report_sha256,
+                                },
+                            },
+                            "progress": self._completed_progress(child.get("progress"), child.get("started_at")),
+                        }
+                    )
+                    parent_broadcast = parent.get("broadcast") if isinstance(parent.get("broadcast"), dict) else {}
+                    preserved_blockers = [
+                        reason
+                        for reason in parent_broadcast.get("blocking_reasons", [])
+                        if reason
+                        not in {
+                            "missing_qualified_selective_review_queue",
+                            "invalid_or_stale_selective_review_evidence",
+                            "review_evidence_bundle_not_available",
+                        }
+                    ]
+                    merged_blockers = list(
+                        dict.fromkeys([*preserved_blockers, *(quality_report.get("blocking_reasons") or [])])
+                    )
+                    merged_limitations = list(
+                        dict.fromkeys(
+                            [
+                                *(parent_broadcast.get("limitations") or []),
+                                *(quality_report.get("limitations") or []),
+                            ]
+                        )
+                    )
+                    parent["broadcast"] = {
+                        **parent_broadcast,
+                        "status": "needs_review",
+                        "blocking_reasons": merged_blockers,
+                        "limitations": merged_limitations,
+                        "status_generation": quality_report.get("status_generation"),
+                        "review_evidence": {
+                            "status": "ready",
+                            "generation_id": activation.generation_id,
+                            "queue_sha256": activation.queue_sha256,
+                            "operation_run_id": operation_run_id,
+                        },
+                    }
+                    child["artifacts"] = self._collect_artifacts(child_output)
+                    child["stats"] = self._collect_stats(child_output)
+                    parent["artifacts"] = self._collect_artifacts(parent_output)
+                    parent["stats"] = self._collect_stats(parent_output)
+        except (CancelledError, ReviewEvidenceBundleError, RuntimeError, OSError, ValueError) as exc:
+            error_code = (
+                "review_evidence_import_cancelled"
+                if isinstance(exc, CancelledError)
+                else (
+                    exc.code
+                    if isinstance(exc, (ReviewEvidenceBundleError, _ReviewEvidenceTargetContextError))
+                    else "review_evidence_import_failed"
+                )
+            )
+            cancelled = error_code == "review_evidence_import_cancelled"
+            blocked_codes = {
+                "insufficient_review_evidence_capacity",
+                "review_evidence_fixed",
+                "review_evidence_conflict",
+                "target_binding_mismatch",
+                _CONFIRMED_CONFIG_CHANGED_AFTER_CONFIRMATION,
+            }
+            with self._lock:
+                with self._registry_transaction() as registry:
+                    child = next((item for item in registry["runs"] if item.get("run_id") == operation_run_id), None)
+                    if child is not None and child.get("status") in {"queued", "running"}:
+                        metadata = child.get("broadcast") if isinstance(child.get("broadcast"), dict) else {}
+                        child.update(
+                            {
+                                "status": "cancelled" if cancelled else "failed",
+                                "completed_at": _utc_now_iso(),
+                                "error": str(exc) or error_code,
+                                "broadcast": {
+                                    **metadata,
+                                    "operation_status": (
+                                        "cancelled"
+                                        if cancelled
+                                        else "blocked"
+                                        if error_code in blocked_codes
+                                        else "failed"
+                                    ),
+                                    "error_code": error_code,
+                                    "worker_exited": True,
+                                },
+                                "progress": (
+                                    self._cancelled_progress(child.get("progress"), child.get("started_at"))
+                                    if cancelled
+                                    else self._failed_progress(child.get("progress"), child.get("started_at"))
+                                ),
+                            }
+                        )
+                        if child_output is not None:
+                            artifact_error = self._write_run_artifacts(child_output, child)
+                            child["error"] = self._append_artifact_error(child.get("error"), artifact_error)
+                            child["artifacts"] = self._collect_artifacts(child_output)
+                            child["stats"] = self._collect_stats(child_output)
+        finally:
+            with self._lock:
+                self._active_threads.pop(operation_run_id, None)
+                self._cancel_events.pop(operation_run_id, None)
+
+    def _review_evidence_target(
+        self,
+        run_id: str,
+        output_dir: Path,
+        *,
+        parent: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        contract_path = output_dir / TRACKING_CONTRACT_REPORT_NAME
+        try:
+            contract, contract_sha256 = load_bound_json(contract_path, "review evidence target contract")
+        except BroadcastApiError as exc:
+            raise RuntimeError(f"review evidence target contract is unavailable: {exc}") from exc
+        source = contract.get("source") if isinstance(contract.get("source"), dict) else {}
+        source_sha256 = source.get("video_sha256")
+        if not isinstance(source_sha256, str) or re.fullmatch(r"[0-9a-f]{64}", source_sha256) is None:
+            raise RuntimeError("review evidence target contract has no source video SHA-256")
+        parent = parent or self.get_run(run_id)
+        broadcast = parent.get("broadcast") if isinstance(parent.get("broadcast"), dict) else {}
+        quality_profile = broadcast.get("quality_profile")
+        max_windows = broadcast.get("max_manual_review_windows")
+        if not isinstance(quality_profile, str) or not quality_profile:
+            raise RuntimeError("review evidence target quality profile is unavailable")
+        if isinstance(max_windows, bool) or not isinstance(max_windows, int) or not 1 <= max_windows <= 30:
+            raise RuntimeError("review evidence target review window limit is unavailable")
+        action_binding_path = output_dir / "action_signal_binding.v1.json"
+        if not action_binding_path.is_file():
+            raise RuntimeError("review evidence target action-signal binding is unavailable")
+        action_signal_binding_sha256 = sha256_file(action_binding_path)
+        confirmed_config_sha256 = self._review_evidence_confirmed_config_sha256(parent)
+        candidate_rows = contract.get("candidates")
+        if not isinstance(candidate_rows, list) or not candidate_rows:
+            raise RuntimeError("review evidence target candidate population is empty")
+        population = []
+        seen_candidate_ids: set[str] = set()
+        for raw_candidate in candidate_rows:
+            if not isinstance(raw_candidate, dict):
+                raise RuntimeError("review evidence target candidate population is invalid")
+            candidate_id = raw_candidate.get("candidate_id")
+            if not isinstance(candidate_id, str) or not candidate_id or candidate_id in seen_candidate_ids:
+                raise RuntimeError("review evidence target candidate identity is invalid")
+            seen_candidate_ids.add(candidate_id)
+            raw_bbox = raw_candidate.get("bbox")
+            raw_confidence = raw_candidate.get("confidence")
+            if (
+                not isinstance(raw_bbox, list)
+                or len(raw_bbox) != 4
+                or any(isinstance(value, bool) or not isinstance(value, (int, float)) for value in raw_bbox)
+                or isinstance(raw_confidence, bool)
+                or not isinstance(raw_confidence, (int, float))
+            ):
+                raise RuntimeError("review evidence target candidate geometry is invalid")
+            identity = {
+                "candidate_id": candidate_id,
+                "frame_index": raw_candidate.get("frame_index"),
+                "bbox": [float(value) for value in raw_bbox],
+                "detector_source": raw_candidate.get("source"),
+                "confidence": float(raw_confidence),
+            }
+            fingerprint = hashlib.sha256(
+                json.dumps(identity, sort_keys=True, separators=(",", ":"), allow_nan=False).encode("utf-8")
+            ).hexdigest()
+            population.append({"candidate_id": candidate_id, "candidate_fingerprint": fingerprint})
+        population.sort(key=lambda row: row["candidate_id"])
+        candidate_population_sha256 = hashlib.sha256(
+            json.dumps(population, sort_keys=True, separators=(",", ":"), allow_nan=False).encode("utf-8")
+        ).hexdigest()
+        profile_context = {
+            "quality_profile": quality_profile,
+            "max_manual_review_windows": max_windows,
+            "confirmed_config_sha256": confirmed_config_sha256,
+            "action_signal_binding_sha256": action_signal_binding_sha256,
+            "preflight": broadcast.get("preflight"),
+        }
+        profile_digest = hashlib.sha256(
+            json.dumps(profile_context, sort_keys=True, separators=(",", ":"), allow_nan=False).encode("utf-8")
+        ).hexdigest()
+        return {
+            "run_id": run_id,
+            "source_sha256": source_sha256,
+            "root_contract_sha256": contract_sha256,
+            "action_signal_binding_sha256": action_signal_binding_sha256,
+            "confirmed_config_sha256": confirmed_config_sha256,
+            "profile_digest": profile_digest,
+            "quality_profile": quality_profile,
+            "max_review_windows": max_windows,
+            "max_manual_review_windows": max_windows,
+            "provisioner_version": PROVISIONER_VERSION,
+            "candidate_population_sha256": candidate_population_sha256,
+            "candidate_population_count": len(population),
+        }
+
+    @staticmethod
+    def _review_evidence_parent_from_registry(
+        registry: dict[str, Any],
+        run_id: str,
+        output_dir: Path,
+    ) -> dict[str, Any]:
+        parent = next((item for item in registry["runs"] if item.get("run_id") == run_id), None)
+        if parent is None or parent.get("source") != "broadcast_hybrid":
+            raise KeyError(run_id)
+        if parent.get("status") != "completed":
+            raise RuntimeError(f"Broadcast run must be completed before review operations: {run_id}")
+        if Path(parent["output_dir"]).resolve() != output_dir:
+            raise RuntimeError("broadcast review output changed during validation")
+        return parent
+
+    def _validate_current_review_queue_locked(
+        self,
+        run_id: str,
+        output_dir: Path,
+        parent: dict[str, Any],
+        queue_path: Path,
+    ) -> tuple[dict[str, Any], str]:
+        queue, queue_sha256 = validate_review_queue_activation(output_dir, queue_path)
+        if not isinstance(queue.get("activation"), dict):
+            return queue, queue_sha256
+        target_before = self._review_evidence_target(run_id, output_dir, parent=parent)
+        queue, queue_sha256 = validate_review_queue_activation(
+            output_dir,
+            queue_path,
+            expected_target=target_before,
+        )
+        target_after = self._review_evidence_target(run_id, output_dir, parent=parent)
+        if target_after != target_before:
+            raise BroadcastApiError("review evidence target changed during activation validation")
+        return queue, queue_sha256
+
+    @staticmethod
+    def _apply_revoked_review_evidence_state(
+        parent: dict[str, Any],
+        quality_report: dict[str, Any],
+        *,
+        generation_id: str,
+        queue_sha256: str,
+        revoked_at: Any,
+    ) -> None:
+        parent_broadcast = parent.get("broadcast") if isinstance(parent.get("broadcast"), dict) else {}
+        preserved_blockers = [
+            reason
+            for reason in parent_broadcast.get("blocking_reasons", [])
+            if reason
+            not in {
+                "missing_qualified_selective_review_queue",
+                "invalid_or_stale_selective_review_evidence",
+                "review_evidence_bundle_not_available",
+            }
+        ]
+        parent["broadcast"] = {
+            **parent_broadcast,
+            "status": quality_report.get("status"),
+            "blocking_reasons": list(
+                dict.fromkeys([*preserved_blockers, *(quality_report.get("blocking_reasons") or [])])
+            ),
+            "limitations": list(
+                dict.fromkeys(
+                    [
+                        *(parent_broadcast.get("limitations") or []),
+                        *(quality_report.get("limitations") or []),
+                    ]
+                )
+            ),
+            "status_generation": quality_report.get("status_generation"),
+            "review_evidence": {
+                "status": "revoked",
+                "generation_id": generation_id,
+                "queue_sha256": queue_sha256,
+                "revoked_at": revoked_at,
+            },
+        }
+
+    def _review_evidence_confirmed_config_sha256(self, parent: dict[str, Any]) -> str:
+        notes = parent.get("notes")
+        try:
+            confirmation = json.loads(notes) if isinstance(notes, str) else notes
+        except json.JSONDecodeError as exc:
+            raise RuntimeError("review evidence target confirmation record is unavailable") from exc
+        if not isinstance(confirmation, dict):
+            raise RuntimeError("review evidence target confirmation record is unavailable")
+        expected_sha256 = confirmation.get("expected_config_sha256")
+        if not isinstance(expected_sha256, str) or re.fullmatch(r"[0-9a-f]{64}", expected_sha256) is None:
+            raise RuntimeError("review evidence target confirmation record has no config SHA-256")
+
+        config_path_value = parent.get("config_path")
+        config_path = Path(config_path_value).resolve() if isinstance(config_path_value, str) else None
+        if config_path is None or not config_path.is_file():
+            raise RuntimeError("review evidence target confirmed config is unavailable")
+        current_config_sha256 = sha256_file(config_path)
+        if current_config_sha256 != expected_sha256:
+            raise _ReviewEvidenceTargetContextError(
+                _CONFIRMED_CONFIG_CHANGED_AFTER_CONFIRMATION,
+                "config changed after confirmation",
+            )
+        return expected_sha256
+
+    def _review_evidence_children(self, parent_run_id: str) -> list[dict[str, Any]]:
+        with self._lock:
+            registry = self._read_registry()
+            children = [
+                deepcopy(item)
+                for item in registry["runs"]
+                if item.get("source") == "broadcast_review_evidence_import"
+                and item.get("parent_run_id") == parent_run_id
+            ]
+        return sorted(children, key=lambda item: str(item.get("created_at") or ""))
+
+    def _recover_interrupted_review_evidence_imports(self) -> None:
+        """Convert orphaned imports into an authoritative completion or an explicit retryable failure."""
+
+        with self._lock:
+            with self._registry_transaction() as registry:
+                for child in registry["runs"]:
+                    if child.get("source") != "broadcast_review_evidence_import" or child.get("status") == "completed":
+                        continue
+                    metadata = child.get("broadcast") if isinstance(child.get("broadcast"), dict) else {}
+                    was_active = child.get("status") in {"queued", "running"}
+                    if was_active and self._owner_lease_is_active(
+                        metadata.get("owner_pid"), metadata.get("owner_instance_id")
+                    ):
+                        continue
+                    parent = next(
+                        (item for item in registry["runs"] if item.get("run_id") == child.get("parent_run_id")), None
+                    )
+                    completed_at = _utc_now_iso()
+                    recovered_result: dict[str, Any] | None = None
+                    if parent is not None:
+                        parent_output = Path(parent["output_dir"]).resolve()
+                        queue_path = parent_output / "selective_review_queue.v1.json"
+                        if queue_path.is_file():
+                            try:
+                                queue, queue_sha256 = self._validate_current_review_queue_locked(
+                                    str(child.get("parent_run_id") or ""),
+                                    parent_output,
+                                    parent,
+                                    queue_path,
+                                )
+                                activation = (
+                                    queue.get("activation") if isinstance(queue.get("activation"), dict) else {}
+                                )
+                                request = metadata.get("request") if isinstance(metadata.get("request"), dict) else {}
+                                generation_id = activation.get("generation_id")
+                                activation_manifest_path = (
+                                    parent_output
+                                    / "review_evidence"
+                                    / "generations"
+                                    / str(generation_id)
+                                    / "review_evidence_activation.v1.json"
+                                )
+                                activation_manifest, _ = load_bound_json(
+                                    activation_manifest_path,
+                                    "review evidence activation",
+                                )
+                                request_identity = (
+                                    activation_manifest.get("request_identity")
+                                    if isinstance(activation_manifest.get("request_identity"), dict)
+                                    else {}
+                                )
+                                if activation.get("bundle_id") == request.get("bundle_id") and request_identity.get(
+                                    "bundle_manifest_sha256"
+                                ) == request.get("bundle_manifest_sha256"):
+                                    recovered_result = {
+                                        "status": "completed",
+                                        "review_evidence_generation_id": activation.get("generation_id"),
+                                        "queue_sha256": queue_sha256,
+                                    }
+                            except (BroadcastApiError, OSError, ValueError):
+                                recovered_result = None
+                    output_dir = Path(child["output_dir"]).resolve()
+                    if recovered_result is not None:
+                        child.update(
+                            {
+                                "status": "completed",
+                                "completed_at": completed_at,
+                                "error": None,
+                                "broadcast": {
+                                    **metadata,
+                                    "operation_status": "completed",
+                                    "recovered": True,
+                                    "worker_exited": True,
+                                    "commit_started": True,
+                                    "result": recovered_result,
+                                },
+                                "progress": self._completed_progress(child.get("progress"), child.get("started_at")),
+                            }
+                        )
+                        quality_report = publish_broadcast_facade(Path(parent["output_dir"]).resolve())
+                        parent_broadcast = parent.get("broadcast") if isinstance(parent.get("broadcast"), dict) else {}
+                        preserved_blockers = [
+                            reason
+                            for reason in parent_broadcast.get("blocking_reasons", [])
+                            if reason
+                            not in {
+                                "missing_qualified_selective_review_queue",
+                                "invalid_or_stale_selective_review_evidence",
+                                "review_evidence_bundle_not_available",
+                            }
+                        ]
+                        parent["broadcast"] = {
+                            **parent_broadcast,
+                            "status": "needs_review",
+                            "blocking_reasons": list(
+                                dict.fromkeys([*preserved_blockers, *(quality_report.get("blocking_reasons") or [])])
+                            ),
+                            "limitations": list(
+                                dict.fromkeys(
+                                    [
+                                        *(parent_broadcast.get("limitations") or []),
+                                        *(quality_report.get("limitations") or []),
+                                    ]
+                                )
+                            ),
+                            "status_generation": quality_report.get("status_generation"),
+                            "review_evidence": {
+                                "status": "ready",
+                                "generation_id": recovered_result["review_evidence_generation_id"],
+                                "queue_sha256": recovered_result["queue_sha256"],
+                                "operation_run_id": child["run_id"],
+                            },
+                        }
+                        parent_output = Path(parent["output_dir"]).resolve()
+                        parent["artifacts"] = self._collect_artifacts(parent_output)
+                        parent["stats"] = self._collect_stats(parent_output)
+                        import_report_path = output_dir / "review_evidence_import_report.v1.json"
+                        if not import_report_path.exists():
+                            publish_json_exclusive(
+                                import_report_path,
+                                {
+                                    "schema_version": "1.0",
+                                    "artifact_type": "broadcast_review_evidence_import_report",
+                                    "status": "succeeded",
+                                    "operation_run_id": child["run_id"],
+                                    "parent_run_id": child.get("parent_run_id"),
+                                    "request_digest": metadata.get("request_digest"),
+                                    "generation_id": recovered_result["review_evidence_generation_id"],
+                                    "queue_sha256": recovered_result["queue_sha256"],
+                                    "idempotent_activation": True,
+                                    "recovered": True,
+                                },
+                                trusted_root=output_dir,
+                            )
+                    else:
+                        if not was_active:
+                            continue
+                        error = "Review evidence import was interrupted before an authoritative root commit."
+                        child.update(
+                            {
+                                "status": "failed",
+                                "completed_at": completed_at,
+                                "error": error,
+                                "broadcast": {
+                                    **metadata,
+                                    "operation_status": "failed",
+                                    "error_code": "review_evidence_import_interrupted",
+                                    "recovered": True,
+                                    "worker_exited": True,
+                                },
+                                "progress": self._failed_progress(child.get("progress"), child.get("started_at")),
+                            }
+                        )
+                    artifact_error = self._write_run_artifacts(output_dir, child)
+                    child["error"] = self._append_artifact_error(child.get("error"), artifact_error)
+                    child["artifacts"] = self._collect_artifacts(output_dir)
+                    child["stats"] = self._collect_stats(output_dir)
+
+    def _recover_review_evidence_revocations(self) -> None:
+        """Reconcile an authoritative filesystem revocation into child and parent registry state."""
+
+        with self._lock:
+            with self._registry_transaction() as registry:
+                for child in registry["runs"]:
+                    if child.get("source") != "broadcast_review_evidence_import":
+                        continue
+                    metadata = child.get("broadcast") if isinstance(child.get("broadcast"), dict) else {}
+                    result = metadata.get("result") if isinstance(metadata.get("result"), dict) else {}
+                    generation_id = result.get("review_evidence_generation_id")
+                    queue_sha256 = result.get("queue_sha256")
+                    if (
+                        not isinstance(generation_id, str)
+                        or not isinstance(queue_sha256, str)
+                        or result.get("status") == "revoked"
+                    ):
+                        continue
+                    parent = next(
+                        (item for item in registry["runs"] if item.get("run_id") == child.get("parent_run_id")),
+                        None,
+                    )
+                    if parent is None:
+                        continue
+                    parent_output = Path(parent["output_dir"]).resolve()
+                    revocation_path = (
+                        parent_output
+                        / "review_evidence"
+                        / "generations"
+                        / generation_id
+                        / "review_evidence_revocation.v1.json"
+                    )
+                    if not revocation_path.is_file():
+                        continue
+                    try:
+                        revocation, _ = load_bound_json(revocation_path, "review evidence revocation")
+                    except BroadcastApiError:
+                        continue
+                    if (
+                        revocation.get("artifact_type") != "broadcast_review_evidence_revocation"
+                        or revocation.get("generation_id") != generation_id
+                        or revocation.get("queue_sha256") != queue_sha256
+                    ):
+                        continue
+                    root_queue_path = parent_output / "selective_review_queue.v1.json"
+                    if root_queue_path.exists():
+                        try:
+                            revocation = revoke_review_evidence_activation(
+                                parent_output,
+                                generation_id=generation_id,
+                                expected_queue_sha256=queue_sha256,
+                            )
+                        except ReviewEvidenceBundleError:
+                            continue
+                    child["broadcast"] = {
+                        **metadata,
+                        "result": {
+                            **result,
+                            "status": "revoked",
+                            "revoked_at": revocation.get("revoked_at"),
+                        },
+                    }
+                    quality_report = publish_broadcast_facade(parent_output)
+                    self._apply_revoked_review_evidence_state(
+                        parent,
+                        quality_report,
+                        generation_id=generation_id,
+                        queue_sha256=queue_sha256,
+                        revoked_at=revocation.get("revoked_at"),
+                    )
+                    parent["artifacts"] = self._collect_artifacts(parent_output)
+                    parent["stats"] = self._collect_stats(parent_output)
+
+    @staticmethod
+    def _review_evidence_import_response(child: dict[str, Any]) -> dict[str, Any]:
+        metadata = child.get("broadcast") if isinstance(child.get("broadcast"), dict) else {}
+        result = metadata.get("result") if isinstance(metadata.get("result"), dict) else {}
+        status = child.get("status")
+        return {
+            "run_id": child["run_id"],
+            "parent_run_id": child.get("parent_run_id"),
+            "status": "completed" if status == "completed" else "queued",
+            "reason": "review_evidence_import_completed" if status == "completed" else "review_evidence_import_queued",
+            "artifact": "selective_review_queue.v1.json" if status == "completed" else None,
+            "generation_id": result.get("review_evidence_generation_id"),
+            "details": {"queue_sha256": result.get("queue_sha256")},
+        }
+
+    def revoke_broadcast_review_evidence(
+        self,
+        run_id: str,
+        generation_id: str,
+        expected_queue_sha256: str,
+    ) -> dict[str, Any]:
+        """Revoke one exact, unconsumed review-evidence activation."""
+
+        self._assert_service_open()
+        if not isinstance(generation_id, str) or re.fullmatch(r"review-evidence-[0-9a-f]{24}", generation_id) is None:
+            raise ValueError("generation_id must identify an immutable review evidence generation")
+        if not isinstance(expected_queue_sha256, str) or re.fullmatch(r"[0-9a-f]{64}", expected_queue_sha256) is None:
+            raise ValueError("queue_sha256 must be a lowercase SHA-256")
+        with self._lock:
+            self._assert_service_open_locked()
+            with self._registry_transaction() as registry:
+                parent = next((item for item in registry["runs"] if item.get("run_id") == run_id), None)
+                if parent is None or parent.get("source") != "broadcast_hybrid":
+                    raise KeyError(run_id)
+                active_import = next(
+                    (
+                        item
+                        for item in registry["runs"]
+                        if item.get("source") == "broadcast_review_evidence_import"
+                        and item.get("parent_run_id") == run_id
+                        and item.get("status") in {"queued", "running"}
+                    ),
+                    None,
+                )
+                if active_import is not None:
+                    raise RuntimeError("review evidence activation is still being committed")
+                output_dir = Path(parent["output_dir"]).resolve()
+                matching_child = None
+                for child in reversed(registry["runs"]):
+                    metadata = child.get("broadcast") if isinstance(child.get("broadcast"), dict) else {}
+                    result = metadata.get("result") if isinstance(metadata.get("result"), dict) else {}
+                    if (
+                        child.get("source") == "broadcast_review_evidence_import"
+                        and child.get("parent_run_id") == run_id
+                        and result.get("review_evidence_generation_id") == generation_id
+                        and result.get("queue_sha256") == expected_queue_sha256
+                    ):
+                        matching_child = child
+                        break
+                if matching_child is None:
+                    raise RuntimeError("review evidence activation has no authoritative import lineage")
+                try:
+                    report = revoke_review_evidence_activation(
+                        output_dir,
+                        generation_id=generation_id,
+                        expected_queue_sha256=expected_queue_sha256,
+                    )
+                except ReviewEvidenceBundleError as exc:
+                    raise RuntimeError(str(exc)) from exc
+                metadata = matching_child.get("broadcast") if isinstance(matching_child.get("broadcast"), dict) else {}
+                result = metadata.get("result") if isinstance(metadata.get("result"), dict) else {}
+                matching_child["broadcast"] = {
+                    **metadata,
+                    "result": {**result, "status": "revoked", "revoked_at": report["revoked_at"]},
+                }
+                quality_report = publish_broadcast_facade(output_dir)
+                self._apply_revoked_review_evidence_state(
+                    parent,
+                    quality_report,
+                    generation_id=generation_id,
+                    queue_sha256=expected_queue_sha256,
+                    revoked_at=report["revoked_at"],
+                )
+                parent["artifacts"] = self._collect_artifacts(output_dir)
+                parent["stats"] = self._collect_stats(output_dir)
+        return {
+            "run_id": run_id,
+            "status": "revoked",
+            "generation_id": generation_id,
+            "queue_sha256": expected_queue_sha256,
+            "revoked_at": report["revoked_at"],
+        }
+
     def get_broadcast_review_windows(self, run_id: str) -> dict[str, Any]:
         run, output_dir = self._broadcast_run_output(run_id)
         try:
@@ -4720,36 +5881,48 @@ class ApiService:
             }
 
         queue_path = output_dir / "selective_review_queue.v1.json"
-        if not queue_path.is_file():
-            return unavailable("missing_qualified_selective_review_queue")
-        try:
-            queue, queue_sha256 = validate_review_queue_bindings(queue_path, trusted_root=output_dir)
-        except BroadcastApiError as exc:
-            return unavailable("invalid_or_stale_selective_review_evidence", message=str(exc))
-        items = queue.get("items")
-        if not isinstance(items, list):
-            return unavailable("invalid_selective_review_queue_items")
-        broadcast = run.get("broadcast")
-        if not isinstance(broadcast, dict):
-            broadcast = {}
-        configured_limit = broadcast.get("max_manual_review_windows", 30)
-        if not isinstance(configured_limit, int) or isinstance(configured_limit, bool):
-            configured_limit = 30
-        if len(items) > configured_limit or queue.get("review_item_count") != len(items):
-            return unavailable("invalid_selective_review_queue_window_count")
-        return {
-            "run_id": run_id,
-            "status": "ready",
-            "reason": None,
-            "queue_sha256": queue_sha256,
-            "review_item_count": len(items),
-            "items": items,
-            "terminal_tail_review": terminal_tail_review,
-        }
+        with self._lock:
+            with self._registry_file_lock():
+                registry = self._read_registry()
+                run = self._review_evidence_parent_from_registry(registry, run_id, output_dir)
+                if not queue_path.is_file():
+                    return unavailable("missing_qualified_selective_review_queue")
+                try:
+                    queue, queue_sha256 = self._validate_current_review_queue_locked(
+                        run_id,
+                        output_dir,
+                        run,
+                        queue_path,
+                    )
+                except (BroadcastApiError, RuntimeError) as exc:
+                    return unavailable("invalid_or_stale_selective_review_evidence", message=str(exc))
+                items = queue.get("items")
+                if not isinstance(items, list):
+                    return unavailable("invalid_selective_review_queue_items")
+                broadcast = run.get("broadcast")
+                if not isinstance(broadcast, dict):
+                    broadcast = {}
+                configured_limit = broadcast.get("max_manual_review_windows", 30)
+                if not isinstance(configured_limit, int) or isinstance(configured_limit, bool):
+                    configured_limit = 30
+                if len(items) > configured_limit or queue.get("review_item_count") != len(items):
+                    return unavailable("invalid_selective_review_queue_window_count")
+                return {
+                    "run_id": run_id,
+                    "status": "ready",
+                    "reason": None,
+                    "queue_sha256": queue_sha256,
+                    "review_item_count": len(items),
+                    "items": items,
+                    "terminal_tail_review": terminal_tail_review,
+                }
 
     def submit_broadcast_review_actions(self, run_id: str, request: dict[str, Any]) -> dict[str, Any]:
         self._assert_service_open()
         _, output_dir = self._broadcast_run_output(run_id)
+        expected_queue_sha256 = request.get("queue_sha256")
+        if not isinstance(expected_queue_sha256, str) or re.fullmatch(r"[0-9a-f]{64}", expected_queue_sha256) is None:
+            raise ValueError("queue_sha256 must be a lowercase SHA-256")
         window_state = self.get_broadcast_review_windows(run_id)
         if window_state.get("status") != "ready":
             raise RuntimeError(str(window_state.get("reason") or "broadcast review windows are unavailable"))
@@ -4762,10 +5935,28 @@ class ApiService:
         if any(isinstance(action, dict) and action.get("action") == "correct_trajectory" for action in raw_actions):
             raise RuntimeError("correct_trajectory is not supported by the global trajectory solver")
         try:
-            validate_review_queue_bindings(queue_path, trusted_root=output_dir)
-            envelope = build_review_action_envelope(queue_path, raw_actions, trusted_root=output_dir)
-            decisions_path = output_dir / "review_decisions.json"
-            decisions_sha256 = publish_json_exclusive(decisions_path, envelope, trusted_root=output_dir)
+            with self._lock:
+                with self._registry_file_lock():
+                    registry = self._read_registry()
+                    parent = self._review_evidence_parent_from_registry(registry, run_id, output_dir)
+                    if any(
+                        item.get("source") == "broadcast_review_evidence_import"
+                        and item.get("parent_run_id") == run_id
+                        and item.get("status") in {"queued", "running"}
+                        for item in registry["runs"]
+                    ):
+                        raise RuntimeError("review evidence activation is still being committed")
+                    _, current_queue_sha256 = self._validate_current_review_queue_locked(
+                        run_id,
+                        output_dir,
+                        parent,
+                        queue_path,
+                    )
+                    if current_queue_sha256 != expected_queue_sha256:
+                        raise RuntimeError("selective review queue changed after review windows were loaded")
+                    envelope = build_review_action_envelope(queue_path, raw_actions, trusted_root=output_dir)
+                    decisions_path = output_dir / "review_decisions.json"
+                    decisions_sha256 = publish_json_exclusive(decisions_path, envelope, trusted_root=output_dir)
         except BroadcastApiError as exc:
             raise RuntimeError(f"invalid or stale selective review evidence: {exc}") from exc
         self._refresh_broadcast_facade_state(run_id, output_dir)
@@ -4792,9 +5983,10 @@ class ApiService:
             raise ValueError("reviewer_id must not be blank")
         if decision != "accept_terminal_shortfall":
             raise ValueError("unsupported terminal-tail review decision")
-        if not isinstance(expected_evidence_sha256, str) or re.fullmatch(
-            r"[0-9a-f]{64}", expected_evidence_sha256
-        ) is None:
+        if (
+            not isinstance(expected_evidence_sha256, str)
+            or re.fullmatch(r"[0-9a-f]{64}", expected_evidence_sha256) is None
+        ):
             raise ValueError("evidence_sha256 must be a lowercase SHA-256")
         try:
             acknowledgement = build_terminal_tail_review_acknowledgement(
@@ -5663,11 +6855,7 @@ class ApiService:
         stitch = temporal.get("stitch")
         results = execution.get("results") if isinstance(execution, dict) else None
         ordered_chunks = (
-            chunks
-            if isinstance(chunks, list)
-            and chunks
-            and all(isinstance(chunk, dict) for chunk in chunks)
-            else []
+            chunks if isinstance(chunks, list) and chunks and all(isinstance(chunk, dict) for chunk in chunks) else []
         )
         expected_chunk_names = [chunk.get("name") for chunk in ordered_chunks]
         contiguous_cores = bool(ordered_chunks) and ordered_chunks[0].get("core_start_frame") == 0
@@ -5750,12 +6938,8 @@ class ApiService:
         progress_plan: dict[str, tuple[float, float]],
     ) -> None:
         existing = self.get_run(run_id)
-        broadcast: dict[str, Any] = (
-            existing["broadcast"] if isinstance(existing.get("broadcast"), dict) else {}
-        )
-        preflight: dict[str, Any] = (
-            broadcast["preflight"] if isinstance(broadcast.get("preflight"), dict) else {}
-        )
+        broadcast: dict[str, Any] = existing["broadcast"] if isinstance(existing.get("broadcast"), dict) else {}
+        preflight: dict[str, Any] = broadcast["preflight"] if isinstance(broadcast.get("preflight"), dict) else {}
         calibration_raw = preflight.get("calibration")
         if not isinstance(calibration_raw, dict):
             raise RuntimeError("broadcast calibration preflight is unavailable")
@@ -5803,9 +6987,7 @@ class ApiService:
             config=config,
         )
         expected_terminal_shortfall = (
-            int(terminal_shortfall_evidence["missing_frame_count"])
-            if terminal_shortfall_evidence is not None
-            else 0
+            int(terminal_shortfall_evidence["missing_frame_count"]) if terminal_shortfall_evidence is not None else 0
         )
         try:
             publish_json_exclusive(calibration_path, calibration.to_dict(), trusted_root=output_dir)
@@ -5872,8 +7054,7 @@ class ApiService:
                     or limitation.get("reported_frame_count", report.get("expected_frame_count"))
                     != terminal_shortfall_evidence["reported_frame_count"]
                     or limitation.get("decoded_frame_count") != terminal_shortfall_evidence["verified_frame_count"]
-                    or limitation.get("missing_terminal_frames")
-                    != terminal_shortfall_evidence["missing_frame_count"]
+                    or limitation.get("missing_terminal_frames") != terminal_shortfall_evidence["missing_frame_count"]
                     or limitation.get("requires_manual_review") is not True
                 ):
                     raise RuntimeError("broadcast action signal terminal shortfall does not match its trusted audit")
@@ -6905,11 +8086,7 @@ class ApiService:
     @classmethod
     def _terminal_tail_frozen_inputs(cls, output_dir: Path) -> dict[str, str]:
         acknowledgement_sha256 = cls._require_terminal_tail_review_gate(output_dir)
-        return (
-            {"terminal_tail_review_sha256": acknowledgement_sha256}
-            if acknowledgement_sha256 is not None
-            else {}
-        )
+        return {"terminal_tail_review_sha256": acknowledgement_sha256} if acknowledgement_sha256 is not None else {}
 
     def _ensure_registry_file(self) -> None:
         self.registry_path.parent.mkdir(parents=True, exist_ok=True)
@@ -9173,6 +10350,19 @@ class ApiService:
         reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x0400)
         return stat.S_ISLNK(metadata.st_mode) or bool(getattr(metadata, "st_file_attributes", 0) & reparse_flag)
 
+    @staticmethod
+    def _normalize_filesystem_path(path: Path) -> Path:
+        """Normalize Windows extended-length and ordinary absolute paths to one lexical form."""
+
+        text = os.path.abspath(os.fspath(path))
+        if os.name == "nt":
+            folded = text.casefold()
+            if folded.startswith("\\\\?\\unc\\"):
+                text = "\\\\" + text[8:]
+            elif folded.startswith("\\\\?\\"):
+                text = text[4:]
+        return Path(text)
+
     def _resolve_safe_descendant(
         self,
         root: Path,
@@ -9184,8 +10374,8 @@ class ApiService:
     ) -> Path:
         """Resolve a non-reparse descendant while preserving lexical containment checks."""
 
-        lexical_root = Path(os.path.abspath(root))
-        lexical_candidate = Path(os.path.abspath(candidate))
+        lexical_root = self._normalize_filesystem_path(root)
+        lexical_candidate = self._normalize_filesystem_path(candidate)
         if self._is_link_or_reparse_point(lexical_root):
             raise RuntimeError(f"Artifact root cannot be a link or reparse point: {lexical_root}")
         try:
@@ -9201,9 +10391,9 @@ class ApiService:
             if self._is_link_or_reparse_point(current):
                 raise RuntimeError(f"Path cannot traverse a link or reparse point: {current}")
 
-        resolved_root = lexical_root.resolve()
-        resolved_candidate = lexical_candidate.resolve()
-        if resolved_root not in resolved_candidate.parents:
+        resolved_root = self._normalize_filesystem_path(lexical_root.resolve())
+        resolved_candidate = self._normalize_filesystem_path(lexical_candidate.resolve())
+        if not self._path_is_relative_to(resolved_candidate, resolved_root) or resolved_candidate == resolved_root:
             raise RuntimeError(f"Resolved path must stay under {resolved_root}: {resolved_candidate}")
         current = lexical_root
         if self._is_link_or_reparse_point(current):
@@ -9373,7 +10563,9 @@ class ApiService:
         except RuntimeError:
             return []
         artifact_paths = [
-            item.resolve() for item in output_dir.iterdir() if self._is_safe_direct_file(output_dir, item)
+            item.resolve()
+            for item in output_dir.iterdir()
+            if not item.name.startswith(".") and self._is_safe_direct_file(output_dir, item)
         ]
         chunk_names = self._temporal_chunk_names(output_dir)
         chunk_roots, allow_nested_contracts = self._temporal_chunk_artifact_roots(output_dir)
@@ -9396,7 +10588,18 @@ class ApiService:
                 )
             )
         artifact_paths.extend(self._broadcast_nested_artifact_paths(output_dir))
-        return sorted(artifact_paths, key=lambda item: item.relative_to(output_dir).as_posix())
+        normalized_root = self._normalize_filesystem_path(output_dir)
+        normalized: dict[str, Path] = {}
+        for artifact_path in artifact_paths:
+            candidate = self._normalize_filesystem_path(artifact_path)
+            try:
+                relative = candidate.relative_to(normalized_root)
+            except ValueError:
+                continue
+            if any(part.startswith(".") for part in relative.parts):
+                continue
+            normalized[relative.as_posix()] = candidate
+        return [normalized[name] for name in sorted(normalized)]
 
     def _broadcast_nested_artifact_paths(self, output_dir: Path) -> list[Path]:
         """Expand only status and source-report files named by trusted broadcast manifests."""

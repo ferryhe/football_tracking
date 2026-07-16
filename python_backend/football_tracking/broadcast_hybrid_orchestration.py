@@ -263,6 +263,9 @@ def recompute_reviewed_trajectory(
             annotation_resolution_path=bound["annotation_resolution"],
             resolved_contract_path=bound["resolved_tracking_contract"],
             policy_roles_path=bound["policy_roles"],
+            qualification_dataset_manifest_path=bound.get("qualification_dataset"),
+            qualification_predictions_path=bound.get("qualification_predictions"),
+            qualification_decisions_path=bound.get("qualification_decisions"),
         )
         review_created = True
     _raise_if_cancelled(should_cancel)
@@ -760,6 +763,17 @@ def _resolve_queue_bindings(queue_path: Path, queue: dict[str, Any]) -> dict[str
         "resolved_tracking_contract",
         "policy_roles",
     }
+    qualification = {
+        "qualification_dataset",
+        "qualification_predictions",
+        "qualification_decisions",
+    }
+    present_qualification = set(raw_bindings) & qualification
+    if present_qualification and present_qualification != qualification:
+        raise BroadcastHybridOrchestrationError(
+            "selective review queue qualification binding keys are incomplete"
+        )
+    required |= present_qualification
     if set(raw_bindings) != required:
         raise BroadcastHybridOrchestrationError("selective review queue binding keys are incomplete or unexpected")
     resolved: dict[str, Path] = {}
@@ -884,7 +898,10 @@ def _validate_action_signal_binding(
     )
     report_source = Path(_required_text(action_report.get("input_video"), "action signal input video")).resolve()
     if report_source != source_video.resolve():
-        raise BroadcastHybridOrchestrationError("action signal report is bound to a different source video path")
+        if not report_source.is_file() or _sha256_file(report_source) != source_video_sha256:
+            raise BroadcastHybridOrchestrationError(
+                "action signal report is bound to a different source video path or content"
+            )
     report_artifacts = _required_mapping(action_report.get("artifacts"), "action signal report artifacts")
     if report_artifacts.get("track") != ACTION_TRACK_NAME:
         raise BroadcastHybridOrchestrationError("action signal report does not bind the canonical action track")
@@ -1174,6 +1191,9 @@ def _validate_materialization(
                     annotation_resolution_path=bound["annotation_resolution"],
                     resolved_contract_path=bound["resolved_tracking_contract"],
                     policy_roles_path=bound["policy_roles"],
+                    qualification_dataset_manifest_path=bound.get("qualification_dataset"),
+                    qualification_predictions_path=bound.get("qualification_predictions"),
+                    qualification_decisions_path=bound.get("qualification_decisions"),
                 )
             except (OSError, SelectiveReviewError, ValueError) as exc:
                 raise BroadcastHybridOrchestrationError(

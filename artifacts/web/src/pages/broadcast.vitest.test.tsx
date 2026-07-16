@@ -1,6 +1,6 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import type { ReactNode } from "react";
+import { StrictMode, type ReactNode } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type {
   ArtifactSummary,
@@ -15,6 +15,7 @@ const submitTerminalTailReview = vi.fn();
 const recompute = vi.fn();
 const renderBroadcast = vi.fn();
 const cancelRun = vi.fn();
+const refreshReviewEvidence = vi.fn();
 const buildRequest = vi.fn();
 const requestedRunIds: string[] = [];
 const artifactRunIds: string[] = [];
@@ -115,9 +116,47 @@ vi.mock("@/contexts/LanguageContext", () => ({
         refresh: "Refresh",
         loading: "Loading",
         reviewerId: "Reviewer",
+        reviewEvidence: {
+          loading: "Loading review evidence",
+          ambiguousBundleRecovery: "Keep one compatible bundle",
+          insufficientCapacityRecovery: "Free evidence capacity",
+          retryBundleUnavailableRecovery: "Restore the same bundle",
+          recoveryAction: (action: string) => action,
+          prepareFailed: "Evidence preparation failed",
+          cancelFailed: "Evidence cancellation failed",
+          loadFailed: "Evidence loading failed",
+        },
       },
     },
   }),
+}));
+
+vi.mock("@/components/broadcast/useBroadcastReviewEvidenceController", () => ({
+  useBroadcastReviewEvidenceController: () => ({
+    stepProps: {
+      state: {
+        status: "ready",
+        generationId: "review-evidence-generation-1",
+        queueSha256: "d".repeat(64),
+      },
+    },
+    isLoading: false,
+    isReady: true,
+    readyIdentity: {
+      generationId: "review-evidence-generation-1",
+      queueSha256: "d".repeat(64),
+    },
+    error: null,
+    refresh: refreshReviewEvidence,
+  }),
+}));
+
+vi.mock("@/components/broadcast/BroadcastReviewEvidenceStep", () => ({
+  BroadcastReviewEvidenceStep: () => (
+    <div data-testid="broadcast-review-evidence-step">
+      review evidence ready
+    </div>
+  ),
 }));
 
 vi.mock("@/lib/broadcastWorkflow", async (importOriginal) => {
@@ -244,7 +283,12 @@ function renderPage() {
   const Wrapper = ({ children }: { children: ReactNode }) => (
     <QueryClientProvider client={client}>{children}</QueryClientProvider>
   );
-  return render(<BroadcastPage />, { wrapper: Wrapper });
+  return render(
+    <StrictMode>
+      <BroadcastPage />
+    </StrictMode>,
+    { wrapper: Wrapper },
+  );
 }
 
 function deferred<T>() {
@@ -270,6 +314,7 @@ beforeEach(() => {
   recompute.mockResolvedValue({ run_id: "recompute-child" });
   renderBroadcast.mockResolvedValue({ run_id: "render-child" });
   cancelRun.mockResolvedValue({ status: "cancelled" });
+  refreshReviewEvidence.mockReset().mockResolvedValue(undefined);
 });
 
 describe("BroadcastPage controller integration", () => {
@@ -328,7 +373,7 @@ describe("BroadcastPage controller integration", () => {
     expect(submitReview).toHaveBeenCalledTimes(1);
     expect(submitReview).toHaveBeenCalledWith({
       runId: "parent one",
-      data: { actions: [] },
+      data: { queue_sha256: "d".repeat(64), actions: [] },
     });
 
     reviewSubmission.resolve({

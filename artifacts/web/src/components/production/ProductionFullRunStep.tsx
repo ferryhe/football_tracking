@@ -32,6 +32,8 @@ import {
   type BroadcastReviewDecision,
 } from "@/components/broadcast/BroadcastReviewStep";
 import { BroadcastRenderStep } from "@/components/broadcast/BroadcastRenderStep";
+import { BroadcastReviewEvidenceStep } from "@/components/broadcast/BroadcastReviewEvidenceStep";
+import { useBroadcastReviewEvidenceController } from "@/components/broadcast/useBroadcastReviewEvidenceController";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -328,6 +330,26 @@ export function ProductionFullRunStep({
     parentRunId: currentRunId || null,
     enabled: remoteFullRunEnabled,
     language,
+  });
+  const reviewEvidenceEnabled = Boolean(
+    remoteFullRunEnabled &&
+    currentRunId &&
+    controller.parent?.run_id === currentRunId &&
+    controller.parent.source === "broadcast_hybrid" &&
+    controller.recovery.state === "needs_review",
+  );
+  const reviewEvidence = useBroadcastReviewEvidenceController({
+    runId: reviewEvidenceEnabled ? currentRunId : "",
+    enabled: reviewEvidenceEnabled,
+    messages: {
+      ambiguousBundleRecovery:
+        t.broadcast.reviewEvidence.ambiguousBundleRecovery,
+      insufficientCapacityRecovery:
+        t.broadcast.reviewEvidence.insufficientCapacityRecovery,
+      retryBundleUnavailableRecovery:
+        t.broadcast.reviewEvidence.retryBundleUnavailableRecovery,
+    },
+    formatRecoveryAction: t.broadcast.reviewEvidence.recoveryAction,
   });
   const runQuery = useGetRun(currentRunId, {
     query: {
@@ -874,7 +896,16 @@ export function ProductionFullRunStep({
   }
 
   async function handleReviewSubmit(decisions: BroadcastReviewDecision[]) {
-    if (!fullRunHashValid || reviewSubmitLockRef.current) return;
+    if (
+      !fullRunHashValid ||
+      reviewSubmitLockRef.current ||
+      !reviewEvidence.isReady ||
+      !reviewEvidence.readyIdentity?.queueSha256 ||
+      reviewEvidence.readyIdentity.queueSha256 !==
+        controller.review.data?.queue_sha256
+    ) {
+      return;
+    }
     reviewSubmitLockRef.current = true;
     const hasCandidates = (controller.review.data?.items ?? []).some(
       (item) => (item.candidates ?? []).length > 0,
@@ -950,14 +981,27 @@ export function ProductionFullRunStep({
   const terminalTailRequiresReview = terminalTailReview?.status === "required";
   const terminalTailAccepted = terminalTailReview?.status === "accepted";
   const terminalTailInvalid = terminalTailReview?.status === "invalid";
-  const terminalTailNeedsReviewer =
-    reviewHasCandidates || terminalTailRequiresReview;
-  const selectiveReviewCanSubmit = Boolean(
-    reviewResponse?.status === "ready" &&
-      (reviewHasCandidates ||
-        reviewResponse.review_item_count === 0 &&
-          (reviewResponse.items ?? []).length === 0),
+  const reviewEvidenceQueueMatches = Boolean(
+    reviewEvidence.isReady &&
+    reviewEvidence.readyIdentity?.queueSha256 &&
+    reviewResponse?.queue_sha256 &&
+    reviewEvidence.readyIdentity.queueSha256 === reviewResponse.queue_sha256,
   );
+  const reviewEvidenceQueueMismatch = Boolean(
+    reviewEvidence.isReady &&
+    reviewResponse?.status === "ready" &&
+    !reviewEvidenceQueueMatches,
+  );
+  const selectiveReviewCanSubmit = Boolean(
+    reviewEvidenceQueueMatches &&
+    reviewResponse?.status === "ready" &&
+    (reviewHasCandidates ||
+      (reviewResponse.review_item_count === 0 &&
+        (reviewResponse.items ?? []).length === 0)),
+  );
+  const terminalTailNeedsReviewer =
+    terminalTailRequiresReview ||
+    (selectiveReviewCanSubmit && reviewHasCandidates);
   const terminalTailNeedsStandaloneSubmit =
     terminalTailRequiresReview && !selectiveReviewCanSubmit;
 
@@ -973,6 +1017,23 @@ export function ProductionFullRunStep({
       errorText(
         controller.errors.action.cause ?? controller.errors.action.code,
       ))
+    : null;
+  const reviewEvidenceError = reviewEvidence.error
+    ? errorText(
+        reviewEvidence.error.cause ??
+          (reviewEvidence.error.kind === "prepare"
+            ? t.broadcast.reviewEvidence.prepareFailed
+            : reviewEvidence.error.kind === "cancel"
+              ? t.broadcast.reviewEvidence.cancelFailed
+              : t.broadcast.reviewEvidence.loadFailed),
+      )
+    : null;
+  const reviewEvidenceErrorTitle = reviewEvidence.error
+    ? reviewEvidence.error.kind === "prepare"
+      ? t.broadcast.reviewEvidence.prepareFailed
+      : reviewEvidence.error.kind === "cancel"
+        ? t.broadcast.reviewEvidence.cancelFailed
+        : t.broadcast.reviewEvidence.loadFailed
     : null;
   const statusGeneration =
     controller.parent?.broadcast?.status_generation?.trim() ?? "";
@@ -1404,6 +1465,60 @@ export function ProductionFullRunStep({
               </AlertDescription>
             </Alert>
           )}
+          {controller.review.recomputeRecoveryMode === "none" && (
+            <div className="flex justify-end">
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                data-testid="production-review-evidence-refresh"
+                disabled={
+                  controller.pending.recovery ||
+                  reviewEvidence.stepProps.isPreparing ||
+                  reviewEvidence.stepProps.isCancelling ||
+                  reviewEvidence.stepProps.isRetrying
+                }
+                onClick={() => {
+                  void Promise.allSettled([
+                    controller.actions.refresh(),
+                    reviewEvidence.refresh(),
+                  ]);
+                }}
+              >
+                <RefreshCw className="mr-2 h-4 w-4" aria-hidden="true" />
+                {t.broadcast.refresh}
+              </Button>
+            </div>
+          )}
+          {controller.review.recomputeRecoveryMode === "none" &&
+            reviewEvidenceError && (
+              <Alert
+                variant="destructive"
+                data-testid="production-review-evidence-error"
+              >
+                <AlertTitle>{reviewEvidenceErrorTitle}</AlertTitle>
+                <AlertDescription>{reviewEvidenceError}</AlertDescription>
+              </Alert>
+            )}
+          {controller.review.recomputeRecoveryMode === "none" &&
+            reviewEvidence.isLoading && (
+              <Card>
+                <CardContent className="flex items-center gap-3 py-8 text-sm text-muted-foreground">
+                  <Loader2
+                    className="h-5 w-5 animate-spin"
+                    aria-hidden="true"
+                  />
+                  {t.broadcast.reviewEvidence.loading}
+                </CardContent>
+              </Card>
+            )}
+          {controller.review.recomputeRecoveryMode === "none" &&
+            !reviewEvidence.isLoading && (
+              <BroadcastReviewEvidenceStep
+                {...reviewEvidence.stepProps}
+                labels={t.broadcast.reviewEvidence}
+              />
+            )}
           {controller.review.recomputeRecoveryMode === "none" &&
             controller.review.isLoading && (
               <Card>
@@ -1428,17 +1543,40 @@ export function ProductionFullRunStep({
           {controller.review.recomputeRecoveryMode === "none" &&
             reviewResponse && (
               <>
-                {controller.montage.messages.length > 0 && (
-                  <Alert variant="destructive">
+                {reviewEvidenceQueueMismatch && (
+                  <Alert
+                    variant="destructive"
+                    data-testid="production-review-evidence-stale"
+                  >
                     <AlertTitle>{t.broadcast.reviewUnavailable}</AlertTitle>
                     <AlertDescription>
-                      {controller.montage.messages.join(" ")}
+                      {t.broadcast.staleEvidence}
                     </AlertDescription>
                   </Alert>
                 )}
+                {reviewResponse.status !== "ready" && reviewResponse.reason && (
+                  <Alert>
+                    <AlertTitle>{t.broadcast.reviewUnavailable}</AlertTitle>
+                    <AlertDescription>{reviewResponse.reason}</AlertDescription>
+                  </Alert>
+                )}
+                {selectiveReviewCanSubmit &&
+                  controller.montage.messages.length > 0 && (
+                    <Alert variant="destructive">
+                      <AlertTitle>{t.broadcast.reviewUnavailable}</AlertTitle>
+                      <AlertDescription>
+                        {controller.montage.messages.join(" ")}
+                      </AlertDescription>
+                    </Alert>
+                  )}
                 {terminalTailInvalid && (
-                  <Alert variant="destructive" data-testid="production-terminal-tail-invalid">
-                    <AlertTitle>{t.production.fullTerminalTailInvalidTitle}</AlertTitle>
+                  <Alert
+                    variant="destructive"
+                    data-testid="production-terminal-tail-invalid"
+                  >
+                    <AlertTitle>
+                      {t.production.fullTerminalTailInvalidTitle}
+                    </AlertTitle>
                     <AlertDescription>
                       {terminalTailReview.reason ??
                         t.production.fullTerminalTailInvalid}
@@ -1517,25 +1655,27 @@ export function ProductionFullRunStep({
                       : t.production.fullTerminalTailSubmit}
                   </Button>
                 )}
-                <BroadcastReviewStep
-                  response={reviewResponse}
-                  montageUrlsByCandidateId={
-                    controller.montage.urlsByCandidateId
-                  }
-                  decisions={reviewDecisions}
-                  onDecisionsChange={setReviewDecisions}
-                  onSubmit={(decisions) => void handleReviewSubmit(decisions)}
-                  isSubmitting={controller.pending.review}
-                  disabled={
-                    controller.montage.messages.length > 0 ||
-                    terminalTailInvalid ||
-                    (terminalTailNeedsReviewer && !reviewerId.trim()) ||
-                    (terminalTailRequiresReview && !terminalTailConfirmed)
-                  }
-                  error={controllerActionError}
-                  labels={t.broadcast.review}
-                  noiseSubtypeLabels={t.broadcast.noiseSubtypes}
-                />
+                {selectiveReviewCanSubmit && (
+                  <BroadcastReviewStep
+                    response={reviewResponse}
+                    montageUrlsByCandidateId={
+                      controller.montage.urlsByCandidateId
+                    }
+                    decisions={reviewDecisions}
+                    onDecisionsChange={setReviewDecisions}
+                    onSubmit={(decisions) => void handleReviewSubmit(decisions)}
+                    isSubmitting={controller.pending.review}
+                    disabled={
+                      controller.montage.messages.length > 0 ||
+                      terminalTailInvalid ||
+                      (terminalTailNeedsReviewer && !reviewerId.trim()) ||
+                      (terminalTailRequiresReview && !terminalTailConfirmed)
+                    }
+                    error={controllerActionError}
+                    labels={t.broadcast.review}
+                    noiseSubtypeLabels={t.broadcast.noiseSubtypes}
+                  />
+                )}
               </>
             )}
         </div>

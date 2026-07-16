@@ -819,6 +819,10 @@ export function validateAndBuildBroadcastReviewActions(
 ): BroadcastValidationResult<BroadcastReviewActionsRequest> {
   const messages: string[] = [];
   const reviewer = cleanText(reviewerId);
+  const queueSha256 = cleanText(review.queue_sha256);
+  if (!queueSha256 || !/^[0-9a-f]{64}$/.test(queueSha256)) {
+    messages.push("Review queue SHA-256 is missing or invalid.");
+  }
   if (review.status !== "ready") {
     messages.push(
       `Review windows are not ready${review.reason ? `: ${review.reason}` : "."}`,
@@ -942,7 +946,7 @@ export function validateAndBuildBroadcastReviewActions(
       return action;
     },
   );
-  return success({ actions });
+  return success({ queue_sha256: queueSha256!, actions });
 }
 
 export function resolveBroadcastMontageArtifact(

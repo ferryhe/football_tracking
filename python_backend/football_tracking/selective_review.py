@@ -23,6 +23,7 @@ from football_tracking.candidate_annotations import (
 from football_tracking.selective_policy import (
     SelectivePolicyError,
     validate_selective_decisions_binding,
+    validate_selective_policy_application_binding,
     validate_selective_policy_evidence_binding,
 )
 from football_tracking.tracking_contracts import (
@@ -501,6 +502,9 @@ def build_selective_review_queue(
     annotation_resolution_path: Path | None = None,
     resolved_contract_path: Path | None = None,
     policy_roles_path: Path | None = None,
+    qualification_dataset_manifest_path: Path | None = None,
+    qualification_predictions_path: Path | None = None,
+    qualification_decisions_path: Path | None = None,
     fps_overrides: dict[str, float] | None = None,
     window_seconds: float = DEFAULT_WINDOW_SECONDS,
     max_windows: int = MAX_REVIEW_WINDOWS,
@@ -519,6 +523,9 @@ def build_selective_review_queue(
         annotation_resolution_path=annotation_resolution_path,
         resolved_contract_path=resolved_contract_path,
         policy_roles_path=policy_roles_path,
+        qualification_dataset_manifest_path=qualification_dataset_manifest_path,
+        qualification_predictions_path=qualification_predictions_path,
+        qualification_decisions_path=qualification_decisions_path,
         fps_overrides=fps_overrides,
     )
     _, windows, selection = _select_review_candidates(
@@ -584,6 +591,9 @@ def materialize_selective_review_actions(
     annotation_resolution_path: Path | None = None,
     resolved_contract_path: Path | None = None,
     policy_roles_path: Path | None = None,
+    qualification_dataset_manifest_path: Path | None = None,
+    qualification_predictions_path: Path | None = None,
+    qualification_decisions_path: Path | None = None,
 ) -> dict[str, Any]:
     """Validate review actions and atomically publish annotation/correction artifacts."""
 
@@ -595,10 +605,15 @@ def materialize_selective_review_actions(
     _require_envelope(actions_report, artifact_type="selective_review_actions", name="selective review actions")
 
     queue_dir = queue_snapshot.path.parent
-    timing_path = queue_dir / REVIEW_TIMING_NAME
+    queue_bindings = _required_object(queue.get("bindings"), "queue.bindings")
+    timing_binding = _required_object(queue_bindings.get("review_timing"), "queue.bindings.review_timing")
+    timing_path = _safe_queue_binding_artifact(
+        queue_dir,
+        timing_binding.get("path"),
+        label="queue review_timing",
+    )
     timing, timing_snapshot = _load_json_snapshot(timing_path, "review timing")
     _require_envelope(timing, artifact_type="selective_review_timing", name="review timing")
-    queue_bindings = _required_object(queue.get("bindings"), "queue.bindings")
     expected_binding_names = {
         "review_timing",
         "policy",
@@ -613,10 +628,18 @@ def materialize_selective_review_actions(
         "resolved_tracking_contract",
         "policy_roles",
     }
+    qualification_binding_names = {
+        "qualification_dataset",
+        "qualification_predictions",
+        "qualification_decisions",
+    }
+    present_qualification_bindings = set(queue_bindings) & qualification_binding_names
+    if present_qualification_bindings and present_qualification_bindings != qualification_binding_names:
+        raise SelectiveReviewError("queue qualification bindings must be complete")
+    expected_binding_names |= present_qualification_bindings
     if set(queue_bindings) != expected_binding_names:
         raise SelectiveReviewError("queue binding keys do not match the selective review contract")
-    timing_binding = _required_object(queue_bindings.get("review_timing"), "queue.bindings.review_timing")
-    expected_timing_binding = {"path": REVIEW_TIMING_NAME, "sha256": timing_snapshot.sha256}
+    expected_timing_binding = {"path": str(timing_binding["path"]), "sha256": timing_snapshot.sha256}
     if timing_binding != expected_timing_binding:
         raise SelectiveReviewError("queue review_timing binding does not match the timing artifact")
     timing_map = _parse_timing_report(timing)
@@ -639,11 +662,14 @@ def materialize_selective_review_actions(
         annotation_resolution_path=annotation_resolution_path,
         resolved_contract_path=resolved_contract_path,
         policy_roles_path=policy_roles_path,
+        qualification_dataset_manifest_path=qualification_dataset_manifest_path,
+        qualification_predictions_path=qualification_predictions_path,
+        qualification_decisions_path=qualification_decisions_path,
         fps_overrides=overrides,
     )
     for name, descriptor in bundle["bindings"].items():
         expected = _required_object(queue_bindings.get(name), f"queue.bindings.{name}")
-        if expected != descriptor:
+        if not _queue_binding_matches_supplied_input(queue_dir, expected, descriptor, label=name):
             raise SelectiveReviewError(f"queue {name} binding does not match the supplied input snapshot")
     if timing_map != bundle["timings"]:
         raise SelectiveReviewError("review timing does not match the bound video metadata")
@@ -826,6 +852,9 @@ def _load_source_bundle(
     annotation_resolution_path: Path | None,
     resolved_contract_path: Path | None,
     policy_roles_path: Path | None,
+    qualification_dataset_manifest_path: Path | None,
+    qualification_predictions_path: Path | None,
+    qualification_decisions_path: Path | None,
     fps_overrides: dict[str, float] | None,
 ) -> dict[str, Any]:
     dataset, dataset_snapshot = _load_json_snapshot(dataset_manifest_path, "candidate dataset manifest")
@@ -854,26 +883,45 @@ def _load_source_bundle(
     _require_envelope(predictions, artifact_type="candidate_predictions", name="candidate predictions")
     _require_envelope(policy, artifact_type="selective_policy", name="selective policy")
     _require_envelope(model, artifact_type="candidate_classifier_model", name="model manifest")
-    _require_envelope(decisions, artifact_type="selective_decisions", name="selective decisions")
-    try:
-        validated_decisions = validate_selective_decisions_binding(policy_snapshot.path, decisions_snapshot.path)
-    except (OSError, ValueError, SelectivePolicyError) as exc:
-        raise SelectiveReviewError(f"selective policy/decisions binding is invalid: {exc}") from exc
-    if validated_decisions != decisions:
-        raise SelectiveReviewError("selective decisions changed during strict policy binding validation")
-    _validate_policy_decisions_contract(
-        policy,
-        decisions,
-        policy_snapshot=policy_snapshot,
-        decisions_snapshot=decisions_snapshot,
-    )
+    target_application = decisions.get("artifact_type") == "selective_policy_application"
+    if not target_application:
+        _require_envelope(decisions, artifact_type="selective_decisions", name="selective decisions")
+        try:
+            validated_decisions = validate_selective_decisions_binding(policy_snapshot.path, decisions_snapshot.path)
+        except (OSError, ValueError, SelectivePolicyError) as exc:
+            raise SelectiveReviewError(f"selective policy/decisions binding is invalid: {exc}") from exc
+        if validated_decisions != decisions:
+            raise SelectiveReviewError("selective decisions changed during strict policy binding validation")
+        _validate_policy_decisions_contract(
+            policy,
+            decisions,
+            policy_snapshot=policy_snapshot,
+            decisions_snapshot=decisions_snapshot,
+        )
+        qualification_dataset_manifest_path = dataset_snapshot.path
+        qualification_predictions_path = predictions_snapshot.path
+        qualification_decisions_path = decisions_snapshot.path
+    else:
+        missing_target_evidence = [
+            name
+            for name, path in (
+                ("qualification dataset", qualification_dataset_manifest_path),
+                ("qualification predictions", qualification_predictions_path),
+                ("qualification decisions", qualification_decisions_path),
+            )
+            if path is None
+        ]
+        if missing_target_evidence:
+            raise SelectiveReviewError(
+                "independent target application requires " + ", ".join(missing_target_evidence)
+            )
     _, training_report_snapshot, weights_snapshot = _load_model_package(model, model_snapshot)
     try:
         evidence_validation = validate_selective_policy_evidence_binding(
             policy_snapshot.path,
-            decisions_snapshot.path,
-            predictions_snapshot.path,
-            dataset_snapshot.path,
+            Path(qualification_decisions_path),
+            Path(qualification_predictions_path),
+            Path(qualification_dataset_manifest_path),
             annotation_resolution_path,
             resolved_contract_path,
             model_snapshot.path,
@@ -881,8 +929,24 @@ def _load_source_bundle(
         )
     except (OSError, ValueError, SelectivePolicyError) as exc:
         raise SelectiveReviewError(f"selective policy qualification evidence is invalid: {exc}") from exc
-    if evidence_validation.get("policy") != policy or evidence_validation.get("decisions") != decisions:
-        raise SelectiveReviewError("selective policy or decisions changed during qualification evidence validation")
+    if evidence_validation.get("policy") != policy:
+        raise SelectiveReviewError("selective policy changed during qualification evidence validation")
+    if target_application:
+        try:
+            application_validation = validate_selective_policy_application_binding(
+                policy_snapshot.path,
+                decisions_snapshot.path,
+                predictions_snapshot.path,
+                dataset_snapshot.path,
+                contract_snapshot.path,
+                model_snapshot.path,
+            )
+        except (OSError, ValueError, SelectivePolicyError) as exc:
+            raise SelectiveReviewError(f"frozen target policy application is invalid: {exc}") from exc
+        if application_validation.get("application") != decisions:
+            raise SelectiveReviewError("target application changed during frozen-policy validation")
+    elif evidence_validation.get("decisions") != decisions:
+        raise SelectiveReviewError("selective decisions changed during qualification evidence validation")
     evidence_bindings = _required_object(evidence_validation.get("bindings"), "qualification evidence bindings")
     evidence_paths = {
         "annotation_resolution": Path(annotation_resolution_path),
@@ -896,6 +960,12 @@ def _load_source_bundle(
         if expected != {"path": snapshot.path.name, "sha256": snapshot.sha256}:
             raise SelectiveReviewError(f"{name.replace('_', ' ')} binding changed after strict validation")
         qualification_snapshots[name] = snapshot
+    for name, path in (
+        ("qualification_dataset", Path(qualification_dataset_manifest_path)),
+        ("qualification_predictions", Path(qualification_predictions_path)),
+        ("qualification_decisions", Path(qualification_decisions_path)),
+    ):
+        qualification_snapshots[name] = _snapshot(path, name.replace("_", " "))
     if contract.get("schema_version") != "2.0":
         raise SelectiveReviewError("tracking contract must use schema version 2.0")
     if contract.get("validation_errors") != []:
@@ -918,8 +988,6 @@ def _load_source_bundle(
     for value, name, expected in (
         (predictions.get("dataset_version"), "predictions.dataset_version", dataset_version),
         (predictions.get("model_version"), "predictions.model_version", model_version),
-        (policy.get("dataset_version", dataset_version), "policy.dataset_version", dataset_version),
-        (policy.get("model_version", model_version), "policy.model_version", model_version),
         (decisions.get("policy_version"), "decisions.policy_version", policy_version),
         (decisions.get("dataset_version", dataset_version), "decisions.dataset_version", dataset_version),
         (decisions.get("model_version", model_version), "decisions.model_version", model_version),
@@ -931,16 +999,17 @@ def _load_source_bundle(
         raise SelectiveReviewError("dataset contract binding does not match the supplied tracking contract")
     if predictions.get("source_contract_sha256") != contract_snapshot.sha256:
         raise SelectiveReviewError("predictions contract binding does not match the supplied tracking contract")
-    _validate_policy_lineage(
-        policy,
-        decisions,
-        predictions_sha256=predictions_snapshot.sha256,
-        dataset_sha256=dataset_snapshot.sha256,
-        model_sha256=model_snapshot.sha256,
-        training_report_sha256=training_report_snapshot.sha256,
-        model_weights_sha256=weights_snapshot.sha256,
-        contract_sha256=contract_snapshot.sha256,
-    )
+    if not target_application:
+        _validate_policy_lineage(
+            policy,
+            decisions,
+            predictions_sha256=predictions_snapshot.sha256,
+            dataset_sha256=dataset_snapshot.sha256,
+            model_sha256=model_snapshot.sha256,
+            training_report_sha256=training_report_snapshot.sha256,
+            model_weights_sha256=weights_snapshot.sha256,
+            contract_sha256=contract_snapshot.sha256,
+        )
 
     candidates = _unique_rows(
         normalized_contract.get("candidates"),
@@ -1160,6 +1229,20 @@ def _load_source_bundle(
         "resolved_tracking_contract": _artifact_binding(qualification_snapshots["resolved_tracking_contract"]),
         "policy_roles": _artifact_binding(qualification_snapshots["policy_roles"]),
     }
+    if target_application:
+        bindings.update(
+            {
+                "qualification_dataset": _artifact_binding(
+                    qualification_snapshots["qualification_dataset"]
+                ),
+                "qualification_predictions": _artifact_binding(
+                    qualification_snapshots["qualification_predictions"]
+                ),
+                "qualification_decisions": _artifact_binding(
+                    qualification_snapshots["qualification_decisions"]
+                ),
+            }
+        )
     return {
         "dataset_version": dataset_version,
         "bindings": bindings,
@@ -1258,6 +1341,44 @@ def _safe_model_artifact(root: Path, value: Any, *, expected_name: str, label: s
     if path.parent != root.resolve():
         raise SelectiveReviewError(f"{label} path escapes the model package")
     return path
+
+
+def _safe_queue_binding_artifact(root: Path, value: Any, *, label: str) -> Path:
+    raw = _required_text(value, f"{label} path")
+    relative = Path(raw)
+    if relative.is_absolute() or ".." in relative.parts:
+        raise SelectiveReviewError(f"{label} path must be contained and relative")
+    trusted_root = root.resolve()
+    path = (trusted_root / relative).resolve()
+    if not path.is_relative_to(trusted_root):
+        raise SelectiveReviewError(f"{label} path escapes the review queue root")
+    return path
+
+
+def _queue_binding_matches_supplied_input(
+    root: Path,
+    expected: dict[str, Any],
+    supplied: dict[str, Any],
+    *,
+    label: str,
+) -> bool:
+    expected_path_text = _required_text(expected.get("path"), f"queue {label} binding path")
+    supplied_path_text = _required_text(supplied.get("path"), f"supplied {label} binding path")
+    expected_relative = Path(expected_path_text)
+    if expected_relative.is_absolute():
+        expected_path = expected_relative.resolve()
+    else:
+        expected_path = _safe_queue_binding_artifact(
+            root,
+            expected_path_text,
+            label=f"queue {label} binding",
+        )
+    if expected_path != Path(supplied_path_text).resolve():
+        return False
+    return (
+        {key: value for key, value in expected.items() if key != "path"}
+        == {key: value for key, value in supplied.items() if key != "path"}
+    )
 
 
 def _validate_policy_lineage(
@@ -1377,6 +1498,27 @@ def _validate_actions(
         ):
             queue_name = "review_timing" if binding_name == "timing" else binding_name
             descriptor = _required_object(queue_bindings.get(queue_name), f"queue.bindings.{queue_name}")
+            _expect_hash(
+                bindings.get(f"{binding_name}_sha256"),
+                descriptor.get("sha256"),
+                f"{prefix}.bindings.{binding_name}_sha256",
+            )
+        qualification_binding_names = (
+            "qualification_dataset",
+            "qualification_predictions",
+            "qualification_decisions",
+        )
+        present_qualification_bindings = [
+            name for name in qualification_binding_names if name in queue_bindings
+        ]
+        if present_qualification_bindings and len(present_qualification_bindings) != len(
+            qualification_binding_names
+        ):
+            raise SelectiveReviewError("queue qualification bindings must be complete")
+        for binding_name in present_qualification_bindings:
+            descriptor = _required_object(
+                queue_bindings.get(binding_name), f"queue.bindings.{binding_name}"
+            )
             _expect_hash(
                 bindings.get(f"{binding_name}_sha256"),
                 descriptor.get("sha256"),
@@ -1871,6 +2013,9 @@ def build_cli_main(argv: list[str] | None = None) -> int:
     parser.add_argument("--annotation-resolution", required=True, type=Path)
     parser.add_argument("--resolved-contract", required=True, type=Path)
     parser.add_argument("--policy-roles", required=True, type=Path)
+    parser.add_argument("--qualification-dataset-manifest", type=Path)
+    parser.add_argument("--qualification-predictions", type=Path)
+    parser.add_argument("--qualification-decisions", type=Path)
     parser.add_argument("--output-dir", required=True, type=Path)
     parser.add_argument("--fps-override", action="append", default=[])
     parser.add_argument("--window-seconds", type=float, default=DEFAULT_WINDOW_SECONDS)
@@ -1888,6 +2033,9 @@ def build_cli_main(argv: list[str] | None = None) -> int:
             annotation_resolution_path=args.annotation_resolution,
             resolved_contract_path=args.resolved_contract,
             policy_roles_path=args.policy_roles,
+            qualification_dataset_manifest_path=args.qualification_dataset_manifest,
+            qualification_predictions_path=args.qualification_predictions,
+            qualification_decisions_path=args.qualification_decisions,
             fps_overrides=_fps_override_arguments(args.fps_override),
             window_seconds=args.window_seconds,
             max_windows=args.max_windows,
@@ -1927,6 +2075,9 @@ def materialize_cli_main(argv: list[str] | None = None) -> int:
     parser.add_argument("--annotation-resolution", required=True, type=Path)
     parser.add_argument("--resolved-contract", required=True, type=Path)
     parser.add_argument("--policy-roles", required=True, type=Path)
+    parser.add_argument("--qualification-dataset-manifest", type=Path)
+    parser.add_argument("--qualification-predictions", type=Path)
+    parser.add_argument("--qualification-decisions", type=Path)
     parser.add_argument("--output-dir", required=True, type=Path)
     try:
         args = parser.parse_args(argv)
@@ -1943,6 +2094,9 @@ def materialize_cli_main(argv: list[str] | None = None) -> int:
             annotation_resolution_path=args.annotation_resolution,
             resolved_contract_path=args.resolved_contract,
             policy_roles_path=args.policy_roles,
+            qualification_dataset_manifest_path=args.qualification_dataset_manifest,
+            qualification_predictions_path=args.qualification_predictions,
+            qualification_decisions_path=args.qualification_decisions,
         )
     except Exception as exc:
         print(

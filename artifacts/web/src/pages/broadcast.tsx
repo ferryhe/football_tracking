@@ -10,6 +10,7 @@ import {
 import { useLocation, useSearch } from "wouter";
 
 import { BroadcastRenderStep } from "@/components/broadcast/BroadcastRenderStep";
+import { BroadcastReviewEvidenceStep } from "@/components/broadcast/BroadcastReviewEvidenceStep";
 import {
   BroadcastReviewStep,
   type BroadcastReviewDecision,
@@ -18,6 +19,7 @@ import {
   BroadcastSetupStep,
   type BroadcastSetupInput,
 } from "@/components/broadcast/BroadcastSetupStep";
+import { useBroadcastReviewEvidenceController } from "@/components/broadcast/useBroadcastReviewEvidenceController";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -78,6 +80,25 @@ export default function BroadcastPage() {
   const { recovery, parent: parentRun } = controller;
   const recomputeRecoveryMode = controller.review.recomputeRecoveryMode;
   const recoveryAttemptState = controller.review.recoveryAttemptState;
+  const parentRunId = parentRun?.run_id ?? "";
+  const reviewEvidenceEnabled = Boolean(
+    parentRunId &&
+    parentRun?.source === "broadcast_hybrid" &&
+    recovery.state === "needs_review",
+  );
+  const reviewEvidence = useBroadcastReviewEvidenceController({
+    runId: parentRunId,
+    enabled: reviewEvidenceEnabled,
+    messages: {
+      ambiguousBundleRecovery:
+        t.broadcast.reviewEvidence.ambiguousBundleRecovery,
+      insufficientCapacityRecovery:
+        t.broadcast.reviewEvidence.insufficientCapacityRecovery,
+      retryBundleUnavailableRecovery:
+        t.broadcast.reviewEvidence.retryBundleUnavailableRecovery,
+    },
+    formatRecoveryAction: t.broadcast.reviewEvidence.recoveryAction,
+  });
 
   useEffect(() => {
     setReviewDecisions([]);
@@ -118,14 +139,37 @@ export default function BroadcastPage() {
         staleEvidence: t.broadcast.staleEvidence,
       })
     : null;
+  const reviewEvidenceError = reviewEvidence.error
+    ? errorMessage(
+        reviewEvidence.error.cause,
+        reviewEvidence.error.kind === "prepare"
+          ? t.broadcast.reviewEvidence.prepareFailed
+          : reviewEvidence.error.kind === "cancel"
+            ? t.broadcast.reviewEvidence.cancelFailed
+            : t.broadcast.reviewEvidence.loadFailed,
+      )
+    : null;
   const combinedError =
     setupError ??
     actionError ??
+    reviewEvidenceError ??
     (controller.errors.query
       ? errorMessage(controller.errors.query, t.broadcast.loadFailed)
       : null);
   const workflowMessages = controller.workflowMessages;
   const localizedReviewResponse = controller.review.localizedData;
+  const reviewEvidenceQueueMatches = Boolean(
+    reviewEvidence.isReady &&
+    reviewEvidence.readyIdentity?.queueSha256 &&
+    localizedReviewResponse?.queue_sha256 &&
+    reviewEvidence.readyIdentity.queueSha256 ===
+      localizedReviewResponse.queue_sha256,
+  );
+  const reviewEvidenceQueueMismatch = Boolean(
+    reviewEvidence.isReady &&
+    localizedReviewResponse?.status === "ready" &&
+    !reviewEvidenceQueueMatches,
+  );
   const montageResolution = {
     urls: controller.montage.urlsByCandidateId,
     messages: controller.montage.messages,
@@ -151,14 +195,24 @@ export default function BroadcastPage() {
         </div>
         {parentRun && (
           <div className="flex flex-wrap items-center gap-2">
-            <Badge variant="outline">{parentRun.run_id}</Badge>
+            <Badge
+              variant="outline"
+              className="max-w-full whitespace-normal break-all"
+            >
+              {parentRun.run_id}
+            </Badge>
             <Badge>{parentRun.broadcast?.status ?? parentRun.status}</Badge>
             <Button
               type="button"
               variant="outline"
               size="sm"
               disabled={recoveryAttemptState === "pending"}
-              onClick={() => void controller.actions.refresh()}
+              onClick={() => {
+                void Promise.allSettled([
+                  controller.actions.refresh(),
+                  reviewEvidence.refresh(),
+                ]);
+              }}
             >
               <RefreshCw className="mr-1.5 h-4 w-4" />
               {t.broadcast.refresh}
@@ -200,9 +254,11 @@ export default function BroadcastPage() {
           <AlertCircle className="h-4 w-4" />
           <AlertTitle>{t.broadcast.blockingReasons}</AlertTitle>
           <AlertDescription>
-            <ul className="list-disc space-y-1 pl-5">
+            <ul className="min-w-0 max-w-full list-disc space-y-1 pl-5">
               {workflowMessages.map((message) => (
-                <li key={message}>{message}</li>
+                <li key={message} className="min-w-0 [overflow-wrap:anywhere]">
+                  {message}
+                </li>
               ))}
             </ul>
           </AlertDescription>
@@ -282,66 +338,100 @@ export default function BroadcastPage() {
               </AlertDescription>
             </Alert>
           )}
-          {recomputeRecoveryMode === "none" && controller.review.isLoading && (
+          {recomputeRecoveryMode === "none" && reviewEvidence.isLoading && (
             <Card>
               <CardContent className="flex items-center gap-3 py-10">
                 <Loader2 className="h-5 w-5 animate-spin" />
-                {t.broadcast.loading}
+                {t.broadcast.reviewEvidence.loading}
               </CardContent>
             </Card>
           )}
-          {recomputeRecoveryMode === "none" && controller.review.isError && (
-            <Alert>
+          {recomputeRecoveryMode === "none" && !reviewEvidence.isLoading && (
+            <BroadcastReviewEvidenceStep
+              {...reviewEvidence.stepProps}
+              labels={t.broadcast.reviewEvidence}
+            />
+          )}
+          {recomputeRecoveryMode === "none" &&
+            reviewEvidence.isReady &&
+            controller.review.isLoading && (
+              <Card>
+                <CardContent className="flex items-center gap-3 py-10">
+                  <Loader2 className="h-5 w-5 animate-spin" />
+                  {t.broadcast.loading}
+                </CardContent>
+              </Card>
+            )}
+          {recomputeRecoveryMode === "none" &&
+            reviewEvidence.isReady &&
+            controller.review.isError && (
+              <Alert>
+                <AlertCircle className="h-4 w-4" />
+                <AlertTitle>{t.broadcast.reviewUnavailable}</AlertTitle>
+                <AlertDescription>
+                  {t.broadcast.evidenceBlocked}
+                </AlertDescription>
+              </Alert>
+            )}
+          {recomputeRecoveryMode === "none" && reviewEvidenceQueueMismatch && (
+            <Alert variant="destructive">
               <AlertCircle className="h-4 w-4" />
               <AlertTitle>{t.broadcast.reviewUnavailable}</AlertTitle>
-              <AlertDescription>{t.broadcast.evidenceBlocked}</AlertDescription>
+              <AlertDescription>{t.broadcast.staleEvidence}</AlertDescription>
             </Alert>
           )}
-          {recomputeRecoveryMode === "none" && localizedReviewResponse && (
-            <>
-              {montageResolution.messages.length > 0 && (
-                <Alert variant="destructive">
-                  <AlertCircle className="h-4 w-4" />
-                  <AlertTitle>{t.broadcast.reviewUnavailable}</AlertTitle>
-                  <AlertDescription>
-                    {montageResolution.messages.join(" ")}
-                  </AlertDescription>
-                </Alert>
-              )}
-              <div className="max-w-sm space-y-2">
-                <Label htmlFor="broadcast-reviewer-id">
-                  {t.broadcast.reviewerId}
-                </Label>
-                <Input
-                  id="broadcast-reviewer-id"
-                  value={reviewerId}
-                  onChange={(event) => setReviewerId(event.target.value)}
-                  maxLength={200}
-                  disabled={controller.pending.review}
+          {recomputeRecoveryMode === "none" &&
+            reviewEvidenceQueueMatches &&
+            localizedReviewResponse && (
+              <>
+                {montageResolution.messages.length > 0 && (
+                  <Alert variant="destructive">
+                    <AlertCircle className="h-4 w-4" />
+                    <AlertTitle>{t.broadcast.reviewUnavailable}</AlertTitle>
+                    <AlertDescription>
+                      {montageResolution.messages.join(" ")}
+                    </AlertDescription>
+                  </Alert>
+                )}
+                <div className="max-w-sm space-y-2">
+                  <Label htmlFor="broadcast-reviewer-id">
+                    {t.broadcast.reviewerId}
+                  </Label>
+                  <Input
+                    id="broadcast-reviewer-id"
+                    value={reviewerId}
+                    onChange={(event) => setReviewerId(event.target.value)}
+                    maxLength={200}
+                    disabled={controller.pending.review}
+                  />
+                </div>
+                <BroadcastReviewStep
+                  response={localizedReviewResponse}
+                  montageUrlsByCandidateId={montageResolution.urls}
+                  decisions={reviewDecisions}
+                  onDecisionsChange={setReviewDecisions}
+                  onSubmit={(decisions) =>
+                    reviewEvidenceQueueMatches
+                      ? void controller.actions.submitReview(
+                          decisions,
+                          reviewerId,
+                        )
+                      : undefined
+                  }
+                  isSubmitting={controller.pending.review}
+                  disabled={
+                    montageResolution.messages.length > 0 ||
+                    ((localizedReviewResponse.items ?? []).some(
+                      (item) => (item.candidates ?? []).length > 0,
+                    ) &&
+                      !reviewerId.trim())
+                  }
+                  error={actionError}
+                  labels={t.broadcast.review}
+                  noiseSubtypeLabels={t.broadcast.noiseSubtypes}
                 />
-              </div>
-              <BroadcastReviewStep
-                response={localizedReviewResponse}
-                montageUrlsByCandidateId={montageResolution.urls}
-                decisions={reviewDecisions}
-                onDecisionsChange={setReviewDecisions}
-                onSubmit={(decisions) =>
-                  void controller.actions.submitReview(decisions, reviewerId)
-                }
-                isSubmitting={controller.pending.review}
-                disabled={
-                  montageResolution.messages.length > 0 ||
-                  ((localizedReviewResponse.items ?? []).some(
-                    (item) => (item.candidates ?? []).length > 0,
-                  ) &&
-                    !reviewerId.trim())
-                }
-                error={actionError}
-                labels={t.broadcast.review}
-                noiseSubtypeLabels={t.broadcast.noiseSubtypes}
-              />
-            </>
-          )}
+              </>
+            )}
         </div>
       )}
 

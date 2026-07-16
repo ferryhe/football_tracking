@@ -281,8 +281,13 @@ class BroadcastRequestSchemaTests(unittest.TestCase):
             )
 
     def test_review_action_shapes_fail_closed(self) -> None:
-        self.assertEqual([], BroadcastReviewActionsRequest(actions=[]).actions)
+        self.assertEqual([], BroadcastReviewActionsRequest(queue_sha256="a" * 64, actions=[]).actions)
+        with self.assertRaises(ValidationError):
+            BroadcastReviewActionsRequest(actions=[])
+        with self.assertRaises(ValidationError):
+            BroadcastReviewActionsRequest(queue_sha256="A" * 64, actions=[])
         valid = BroadcastReviewActionsRequest(
+            queue_sha256="b" * 64,
             actions=[
                 BroadcastReviewAction(
                     action_id="a1",
@@ -292,7 +297,7 @@ class BroadcastRequestSchemaTests(unittest.TestCase):
                     action="reject_noise",
                     noise_subtype="field_line_or_mark",
                 )
-            ]
+            ],
         )
         self.assertEqual("reject_noise", valid.actions[0].action)
 
@@ -356,6 +361,7 @@ class BroadcastReviewBindingTests(unittest.TestCase):
             }
             _write_json(queue_path, queue)
             request = BroadcastReviewActionsRequest(
+                queue_sha256=_sha256(queue_path),
                 actions=[
                     BroadcastReviewAction(
                         action_id="action-1",
@@ -364,7 +370,7 @@ class BroadcastReviewBindingTests(unittest.TestCase):
                         reviewer_id="operator",
                         action="mark_unknown",
                     )
-                ]
+                ],
             )
 
             envelope = build_review_action_envelope(queue_path, request.model_dump(mode="json")["actions"])
@@ -1305,9 +1311,7 @@ class BroadcastApiServiceTests(unittest.TestCase):
         polygon_candidate = json.loads(json.dumps(request))
         polygon_candidate["calibration_confirmation"]["field_polygon"][0] = [1, 0]
         exclusion_candidate = json.loads(json.dumps(request))
-        exclusion_candidate["calibration_confirmation"]["exclusion_polygons"] = [
-            [[1, 1], [5, 1], [1, 5]]
-        ]
+        exclusion_candidate["calibration_confirmation"]["exclusion_polygons"] = [[[1, 1], [5, 1], [1, 5]]]
 
         for name, candidate in (
             ("polygon", polygon_candidate),
@@ -1340,9 +1344,7 @@ class BroadcastApiServiceTests(unittest.TestCase):
             config["scene_bias"]["enabled"] = False
 
         def extra_ground_zone(config: dict[str, Any]) -> None:
-            config["scene_bias"]["ground_zones"].append(
-                {"name": "unexpected", "points": [[1, 1], [5, 1], [1, 5]]}
-            )
+            config["scene_bias"]["ground_zones"].append({"name": "unexpected", "points": [[1, 1], [5, 1], [1, 5]]})
 
         cases = {
             "filtering-roi": filtering_tamper,
@@ -1972,6 +1974,7 @@ class BroadcastApiServiceTests(unittest.TestCase):
             self.service.submit_broadcast_review_actions(
                 "broadcast-test",
                 {
+                    "queue_sha256": windows["queue_sha256"],
                     "actions": [
                         {
                             "action_id": "action-1",
@@ -1983,7 +1986,7 @@ class BroadcastApiServiceTests(unittest.TestCase):
                             "noise_subtype": None,
                             "keypoints": [{"frame_index": 2, "status": "detected", "x": 10.0, "y": 11.0}],
                         }
-                    ]
+                    ],
                 },
             )
         self.assertFalse((output_dir / "review_decisions.json").exists())
@@ -1998,7 +2001,7 @@ class BroadcastApiServiceTests(unittest.TestCase):
 
         submitted = self.service.submit_broadcast_review_actions(
             "broadcast-test",
-            {"actions": []},
+            {"queue_sha256": empty_windows["queue_sha256"], "actions": []},
         )
         self.assertEqual("review_actions_accepted", submitted["reason"])
         decisions = json.loads((output_dir / "review_decisions.json").read_text(encoding="utf-8"))
