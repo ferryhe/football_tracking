@@ -32,6 +32,7 @@ SELECTIVE_POLICY_NAME = "selective_policy.v1.json"
 SELECTIVE_ACCEPTANCE_REPORT_NAME = "selective_acceptance_report.v1.json"
 SELECTIVE_DECISIONS_NAME = "selective_decisions.v1.json"
 SELECTIVE_APPLICATION_NAME = "selective_application.v1.json"
+TARGET_AUDIT_APPLICATION_NAME = "target_finite_population_application.v1.json"
 SELECTIVE_POLICY_ROLES_NAME = "selective_policy_roles.v1.json"
 NOISE_LABELS = tuple(label for label in CLASSIFICATION_LABELS if label not in {"match_ball", "unknown"})
 POLICY_ROLE_SEED = "football-tracking-selective-policy-role-seed-v1"
@@ -717,6 +718,104 @@ def apply_frozen_selective_policy(
         raise
 
 
+def freeze_selective_policy_for_target_audit(
+    policy_path: Path,
+    predictions_path: Path,
+    dataset_manifest_path: Path,
+    target_contract_path: Path,
+    model_manifest_path: Path,
+    output_dir: Path,
+) -> dict[str, Any]:
+    """Freeze label-independent target decisions without qualifying or consuming them."""
+
+    output_dir = Path(output_dir).resolve()
+    if output_dir.exists():
+        raise SelectivePolicyError(f"output directory already exists: {output_dir}")
+    policy, rows, lineage, snapshots, contract = _frozen_application_inputs(
+        policy_path,
+        predictions_path,
+        dataset_manifest_path,
+        target_contract_path,
+        model_manifest_path,
+        require_global_qualification=False,
+    )
+    decisions, _ = _apply_policy(
+        rows,
+        contract,
+        thresholds=policy["thresholds"],
+        qualified=True,
+        config=_validated_policy_config(policy),
+    )
+    application = _target_audit_application_payload(policy, decisions, lineage)
+    _validate_finite_json(application, "target finite-population application")
+    output_dir.parent.mkdir(parents=True, exist_ok=True)
+    staging = Path(tempfile.mkdtemp(prefix=f".{output_dir.name}.staging-", dir=output_dir.parent))
+    try:
+        _write_json(staging / TARGET_AUDIT_APPLICATION_NAME, application)
+        _verify_snapshots(snapshots)
+        os.replace(staging, output_dir)
+        return application
+    except BaseException:
+        shutil.rmtree(staging, ignore_errors=True)
+        raise
+
+
+def validate_target_audit_application_binding(
+    policy_path: Path,
+    application_path: Path,
+    predictions_path: Path,
+    dataset_manifest_path: Path,
+    target_contract_path: Path,
+    model_manifest_path: Path,
+) -> dict[str, Any]:
+    """Recompute the non-consumable target audit application from frozen evidence."""
+
+    application, application_snapshot = _load_snapshot_json(
+        application_path,
+        "target finite-population application",
+    )
+    policy, rows, lineage, snapshots, contract = _frozen_application_inputs(
+        policy_path,
+        predictions_path,
+        dataset_manifest_path,
+        target_contract_path,
+        model_manifest_path,
+        require_global_qualification=False,
+    )
+    decisions, _ = _apply_policy(
+        rows,
+        contract,
+        thresholds=policy["thresholds"],
+        qualified=True,
+        config=_validated_policy_config(policy),
+    )
+    expected = _target_audit_application_payload(
+        policy,
+        decisions,
+        lineage,
+        generated_at=application.get("generated_at"),
+    )
+    if application != expected:
+        raise SelectivePolicyError("target finite-population application does not match the frozen policy and evidence")
+    _verify_snapshots([*snapshots, application_snapshot])
+    return {
+        "policy": policy,
+        "application": application,
+        "candidate_ids": sorted(row["candidate_id"] for row in decisions),
+        "candidate_population_sha256": _canonical_sha256(
+            [
+                {
+                    "candidate_id": row["candidate_id"],
+                    "candidate_fingerprint": row["candidate_fingerprint"],
+                }
+                for row in decisions
+            ]
+        ),
+        "lineage": lineage,
+        "target_binding_evidence": application["target_binding_evidence"],
+    }
+
+
 def validate_selective_policy_application_binding(
     policy_path: Path,
     application_path: Path,
@@ -751,7 +850,10 @@ def validate_selective_policy_application_binding(
         "application": application,
         "candidate_ids": sorted(row["candidate_id"] for row in expected_rows),
         "candidate_population_sha256": _canonical_sha256(
-            [{"candidate_id": row["candidate_id"], "candidate_fingerprint": row["candidate_fingerprint"]} for row in expected_rows]
+            [
+                {"candidate_id": row["candidate_id"], "candidate_fingerprint": row["candidate_fingerprint"]}
+                for row in expected_rows
+            ]
         ),
         "lineage": lineage,
     }
@@ -763,6 +865,8 @@ def _frozen_application_inputs(
     dataset_manifest_path: Path,
     target_contract_path: Path,
     model_manifest_path: Path,
+    *,
+    require_global_qualification: bool = True,
 ) -> tuple[dict[str, Any], list[dict[str, Any]], dict[str, Any], list[_Snapshot], dict[str, Any]]:
     from football_tracking.candidate_classifier import (
         ClassifierError,
@@ -772,7 +876,7 @@ def _frozen_application_inputs(
 
     policy, policy_snapshot = _load_snapshot_json(policy_path, "selective policy")
     _validate_policy_version_payload(policy)
-    if policy.get("status") != "qualified":
+    if require_global_qualification and policy.get("status") != "qualified":
         raise SelectivePolicyError("frozen policy must be qualified before target application")
     predictions, predictions_snapshot = _load_snapshot_json(predictions_path, "target candidate predictions")
     dataset, dataset_snapshot = _load_snapshot_json(dataset_manifest_path, "target candidate dataset")
@@ -889,12 +993,35 @@ def _frozen_application_inputs(
         qualified_descriptor = qualification_lineage.get(name)
         if not isinstance(qualified_descriptor, dict):
             raise SelectivePolicyError(f"qualified policy lineage {name} is invalid")
-        if _required_sha256(
-            qualified_descriptor.get("sha256"), f"qualified policy lineage {name} sha256"
-        ) != snapshot.sha256:
-            raise SelectivePolicyError(
-                f"target {name.replace('_', ' ')} differs from the qualified frozen model"
-            )
+        if (
+            _required_sha256(qualified_descriptor.get("sha256"), f"qualified policy lineage {name} sha256")
+            != snapshot.sha256
+        ):
+            raise SelectivePolicyError(f"target {name.replace('_', ' ')} differs from the qualified frozen model")
+    contract_source = contract.get("source")
+    if isinstance(contract_source, dict) and contract_source.get("video_sha256") is not None:
+        source_sha256 = _required_sha256(
+            contract_source.get("video_sha256"),
+            "target contract source video_sha256",
+        )
+    else:
+        source_identities = sorted(
+            (
+                {
+                    "variant_id": _required_text(
+                        source.get("variant_id"),
+                        "target dataset source variant_id",
+                    ),
+                    "sha256": _required_sha256(
+                        source.get("sha256"),
+                        "target dataset source sha256",
+                    ),
+                }
+                for source in sources
+            ),
+            key=lambda row: row["variant_id"],
+        )
+        source_sha256 = _canonical_sha256(source_identities)
     lineage = {
         "policy": {"sha256": policy_snapshot.sha256},
         "predictions": {"sha256": predictions_snapshot.sha256},
@@ -906,6 +1033,7 @@ def _frozen_application_inputs(
         "dataset_version": dataset["dataset_version"],
         "model_version": model_manifest["model_version"],
         "policy_version": policy["policy_version"],
+        "source_sha256": source_sha256,
     }
     return (
         policy,
@@ -954,6 +1082,62 @@ def _frozen_application_payload(
         "decisions": decisions,
     }
     return {**content, "generated_at": generated_at, "application_content_sha256": _canonical_sha256(content)}
+
+
+def _target_audit_application_payload(
+    policy: dict[str, Any],
+    decisions: list[dict[str, Any]],
+    lineage: dict[str, Any],
+    *,
+    generated_at: Any = None,
+) -> dict[str, Any]:
+    if generated_at is None:
+        generated_at = _utc_now_iso()
+    content = {
+        "schema_version": "1.0",
+        "artifact_type": "target_finite_population_application",
+        "qualification_scope": "target_finite_population",
+        "application_algorithm": "target-finite-population-frozen-decisions-v1",
+        "status": "frozen_before_labels",
+        "training_eligible": False,
+        "reusable": False,
+        "promotion_scope": "exact_target_only",
+        "policy_status_at_freeze": policy["status"],
+        "policy_version": policy["policy_version"],
+        "dataset_version": lineage["dataset_version"],
+        "model_version": lineage["model_version"],
+        "lineage": lineage,
+        "target_binding_evidence": {
+            "source_sha256": lineage["source_sha256"],
+            "root_contract_sha256": lineage["target_contract"]["sha256"],
+            "candidate_population_sha256": _canonical_sha256(
+                [
+                    {
+                        "candidate_id": row["candidate_id"],
+                        "candidate_fingerprint": row["candidate_fingerprint"],
+                    }
+                    for row in decisions
+                ]
+            ),
+            "model_sha256": lineage["model_manifest"]["sha256"],
+            "model_version": lineage["model_version"],
+            "policy_sha256": lineage["policy"]["sha256"],
+            "policy_version": lineage["policy_version"],
+            "thresholds_sha256": _canonical_sha256(policy["thresholds"]),
+        },
+        "summary": {
+            "candidate_count": len(decisions),
+            "accept_count": sum(row["decision"] == "accept" for row in decisions),
+            "reject_count": sum(row["decision"] == "reject" for row in decisions),
+            "abstain_count": sum(row["decision"] == "abstain" for row in decisions),
+        },
+        "decisions": decisions,
+    }
+    return {
+        **content,
+        "generated_at": generated_at,
+        "application_content_sha256": _canonical_sha256(content),
+    }
 
 
 def _normalized_config(config: SelectivePolicyConfig) -> dict[str, Any]:

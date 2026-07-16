@@ -14,6 +14,10 @@ from football_tracking.broadcast_hybrid_orchestration import (
     validate_final_broadcast_artifacts,
 )
 from football_tracking.candidate_annotations import sample_evidence_sha256
+from football_tracking.target_finite_population import (
+    TargetFinitePopulationError,
+    validate_target_prelabel_commitment,
+)
 
 PUBLIC_ARTIFACT_NAMES = (
     "ball_candidates.jsonl",
@@ -48,6 +52,40 @@ _REVIEW_QUEUE_BINDING_NAMES = frozenset(
         "annotation_resolution",
         "resolved_tracking_contract",
         "policy_roles",
+    }
+)
+_TARGET_AUDIT_REVIEW_QUEUE_BINDING_NAMES = frozenset(
+    {
+        "target_audit_plan",
+        "target_audit_labels",
+        "target_qualification",
+        "target_frozen_application",
+        "target_prelabel_commitment",
+    }
+)
+_TARGET_QUALIFICATION_REVIEW_QUEUE_BINDING_NAMES = frozenset(
+    {
+        "qualification_dataset",
+        "qualification_predictions",
+        "qualification_decisions",
+    }
+)
+_TARGET_REVIEW_QUEUE_BINDING_NAMES = (
+    _TARGET_AUDIT_REVIEW_QUEUE_BINDING_NAMES
+    | _TARGET_QUALIFICATION_REVIEW_QUEUE_BINDING_NAMES
+)
+_TARGET_IDENTITY_BINDING_NAMES = frozenset(
+    {
+        "target_run_id",
+        "source_sha256",
+        "root_contract_sha256",
+        "candidate_population_sha256",
+        "model_sha256",
+        "model_version",
+        "confirmed_config_sha256",
+        "policy_sha256",
+        "policy_version",
+        "thresholds_sha256",
     }
 )
 _WINDOWS_REPARSE_ATTRIBUTE = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
@@ -98,8 +136,15 @@ def build_review_action_envelope(
         root = _trusted_directory(trusted_root, "review action root")
         queue_path = _contained_nonlink_file(root, Path(queue_path), "selective review queue")
     queue, queue_sha256 = load_bound_json(queue_path, "selective review queue")
-    if queue_path.name != _QUEUE_NAME or queue.get("artifact_type") != "selective_review_queue":
+    target_finite_queue = queue.get("artifact_type") == "target_finite_population_review_queue"
+    if queue_path.name != _QUEUE_NAME or (
+        queue.get("artifact_type") != "selective_review_queue" and not target_finite_queue
+    ):
         raise BroadcastApiError("review actions require a selective_review_queue.v1.json artifact")
+    if target_finite_queue and (
+        queue.get("schema_version") != "1.0" or queue.get("qualification_scope") != "target_finite_population"
+    ):
+        raise BroadcastApiError("target finite-population review queue envelope is invalid")
     queue_bindings = _required_mapping(queue.get("bindings"), "review queue bindings")
     binding_fields = {
         "timing_sha256": "review_timing",
@@ -115,21 +160,50 @@ def build_review_action_envelope(
         "resolved_tracking_contract_sha256": "resolved_tracking_contract",
         "policy_roles_sha256": "policy_roles",
     }
-    optional_binding_fields = {
+    qualification_binding_fields = {
         "qualification_dataset_sha256": "qualification_dataset",
         "qualification_predictions_sha256": "qualification_predictions",
         "qualification_decisions_sha256": "qualification_decisions",
     }
-    present_optional = [
-        output_name
-        for output_name, source_name in optional_binding_fields.items()
+    present_qualification = {
+        output_name: source_name
+        for output_name, source_name in qualification_binding_fields.items()
         if source_name in queue_bindings
-    ]
-    if present_optional and len(present_optional) != len(optional_binding_fields):
-        raise BroadcastApiError("review queue qualification bindings must be complete")
-    binding_fields.update(
-        {output_name: optional_binding_fields[output_name] for output_name in present_optional}
-    )
+    }
+    if target_finite_queue:
+        missing_qualification = set(qualification_binding_fields.values()) - set(
+            queue_bindings
+        )
+        if missing_qualification:
+            raise BroadcastApiError(
+                "target review queue qualification bindings must be complete: "
+                f"{sorted(missing_qualification)}"
+            )
+        binding_fields.update(qualification_binding_fields)
+    else:
+        if present_qualification and len(present_qualification) != len(
+            qualification_binding_fields
+        ):
+            raise BroadcastApiError("review queue qualification bindings must be complete")
+        binding_fields.update(present_qualification)
+
+    target_binding_fields = {
+        "target_audit_plan_sha256": "target_audit_plan",
+        "target_audit_labels_sha256": "target_audit_labels",
+        "target_qualification_sha256": "target_qualification",
+        "target_frozen_application_sha256": "target_frozen_application",
+        "target_prelabel_commitment_sha256": "target_prelabel_commitment",
+    }
+    if target_finite_queue:
+        missing_target_bindings = set(target_binding_fields.values()) - set(queue_bindings)
+        if missing_target_bindings:
+            raise BroadcastApiError(
+                "target review queue target audit bindings must be complete: "
+                f"{sorted(missing_target_bindings)}"
+            )
+        binding_fields.update(target_binding_fields)
+    elif set(target_binding_fields.values()) & set(queue_bindings):
+        raise BroadcastApiError("legacy review queue may not carry target finite-population bindings")
     shared_bindings = {"queue_sha256": queue_sha256}
     for output_name, source_name in binding_fields.items():
         binding = _required_mapping(queue_bindings.get(source_name), f"review queue binding {source_name}")
@@ -221,12 +295,28 @@ def validate_review_queue_bindings(
             except ValueError as exc:
                 raise BroadcastApiError("review queue binding base must remain inside the trusted review root") from exc
     queue, queue_sha256 = load_bound_json(queue_path, "selective review queue")
-    if queue_path.name != _QUEUE_NAME or queue.get("artifact_type") != "selective_review_queue":
+    target_finite_queue = queue.get("artifact_type") == "target_finite_population_review_queue"
+    if queue_path.name != _QUEUE_NAME or (
+        queue.get("artifact_type") != "selective_review_queue" and not target_finite_queue
+    ):
         raise BroadcastApiError("review windows require a selective_review_queue.v1.json artifact")
+    if target_finite_queue and (
+        queue.get("schema_version") != "1.0" or queue.get("qualification_scope") != "target_finite_population"
+    ):
+        raise BroadcastApiError("target finite-population review queue envelope is invalid")
     bindings = _required_mapping(queue.get("bindings"), "review queue bindings")
-    required = _REVIEW_QUEUE_BINDING_NAMES
+    required = (
+        _REVIEW_QUEUE_BINDING_NAMES | _TARGET_REVIEW_QUEUE_BINDING_NAMES
+        if target_finite_queue
+        else _REVIEW_QUEUE_BINDING_NAMES
+    )
+    if not target_finite_queue and _TARGET_AUDIT_REVIEW_QUEUE_BINDING_NAMES & set(
+        bindings
+    ):
+        raise BroadcastApiError("legacy review queue may not carry target finite-population bindings")
     if not required.issubset(bindings):
         raise BroadcastApiError(f"review queue bindings are incomplete: {sorted(required - set(bindings))}")
+    validated_paths: dict[str, Path] = {}
     for name in sorted(required):
         binding = _required_mapping(bindings[name], f"review queue binding {name}")
         raw_path = Path(_required_text(binding.get("path"), f"review queue binding {name} path"))
@@ -239,6 +329,11 @@ def validate_review_queue_bindings(
             path = _contained_nonlink_file(root, path, f"bound review evidence {name}")
         if sha256_file(path) != _required_sha256(binding.get("sha256"), f"review queue binding {name} sha256"):
             raise BroadcastApiError(f"bound review evidence changed: {name}")
+        validated_paths[name] = path
+    if target_finite_queue:
+        _validate_target_review_queue_chain(queue, validated_paths)
+    elif "target_bindings" in queue:
+        raise BroadcastApiError("legacy review queue may not carry exact target bindings")
     _validate_bound_dataset_sample_artifacts(
         queue_path,
         bindings["dataset"],
@@ -248,6 +343,96 @@ def validate_review_queue_bindings(
     if sha256_file(queue_path) != queue_sha256:
         raise BroadcastApiError("selective review queue changed during validation")
     return queue, queue_sha256
+
+
+def _validate_target_review_queue_chain(
+    queue: dict[str, Any],
+    artifact_paths: dict[str, Path],
+) -> None:
+    target_bindings = _required_mapping(
+        queue.get("target_bindings"),
+        "review queue exact target bindings",
+    )
+    if set(target_bindings) != _TARGET_IDENTITY_BINDING_NAMES:
+        raise BroadcastApiError("review queue exact target bindings are incomplete or contain extras")
+    for field in _TARGET_IDENTITY_BINDING_NAMES:
+        if field.endswith("_sha256"):
+            _required_sha256(target_bindings.get(field), f"target_bindings.{field}")
+        else:
+            _required_text(target_bindings.get(field), f"target_bindings.{field}")
+
+    plan, _ = load_bound_json(
+        artifact_paths["target_audit_plan"],
+        "target audit plan",
+    )
+    qualification, _ = load_bound_json(
+        artifact_paths["target_qualification"],
+        "target qualification",
+    )
+    application, _ = load_bound_json(
+        artifact_paths["decisions"],
+        "target qualified application",
+    )
+    frozen_application, _ = load_bound_json(
+        artifact_paths["target_frozen_application"],
+        "target frozen application",
+    )
+    labels, _ = load_bound_json(
+        artifact_paths["target_audit_labels"],
+        "target audit labels",
+    )
+    try:
+        validate_target_prelabel_commitment(
+            plan,
+            artifact_paths["target_prelabel_commitment"],
+        )
+    except (OSError, ValueError, TargetFinitePopulationError) as exc:
+        raise BroadcastApiError(f"review queue target pre-label commitment is invalid: {exc}") from exc
+    external_commitment = _required_mapping(
+        plan.get("external_commitment"),
+        "target audit plan external commitment",
+    )
+    external_commitment_sha256 = external_commitment.get("record_sha256")
+    if (
+        plan.get("artifact_type") != "target_finite_population_audit_plan"
+        or plan.get("bindings") != target_bindings
+        or qualification.get("artifact_type") != "target_finite_population_qualification"
+        or qualification.get("bindings") != target_bindings
+        or qualification.get("plan_sha256") != plan.get("plan_sha256")
+        or qualification.get("external_commitment_sha256") != external_commitment_sha256
+        or application.get("artifact_type") != "target_finite_population_qualified_application"
+        or application.get("bindings") != target_bindings
+        or application.get("plan_sha256") != plan.get("plan_sha256")
+        or application.get("external_commitment_sha256") != external_commitment_sha256
+        or application.get("qualification_sha256") != qualification.get("qualification_sha256")
+        or labels.get("artifact_type") != "target_finite_population_audit_labels"
+        or labels.get("plan_sha256") != plan.get("plan_sha256")
+        or labels.get("external_commitment_sha256") != external_commitment_sha256
+        or labels.get("plan_commitment_sha256") != plan.get("plan_commitment_sha256")
+        or labels.get("sampling_design_sha256") != plan.get("sampling_design_sha256")
+        or labels.get("sample_sha256") != plan.get("sample_sha256")
+    ):
+        raise BroadcastApiError("review queue target artifacts do not share one exact target identity")
+    expected_evidence = {
+        name: target_bindings[name]
+        for name in (
+            "source_sha256",
+            "root_contract_sha256",
+            "candidate_population_sha256",
+            "model_sha256",
+            "model_version",
+            "policy_sha256",
+            "policy_version",
+            "thresholds_sha256",
+        )
+    }
+    if (
+        frozen_application.get("artifact_type") != "target_finite_population_application"
+        or frozen_application.get("target_binding_evidence") != expected_evidence
+        or plan.get("frozen_application_content_sha256")
+        != frozen_application.get("application_content_sha256")
+    ):
+        raise BroadcastApiError("review queue frozen application target identity is inconsistent")
 
 
 def validate_review_queue_activation(output_dir: Path, queue_path: Path) -> tuple[dict[str, Any], str]:
@@ -316,9 +501,8 @@ def validate_review_queue_activation(output_dir: Path, queue_path: Path) -> tupl
     ):
         raise BroadcastApiError("review evidence bundle manifest changed after activation")
     bundle_manifest, _ = load_bound_json(bundle_manifest_path, "review evidence bundle manifest")
-    if (
-        bundle_manifest.get("bundle_id") != bundle_id
-        or bundle_manifest.get("target") != activation_manifest.get("target")
+    if bundle_manifest.get("bundle_id") != bundle_id or bundle_manifest.get("target") != activation_manifest.get(
+        "target"
     ):
         raise BroadcastApiError("review evidence bundle target does not match activation")
     request_identity = _required_mapping(
@@ -447,8 +631,8 @@ def collect_review_evidence_paths(
 
     root = _trusted_directory(trusted_root, "review evidence root")
     queue_path = _contained_nonlink_file(root, Path(queue_path), "selective review queue")
-    resolved_binding_base = queue_path.parent if binding_base is None else _trusted_directory(
-        binding_base, "review binding base"
+    resolved_binding_base = (
+        queue_path.parent if binding_base is None else _trusted_directory(binding_base, "review binding base")
     )
     try:
         resolved_binding_base.relative_to(root)
