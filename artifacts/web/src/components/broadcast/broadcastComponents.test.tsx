@@ -2,15 +2,22 @@ import assert from "node:assert/strict";
 
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import React from "react";
-import { act, create, type ReactTestRenderer } from "react-test-renderer";
+import {
+  act,
+  create,
+  type ReactTestInstance,
+  type ReactTestRenderer,
+} from "react-test-renderer";
 
 import { FieldPreviewCanvas } from "@/components/FieldPreviewCanvas";
+import { BroadcastRenderStep } from "@/components/broadcast/BroadcastRenderStep";
 import { BroadcastReviewStep } from "@/components/broadcast/BroadcastReviewStep";
 import { LanguageProvider } from "@/contexts/LanguageContext";
 import type {
   BroadcastReviewCandidate,
   BroadcastReviewWindowsResponse,
   FieldPreviewResponse,
+  RunRecord,
 } from "@workspace/api-client-react";
 
 (
@@ -239,6 +246,73 @@ await test("zero-candidate queue can continue with an exact empty decision list"
   assert.equal(button.props.disabled, false);
   await act(async () => button.props.onClick());
   assert.deepEqual(submitted, []);
+  await act(async () => renderer.unmount());
+});
+
+function renderedText(node: ReactTestInstance): string {
+  return node.children
+    .map((child) => (typeof child === "string" ? child : renderedText(child)))
+    .join("");
+}
+
+await test("rendering helper text uses the accessible foreground token", async () => {
+  const trajectoryGenerationId = `trajectory-${"a".repeat(24)}`;
+  const parent: RunRecord = {
+    run_id: "broadcast-parent",
+    source: "broadcast_hybrid",
+    status: "completed",
+    created_at: "2026-07-15T18:00:00Z",
+    output_dir: "outputs/broadcast-parent",
+    broadcast: {
+      status: "trajectory_ready",
+      trajectory_generation_id: trajectoryGenerationId,
+    },
+  };
+  const operation: RunRecord = {
+    run_id: "render-child",
+    source: "broadcast_hybrid_render",
+    status: "running",
+    created_at: "2026-07-15T18:01:00Z",
+    output_dir: "outputs/render-child",
+    parent_run_id: parent.run_id,
+    progress: { stage: "render", percent: 35 },
+    broadcast: {
+      operation: "render",
+      operation_status: "running",
+      parent_run_id: parent.run_id,
+    },
+  };
+  let renderer!: ReactTestRenderer;
+  await act(async () => {
+    renderer = create(
+      <BroadcastRenderStep
+        run={parent}
+        operationRun={operation}
+        trajectoryGenerationId={trajectoryGenerationId}
+        onRender={() => undefined}
+        isRendering
+      />,
+    );
+  });
+
+  for (const text of [
+    "Render the reviewed trajectory, inspect the final video, and download its evidence.",
+    "Ready",
+    "running",
+    "Waiting",
+    "35.0%",
+    "Allowed range: 320–7680 × 180–4320",
+  ]) {
+    const matching = renderer.root.findAll(
+      (node) =>
+        typeof node.props.className === "string" && renderedText(node) === text,
+    );
+    assert.ok(matching.length > 0, `missing rendered text: ${text}`);
+    for (const node of matching) {
+      assert.match(node.props.className, /\btext-foreground\b/);
+      assert.doesNotMatch(node.props.className, /\btext-muted-foreground\b/);
+    }
+  }
   await act(async () => renderer.unmount());
 });
 

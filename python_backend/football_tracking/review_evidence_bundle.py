@@ -1355,6 +1355,13 @@ def _stage_bundle_root_queue(source: Path, staging: Path, manifest: dict[str, An
     else:
         _write_json(root_queue, queue, exclusive=True)
         staged_source_queue.unlink()
+        empty_parent = staged_source_queue.parent
+        while empty_parent != staging:
+            try:
+                empty_parent.rmdir()
+            except OSError:
+                break
+            empty_parent = empty_parent.parent
     try:
         validate_review_queue_bindings(root_queue, trusted_root=staging)
         collect_review_evidence_paths(root_queue, trusted_root=staging)
@@ -1511,13 +1518,14 @@ def _validate_queue_coverage(queue: Mapping[str, Any], *, max_windows: int) -> N
 def _build_inventory(root: Path) -> list[dict[str, Any]]:
     rows = []
     total_size = 0
-    for path in sorted(root.rglob("*")):
-        relative = path.relative_to(root).as_posix()
-        _require_safe_relative_path(relative, "inventory path")
-        if _is_link_or_reparse(path):
-            raise ReviewEvidenceBundleError("unsafe_bundle_path", f"inventory contains a link: {relative}")
-        if path.is_dir():
-            continue
+    files, directories = _collect_bundle_entries(root)
+    expected_directories = _inventory_parent_directories(files)
+    if directories != expected_directories:
+        raise ReviewEvidenceBundleError(
+            "invalid_bundle_inventory",
+            "bundle contains a directory that is not required by an inventoried file",
+        )
+    for relative, path in sorted(files.items()):
         size = path.stat().st_size
         total_size += size
         if len(rows) + 1 > MAX_BUNDLE_FILES or size > MAX_SINGLE_FILE_BYTES or total_size > MAX_BUNDLE_BYTES:
@@ -1548,17 +1556,71 @@ def _validate_inventory(root: Path, raw_inventory: Any) -> dict[str, dict[str, A
         if path.stat().st_size != expected_size or sha256_file(path) != expected_sha256:
             raise ReviewEvidenceBundleError("bundle_inventory_mismatch", f"bundle inventory changed: {key}")
         inventory[key] = {"path": path, "sha256": expected_sha256, "size_bytes": expected_size}
-    actual = {
-        path.relative_to(root).as_posix()
-        for path in root.rglob("*")
-        if path.is_file() and path.name != BUNDLE_MANIFEST_NAME
-    }
+    actual_files, actual_directories = _collect_bundle_entries(root)
+    actual = set(actual_files) - {BUNDLE_MANIFEST_NAME}
     if actual != set(inventory):
         raise ReviewEvidenceBundleError(
             "invalid_bundle_inventory",
             f"bundle inventory is not exhaustive; missing={sorted(actual - set(inventory))}, extra={sorted(set(inventory) - actual)}",
         )
+    expected_directories = _inventory_parent_directories(inventory)
+    if actual_directories != expected_directories:
+        raise ReviewEvidenceBundleError(
+            "invalid_bundle_inventory",
+            "bundle inventory is not exhaustive for directories; "
+            f"undeclared={sorted(actual_directories - expected_directories)}, "
+            f"missing={sorted(expected_directories - actual_directories)}",
+        )
     return inventory
+
+
+def _collect_bundle_entries(root: Path) -> tuple[dict[str, Path], set[str]]:
+    files: dict[str, Path] = {}
+    directories: set[str] = set()
+    pending = [root]
+    while pending:
+        directory = pending.pop()
+        try:
+            with os.scandir(directory) as iterator:
+                entries = sorted(iterator, key=lambda entry: entry.name)
+        except OSError as exc:
+            raise ReviewEvidenceBundleError(
+                "unsafe_bundle_path", f"could not inspect bundle directory: {directory}"
+            ) from exc
+        for entry in entries:
+            path = Path(entry.path)
+            relative = path.relative_to(root).as_posix()
+            _require_safe_relative_path(relative, "inventory path")
+            try:
+                info = entry.stat(follow_symlinks=False)
+            except OSError as exc:
+                raise ReviewEvidenceBundleError(
+                    "unsafe_bundle_path", f"could not inspect bundle entry: {relative}"
+                ) from exc
+            if _stat_is_link_or_reparse(info):
+                raise ReviewEvidenceBundleError(
+                    "unsafe_bundle_path", f"bundle contains a link or reparse point: {relative}"
+                )
+            if stat.S_ISDIR(info.st_mode):
+                directories.add(relative)
+                pending.append(path)
+            elif stat.S_ISREG(info.st_mode):
+                files[relative] = path
+            else:
+                raise ReviewEvidenceBundleError(
+                    "unsafe_bundle_path", f"bundle contains a non-regular entry: {relative}"
+                )
+    return files, directories
+
+
+def _inventory_parent_directories(paths: Mapping[str, Any]) -> set[str]:
+    directories: set[str] = set()
+    for relative in paths:
+        parent = PurePosixPath(relative).parent
+        while parent != PurePosixPath("."):
+            directories.add(parent.as_posix())
+            parent = parent.parent
+    return directories
 
 
 def _require_inventory_path(inventory: Mapping[str, Mapping[str, Any]], relative: PurePosixPath, label: str) -> Path:
@@ -2758,6 +2820,10 @@ def _is_link_or_reparse(path: Path) -> bool:
         info = path.lstat()
     except OSError:
         return False
+    return _stat_is_link_or_reparse(info)
+
+
+def _stat_is_link_or_reparse(info: os.stat_result) -> bool:
     return stat.S_ISLNK(info.st_mode) or bool(getattr(info, "st_file_attributes", 0) & 0x400)
 
 

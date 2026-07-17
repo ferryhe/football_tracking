@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from football_tracking.ai_contracts import (
     AIApprovedActionName,
@@ -612,6 +612,7 @@ class BroadcastRunState(BaseModel):
         Literal[
             "queued",
             "running",
+            "reconciling",
             "committing",
             "copying",
             "validating",
@@ -703,8 +704,11 @@ class BroadcastReviewAction(BaseModel):
 
 
 class BroadcastReviewActionsRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     # Empty actions are valid only for an evidence-bound queue with zero
     # candidates. The service revalidates that exact queue before publishing.
+    queue_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     actions: list[BroadcastReviewAction]
 
     @model_validator(mode="after")
@@ -716,6 +720,48 @@ class BroadcastReviewActionsRequest(BaseModel):
         if len(candidates) != len(set(candidates)):
             raise ValueError("each review candidate may be submitted only once")
         return self
+
+
+class BroadcastTerminalTailReviewEvidence(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    source_video_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    tracking_contract_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    action_signal_report_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    temporal_chunks_report_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    reported_frame_count: int = Field(ge=1)
+    verified_frame_count: int = Field(ge=1)
+    gap_frames: int = Field(ge=1)
+    gap_seconds: float = Field(gt=0.0)
+    evidence_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+class BroadcastTerminalTailReviewState(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["not_required", "required", "accepted", "invalid"]
+    reason: str | None = None
+    evidence: BroadcastTerminalTailReviewEvidence | None = None
+    decision: Literal["accept_terminal_shortfall"] | None = None
+    reviewer_id: str | None = None
+    reviewed_at: str | None = None
+    acknowledgement_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+
+
+class BroadcastTerminalTailReviewRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    decision: Literal["accept_terminal_shortfall"]
+    reviewer_id: str = Field(min_length=1, max_length=200)
+    evidence_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+    @field_validator("reviewer_id")
+    @classmethod
+    def validate_reviewer_id(cls, value: str) -> str:
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("reviewer_id must not be blank")
+        return stripped
 
 
 class BroadcastTrajectoryRecomputeRequest(BaseModel):
@@ -732,6 +778,7 @@ class BroadcastOperationDetails(BaseModel):
     model_config = ConfigDict(extra="allow")
 
     review_decisions_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    terminal_tail_review_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     message: str | None = None
 
 
@@ -756,10 +803,33 @@ class BroadcastReviewEvidenceImportRequest(BaseModel):
 class BroadcastConfigLineageReconfirmationRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
+    target_run_id: str = Field(min_length=1)
+    confirmed_config_name: str = Field(min_length=1)
+    confirmed_text_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     expected_observed_raw_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     workflow_bindings: dict[str, Any]
     operator_id: str = Field(min_length=1, max_length=200)
     reviewer_id: str = Field(min_length=1, max_length=200)
+
+    @field_validator("target_run_id", "confirmed_config_name")
+    @classmethod
+    def validate_authority_identity(cls, value: str) -> str:
+        if value != value.strip():
+            raise ValueError("authority identity must be trimmed text")
+        return value
+
+    @field_validator("operator_id", "reviewer_id")
+    @classmethod
+    def validate_identity(cls, value: str) -> str:
+        if not value.strip() or value != value.strip():
+            raise ValueError("identity must be non-empty trimmed text")
+        return value
+
+    @model_validator(mode="after")
+    def validate_independent_reviewer(self) -> BroadcastConfigLineageReconfirmationRequest:
+        if self.operator_id == self.reviewer_id:
+            raise ValueError("operator and independent reviewer must differ")
+        return self
 
 
 class BroadcastConfigLineageReconfirmationResponse(BaseModel):
@@ -774,6 +844,16 @@ class BroadcastConfigLineageReconfirmationResponse(BaseModel):
     canonical_snapshot_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     lineage_generation_id: str = Field(pattern=r"^lineage-[0-9a-f]{24}$")
     historical_raw_snapshot_observed: Literal[False]
+
+
+class BroadcastConfigLineageReconfirmationChallenge(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    target_run_id: str = Field(min_length=1)
+    confirmed_config_name: str = Field(min_length=1)
+    confirmed_text_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    expected_observed_raw_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    workflow_bindings: dict[str, Any]
 
 
 ConfigLineageBlockerCode = Literal[
@@ -873,6 +953,7 @@ class BroadcastReviewEvidenceStateResponse(BaseModel):
     capacity: BroadcastReviewEvidenceCapacity | None = None
     blocking_reasons: list[str] = Field(default_factory=list)
     message: str | None = None
+    config_lineage_reconfirmation: BroadcastConfigLineageReconfirmationChallenge | None = None
 
 
 class BroadcastReviewEvidenceArtifact(BaseModel):
@@ -941,6 +1022,9 @@ class BroadcastReviewWindowsResponse(BaseModel):
     queue_sha256: str | None = None
     review_item_count: int = 0
     items: list[BroadcastReviewWindow] = Field(default_factory=list)
+    terminal_tail_review: BroadcastTerminalTailReviewState = Field(
+        default_factory=lambda: BroadcastTerminalTailReviewState(status="not_required")
+    )
 
 
 class CreateRunRequest(BaseModel):

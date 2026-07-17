@@ -3,7 +3,7 @@ from __future__ import annotations
 import mimetypes
 import os
 import weakref
-from typing import Any
+from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import FileResponse, JSONResponse
@@ -20,9 +20,11 @@ from football_tracking.api.schemas import (
     EventCandidateReport,
     PlayerTracksReport,
 )
-from football_tracking.api.service import ApiService
+from football_tracking.api.service import ApiService, ArtifactStatusGenerationConflict
 
 router = APIRouter()
+
+_STATUS_GENERATION_PATTERN = r"^[0-9a-f]{64}$"
 
 
 class _LeasedFileResponse(FileResponse):
@@ -132,19 +134,47 @@ class _LeasedFileResponse(FileResponse):
         )
 
 
-@router.get("/runs/{run_id}/artifacts", response_model=list[ArtifactSummary])
-def list_artifacts(run_id: str, service: ApiService = Depends(get_service)) -> list[ArtifactSummary]:
+@router.get(
+    "/runs/{run_id}/artifacts",
+    response_model=list[ArtifactSummary],
+    responses={409: {"model": ApiErrorResponse, "description": "Ready product generation conflict"}},
+)
+def list_artifacts(
+    run_id: str,
+    service: ApiService = Depends(get_service),
+    status_generation: Annotated[str | None, Query(pattern=_STATUS_GENERATION_PATTERN)] = None,
+) -> list[ArtifactSummary]:
     try:
-        return [ArtifactSummary(**item) for item in service.list_artifacts(run_id)]
+        return [
+            ArtifactSummary(**item)
+            for item in service.list_artifacts(
+                run_id,
+                expected_status_generation=status_generation,
+            )
+        ]
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=f"Run not found: {run_id}") from exc
+    except ArtifactStatusGenerationConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
-@router.get("/runs/{run_id}/artifacts/{artifact_name:path}")
+@router.get(
+    "/runs/{run_id}/artifacts/{artifact_name:path}",
+    responses={409: {"model": ApiErrorResponse, "description": "Ready product generation conflict"}},
+)
 @router.head("/runs/{run_id}/artifacts/{artifact_name:path}", include_in_schema=False)
-def get_artifact(run_id: str, artifact_name: str, service: ApiService = Depends(get_service)) -> FileResponse:
+def get_artifact(
+    run_id: str,
+    artifact_name: str,
+    service: ApiService = Depends(get_service),
+    status_generation: Annotated[str | None, Query(pattern=_STATUS_GENERATION_PATTERN)] = None,
+) -> FileResponse:
     try:
-        lease = service.acquire_artifact_response_lease(run_id, artifact_name)
+        lease = service.acquire_artifact_response_lease(
+            run_id,
+            artifact_name,
+            expected_status_generation=status_generation,
+        )
         media_type, _ = mimetypes.guess_type(artifact_name)
         try:
             return _LeasedFileResponse(
@@ -157,6 +187,8 @@ def get_artifact(run_id: str, artifact_name: str, service: ApiService = Depends(
             raise
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=f"Run not found: {run_id}") from exc
+    except ArtifactStatusGenerationConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except (FileNotFoundError, OSError, RuntimeError) as exc:
         raise HTTPException(status_code=404, detail=f"Artifact not found: {artifact_name}") from exc
 

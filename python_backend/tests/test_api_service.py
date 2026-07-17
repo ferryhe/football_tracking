@@ -626,6 +626,36 @@ class ApiServiceSmokeTests(unittest.TestCase):
         self.assertEqual("estimated" if suggestion["confidence"] == "detected" else "low", calibration["confidence"])
         self.assertEqual(list(suggestion["field_polygon"][0]), calibration["image_points"][0])
 
+    def test_field_green_heuristic_clamps_real_wide_frame_points_inside_image(self) -> None:
+        frame_width = 5120
+        frame_height = 1440
+        green_frame = np.full((frame_height, frame_width, 3), (0, 128, 0), dtype=np.uint8)
+
+        polygon, _, detected = self.service._detect_field_polygon(
+            green_frame,
+            (0, 0, frame_width, frame_height),
+        )
+        expanded_polygon = self.service._expand_polygon(
+            polygon,
+            frame_width=frame_width,
+            frame_height=frame_height,
+            scale_x=1.08,
+            scale_y=1.10,
+        )
+
+        self.assertTrue(detected)
+        self.assertEqual((5119, 1382), polygon[-2])
+        self.assertTrue(
+            all(
+                isinstance(x, int)
+                and isinstance(y, int)
+                and 0 <= x < frame_width
+                and 0 <= y < frame_height
+                for suggested_polygon in (polygon, expanded_polygon)
+                for x, y in suggested_polygon
+            )
+        )
+
     def test_mask_row_span_accepts_opencv_n_by_two_find_non_zero_shape(self) -> None:
         mask = np.ones((8, 12), dtype=np.uint8)
         points = np.array([[1, 0], [4, 1], [3, 2]], dtype=np.int32)

@@ -17,6 +17,7 @@ from unittest.mock import patch
 
 from test_selective_policy import _write_inputs
 
+from football_tracking.api.broadcast_api import build_review_action_envelope
 from football_tracking.candidate_annotations import resolve_candidate_annotations
 from football_tracking.selective_policy import (
     AUDIT_ALGORITHM,
@@ -42,6 +43,7 @@ from football_tracking.selective_review import (
     SelectiveReviewError,
     _select_review_candidates,
     _selection_report,
+    _validate_actions,
     build_cli_main,
     build_review_windows,
     build_selective_review_queue,
@@ -887,10 +889,104 @@ def _queue_action(
         "qualification_dataset",
         "qualification_predictions",
         "qualification_decisions",
+        "target_audit_plan",
+        "target_audit_labels",
+        "target_qualification",
+        "target_frozen_application",
+        "target_prelabel_commitment",
     ):
         if name in queue["bindings"]:
             result["bindings"][f"{name}_sha256"] = queue["bindings"][name]["sha256"]
     return result
+
+
+def _action_validation_fixture(
+    root: Path,
+    *,
+    target_finite_population: bool,
+) -> tuple[Path, dict[str, Any], list[dict[str, Any]]]:
+    base_names = (
+        "review_timing",
+        "policy",
+        "decisions",
+        "model",
+        "training_report",
+        "model_weights",
+        "dataset",
+        "predictions",
+        "contract",
+        "annotation_resolution",
+        "resolved_tracking_contract",
+        "policy_roles",
+    )
+    qualification_names = (
+        "qualification_dataset",
+        "qualification_predictions",
+        "qualification_decisions",
+    )
+    target_names = (
+        "target_audit_plan",
+        "target_audit_labels",
+        "target_qualification",
+        "target_frozen_application",
+        "target_prelabel_commitment",
+    )
+    binding_names = base_names + (
+        qualification_names + target_names if target_finite_population else ()
+    )
+    queue = {
+        "schema_version": "1.0",
+        "artifact_type": (
+            "target_finite_population_review_queue"
+            if target_finite_population
+            else "selective_review_queue"
+        ),
+        **(
+            {"qualification_scope": "target_finite_population"}
+            if target_finite_population
+            else {}
+        ),
+        "review_item_count": 1,
+        "bindings": {
+            name: {
+                "path": f"{name}.json",
+                "sha256": hashlib.sha256(name.encode("utf-8")).hexdigest(),
+            }
+            for name in binding_names
+        },
+        "items": [
+            {
+                "review_item_id": "window-1",
+                "candidates": [
+                    {
+                        "candidate_id": "candidate-1",
+                        "candidate_fingerprint": "e" * 64,
+                        "evidence": {
+                            "sha256": "f" * 64,
+                            "dataset_version": "fixture-dataset-v1",
+                            "sample_id": "sample-1",
+                        },
+                    }
+                ],
+            }
+        ],
+    }
+    queue_path = root / "selective_review_queue.v1.json"
+    _write_json(queue_path, queue)
+    envelope = build_review_action_envelope(
+        queue_path,
+        [
+            {
+                "action_id": "action-1",
+                "review_item_id": "window-1",
+                "candidate_id": "candidate-1",
+                "reviewer_id": "reviewer-1",
+                "created_at": "2026-07-09T12:00:00Z",
+                "action": "confirm_ball",
+            }
+        ],
+    )
+    return queue_path, queue, envelope["actions"]
 
 
 def _complete_queue_actions(queue_path: Path) -> list[dict[str, object]]:
@@ -1433,6 +1529,78 @@ class SelectiveReviewArtifactTests(unittest.TestCase):
                     target_frozen_application_path=target_paths["target_frozen_application"],
                     target_prelabel_commitment_path=target_paths["target_prelabel_commitment"],
                 )
+
+    def test_action_validation_requires_exact_target_audit_bindings_and_closed_sets(self) -> None:
+        target_fields = (
+            "target_audit_plan_sha256",
+            "target_audit_labels_sha256",
+            "target_qualification_sha256",
+            "target_frozen_application_sha256",
+            "target_prelabel_commitment_sha256",
+        )
+        with tempfile.TemporaryDirectory() as raw:
+            queue_path, queue, actions = _action_validation_fixture(
+                Path(raw),
+                target_finite_population=True,
+            )
+            queue_sha256 = _sha256(queue_path)
+            validated = _validate_actions(
+                deepcopy(actions),
+                queue=queue,
+                queue_sha256=queue_sha256,
+                timings={},
+            )
+            self.assertEqual(1, len(validated))
+
+            for field in target_fields:
+                with self.subTest(case="missing", field=field):
+                    missing = deepcopy(actions)
+                    del missing[0]["bindings"][field]
+                    with self.assertRaisesRegex(SelectiveReviewError, field):
+                        _validate_actions(
+                            missing,
+                            queue=queue,
+                            queue_sha256=queue_sha256,
+                            timings={},
+                        )
+                with self.subTest(case="wrong_hash", field=field):
+                    changed = deepcopy(actions)
+                    changed[0]["bindings"][field] = "0" * 64
+                    with self.assertRaisesRegex(SelectiveReviewError, field):
+                        _validate_actions(
+                            changed,
+                            queue=queue,
+                            queue_sha256=queue_sha256,
+                            timings={},
+                        )
+
+            extra = deepcopy(actions)
+            extra[0]["bindings"]["unexpected_sha256"] = "0" * 64
+            with self.assertRaisesRegex(SelectiveReviewError, "unexpected_sha256"):
+                _validate_actions(
+                    extra,
+                    queue=queue,
+                    queue_sha256=queue_sha256,
+                    timings={},
+                )
+
+        with tempfile.TemporaryDirectory() as raw:
+            queue_path, queue, actions = _action_validation_fixture(
+                Path(raw),
+                target_finite_population=False,
+            )
+            queue_sha256 = _sha256(queue_path)
+            for field in target_fields:
+                with self.subTest(case="legacy_mixed", field=field):
+                    mixed = deepcopy(actions)
+                    mixed[0]["bindings"][field] = "0" * 64
+                    with self.assertRaisesRegex(SelectiveReviewError, field):
+                        _validate_actions(
+                            mixed,
+                            queue=queue,
+                            queue_sha256=queue_sha256,
+                            timings={},
+                        )
 
     def test_large_audit_population_is_deterministically_bounded_and_fair(self) -> None:
         with tempfile.TemporaryDirectory() as raw:

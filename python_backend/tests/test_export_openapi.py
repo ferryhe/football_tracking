@@ -150,6 +150,9 @@ class ExportOpenApiTests(unittest.TestCase):
         self.assertIn("trajectory_generation_id", render["required"])
         action = document["components"]["schemas"]["BroadcastReviewAction"]
         self.assertNotIn("correct_trajectory", action["properties"]["action"]["enum"])
+        action_request = document["components"]["schemas"]["BroadcastReviewActionsRequest"]
+        self.assertIn("queue_sha256", action_request["required"])
+        self.assertEqual("^[0-9a-f]{64}$", action_request["properties"]["queue_sha256"]["pattern"])
         operation_response = document["components"]["schemas"]["BroadcastOperationResponse"]
         self.assertIn("parent_run_id", operation_response["properties"])
         self.assertEqual(
@@ -166,6 +169,9 @@ class ExportOpenApiTests(unittest.TestCase):
         self.assertIn("bundle_manifest_sha256", evidence_import["required"])
         lineage_request = document["components"]["schemas"]["BroadcastConfigLineageReconfirmationRequest"]
         for field in (
+            "target_run_id",
+            "confirmed_config_name",
+            "confirmed_text_sha256",
             "expected_observed_raw_sha256",
             "operator_id",
             "reviewer_id",
@@ -200,6 +206,19 @@ class ExportOpenApiTests(unittest.TestCase):
         )
         evidence_state = document["components"]["schemas"]["BroadcastReviewEvidenceStateResponse"]
         self.assertIn("capacity", evidence_state["properties"])
+        self.assertEqual(
+            "#/components/schemas/BroadcastConfigLineageReconfirmationChallenge",
+            evidence_state["properties"]["config_lineage_reconfirmation"]["anyOf"][0]["$ref"],
+        )
+        lineage_challenge = document["components"]["schemas"]["BroadcastConfigLineageReconfirmationChallenge"]
+        for field in (
+            "target_run_id",
+            "confirmed_config_name",
+            "confirmed_text_sha256",
+            "expected_observed_raw_sha256",
+            "workflow_bindings",
+        ):
+            self.assertIn(field, lineage_challenge["required"])
         self.assertEqual(
             {
                 "not_available",
@@ -240,11 +259,26 @@ class ExportOpenApiTests(unittest.TestCase):
             "#/components/schemas/BroadcastRunState",
             run_record["properties"]["broadcast"]["$ref"],
         )
+        operation_status = document["components"]["schemas"]["BroadcastRunState"]["properties"]["operation_status"]
+        self.assertIn("reconciling", operation_status["anyOf"][0]["enum"])
+
+        for operation in (
+            paths["/runs/{run_id}/artifacts"]["get"],
+            paths["/runs/{run_id}/artifacts/{artifact_name}"]["get"],
+        ):
+            generation_parameter = next(
+                parameter for parameter in operation["parameters"] if parameter["name"] == "status_generation"
+            )
+            self.assertEqual("query", generation_parameter["in"])
+            self.assertFalse(generation_parameter["required"])
+            self.assertEqual("^[0-9a-f]{64}$", generation_parameter["schema"]["anyOf"][0]["pattern"])
+            self.assertIn("409", operation["responses"])
 
     def test_generated_clients_expose_broadcast_hybrid_workflow_contracts(self) -> None:
         react_api = Path("lib/api-client-react/src/generated/api.ts").read_text(encoding="utf-8")
         react_schemas = Path("lib/api-client-react/src/generated/api.schemas.ts").read_text(encoding="utf-8")
         zod_api = Path("lib/api-zod/src/generated/api.ts").read_text(encoding="utf-8")
+        zod_broadcast_state = Path("lib/api-zod/src/generated/types/broadcastRunState.ts").read_text(encoding="utf-8")
 
         for operation in (
             "reconfirmBroadcastConfigLineage",
@@ -256,6 +290,7 @@ class ExportOpenApiTests(unittest.TestCase):
             self.assertIn(operation, react_api)
         for schema in (
             "BroadcastCalibrationConfirmation",
+            "BroadcastConfigLineageReconfirmationChallenge",
             "BroadcastConfigLineageReconfirmationRequest",
             "BroadcastConfigLineageReconfirmationResponse",
             "BroadcastOperationDetails",
@@ -276,6 +311,7 @@ class ExportOpenApiTests(unittest.TestCase):
             self.assertIn(operation, zod_api)
         for filename in (
             "broadcastCalibrationConfirmation.ts",
+            "broadcastConfigLineageReconfirmationChallenge.ts",
             "broadcastConfigLineageReconfirmationRequest.ts",
             "broadcastConfigLineageReconfirmationResponse.ts",
             "broadcastOperationDetails.ts",
@@ -286,6 +322,14 @@ class ExportOpenApiTests(unittest.TestCase):
             "broadcastRenderRequest.ts",
         ):
             self.assertTrue((Path("lib/api-zod/src/generated/types") / filename).is_file())
+        for generated_contract in (react_schemas, zod_api, zod_broadcast_state):
+            self.assertIn('"reconciling"', generated_contract)
+        self.assertIn("export type ListArtifactsParams", react_schemas)
+        self.assertIn("export type GetArtifactParams", react_schemas)
+        self.assertGreaterEqual(react_schemas.count("status_generation?: string | null"), 2)
+        self.assertIn("params?: ListArtifactsParams", react_api)
+        self.assertIn("params?: GetArtifactParams", react_api)
+        self.assertIn("status_generation: zod", zod_api)
 
     def test_openapi_run_record_exposes_ai_candidate_lifecycle_schema(self) -> None:
         document = build_openapi_document()

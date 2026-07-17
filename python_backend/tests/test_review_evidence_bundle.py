@@ -2,18 +2,22 @@ from __future__ import annotations
 
 import hashlib
 import json
+import multiprocessing
 import os
 import tempfile
 import threading
 import time
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
+from typing import Callable
 from unittest import mock
 
 import yaml
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+import football_tracking.api.service as service_module
 import football_tracking.config_lineage as config_lineage_module
 from football_tracking.api.broadcast_api import BroadcastApiError
 from football_tracking.api.dependencies import get_service
@@ -222,6 +226,9 @@ class ReviewEvidenceBundleTests(unittest.TestCase):
         app.include_router(broadcast_router)
         client = TestClient(app)
         payload = {
+            "target_run_id": "run-1",
+            "confirmed_config_name": "fixture.yaml",
+            "confirmed_text_sha256": "b" * 64,
             "expected_observed_raw_sha256": "1" * 64,
             "workflow_bindings": {},
             "operator_id": "operator-1",
@@ -249,6 +256,47 @@ class ReviewEvidenceBundleTests(unittest.TestCase):
                     },
                     response.json(),
                 )
+
+    def test_config_lineage_route_requires_complete_independent_identities(self) -> None:
+        class UnexpectedService:
+            def reconfirm_broadcast_config_lineage(
+                self,
+                run_id: str,
+                request: dict[str, object],
+            ) -> dict[str, object]:
+                raise AssertionError(
+                    f"unexpected service call for {run_id}: {request}"
+                )
+
+        app = FastAPI()
+        app.include_router(broadcast_router)
+        app.dependency_overrides[get_service] = UnexpectedService
+        client = TestClient(app)
+        payload = {
+            "target_run_id": "run-1",
+            "confirmed_config_name": "fixture.yaml",
+            "confirmed_text_sha256": "b" * 64,
+            "expected_observed_raw_sha256": "1" * 64,
+            "workflow_bindings": {},
+            "operator_id": "operator-1",
+        }
+
+        missing = client.post(
+            "/runs/run-1/broadcast/config-lineage-reconfirmation",
+            json=payload,
+        )
+        same_identity = client.post(
+            "/runs/run-1/broadcast/config-lineage-reconfirmation",
+            json={**payload, "reviewer_id": "operator-1"},
+        )
+        whitespace = client.post(
+            "/runs/run-1/broadcast/config-lineage-reconfirmation",
+            json={**payload, "reviewer_id": " reviewer-1 "},
+        )
+
+        self.assertEqual(422, missing.status_code)
+        self.assertEqual(422, same_identity.status_code)
+        self.assertEqual(422, whitespace.status_code)
 
     def test_config_lineage_service_classifies_authority_and_registry_failures(self) -> None:
         repo = self.root / "lineage-service-repo"
@@ -281,6 +329,9 @@ class ReviewEvidenceBundleTests(unittest.TestCase):
         )
         service._write_registry(registry)
         request = {
+            "target_run_id": "run-fixture",
+            "confirmed_config_name": "fixture.yaml",
+            "confirmed_text_sha256": "b" * 64,
             "expected_observed_raw_sha256": "1" * 64,
             "workflow_bindings": {},
             "operator_id": "operator-1",
@@ -337,6 +388,47 @@ class ReviewEvidenceBundleTests(unittest.TestCase):
                 with self.assertRaises(ConfigLineageError) as mismatch:
                     service.reconfirm_broadcast_config_lineage("run-fixture", request)
             self.assertEqual(CONFIG_LINEAGE_MISMATCH, mismatch.exception.code)
+
+            current_authority = {
+                "target_run_id": "run-fixture",
+                "confirmed_config_name": "renamed-fixture.yaml",
+                "confirmed_text_sha256": "c" * 64,
+                "workflow_bindings": {},
+            }
+            current_request = {
+                **request,
+                **current_authority,
+            }
+            stale_echoes = {
+                "target_run_id": "stale-run",
+                "confirmed_config_name": "fixture.yaml",
+                "confirmed_text_sha256": "b" * 64,
+            }
+            publication = mock.Mock()
+            with (
+                mock.patch.object(
+                    service,
+                    "_broadcast_config_lineage_reconfirmation_authority",
+                    return_value=current_authority,
+                ),
+                mock.patch(
+                    "football_tracking.api.service.reconfirm_config_lineage",
+                    side_effect=publication,
+                ),
+            ):
+                for field, stale_value in stale_echoes.items():
+                    with (
+                        self.subTest(stale_challenge_field=field),
+                        self.assertRaisesRegex(
+                            ConfigLineageError,
+                            "challenge does not match current server-derived authority",
+                        ),
+                    ):
+                        service.reconfirm_broadcast_config_lineage(
+                            "run-fixture",
+                            {**current_request, field: stale_value},
+                        )
+            publication.assert_not_called()
 
             with (
                 mock.patch.object(
@@ -486,6 +578,9 @@ class ReviewEvidenceBundleTests(unittest.TestCase):
         )
         first._write_registry(registry)
         request = {
+            "target_run_id": "run-fixture",
+            "confirmed_config_name": "fixture.yaml",
+            "confirmed_text_sha256": "b" * 64,
             "expected_observed_raw_sha256": "1" * 64,
             "workflow_bindings": {},
             "operator_id": "operator-1",
@@ -1456,6 +1551,46 @@ class ReviewEvidenceBundleTests(unittest.TestCase):
 
         self.assertEqual("unsafe_bundle_path", caught.exception.code)
 
+    def test_validator_rejects_handwritten_symlink_directory(self) -> None:
+        self._write_fixture()
+        built = build_review_evidence_bundle(self.source, self.root / "published")
+        external = self.root / "external-directory"
+        external.mkdir()
+        (external / "outside.bin").write_bytes(b"outside-bundle")
+        linked = built.root / "target-application" / "linked-directory"
+        try:
+            linked.symlink_to(external, target_is_directory=True)
+        except OSError as exc:
+            self.skipTest(f"directory symlinks are unavailable: {exc}")
+
+        with self.assertRaises(ReviewEvidenceBundleError) as caught:
+            validate_review_evidence_bundle(built.root)
+
+        self.assertEqual("unsafe_bundle_path", caught.exception.code)
+
+    def test_validator_rejects_handwritten_fifo(self) -> None:
+        if os.name == "nt" or not hasattr(os, "mkfifo"):
+            self.skipTest("POSIX FIFO creation is unavailable")
+        self._write_fixture()
+        built = build_review_evidence_bundle(self.source, self.root / "published")
+        fifo = built.root / "target-application" / "unexpected.fifo"
+        os.mkfifo(fifo)
+
+        with self.assertRaises(ReviewEvidenceBundleError) as caught:
+            validate_review_evidence_bundle(built.root)
+
+        self.assertEqual("unsafe_bundle_path", caught.exception.code)
+
+    def test_validator_rejects_undeclared_empty_directory(self) -> None:
+        self._write_fixture()
+        built = build_review_evidence_bundle(self.source, self.root / "published")
+        (built.root / "target-application" / "undeclared-directory").mkdir()
+
+        with self.assertRaises(ReviewEvidenceBundleError) as caught:
+            validate_review_evidence_bundle(built.root)
+
+        self.assertEqual("invalid_bundle_inventory", caught.exception.code)
+
     def test_windows_reparse_attribute_is_rejected_even_without_symlink_mode(self) -> None:
         from football_tracking import review_evidence_bundle as bundle_module
 
@@ -1923,12 +2058,6 @@ class ReviewEvidenceBundleTests(unittest.TestCase):
             ).hexdigest()
             target["notes"] = json.dumps(confirmation, sort_keys=True, separators=(",", ":"))
             service._write_registry(registry)
-            required = service.get_broadcast_review_evidence("run-fixture")
-            self.assertEqual("blocked", required["status"])
-            self.assertEqual(
-                "confirmed_config_lineage_reconfirmation_required",
-                required["blocker_code"],
-            )
 
             registry = service._read_registry()
             target = next(item for item in registry["runs"] if item["run_id"] == "run-fixture")
@@ -1967,12 +2096,61 @@ class ReviewEvidenceBundleTests(unittest.TestCase):
             }
             registry["runs"].extend([accepted_trial, failed])
             service._write_registry(registry)
-            target = service.get_run("run-fixture")
-            workflow_bindings = service._derive_config_lineage_workflow_bindings(
-                target,
-                config_path,
-                registry=service._read_registry(),
+
+            required = service.get_broadcast_review_evidence("run-fixture")
+            self.assertEqual("blocked", required["status"])
+            self.assertEqual(
+                "confirmed_config_lineage_reconfirmation_required",
+                required["blocker_code"],
             )
+            self.assertEqual("reconfirm_production_config", required["recovery_action"])
+            challenge = required["config_lineage_reconfirmation"]
+            self.assertEqual("run-fixture", challenge["target_run_id"])
+            self.assertEqual("fixture.yaml", challenge["confirmed_config_name"])
+            self.assertEqual(
+                confirmation["expected_config_sha256"],
+                challenge["confirmed_text_sha256"],
+            )
+            self.assertEqual(sha256_file(config_path), challenge["expected_observed_raw_sha256"])
+            workflow_bindings = challenge["workflow_bindings"]
+            workflow_source_signature = yaml.safe_load(config_path.read_text(encoding="utf-8"))["metadata"][
+                "production_workflow"
+            ]["source_signature"]
+            self.assertEqual(
+                {"path", "size_bytes", "modified_at"},
+                set(workflow_source_signature),
+            )
+
+            app = FastAPI()
+            app.include_router(broadcast_router)
+            app.dependency_overrides[get_service] = lambda: service
+            client = TestClient(app)
+            discovered = client.get(
+                "/runs/run-fixture/broadcast/review-evidence"
+            )
+            missing_reviewer = client.post(
+                "/runs/run-fixture/broadcast/config-lineage-reconfirmation",
+                json={
+                    **challenge,
+                    "operator_id": "operator-1",
+                },
+            )
+            same_identity = client.post(
+                "/runs/run-fixture/broadcast/config-lineage-reconfirmation",
+                json={
+                    **challenge,
+                    "operator_id": "operator-1",
+                    "reviewer_id": "operator-1",
+                },
+            )
+            self.assertEqual(200, discovered.status_code)
+            self.assertEqual(
+                challenge,
+                discovered.json()["config_lineage_reconfirmation"],
+            )
+            self.assertEqual(422, missing_reviewer.status_code)
+            self.assertEqual(422, same_identity.status_code)
+
             for field in (
                 "workflow_id",
                 "accepted_trial",
@@ -2003,19 +2181,41 @@ class ReviewEvidenceBundleTests(unittest.TestCase):
                     service.reconfirm_broadcast_config_lineage(
                         "run-fixture",
                         {
+                            **challenge,
                             "expected_observed_raw_sha256": sha256_file(config_path),
                             "workflow_bindings": tampered,
                             "operator_id": "operator-1",
                             "reviewer_id": "reviewer-1",
                         },
                     )
+
+            config_path.write_bytes(config_path.read_bytes().replace(b"\r\n", b"\n"))
+            with self.assertRaisesRegex(ConfigLineageError, "snapshot mismatch"):
+                service.reconfirm_broadcast_config_lineage(
+                    "run-fixture",
+                    {
+                        **challenge,
+                        "operator_id": "operator-1",
+                        "reviewer_id": "reviewer-1",
+                    },
+                )
+            normalized = service.get_broadcast_review_evidence("run-fixture")
+            self.assertNotIn("config_lineage_reconfirmation", normalized)
+
+            config_path.write_bytes(config_path.read_bytes().replace(b"\n", b"\r\n"))
+            refreshed = service.get_broadcast_review_evidence("run-fixture")
+            challenge = refreshed["config_lineage_reconfirmation"]
+            self.assertEqual(
+                required["config_lineage_reconfirmation"]["expected_observed_raw_sha256"],
+                challenge["expected_observed_raw_sha256"],
+            )
+
             if os.name == "nt":
                 with self.assertRaises(ConfigLineageError) as unsupported:
                     service.reconfirm_broadcast_config_lineage(
                         "run-fixture",
                         {
-                            "expected_observed_raw_sha256": sha256_file(config_path),
-                            "workflow_bindings": workflow_bindings,
+                            **challenge,
                             "operator_id": "operator-1",
                             "reviewer_id": "reviewer-1",
                         },
@@ -2025,8 +2225,7 @@ class ReviewEvidenceBundleTests(unittest.TestCase):
             response = service.reconfirm_broadcast_config_lineage(
                 "run-fixture",
                 {
-                    "expected_observed_raw_sha256": sha256_file(config_path),
-                    "workflow_bindings": workflow_bindings,
+                    **challenge,
                     "operator_id": "operator-1",
                     "reviewer_id": "reviewer-1",
                 },
@@ -2064,6 +2263,62 @@ class ReviewEvidenceBundleTests(unittest.TestCase):
             self.assertEqual([], service._review_evidence_children("run-fixture"))
         finally:
             service.close()
+
+    @unittest.skipIf(os.name == "nt", "POSIX config-lineage regression coverage requires fork")
+    def test_review_evidence_state_does_not_reenter_lock_after_crlf_lineage_reconfirmation(self) -> None:
+        draft = self._write_fixture()
+        service, _ = self._create_service_parent(draft)
+        try:
+            self._reconfirm_crlf_config_lineage(service)
+
+            state = self._call_in_forked_process(
+                lambda: service.get_broadcast_review_evidence("run-fixture"),
+                label="review evidence state",
+            )
+
+            self.assertEqual("not_available", state["status"])
+            self.assertEqual("review_evidence_bundle_not_available", state["blocker_code"])
+        finally:
+            service.close()
+
+    @unittest.skipIf(os.name == "nt", "POSIX config-lineage regression coverage requires fork")
+    def test_review_windows_do_not_reenter_lock_after_crlf_lineage_reconfirmation(self) -> None:
+        draft = self._write_fixture()
+        service, _ = self._create_service_parent(draft)
+        try:
+            built = build_review_evidence_bundle(
+                self.source,
+                service.review_evidence_inbox_dir / "pre-lineage-fixture",
+            )
+            queued = service.import_broadcast_review_evidence(
+                "run-fixture",
+                {
+                    "bundle_id": "review-evidence-fixture",
+                    "bundle_manifest_sha256": built.bundle_sha256,
+                },
+            )
+            terminal = self._wait_for_terminal(service, queued["run_id"])
+            self.assertEqual("completed", terminal["status"], terminal.get("error"))
+            self._reconfirm_crlf_config_lineage(service)
+
+            state = self._call_in_forked_process(
+                lambda: service.get_broadcast_review_windows("run-fixture"),
+                label="review windows",
+            )
+
+            self.assertEqual("needs_review", state["status"])
+            self.assertEqual("invalid_or_stale_selective_review_evidence", state["reason"])
+        finally:
+            service.close()
+
+    def test_activated_review_consumers_reject_changed_confirmed_config(self) -> None:
+        self._assert_activated_review_consumers_reject_target_mutation("config")
+
+    def test_activated_review_consumers_reject_changed_root_contract(self) -> None:
+        self._assert_activated_review_consumers_reject_target_mutation("root_contract")
+
+    def test_activated_review_consumers_reject_changed_action_signal_binding(self) -> None:
+        self._assert_activated_review_consumers_reject_target_mutation("action_binding")
 
     def test_direct_service_import_requires_exact_manifest_sha256(self) -> None:
         draft = self._write_fixture()
@@ -2340,6 +2595,112 @@ class ReviewEvidenceBundleTests(unittest.TestCase):
         finally:
             recovered_service.close()
 
+    def test_recovery_blocks_expected_target_context_without_swallowing_unknown_runtime(self) -> None:
+        repo = self.root / "recovery-unit-repo"
+        service = ApiService(repo)
+        parent_output = repo / "outputs" / "runs" / "fixture" / "run-fixture"
+        child_output = repo / "outputs" / "runs" / "review-evidence" / "import-fixture"
+        parent_output.mkdir(parents=True)
+        child_output.mkdir(parents=True)
+        queue_path = parent_output / "selective_review_queue.v1.json"
+        queue_path.write_bytes(b"committed-root-queue")
+        generation_file = parent_output / "review_evidence" / "generations" / "generation-1" / "payload.bin"
+        generation_file.parent.mkdir(parents=True)
+        generation_file.write_bytes(b"committed-generation")
+        registry = service._read_registry()
+        registry["runs"].extend(
+            [
+                {
+                    "run_id": "run-fixture",
+                    "source": "broadcast_hybrid",
+                    "status": "completed",
+                    "output_dir": str(parent_output),
+                    "broadcast": {
+                        "status": "needs_review",
+                        "blocking_reasons": ["existing_non_evidence_blocker"],
+                    },
+                },
+                {
+                    "run_id": "import-fixture",
+                    "source": "broadcast_review_evidence_import",
+                    "status": "failed",
+                    "parent_run_id": "run-fixture",
+                    "output_dir": str(child_output),
+                    "broadcast": {
+                        "operation_status": "failed",
+                        "request": {
+                            "bundle_id": "bundle-1",
+                            "bundle_manifest_sha256": "1" * 64,
+                        },
+                    },
+                },
+            ]
+        )
+        service._write_registry(registry)
+        service.close()
+
+        target_error = service_module._ReviewEvidenceTargetContextError(
+            CONFIG_LINEAGE_MISMATCH,
+            "injected config lineage mismatch",
+        )
+        with mock.patch.object(
+            ApiService,
+            "_validate_current_review_queue_locked",
+            side_effect=target_error,
+        ):
+            recovered_service = ApiService(repo)
+        try:
+            recovered = recovered_service.get_run("import-fixture")
+            parent = recovered_service.get_run("run-fixture")
+
+            self.assertEqual("failed", recovered["status"])
+            self.assertEqual("blocked", recovered["broadcast"]["operation_status"])
+            self.assertEqual(CONFIG_LINEAGE_MISMATCH, recovered["broadcast"]["blocker_code"])
+            self.assertEqual(CONFIG_LINEAGE_MISMATCH, recovered["broadcast"]["error_code"])
+            self.assertEqual("inspect_production_config_lineage", recovered["broadcast"]["recovery_action"])
+            self.assertEqual("needs_review", parent["broadcast"]["status"])
+            self.assertIn(CONFIG_LINEAGE_MISMATCH, parent["broadcast"]["blocking_reasons"])
+            self.assertEqual("blocked", parent["broadcast"]["review_evidence"]["status"])
+            self.assertEqual(
+                CONFIG_LINEAGE_MISMATCH,
+                parent["broadcast"]["review_evidence"]["blocker_code"],
+            )
+            self.assertEqual(
+                "inspect_production_config_lineage",
+                parent["broadcast"]["review_evidence"]["recovery_action"],
+            )
+            self.assertEqual(b"committed-root-queue", queue_path.read_bytes())
+            self.assertEqual(b"committed-generation", generation_file.read_bytes())
+        finally:
+            recovered_service.close()
+
+        with (
+            mock.patch.object(
+                ApiService,
+                "_validate_current_review_queue_locked",
+                side_effect=RuntimeError("injected unexpected recovery bug"),
+            ),
+            self.assertRaisesRegex(RuntimeError, "injected unexpected recovery bug"),
+        ):
+            ApiService(repo)
+
+    def test_service_restart_blocks_failed_committed_import_when_config_lineage_is_invalid(self) -> None:
+        self._assert_restart_blocks_committed_import_for_lineage_failure(
+            orphaned_status="failed",
+            config_failure="mismatch",
+            expected_code=CONFIG_LINEAGE_MISMATCH,
+            expected_recovery_action="inspect_production_config_lineage",
+            assert_unknown_runtime=True,
+        )
+
+    def test_service_restart_blocks_cancelled_committed_import_when_config_lineage_is_missing(self) -> None:
+        self._assert_restart_blocks_committed_import_for_lineage_failure(
+            orphaned_status="cancelled",
+            config_failure="reconfirmation_required",
+            expected_code=CONFIG_LINEAGE_REQUIRED,
+            expected_recovery_action="reconfirm_production_config",
+        )
+
     def test_service_revokes_exact_unconsumed_activation_and_recovers_parent_state(self) -> None:
         draft = self._write_fixture()
         service, parent_output = self._create_service_parent(draft)
@@ -2354,6 +2715,7 @@ class ReviewEvidenceBundleTests(unittest.TestCase):
             )
             terminal = self._wait_for_terminal(service, queued["run_id"])
             result = terminal["broadcast"]["result"]
+            previous_generation = service.get_run("run-fixture")["broadcast"]["status_generation"]
 
             revoked = service.revoke_broadcast_review_evidence(
                 "run-fixture",
@@ -2366,6 +2728,86 @@ class ReviewEvidenceBundleTests(unittest.TestCase):
             self.assertFalse((parent_output / "selective_review_queue.v1.json").exists())
             self.assertEqual("revoked", parent["broadcast"]["review_evidence"]["status"])
             self.assertIn("missing_qualified_selective_review_queue", parent["broadcast"]["blocking_reasons"])
+            self.assertNotEqual(previous_generation, parent["broadcast"]["status_generation"])
+            report = json.loads(
+                (
+                    parent_output
+                    / "broadcast_status"
+                    / parent["broadcast"]["status_generation"]
+                    / "broadcast_quality_report.json"
+                ).read_text(encoding="utf-8")
+            )
+            self.assertEqual(parent["broadcast"]["status"], report["status"])
+            self.assertIn("missing_qualified_selective_review_queue", report["blocking_reasons"])
+            self.assertEqual(parent["broadcast"]["status_generation"], report["status_generation"])
+        finally:
+            service.close()
+
+    def test_stale_review_post_is_rejected_after_revoke_and_reimport(self) -> None:
+        draft = self._write_fixture()
+        service, parent_output = self._create_service_parent(draft)
+        try:
+            built = build_review_evidence_bundle(self.source, service.review_evidence_inbox_dir / "fixture")
+            queued = service.import_broadcast_review_evidence(
+                "run-fixture",
+                {
+                    "bundle_id": "review-evidence-fixture",
+                    "bundle_manifest_sha256": built.bundle_sha256,
+                },
+            )
+            terminal = self._wait_for_terminal(service, queued["run_id"])
+            result = terminal["broadcast"]["result"]
+            old_windows = service.get_broadcast_review_windows("run-fixture")
+            self.assertEqual("ready", old_windows["status"])
+
+            service.revoke_broadcast_review_evidence(
+                "run-fixture",
+                result["review_evidence_generation_id"],
+                result["queue_sha256"],
+            )
+            draft["bundle_id"] = "review-evidence-replacement"
+            self._write_json(self.source / "review_evidence_bundle.draft.json", draft)
+            replacement = build_review_evidence_bundle(
+                self.source,
+                service.review_evidence_inbox_dir / "replacement",
+            )
+            replacement_job = service.import_broadcast_review_evidence(
+                "run-fixture",
+                {
+                    "bundle_id": "review-evidence-replacement",
+                    "bundle_manifest_sha256": replacement.bundle_sha256,
+                },
+            )
+            replacement_terminal = self._wait_for_terminal(service, replacement_job["run_id"])
+            self.assertEqual("completed", replacement_terminal["status"])
+            current_windows = service.get_broadcast_review_windows("run-fixture")
+            self.assertNotEqual(old_windows["queue_sha256"], current_windows["queue_sha256"])
+
+            app = FastAPI()
+            app.include_router(broadcast_router)
+            app.dependency_overrides[get_service] = lambda: service
+            client = TestClient(app)
+            review_item = old_windows["items"][0]
+            candidate = review_item["candidates"][0]
+            response = client.post(
+                "/runs/run-fixture/broadcast/review-actions",
+                json={
+                    "queue_sha256": old_windows["queue_sha256"],
+                    "actions": [
+                        {
+                            "action_id": "stale-action",
+                            "review_item_id": review_item["review_item_id"],
+                            "candidate_id": candidate["candidate_id"],
+                            "reviewer_id": "operator",
+                            "action": "confirm_ball",
+                        }
+                    ],
+                },
+            )
+
+            self.assertEqual(409, response.status_code)
+            self.assertIn("queue changed", response.json()["detail"])
+            self.assertFalse((parent_output / "review_decisions.json").exists())
         finally:
             service.close()
 
@@ -2466,6 +2908,7 @@ class ReviewEvidenceBundleTests(unittest.TestCase):
                     service.submit_broadcast_review_actions(
                         "run-fixture",
                         {
+                            "queue_sha256": result["queue_sha256"],
                             "actions": [
                                 {
                                     "action_id": "action-1",
@@ -2476,7 +2919,7 @@ class ReviewEvidenceBundleTests(unittest.TestCase):
                                     "action": "confirm_ball",
                                     "noise_subtype": None,
                                 }
-                            ]
+                            ],
                         },
                     )
                     successes.append("action")
@@ -2530,6 +2973,7 @@ class ReviewEvidenceBundleTests(unittest.TestCase):
         )
         terminal = self._wait_for_terminal(service, queued["run_id"])
         result = terminal["broadcast"]["result"]
+        previous_generation = service.get_run("run-fixture")["broadcast"]["status_generation"]
         revoke_review_evidence_activation(
             parent_output,
             generation_id=result["review_evidence_generation_id"],
@@ -2549,6 +2993,19 @@ class ReviewEvidenceBundleTests(unittest.TestCase):
                 "missing_qualified_selective_review_queue",
                 parent["broadcast"]["blocking_reasons"],
             )
+            self.assertNotEqual(previous_generation, parent["broadcast"]["status_generation"])
+            report = json.loads(
+                (
+                    parent_output
+                    / "broadcast_status"
+                    / parent["broadcast"]["status_generation"]
+                    / "broadcast_quality_report.json"
+                ).read_text(encoding="utf-8")
+            )
+            self.assertIn("missing_qualified_selective_review_queue", report["blocking_reasons"])
+            self.assertEqual(parent["broadcast"]["status"], report["status"])
+            for limitation in report["limitations"]:
+                self.assertIn(limitation, parent["broadcast"]["limitations"])
         finally:
             recovered_service.close()
 
@@ -2676,7 +3133,10 @@ class ReviewEvidenceBundleTests(unittest.TestCase):
             "source_signature": {
                 "path": str(source_path.resolve()),
                 "size_bytes": source_stat.st_size,
-                "mtime_ns": source_stat.st_mtime_ns,
+                "modified_at": datetime.fromtimestamp(
+                    source_stat.st_mtime,
+                    tz=timezone.utc,
+                ).isoformat(),
             },
         }
         config_path.write_text(
@@ -2762,6 +3222,292 @@ class ReviewEvidenceBundleTests(unittest.TestCase):
             draft["target"]["root_contract_sha256"], sha256_file(parent_output / "tracking_contract.v2.json")
         )
         return service, parent_output
+
+    def _reconfirm_crlf_config_lineage(self, service: ApiService) -> None:
+        parent = service.get_run("run-fixture")
+        config_path = Path(parent["config_path"])
+        config_path.write_bytes(config_path.read_bytes().replace(b"\r\n", b"\n").replace(b"\n", b"\r\n"))
+        registry = service._read_registry()
+        target = next(item for item in registry["runs"] if item["run_id"] == "run-fixture")
+        target["broadcast"]["submission_id"] = "submission-completed"
+        target["broadcast"]["generation_id"] = "generation-completed"
+        accepted_trial = {
+            **json.loads(json.dumps(target)),
+            "run_id": "trial-accepted",
+            "source": "tracking",
+            "status": "completed",
+            "parent_run_id": None,
+            "output_dir": str(self.root / "trial-accepted"),
+            "notes": json.dumps(
+                {
+                    "purpose": "trial",
+                    "workflow_id": "workflow-1",
+                    "trial_intent_sha256": "2" * 64,
+                    "calibration_digest": "5" * 64,
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            ),
+            "broadcast": {},
+        }
+        failed = {
+            **json.loads(json.dumps(target)),
+            "run_id": "run-failed",
+            "status": "failed",
+            "output_dir": str(self.root / "run-failed"),
+            "broadcast": {
+                **target["broadcast"],
+                "submission_id": "submission-failed",
+                "generation_id": "generation-failed",
+            },
+        }
+        registry["runs"].extend([accepted_trial, failed])
+        service._write_registry(registry)
+
+        current_registry = service._read_registry()
+        current_parent = next(item for item in current_registry["runs"] if item["run_id"] == "run-fixture")
+        challenge = service._broadcast_config_lineage_reconfirmation_challenge(
+            current_parent,
+            registry=current_registry,
+        )
+        response = service.reconfirm_broadcast_config_lineage(
+            "run-fixture",
+            {
+                **challenge,
+                "operator_id": "operator-1",
+                "reviewer_id": "reviewer-1",
+            },
+        )
+        self.assertEqual("reconfirmed", response["status"])
+
+    def _call_in_forked_process(
+        self,
+        callback: Callable[[], object],
+        *,
+        label: str,
+        timeout: float = 5.0,
+    ) -> object:
+        if os.name == "nt":
+            self.skipTest("fork-based deadlock regression coverage requires POSIX")
+        context = multiprocessing.get_context("fork")
+        receiver, sender = context.Pipe(duplex=False)
+
+        def invoke() -> None:
+            try:
+                sender.send(("ok", callback()))
+            except BaseException as exc:
+                sender.send(("error", f"{type(exc).__name__}: {exc}"))
+            finally:
+                sender.close()
+
+        process = context.Process(target=invoke, name=f"review-evidence-{label.replace(' ', '-')}")
+        process.start()
+        sender.close()
+        process.join(timeout)
+        if process.is_alive():
+            process.terminate()
+            process.join(1.0)
+            if process.is_alive():
+                process.kill()
+                process.join(1.0)
+            receiver.close()
+            self.fail(f"{label} did not complete within {timeout:.1f} seconds")
+        try:
+            if not receiver.poll():
+                self.fail(f"{label} exited without returning a result (exit code {process.exitcode})")
+            status, payload = receiver.recv()
+        finally:
+            receiver.close()
+        if status != "ok":
+            self.fail(f"{label} failed in child process: {payload}")
+        self.assertEqual(0, process.exitcode)
+        return payload
+
+    def _assert_restart_blocks_committed_import_for_lineage_failure(
+        self,
+        *,
+        orphaned_status: str,
+        config_failure: str,
+        expected_code: str,
+        expected_recovery_action: str,
+        assert_unknown_runtime: bool = False,
+    ) -> None:
+        draft = self._write_fixture()
+        service, parent_output = self._create_service_parent(draft)
+        built = build_review_evidence_bundle(self.source, service.review_evidence_inbox_dir / "fixture")
+        queued = service.import_broadcast_review_evidence(
+            "run-fixture",
+            {
+                "bundle_id": "review-evidence-fixture",
+                "bundle_manifest_sha256": built.bundle_sha256,
+            },
+        )
+        terminal = self._wait_for_terminal(service, queued["run_id"])
+        self.assertEqual("completed", terminal["status"], terminal.get("error"))
+
+        queue_path = parent_output / "selective_review_queue.v1.json"
+        generations_root = parent_output / "review_evidence" / "generations"
+        queue_bytes = queue_path.read_bytes()
+        generation_bytes = {
+            path.relative_to(generations_root).as_posix(): path.read_bytes()
+            for path in generations_root.rglob("*")
+            if path.is_file()
+        }
+        self.assertTrue(generation_bytes)
+        with service._lock, service._registry_transaction() as registry:
+            child = next(item for item in registry["runs"] if item.get("run_id") == queued["run_id"])
+            child["status"] = orphaned_status
+            child["error"] = "injected registry interruption after root commit"
+            child["broadcast"]["operation_status"] = orphaned_status
+            if config_failure == "reconfirmation_required":
+                parent = next(item for item in registry["runs"] if item.get("run_id") == "run-fixture")
+                parent["broadcast"]["submission_id"] = "submission-completed"
+                parent["broadcast"]["generation_id"] = "generation-completed"
+                accepted_trial = {
+                    **json.loads(json.dumps(parent)),
+                    "run_id": "trial-accepted",
+                    "source": "tracking",
+                    "status": "completed",
+                    "parent_run_id": None,
+                    "output_dir": str(self.root / "trial-accepted"),
+                    "notes": json.dumps(
+                        {
+                            "purpose": "trial",
+                            "workflow_id": "workflow-1",
+                            "trial_intent_sha256": "2" * 64,
+                            "calibration_digest": "5" * 64,
+                        },
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ),
+                    "broadcast": {},
+                }
+                failed = {
+                    **json.loads(json.dumps(parent)),
+                    "run_id": "run-failed",
+                    "status": "failed",
+                    "output_dir": str(self.root / "run-failed"),
+                    "broadcast": {
+                        **parent["broadcast"],
+                        "submission_id": "submission-failed",
+                        "generation_id": "generation-failed",
+                    },
+                }
+                registry["runs"].extend([accepted_trial, failed])
+
+        config_path = Path(service.get_run("run-fixture")["config_path"])
+        if config_failure == "mismatch":
+            config_path.write_text("input_video: changed-after-root-commit.mp4\n", encoding="utf-8")
+        elif config_failure == "reconfirmation_required":
+            config_path.write_bytes(config_path.read_bytes().replace(b"\n", b"\r\n"))
+        else:
+            self.fail(f"unsupported config failure: {config_failure}")
+        repo = service.repo_root
+        service.close()
+
+        recovered_service = ApiService(repo)
+        try:
+            recovered = recovered_service.get_run(queued["run_id"])
+            parent = recovered_service.get_run("run-fixture")
+            state = recovered_service.get_broadcast_review_evidence("run-fixture")
+            windows = recovered_service.get_broadcast_review_windows("run-fixture")
+
+            self.assertEqual("failed", recovered["status"])
+            self.assertEqual("blocked", recovered["broadcast"]["operation_status"])
+            self.assertEqual(expected_code, recovered["broadcast"]["blocker_code"])
+            self.assertEqual(expected_code, recovered["broadcast"]["error_code"])
+            self.assertEqual(
+                expected_recovery_action,
+                recovered["broadcast"]["recovery_action"],
+            )
+            self.assertEqual("needs_review", parent["broadcast"]["status"])
+            self.assertIn(expected_code, parent["broadcast"]["blocking_reasons"])
+            self.assertEqual("blocked", parent["broadcast"]["review_evidence"]["status"])
+            self.assertEqual(
+                expected_code,
+                parent["broadcast"]["review_evidence"]["blocker_code"],
+            )
+            self.assertEqual(
+                expected_recovery_action,
+                parent["broadcast"]["review_evidence"]["recovery_action"],
+            )
+            self.assertEqual("blocked", state["status"])
+            self.assertEqual(expected_code, state["blocker_code"])
+            self.assertEqual(expected_recovery_action, state["recovery_action"])
+            self.assertEqual("needs_review", windows["status"])
+            self.assertEqual("invalid_or_stale_selective_review_evidence", windows["reason"])
+            self.assertEqual(queue_bytes, queue_path.read_bytes())
+            self.assertEqual(
+                generation_bytes,
+                {
+                    path.relative_to(generations_root).as_posix(): path.read_bytes()
+                    for path in generations_root.rglob("*")
+                    if path.is_file()
+                },
+            )
+        finally:
+            recovered_service.close()
+
+        if assert_unknown_runtime:
+            with (
+                mock.patch.object(
+                    ApiService,
+                    "_validate_current_review_queue_locked",
+                    side_effect=RuntimeError("injected unexpected recovery bug"),
+                ),
+                self.assertRaisesRegex(RuntimeError, "injected unexpected recovery bug"),
+            ):
+                ApiService(repo)
+
+    def _assert_activated_review_consumers_reject_target_mutation(self, mutation: str) -> None:
+        draft = self._write_fixture()
+        service, parent_output = self._create_service_parent(draft)
+        try:
+            built = build_review_evidence_bundle(self.source, service.review_evidence_inbox_dir / "fixture")
+            queued = service.import_broadcast_review_evidence(
+                "run-fixture",
+                {
+                    "bundle_id": "review-evidence-fixture",
+                    "bundle_manifest_sha256": built.bundle_sha256,
+                },
+            )
+            terminal = self._wait_for_terminal(service, queued["run_id"])
+            self.assertEqual("completed", terminal["status"])
+            ready = service.get_broadcast_review_windows("run-fixture")
+            self.assertEqual("ready", ready["status"])
+
+            if mutation == "config":
+                Path(service.get_run("run-fixture")["config_path"]).write_text(
+                    "input_video: changed-after-activation.mp4\n",
+                    encoding="utf-8",
+                )
+            elif mutation == "root_contract":
+                contract_path = parent_output / "tracking_contract.v2.json"
+                contract = json.loads(contract_path.read_text(encoding="utf-8"))
+                contract["candidates"][0]["confidence"] = 0.7
+                self._write_json(contract_path, contract)
+            elif mutation == "action_binding":
+                binding_path = parent_output / "action_signal_binding.v1.json"
+                binding = json.loads(binding_path.read_text(encoding="utf-8"))
+                binding["changed_after_activation"] = True
+                self._write_json(binding_path, binding)
+            else:
+                self.fail(f"unsupported target mutation: {mutation}")
+
+            blocked = service.get_broadcast_review_windows("run-fixture")
+            self.assertEqual("needs_review", blocked["status"])
+            self.assertEqual("invalid_or_stale_selective_review_evidence", blocked["reason"])
+            with (
+                mock.patch.object(service, "get_broadcast_review_windows", return_value=ready),
+                self.assertRaisesRegex(RuntimeError, "changed|current run context"),
+            ):
+                service.submit_broadcast_review_actions(
+                    "run-fixture",
+                    {"queue_sha256": ready["queue_sha256"], "actions": []},
+                )
+            self.assertFalse((parent_output / "review_decisions.json").exists())
+        finally:
+            service.close()
 
     def _wait_for_terminal(self, service: ApiService, run_id: str) -> dict[str, object]:
         deadline = time.monotonic() + 5.0

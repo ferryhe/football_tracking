@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import {
+  getGetConfigQueryKey,
   getGetBroadcastReviewEvidenceQueryKey,
   getGetBroadcastReviewWindowsQueryKey,
   getGetRunQueryKey,
@@ -9,6 +10,7 @@ import {
   useGetBroadcastReviewEvidence,
   useGetRun,
   useImportBroadcastReviewEvidence,
+  useReconfirmBroadcastConfigLineage,
   type BroadcastReviewEvidenceBundleSummary,
   type BroadcastReviewEvidenceStateResponse,
   type RunRecord,
@@ -17,6 +19,8 @@ import {
 import type {
   BroadcastReviewEvidenceBundleIdentity,
   BroadcastReviewEvidenceCapacity,
+  BroadcastConfigLineageReconfirmationIdentity,
+  BroadcastConfigLineageReconfirmationState,
   BroadcastReviewEvidenceState,
   BroadcastReviewEvidenceStepProps,
   BroadcastReviewEvidenceStatus,
@@ -37,7 +41,11 @@ const TERMINAL_RETRY_STATUSES = new Set<BroadcastReviewEvidenceStatus>([
 
 const SHA256_PATTERN = /^[0-9a-f]{64}$/;
 
-export type BroadcastReviewEvidenceErrorKind = "load" | "prepare" | "cancel";
+export type BroadcastReviewEvidenceErrorKind =
+  | "load"
+  | "prepare"
+  | "cancel"
+  | "reconfirm";
 
 export interface BroadcastReviewEvidenceControllerError {
   kind: BroadcastReviewEvidenceErrorKind;
@@ -151,6 +159,44 @@ function cleanText(value: string | null | undefined): string | null {
   return cleaned || null;
 }
 
+function configLineageReconfirmationState(
+  response: BroadcastReviewEvidenceStateResponse | undefined,
+  runId: string,
+): BroadcastConfigLineageReconfirmationState | null {
+  const challenge = response?.config_lineage_reconfirmation;
+  const targetRunId = cleanText(challenge?.target_run_id);
+  const confirmedConfigName = cleanText(challenge?.confirmed_config_name);
+  const confirmedTextSha256 = cleanText(challenge?.confirmed_text_sha256);
+  const expectedObservedRawSha256 = cleanText(
+    challenge?.expected_observed_raw_sha256,
+  );
+  const workflowBindings = challenge?.workflow_bindings;
+  if (
+    response?.status !== "blocked" ||
+    response.blocker_code !==
+      "confirmed_config_lineage_reconfirmation_required" ||
+    response.recovery_action !== "reconfirm_production_config" ||
+    targetRunId !== runId ||
+    !confirmedConfigName ||
+    !confirmedTextSha256 ||
+    !SHA256_PATTERN.test(confirmedTextSha256) ||
+    !expectedObservedRawSha256 ||
+    !SHA256_PATTERN.test(expectedObservedRawSha256) ||
+    typeof workflowBindings !== "object" ||
+    workflowBindings === null ||
+    Array.isArray(workflowBindings)
+  ) {
+    return null;
+  }
+  return {
+    targetRunId,
+    confirmedConfigName,
+    confirmedTextSha256,
+    expectedObservedRawSha256,
+    workflowBindings,
+  };
+}
+
 export function useBroadcastReviewEvidenceController({
   runId,
   enabled,
@@ -160,6 +206,7 @@ export function useBroadcastReviewEvidenceController({
   const queryClient = useQueryClient();
   const importMutation = useImportBroadcastReviewEvidence();
   const cancelMutation = useCancelRun();
+  const reconfirmMutation = useReconfirmBroadcastConfigLineage();
   const mutationInFlightRef = useRef(false);
   const lastBundleRef = useRef<{
     runId: string;
@@ -281,6 +328,10 @@ export function useBroadcastReviewEvidenceController({
       recoveryAction = messages.retryBundleUnavailableRecovery;
     }
 
+    const configLineageReconfirmation = configLineageReconfirmationState(
+      response,
+      runId,
+    );
     return {
       status,
       bundle: stateBundle,
@@ -297,6 +348,7 @@ export function useBroadcastReviewEvidenceController({
       generationId: cleanText(response?.generation_id),
       queueSha256: cleanText(response?.queue_sha256),
       capacity,
+      configLineageReconfirmation,
     };
   }, [
     compatibleBundles.length,
@@ -307,12 +359,16 @@ export function useBroadcastReviewEvidenceController({
     response,
     retainedBundle,
     retainedBundleIsCompatible,
+    runId,
     uniqueCompatibleBundle,
     preparableAlternativeBundle,
   ]);
 
   const invalidateProvisioningQueries = useCallback(
-    async (operationRunId?: string | null) => {
+    async (
+      operationRunId?: string | null,
+      confirmedConfigName?: string | null,
+    ) => {
       const invalidations: Promise<unknown>[] = [
         queryClient.invalidateQueries({
           queryKey: getGetBroadcastReviewEvidenceQueryKey(runId),
@@ -329,6 +385,13 @@ export function useBroadcastReviewEvidenceController({
         invalidations.push(
           queryClient.invalidateQueries({
             queryKey: getGetRunQueryKey(operationRunId),
+          }),
+        );
+      }
+      if (confirmedConfigName) {
+        invalidations.push(
+          queryClient.invalidateQueries({
+            queryKey: getGetConfigQueryKey(confirmedConfigName),
           }),
         );
       }
@@ -431,6 +494,69 @@ export function useBroadcastReviewEvidenceController({
     state.status,
   ]);
 
+  const reconfirmConfigLineage = useCallback(
+    async (identities: BroadcastConfigLineageReconfirmationIdentity) => {
+      const challenge = state.configLineageReconfirmation;
+      const operatorId = identities.operatorId.trim();
+      const reviewerId = identities.reviewerId.trim();
+      if (
+        !enabled ||
+        !challenge ||
+        !operatorId ||
+        !reviewerId ||
+        operatorId !== identities.operatorId ||
+        reviewerId !== identities.reviewerId ||
+        operatorId === reviewerId ||
+        mutationInFlightRef.current
+      ) {
+        return;
+      }
+      mutationInFlightRef.current = true;
+      reconfirmMutation.reset();
+      importMutation.reset();
+      cancelMutation.reset();
+      try {
+        await reconfirmMutation.mutateAsync({
+          runId,
+          data: {
+            target_run_id: challenge.targetRunId,
+            confirmed_config_name: challenge.confirmedConfigName,
+            confirmed_text_sha256: challenge.confirmedTextSha256,
+            expected_observed_raw_sha256: challenge.expectedObservedRawSha256,
+            workflow_bindings: challenge.workflowBindings,
+            operator_id: operatorId,
+            reviewer_id: reviewerId,
+          },
+        });
+        await invalidateProvisioningQueries(
+          null,
+          challenge.confirmedConfigName,
+        );
+      } catch {
+        // Keep the mutation error and reload the authoritative stable blocker.
+        try {
+          await invalidateProvisioningQueries(
+            null,
+            challenge.confirmedConfigName,
+          );
+        } catch {
+          // The original mutation error remains available to the host.
+        }
+      } finally {
+        mutationInFlightRef.current = false;
+      }
+    },
+    [
+      cancelMutation,
+      enabled,
+      importMutation,
+      invalidateProvisioningQueries,
+      reconfirmMutation,
+      runId,
+      state.configLineageReconfirmation,
+    ],
+  );
+
   const canPrepare =
     state.status === "available" &&
     uniqueCompatibleBundle !== null &&
@@ -450,7 +576,10 @@ export function useBroadcastReviewEvidenceController({
   const canPrepareAlternative =
     TERMINAL_RETRY_STATUSES.has(state.status) &&
     preparableAlternativeBundle !== null;
-  const mutationPending = importMutation.isPending || cancelMutation.isPending;
+  const mutationPending =
+    importMutation.isPending ||
+    cancelMutation.isPending ||
+    reconfirmMutation.isPending;
   const mutationIsRetry = Boolean(
     importMutation.variables?.data.retry_from_job_id,
   );
@@ -465,6 +594,8 @@ export function useBroadcastReviewEvidenceController({
     error = { kind: "prepare", cause: importMutation.error };
   } else if (cancelMutation.error) {
     error = { kind: "cancel", cause: cancelMutation.error };
+  } else if (reconfirmMutation.error) {
+    error = { kind: "reconfirm", cause: reconfirmMutation.error };
   }
 
   return {
@@ -494,9 +625,15 @@ export function useBroadcastReviewEvidenceController({
             }
           }
         : undefined,
+      onReconfirmConfigLineage: state.configLineageReconfirmation
+        ? (identities) => {
+            void reconfirmConfigLineage(identities);
+          }
+        : undefined,
       isPreparing: importMutation.isPending && !mutationIsRetry,
       isCancelling: cancelMutation.isPending,
       isRetrying: importMutation.isPending && mutationIsRetry,
+      isReconfirming: reconfirmMutation.isPending,
       disabled: !enabled || mutationPending,
     },
     isLoading: enabled && evidenceQuery.isLoading,

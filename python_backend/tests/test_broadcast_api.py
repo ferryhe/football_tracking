@@ -16,6 +16,7 @@ from unittest import mock
 import cv2
 import numpy as np
 import yaml
+from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
 from football_tracking.action_signal import ActionCalibration, generate_action_track
@@ -24,13 +25,16 @@ from football_tracking.api.broadcast_api import (
     BroadcastApiError,
     _safe_status_generation_dir,
     build_review_action_envelope,
+    build_terminal_tail_review_acknowledgement,
     collect_review_evidence_paths,
+    inspect_terminal_tail_review,
     publish_broadcast_facade,
     publish_json_exclusive,
     validate_broadcast_quality_report,
     validate_review_queue_activation,
     validate_review_queue_bindings,
 )
+from football_tracking.api.dependencies import get_service
 from football_tracking.api.routes.artifacts import get_artifact
 from football_tracking.api.schemas import (
     BroadcastOperationResponse,
@@ -53,9 +57,129 @@ def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def _sha256_text(path: Path) -> str:
+    return hashlib.sha256(path.read_text(encoding="utf-8").encode("utf-8")).hexdigest()
+
+
 def _write_json(path: Path, payload: object) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload), encoding="utf-8")
+
+
+class _ActionSignalCapture:
+    def __init__(self, frames: list[np.ndarray], *, reported_frame_count: int, fps: float) -> None:
+        self.frames = frames
+        self.reported_frame_count = reported_frame_count
+        self.fps = fps
+        self.position = 0
+        self.released = False
+
+    def isOpened(self) -> bool:
+        return True
+
+    def get(self, prop: int) -> float:
+        if prop == cv2.CAP_PROP_FRAME_WIDTH:
+            return 64.0
+        if prop == cv2.CAP_PROP_FRAME_HEIGHT:
+            return 36.0
+        if prop == cv2.CAP_PROP_FPS:
+            return self.fps
+        if prop == cv2.CAP_PROP_FRAME_COUNT:
+            return float(self.reported_frame_count)
+        if prop == cv2.CAP_PROP_POS_FRAMES:
+            return float(self.position)
+        return 0.0
+
+    def set(self, prop: int, value: float) -> bool:
+        if prop != cv2.CAP_PROP_POS_FRAMES:
+            return False
+        self.position = int(value)
+        return True
+
+    def read(self) -> tuple[bool, np.ndarray | None]:
+        if self.position >= len(self.frames):
+            return False, None
+        frame = self.frames[self.position]
+        self.position += 1
+        return True, frame.copy()
+
+    def release(self) -> None:
+        self.released = True
+
+
+def _terminal_tail_report(*, verified_count: int, reported_count: int) -> dict[str, object]:
+    chunk_name = "chunk_0000"
+    return {
+        "chunk_count": 1,
+        "frame_count": verified_count,
+        "chunks_root_name": "chunks",
+        "source_chunk_names": [chunk_name],
+        "chunks": [
+            {
+                "index": 0,
+                "name": chunk_name,
+                "decode_start_frame": 0,
+                "start_frame": 0,
+                "end_frame": reported_count - 1,
+                "core_start_frame": 0,
+                "core_end_frame": reported_count - 1,
+            }
+        ],
+        "boundary_events": [
+            {
+                "type": "truncated_final_tail",
+                "chunk_index": 0,
+                "chunk_name": chunk_name,
+                "first_missing_frame": verified_count,
+                "last_missing_frame": reported_count - 1,
+                "missing_frame_count": reported_count - verified_count,
+                "planned_core_end_frame": reported_count - 1,
+                "stitched_core_end_frame": verified_count - 1,
+            }
+        ],
+        "stitch": {"status": "succeeded"},
+        "execution": {
+            "status": "succeeded",
+            "results": [
+                {
+                    "chunk": {"index": 0, "name": chunk_name},
+                    "chunk_index": 0,
+                    "chunk_name": chunk_name,
+                    "exit_code": 0,
+                }
+            ],
+        },
+    }
+
+
+def _reconciling_run_payload() -> dict[str, object]:
+    return {
+        "run_id": "full-recompute-abc123",
+        "source": "broadcast_hybrid_recompute",
+        "status": "running",
+        "created_at": "2026-07-15T00:00:00+00:00",
+        "parent_run_id": "full",
+        "output_dir": "/tmp/full-recompute-abc123",
+        "broadcast": {
+            "operation": "recompute",
+            "operation_status": "reconciling",
+            "parent_run_id": "full",
+            "commit_started": True,
+        },
+    }
+
+
+class _ReconcilingRunServiceStub:
+    def __init__(self, payload: dict[str, object]) -> None:
+        self.payload = payload
+        self.requested_run_ids: list[str] = []
+
+    def get_run(self, run_id: str) -> dict[str, object]:
+        self.requested_run_ids.append(run_id)
+        return self.payload
+
+    def list_runs(self) -> list[dict[str, object]]:
+        return [self.payload]
 
 
 class BroadcastRequestSchemaTests(unittest.TestCase):
@@ -74,6 +198,34 @@ class BroadcastRequestSchemaTests(unittest.TestCase):
             windows_schema["properties"]["items"]["items"]["$ref"],
         )
         self.assertIn("BroadcastReviewEvidenceArtifact", windows_schema["$defs"])
+
+    def test_run_record_accepts_reconciling_operation_status(self) -> None:
+        record = RunRecord.model_validate(_reconciling_run_payload())
+
+        self.assertEqual("reconciling", record.broadcast.operation_status)
+
+    def test_get_run_route_serializes_reconciling_operation_status(self) -> None:
+        service = _ReconcilingRunServiceStub(_reconciling_run_payload())
+        app = create_app(initialize_service=False)
+        app.dependency_overrides[get_service] = lambda: service
+
+        with TestClient(app) as client:
+            response = client.get("/api/v1/runs/full-recompute-abc123")
+
+        self.assertEqual(200, response.status_code)
+        self.assertEqual(["full-recompute-abc123"], service.requested_run_ids)
+        self.assertEqual("reconciling", response.json()["broadcast"]["operation_status"])
+
+    def test_list_runs_route_serializes_reconciling_operation_status(self) -> None:
+        service = _ReconcilingRunServiceStub(_reconciling_run_payload())
+        app = create_app(initialize_service=False)
+        app.dependency_overrides[get_service] = lambda: service
+
+        with TestClient(app) as client:
+            response = client.get("/api/v1/runs")
+
+        self.assertEqual(200, response.status_code)
+        self.assertEqual("reconciling", response.json()[0]["broadcast"]["operation_status"])
 
     def test_broadcast_request_requires_stable_profile_and_three_frame_calibration(self) -> None:
         request = CreateRunRequest(
@@ -130,8 +282,13 @@ class BroadcastRequestSchemaTests(unittest.TestCase):
             )
 
     def test_review_action_shapes_fail_closed(self) -> None:
-        self.assertEqual([], BroadcastReviewActionsRequest(actions=[]).actions)
+        self.assertEqual([], BroadcastReviewActionsRequest(queue_sha256="a" * 64, actions=[]).actions)
+        with self.assertRaises(ValidationError):
+            BroadcastReviewActionsRequest(actions=[])
+        with self.assertRaises(ValidationError):
+            BroadcastReviewActionsRequest(queue_sha256="A" * 64, actions=[])
         valid = BroadcastReviewActionsRequest(
+            queue_sha256="b" * 64,
             actions=[
                 BroadcastReviewAction(
                     action_id="a1",
@@ -141,7 +298,7 @@ class BroadcastRequestSchemaTests(unittest.TestCase):
                     action="reject_noise",
                     noise_subtype="field_line_or_mark",
                 )
-            ]
+            ],
         )
         self.assertEqual("reject_noise", valid.actions[0].action)
 
@@ -444,6 +601,7 @@ class BroadcastReviewBindingTests(unittest.TestCase):
             }
             _write_json(queue_path, queue)
             request = BroadcastReviewActionsRequest(
+                queue_sha256=_sha256(queue_path),
                 actions=[
                     BroadcastReviewAction(
                         action_id="action-1",
@@ -452,7 +610,7 @@ class BroadcastReviewBindingTests(unittest.TestCase):
                         reviewer_id="operator",
                         action="mark_unknown",
                     )
-                ]
+                ],
             )
 
             envelope = build_review_action_envelope(queue_path, request.model_dump(mode="json")["actions"])
@@ -742,6 +900,183 @@ class BroadcastReviewBindingTests(unittest.TestCase):
                 validate_review_queue_bindings(queue_path, trusted_root=root)
 
 
+class TerminalTailReviewContractTests(unittest.TestCase):
+    def _write_evidence(self, output_dir: Path, *, gap_frames: int = 2) -> dict[str, Any]:
+        reported = 5194
+        verified = reported - gap_frames
+        fps = 20.0
+        source_sha256 = "a" * 64
+        contract = {
+            "source": {
+                "video_sha256": source_sha256,
+                "frame_count": reported,
+                "fps": fps,
+            },
+            "summary": {"frame_count": verified},
+        }
+        _write_json(output_dir / "tracking_contract.v2.json", contract)
+        temporal = {
+            "frame_count": verified,
+            "boundary_events": [
+                {
+                    "type": "truncated_final_tail",
+                    "first_missing_frame": verified,
+                    "last_missing_frame": reported - 1,
+                    "missing_frame_count": gap_frames,
+                    "planned_core_end_frame": reported - 1,
+                    "stitched_core_end_frame": verified - 1,
+                }
+            ],
+        }
+        _write_json(output_dir / "temporal_chunks_report.json", temporal)
+        action_report = {
+            "artifact_type": "action_signal_report",
+            "status": "complete_with_terminal_shortfall",
+            "termination_reason": "terminal_decoder_shortfall",
+            "expected_frame_count": reported,
+            "frame_count": verified,
+            "fps": fps,
+            "limitations": [
+                {
+                    "code": "action_signal_terminal_decoder_shortfall",
+                    "requires_manual_review": True,
+                    "reported_frame_count": reported,
+                    "verified_frame_count": verified,
+                    "expected_frame_count": reported,
+                    "decoded_frame_count": verified,
+                    "missing_terminal_frames": gap_frames,
+                    "missing_terminal_seconds": gap_frames / fps,
+                    "expected_terminal_shortfall_frames": gap_frames,
+                    "max_accepted_terminal_shortfall_seconds": 0.1,
+                    "policy": "trusted_full_source_terminal_tail_only",
+                }
+            ],
+        }
+        _write_json(output_dir / "action_signal_report.v1.json", action_report)
+        evidence = {
+            "tracking_contract_sha256": _sha256(output_dir / "tracking_contract.v2.json"),
+            "source_video_sha256": source_sha256,
+            "source_width": 5120,
+            "source_height": 1440,
+            "source_fps": fps,
+            "reported_frame_count": reported,
+            "verified_frame_count": verified,
+            "temporal_chunks_report_sha256": _sha256(output_dir / "temporal_chunks_report.json"),
+            "first_missing_frame": verified,
+            "last_missing_frame": reported - 1,
+            "missing_frame_count": gap_frames,
+            "missing_duration_seconds": gap_frames / fps,
+            "policy": {
+                "max_missing_frames": 2,
+                "max_missing_seconds": 0.1,
+                "requires_manual_review": True,
+            },
+        }
+        binding = {
+            "schema_version": "1.0",
+            "artifact_type": "broadcast_action_signal_binding",
+            "source": {
+                "video_sha256": source_sha256,
+                "tracking_contract_sha256": evidence["tracking_contract_sha256"],
+            },
+            "artifacts": {
+                "action_signal_report.v1.json": {
+                    "sha256": _sha256(output_dir / "action_signal_report.v1.json"),
+                    "size_bytes": (output_dir / "action_signal_report.v1.json").stat().st_size,
+                }
+            },
+            "terminal_shortfall_evidence": evidence,
+        }
+        _write_json(output_dir / "action_signal_binding.v1.json", binding)
+        return evidence
+
+    def test_shortfall_blocks_facade_until_an_immutable_acknowledgement_exists(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            self._write_evidence(output_dir)
+
+            required = inspect_terminal_tail_review(output_dir)
+            self.assertEqual("required", required["status"])
+            self.assertEqual(2, required["evidence"]["gap_frames"])
+            self.assertAlmostEqual(0.1, required["evidence"]["gap_seconds"])
+            first = publish_broadcast_facade(output_dir)
+            self.assertIn("terminal_decoder_shortfall_requires_operator_review", first["blocking_reasons"])
+            self.assertIn("action_signal_terminal_decoder_shortfall", first["limitations"])
+
+            acknowledgement = build_terminal_tail_review_acknowledgement(
+                output_dir,
+                decision="accept_terminal_shortfall",
+                reviewer_id="quality-lead",
+                evidence_sha256=required["evidence"]["evidence_sha256"],
+                reviewed_at="2026-07-15T20:00:00+00:00",
+            )
+            acknowledgement_sha256 = publish_json_exclusive(
+                output_dir / "terminal_tail_review.v1.json",
+                acknowledgement,
+                trusted_root=output_dir,
+            )
+
+            accepted = inspect_terminal_tail_review(output_dir)
+            self.assertEqual("accepted", accepted["status"])
+            self.assertEqual("quality-lead", accepted["reviewer_id"])
+            self.assertEqual(acknowledgement_sha256, accepted["acknowledgement_sha256"])
+            second = publish_broadcast_facade(output_dir)
+            self.assertNotIn("terminal_decoder_shortfall_requires_operator_review", second["blocking_reasons"])
+            self.assertIn("action_signal_terminal_decoder_shortfall", second["limitations"])
+
+            self.assertEqual(
+                acknowledgement,
+                build_terminal_tail_review_acknowledgement(
+                    output_dir,
+                    decision="accept_terminal_shortfall",
+                    reviewer_id="quality-lead",
+                    evidence_sha256=required["evidence"]["evidence_sha256"],
+                ),
+            )
+            with self.assertRaisesRegex(BroadcastApiError, "immutable"):
+                build_terminal_tail_review_acknowledgement(
+                    output_dir,
+                    decision="accept_terminal_shortfall",
+                    reviewer_id="other-reviewer",
+                    evidence_sha256=required["evidence"]["evidence_sha256"],
+                )
+
+    def test_stale_or_tampered_terminal_evidence_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            self._write_evidence(output_dir)
+            temporal_path = output_dir / "temporal_chunks_report.json"
+            temporal = json.loads(temporal_path.read_text(encoding="utf-8"))
+            temporal["boundary_events"][0]["first_missing_frame"] -= 1
+            _write_json(temporal_path, temporal)
+
+            with self.assertRaisesRegex(BroadcastApiError, "temporal chunks report changed"):
+                inspect_terminal_tail_review(output_dir)
+            report = publish_broadcast_facade(output_dir)
+            self.assertIn("invalid_terminal_decoder_shortfall_review_evidence", report["blocking_reasons"])
+
+    def test_large_but_self_consistent_gap_is_rejected_by_policy(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            self._write_evidence(output_dir, gap_frames=3)
+
+            with self.assertRaisesRegex(BroadcastApiError, "internally inconsistent"):
+                inspect_terminal_tail_review(output_dir)
+
+    def test_audit_fps_cannot_understate_the_terminal_duration(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            self._write_evidence(output_dir)
+            binding_path = output_dir / "action_signal_binding.v1.json"
+            binding = json.loads(binding_path.read_text(encoding="utf-8"))
+            binding["terminal_shortfall_evidence"]["source_fps"] = 40.0
+            binding["terminal_shortfall_evidence"]["missing_duration_seconds"] = 0.05
+            _write_json(binding_path, binding)
+
+            with self.assertRaisesRegex(BroadcastApiError, "internally inconsistent"):
+                inspect_terminal_tail_review(output_dir)
+
+
 class BroadcastFacadeTests(unittest.TestCase):
     def test_status_root_creation_tolerates_a_concurrent_creator(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -974,6 +1309,475 @@ class BroadcastApiServiceTests(unittest.TestCase):
             },
         }
 
+    def write_broadcast_video(self, name: str, *, fps: float = 20.0, frame_count: int = 12) -> Path:
+        path = self.repo_root / "data" / name
+        writer = cv2.VideoWriter(str(path), cv2.VideoWriter_fourcc(*"MJPG"), fps, (64, 36))
+        if not writer.isOpened():
+            self.skipTest("OpenCV video writer is unavailable")
+        for frame_index in range(frame_count):
+            writer.write(np.full((36, 64, 3), frame_index, dtype=np.uint8))
+        writer.release()
+        return path
+
+    def terminal_tail_request(self, video: Path) -> dict[str, object]:
+        request = self.request()
+        request["input_video"] = str(video)
+        request["config_patch"] = {"temporal_chunks": {"enabled": True}}
+        return request
+
+    def write_confirmed_config(self) -> tuple[str, Path]:
+        relative_name = "generated/production_workflow_confirmed.yaml"
+        config_path = self.repo_root / "config" / relative_name
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+        config_path.write_text(
+            (self.repo_root / "config" / "default.yaml").read_text(encoding="utf-8"),
+            encoding="utf-8",
+        )
+        return relative_name, config_path
+
+    def production_full_request(self) -> tuple[dict[str, object], str, Path, Path]:
+        workflow_id = "workflow-production-full"
+        parent_output_id = "accepted-output"
+        parent_run_id = f"production_trial_{parent_output_id}"
+        calibration_digest = "c" * 64
+        trial_intent_sha256 = "d" * 64
+        trial_request_sha256 = "e" * 64
+        config_patch_sha256 = "f" * 64
+        catalog_video = self.service.list_input_videos()["videos"][0]
+        source_signature = {
+            "path": catalog_video["path"],
+            "size_bytes": catalog_video["size_bytes"],
+            "modified_at": catalog_video["modified_at"],
+        }
+        trial_note = {
+            "schema_version": "1.0",
+            "purpose": "production_trial",
+            "workflow_id": workflow_id,
+            "submission_id": "trial-submission",
+            "output_id": parent_output_id,
+            "generation": 1,
+            "calibration_digest": calibration_digest,
+            "intent_sha256": trial_intent_sha256,
+            "start_frame": 0,
+            "max_frames": 12,
+            "enable_postprocess": True,
+            "enable_follow_cam": True,
+        }
+        trial_config_path = self.repo_root / "config" / "generated" / f"{parent_run_id}.yaml"
+        trial_config_path.parent.mkdir(parents=True, exist_ok=True)
+        trial_config = yaml.safe_load((self.repo_root / "config" / "default.yaml").read_text(encoding="utf-8"))
+        trial_config["metadata"] = {
+            "production_workflow": {
+                **trial_note,
+                "source_signature": source_signature,
+                "output_dir_name": parent_run_id,
+            }
+        }
+        trial_config_path.write_text(yaml.safe_dump(trial_config, sort_keys=False), encoding="utf-8")
+        parent_output = self.repo_root / "outputs" / "runs" / "match" / parent_run_id
+        parent_output.mkdir(parents=True)
+        registry = self.service._read_registry()
+        registry["runs"].append(
+            {
+                "run_id": parent_run_id,
+                "source": "api",
+                "status": "completed",
+                "created_at": "2026-07-14T00:00:00Z",
+                "started_at": "2026-07-14T00:00:00Z",
+                "completed_at": "2026-07-14T00:01:00Z",
+                "config_name": f"generated/{parent_run_id}.yaml",
+                "config_path": str(trial_config_path),
+                "input_video": str(self.video.resolve()),
+                "parent_run_id": None,
+                "output_dir": str(parent_output),
+                "modules_enabled": {"postprocess": True, "follow_cam": True},
+                "artifacts": [],
+                "stats": {},
+                "broadcast": {},
+                "progress": None,
+                "notes": json.dumps(trial_note, sort_keys=True, separators=(",", ":")),
+                "error": None,
+            }
+        )
+        self.service._write_registry(registry)
+
+        confirmed_name = "generated/production_workflow_confirmed.yaml"
+        confirmed_path = self.repo_root / "config" / confirmed_name
+        confirmed = yaml.safe_load((self.repo_root / "config" / "default.yaml").read_text(encoding="utf-8"))
+        confirmed.update(
+            {
+                "input_video": str(self.video.resolve()),
+                "filtering": {"roi": [0, 0, 63, 35]},
+                "scene_bias": {
+                    "enabled": True,
+                    "ground_zones": [
+                        {
+                            "name": "production_field",
+                            "points": [[0, 0], [63, 0], [63, 35], [0, 35]],
+                        }
+                    ],
+                    "negative_rois": [],
+                },
+                "postprocess": {"enabled": True},
+                "runtime": {"start_frame": 0, "max_frames": None},
+                "follow_cam": {"enabled": False},
+                "output": {"save_tracking_contract": True},
+                "metadata": {
+                    "production_workflow": {
+                        "schema_version": "1.0",
+                        "workflow_id": workflow_id,
+                        "base_config_name": "default.yaml",
+                        "accepted_trial_run_id": parent_run_id,
+                        "calibration_digest": calibration_digest,
+                        "source_signature": source_signature,
+                        "trial_intent_sha256": trial_intent_sha256,
+                        "trial_request_sha256": trial_request_sha256,
+                        "trial_patch_sha256": "a" * 64,
+                        "patch_sha256": config_patch_sha256,
+                        "confirmed_at": "2026-07-14T00:02:00Z",
+                    }
+                },
+            }
+        )
+        confirmed_path.write_text(yaml.safe_dump(confirmed, sort_keys=False), encoding="utf-8")
+        full_output_id = "22222222-2222-4222-8222-222222222222"
+        full_note = {
+            "schema_version": "1.0",
+            "purpose": "production_full",
+            "workflow_id": workflow_id,
+            "submission_id": "full-submission",
+            "output_id": full_output_id,
+            "generation": 1,
+            "accepted_trial_run_id": parent_run_id,
+            "accepted_trial_request_sha256": trial_request_sha256,
+            "confirmed_config_name": confirmed_name,
+            "expected_config_sha256": _sha256_text(confirmed_path),
+            "config_patch_sha256": config_patch_sha256,
+            "calibration_digest": calibration_digest,
+            "source_signature": source_signature,
+        }
+        request = self.request()
+        request.update(
+            {
+                "config_name": confirmed_name,
+                "parent_run_id": parent_run_id,
+                "output_dir_name": f"production_full_{full_output_id}",
+                "enable_postprocess": True,
+                "enable_follow_cam": False,
+                "start_frame": 0,
+                "max_frames": None,
+                "notes": json.dumps(full_note, sort_keys=True, separators=(",", ":")),
+            }
+        )
+        return request, parent_run_id, trial_config_path, confirmed_path
+
+    def test_create_run_without_config_patch_keeps_confirmed_config_identity(self) -> None:
+        confirmed_name, confirmed_path = self.write_confirmed_config()
+        request = self.request()
+        request.update({"config_name": confirmed_name, "output_dir_name": "confirmed-without-patch"})
+
+        with mock.patch.object(self.service, "_start_thread_or_cleanup"):
+            run = self.service.create_run(request)
+
+        self.assertEqual(confirmed_name, run["config_name"])
+        self.assertEqual(confirmed_path.resolve(), Path(str(run["config_path"])).resolve())
+
+    def test_create_run_with_empty_config_patch_keeps_confirmed_config_identity(self) -> None:
+        confirmed_name, confirmed_path = self.write_confirmed_config()
+        request = self.request()
+        request.update(
+            {
+                "config_name": confirmed_name,
+                "config_patch": {},
+                "output_dir_name": "confirmed-with-empty-patch",
+            }
+        )
+
+        with mock.patch.object(self.service, "_start_thread_or_cleanup"):
+            run = self.service.create_run(request)
+
+        self.assertEqual(confirmed_name, run["config_name"])
+        self.assertEqual(confirmed_path.resolve(), Path(str(run["config_path"])).resolve())
+
+    def test_create_run_with_non_empty_config_patch_materializes_run_config(self) -> None:
+        confirmed_name, confirmed_path = self.write_confirmed_config()
+        run_id = "confirmed-with-field-patch"
+        request = self.request()
+        request.update(
+            {
+                "config_name": confirmed_name,
+                "config_patch": {"postprocess": {"enabled": False}},
+                "output_dir_name": run_id,
+            }
+        )
+
+        with mock.patch.object(self.service, "_start_thread_or_cleanup"):
+            run = self.service.create_run(request)
+
+        expected_name = f"generated/production_workflow_confirmed_field_setup_{run_id}.yaml"
+        materialized_path = Path(str(run["config_path"]))
+        self.assertEqual(expected_name, run["config_name"])
+        self.assertNotEqual(confirmed_path.resolve(), materialized_path.resolve())
+        self.assertTrue(materialized_path.is_file())
+
+    def test_production_full_preflight_accepts_the_bound_completed_trial(self) -> None:
+        request, parent_run_id, _, _ = self.production_full_request()
+
+        with mock.patch.object(self.service, "_start_thread_or_cleanup") as starter:
+            run = self.service.create_run(request)
+
+        self.assertEqual(parent_run_id, run["parent_run_id"])
+        self.assertEqual("broadcast_hybrid", run["source"])
+        starter.assert_called_once()
+
+    def test_production_full_rejects_request_execution_tampering(self) -> None:
+        request, _, _, _ = self.production_full_request()
+        cases = {
+            "nonzero-start": {"start_frame": 1},
+            "follow-enabled": {"enable_follow_cam": True},
+            "postprocess-mismatch": {"enable_postprocess": False},
+            "bounded-full-count": {"max_frames": 12},
+        }
+
+        for name, mutation in cases.items():
+            with self.subTest(name=name):
+                candidate = json.loads(json.dumps(request))
+                candidate.update(mutation)
+                with self.assertRaisesRegex(ValueError, "production_full"):
+                    self.service.create_run(candidate)
+
+    def test_production_full_rejects_calibration_geometry_tampering(self) -> None:
+        request, _, _, _ = self.production_full_request()
+        polygon_candidate = json.loads(json.dumps(request))
+        polygon_candidate["calibration_confirmation"]["field_polygon"][0] = [1, 0]
+        exclusion_candidate = json.loads(json.dumps(request))
+        exclusion_candidate["calibration_confirmation"]["exclusion_polygons"] = [[[1, 1], [5, 1], [1, 5]]]
+
+        for name, candidate in (
+            ("polygon", polygon_candidate),
+            ("exclusions", exclusion_candidate),
+        ):
+            with self.subTest(name=name):
+                with self.assertRaisesRegex(RuntimeError, "geometry"):
+                    self.service.create_run(candidate)
+
+    def test_production_full_rejects_confirmed_config_execution_and_filtering_tampering(self) -> None:
+        request, _, _, confirmed_path = self.production_full_request()
+        original = yaml.safe_load(confirmed_path.read_text(encoding="utf-8"))
+
+        def filtering_tamper(config: dict[str, Any]) -> None:
+            config["filtering"]["roi"] = [0, 0, 62, 35]
+
+        def runtime_start_tamper(config: dict[str, Any]) -> None:
+            config["runtime"]["start_frame"] = 1
+
+        def runtime_limit_tamper(config: dict[str, Any]) -> None:
+            config["runtime"]["max_frames"] = 12
+
+        def follow_tamper(config: dict[str, Any]) -> None:
+            config["follow_cam"]["enabled"] = True
+
+        def contract_tamper(config: dict[str, Any]) -> None:
+            config["output"]["save_tracking_contract"] = False
+
+        def scene_bias_disabled(config: dict[str, Any]) -> None:
+            config["scene_bias"]["enabled"] = False
+
+        def extra_ground_zone(config: dict[str, Any]) -> None:
+            config["scene_bias"]["ground_zones"].append({"name": "unexpected", "points": [[1, 1], [5, 1], [1, 5]]})
+
+        cases = {
+            "filtering-roi": filtering_tamper,
+            "runtime-start": runtime_start_tamper,
+            "runtime-limit": runtime_limit_tamper,
+            "follow-cam": follow_tamper,
+            "tracking-contract": contract_tamper,
+            "scene-bias-disabled": scene_bias_disabled,
+            "extra-ground-zone": extra_ground_zone,
+        }
+        for name, mutate in cases.items():
+            with self.subTest(name=name):
+                confirmed = json.loads(json.dumps(original))
+                mutate(confirmed)
+                confirmed_path.write_text(yaml.safe_dump(confirmed, sort_keys=False), encoding="utf-8")
+                candidate = json.loads(json.dumps(request))
+                note = json.loads(candidate["notes"])
+                note["expected_config_sha256"] = _sha256_text(confirmed_path)
+                candidate["notes"] = json.dumps(note, sort_keys=True, separators=(",", ":"))
+                with self.assertRaisesRegex(RuntimeError, "execution invariants|geometry"):
+                    self.service.create_run(candidate)
+
+    def test_production_full_route_returns_404_when_the_accepted_trial_is_missing(self) -> None:
+        request, parent_run_id, _, _ = self.production_full_request()
+        registry = self.service._read_registry()
+        registry["runs"] = [run for run in registry["runs"] if run["run_id"] != parent_run_id]
+        self.service._write_registry(registry)
+        app = create_app(initialize_service=False)
+        app.dependency_overrides[get_service] = lambda: self.service
+
+        with TestClient(app) as client:
+            response = client.post("/api/v1/runs", json=request)
+
+        self.assertEqual(404, response.status_code)
+        self.assertIn(parent_run_id, response.json()["detail"])
+
+    def test_production_full_route_returns_409_when_the_accepted_trial_is_not_completed(self) -> None:
+        request, parent_run_id, _, _ = self.production_full_request()
+        registry = self.service._read_registry()
+        parent = next(run for run in registry["runs"] if run["run_id"] == parent_run_id)
+        parent["status"] = "failed"
+        self.service._write_registry(registry)
+        app = create_app(initialize_service=False)
+        app.dependency_overrides[get_service] = lambda: self.service
+
+        with TestClient(app) as client:
+            response = client.post("/api/v1/runs", json=request)
+
+        self.assertEqual(409, response.status_code)
+        self.assertIn("completed", response.json()["detail"])
+
+    def test_production_full_route_returns_400_for_parent_and_note_id_mismatch(self) -> None:
+        request, _, _, _ = self.production_full_request()
+        request["parent_run_id"] = "different-trial"
+        app = create_app(initialize_service=False)
+        app.dependency_overrides[get_service] = lambda: self.service
+
+        with TestClient(app) as client:
+            response = client.post("/api/v1/runs", json=request)
+
+        self.assertEqual(400, response.status_code)
+        self.assertIn("accepted_trial_run_id", response.json()["detail"])
+
+    def test_production_full_route_returns_400_when_parent_run_id_is_missing(self) -> None:
+        request, _, _, _ = self.production_full_request()
+        request["parent_run_id"] = None
+        app = create_app(initialize_service=False)
+        app.dependency_overrides[get_service] = lambda: self.service
+
+        with TestClient(app) as client:
+            response = client.post("/api/v1/runs", json=request)
+
+        self.assertEqual(400, response.status_code)
+        self.assertIn("requires parent_run_id", response.json()["detail"])
+
+    def test_production_identity_requires_valid_production_full_notes(self) -> None:
+        request, _, _, _ = self.production_full_request()
+        wrong_purpose = json.loads(str(request["notes"]))
+        wrong_purpose["purpose"] = "rewritten-purpose"
+        cases = {
+            "missing": None,
+            "malformed": "{not-json",
+            "wrong-purpose": json.dumps(wrong_purpose, sort_keys=True, separators=(",", ":")),
+        }
+        app = create_app(initialize_service=False)
+        app.dependency_overrides[get_service] = lambda: self.service
+
+        with TestClient(app) as client:
+            for name, notes in cases.items():
+                with self.subTest(name=name):
+                    candidate = {**request, "notes": notes}
+                    response = client.post("/api/v1/runs", json=candidate)
+                    self.assertEqual(400, response.status_code)
+                    self.assertIn("production_full notes", response.json()["detail"])
+
+    def test_production_config_identity_requires_notes_under_an_alternate_output_name(self) -> None:
+        request, _, _, _ = self.production_full_request()
+        request.update({"output_dir_name": "alternate-output", "notes": None})
+        app = create_app(initialize_service=False)
+        app.dependency_overrides[get_service] = lambda: self.service
+
+        with TestClient(app) as client:
+            response = client.post("/api/v1/runs", json=request)
+
+        self.assertEqual(400, response.status_code)
+        self.assertIn("production_full notes", response.json()["detail"])
+
+    def test_suspicious_production_workflow_metadata_fails_closed_without_notes(self) -> None:
+        request, _, _, confirmed_path = self.production_full_request()
+        original = yaml.safe_load(confirmed_path.read_text(encoding="utf-8"))
+        request.update({"output_dir_name": "alternate-output", "notes": None})
+        cases = {
+            "invalid-schema": {**original["metadata"]["production_workflow"], "schema_version": "broken"},
+            "non-object": "tampered-production-workflow",
+        }
+        app = create_app(initialize_service=False)
+        app.dependency_overrides[get_service] = lambda: self.service
+
+        with TestClient(app) as client:
+            for name, production_workflow in cases.items():
+                with self.subTest(name=name):
+                    confirmed = json.loads(json.dumps(original))
+                    confirmed["metadata"]["production_workflow"] = production_workflow
+                    confirmed_path.write_text(yaml.safe_dump(confirmed, sort_keys=False), encoding="utf-8")
+                    response = client.post("/api/v1/runs", json=request)
+                    self.assertEqual(400, response.status_code)
+                    self.assertIn("production_full notes", response.json()["detail"])
+
+    def test_production_full_output_prefix_requires_notes_with_a_legacy_config(self) -> None:
+        request = self.request()
+        request.update({"output_dir_name": "production_full_spoofed", "notes": None})
+        app = create_app(initialize_service=False)
+        app.dependency_overrides[get_service] = lambda: self.service
+
+        with TestClient(app) as client:
+            response = client.post("/api/v1/runs", json=request)
+
+        self.assertEqual(400, response.status_code)
+        self.assertIn("production_full notes", response.json()["detail"])
+
+    def test_production_full_rejects_a_non_trial_parent_source(self) -> None:
+        request, parent_run_id, _, _ = self.production_full_request()
+        registry = self.service._read_registry()
+        parent = next(run for run in registry["runs"] if run["run_id"] == parent_run_id)
+        parent["source"] = "broadcast_hybrid"
+        self.service._write_registry(registry)
+
+        with self.assertRaisesRegex(RuntimeError, "source"):
+            self.service.create_run(request)
+
+    def test_production_full_rejects_trial_and_confirmation_lineage_conflicts(self) -> None:
+        request, parent_run_id, _, confirmed_path = self.production_full_request()
+        registry = self.service._read_registry()
+        parent = next(run for run in registry["runs"] if run["run_id"] == parent_run_id)
+        parent_note = json.loads(parent["notes"])
+        parent_note["workflow_id"] = "other-workflow"
+        parent["notes"] = json.dumps(parent_note, sort_keys=True, separators=(",", ":"))
+        self.service._write_registry(registry)
+
+        with self.assertRaisesRegex(RuntimeError, "trial lineage"):
+            self.service.create_run(request)
+
+        registry = self.service._read_registry()
+        parent = next(run for run in registry["runs"] if run["run_id"] == parent_run_id)
+        parent_note["workflow_id"] = "workflow-production-full"
+        parent["notes"] = json.dumps(parent_note, sort_keys=True, separators=(",", ":"))
+        self.service._write_registry(registry)
+        confirmed = yaml.safe_load(confirmed_path.read_text(encoding="utf-8"))
+        confirmed["metadata"]["production_workflow"]["accepted_trial_run_id"] = "other-trial"
+        confirmed_path.write_text(yaml.safe_dump(confirmed, sort_keys=False), encoding="utf-8")
+        full_note = json.loads(str(request["notes"]))
+        full_note["expected_config_sha256"] = _sha256_text(confirmed_path)
+        request["notes"] = json.dumps(full_note, sort_keys=True, separators=(",", ":"))
+
+        with self.assertRaisesRegex(RuntimeError, "configuration lineage"):
+            self.service.create_run(request)
+
+    def test_non_production_broadcast_request_preserves_legacy_parent_behavior(self) -> None:
+        request = self.request()
+        request.update(
+            {
+                "parent_run_id": "legacy-parent-is-not-validated",
+                "output_dir_name": "legacy-broadcast-with-parent",
+                "notes": json.dumps({"purpose": "legacy_broadcast"}),
+            }
+        )
+
+        with mock.patch.object(self.service, "_start_thread_or_cleanup") as starter:
+            run = self.service.create_run(request)
+
+        self.assertEqual("legacy-parent-is-not-validated", run["parent_run_id"])
+        starter.assert_called_once()
+
     def test_preflight_failure_has_no_output_registry_or_thread_side_effects(self) -> None:
         with self.assertRaises(ValueError):
             self.service.create_run(self.request(frames=[0, 5, 12]))
@@ -1135,6 +1939,203 @@ class BroadcastApiServiceTests(unittest.TestCase):
         self.assertEqual(_sha256(self.video), binding["source"]["video_sha256"])
         self.assertFalse(completed["modules_enabled"]["follow_cam"])
 
+    def test_broadcast_accepts_only_the_exact_audited_two_frame_terminal_shortfall(self) -> None:
+        video = self.write_broadcast_video("trusted-tail.avi")
+        with mock.patch.object(self.service, "_start_thread_or_cleanup") as starter:
+            run = self.service.create_run(self.terminal_tail_request(video))
+        thread = starter.call_args.args[1]
+        output_dir = Path(run["output_dir"])
+
+        def fake_tracking(progress_callback=None, should_cancel=None) -> None:
+            contract = build_tracking_contract(
+                source={
+                    "video_sha256": _sha256(video),
+                    "fps": 20.0,
+                    "width": 64,
+                    "height": 36,
+                    "frame_count": 12,
+                },
+                frames=[{"frame_index": index, "status": "unknown"} for index in range(10)],
+            )
+            _write_json(output_dir / "tracking_contract.v2.json", contract)
+            _write_json(
+                output_dir / "temporal_chunks_report.json",
+                _terminal_tail_report(verified_count=10, reported_count=12),
+            )
+
+        capture = _ActionSignalCapture(
+            [np.zeros((36, 64, 3), dtype=np.uint8) for _ in range(10)],
+            reported_frame_count=12,
+            fps=20.0,
+        )
+        with (
+            mock.patch.object(self.service, "_tracking_runner", return_value=fake_tracking),
+            mock.patch("football_tracking.action_signal.cv2.VideoCapture", return_value=capture),
+        ):
+            thread.run()
+
+        completed = self.service.get_run(run["run_id"])
+        self.assertEqual("completed", completed["status"], completed.get("error"))
+        report = json.loads((output_dir / "action_signal_report.v1.json").read_text(encoding="utf-8"))
+        self.assertEqual("complete_with_terminal_shortfall", report["status"])
+        self.assertEqual("terminal_decoder_shortfall", report["termination_reason"])
+        self.assertEqual(12, report["limitations"][0]["reported_frame_count"])
+        self.assertEqual(10, report["limitations"][0]["verified_frame_count"])
+        binding = json.loads((output_dir / "action_signal_binding.v1.json").read_text(encoding="utf-8"))
+        evidence = binding["terminal_shortfall_evidence"]
+        self.assertEqual(2, evidence["missing_frame_count"])
+        self.assertEqual(_sha256(output_dir / "tracking_contract.v2.json"), evidence["tracking_contract_sha256"])
+        self.assertEqual(
+            _sha256(output_dir / "temporal_chunks_report.json"),
+            evidence["temporal_chunks_report_sha256"],
+        )
+        review_windows = self.service.get_broadcast_review_windows(run["run_id"])
+        tail_review = review_windows["terminal_tail_review"]
+        self.assertEqual("required", tail_review["status"])
+        self.assertEqual(2, tail_review["evidence"]["gap_frames"])
+        with self.assertRaisesRegex(RuntimeError, "requires operator review"):
+            self.service.recompute_broadcast_trajectory(
+                run["run_id"],
+                {"review_decisions_sha256": "a" * 64},
+            )
+
+        request = {
+            "decision": "accept_terminal_shortfall",
+            "reviewer_id": "quality-lead",
+            "evidence_sha256": tail_review["evidence"]["evidence_sha256"],
+        }
+        accepted = self.service.submit_broadcast_terminal_tail_review(run["run_id"], request)
+        acknowledgement_sha256 = accepted["details"]["terminal_tail_review_sha256"]
+        self.assertRegex(acknowledgement_sha256, r"^[0-9a-f]{64}$")
+        self.assertNotIn(
+            "terminal_decoder_shortfall_requires_operator_review",
+            self.service.get_run(run["run_id"])["broadcast"]["blocking_reasons"],
+        )
+        repeated = self.service.submit_broadcast_terminal_tail_review(run["run_id"], request)
+        self.assertEqual(acknowledgement_sha256, repeated["details"]["terminal_tail_review_sha256"])
+        with self.assertRaisesRegex(RuntimeError, "immutable"):
+            self.service.submit_broadcast_terminal_tail_review(
+                run["run_id"],
+                {**request, "reviewer_id": "other-reviewer"},
+            )
+        self.assertTrue(capture.released)
+
+    def test_broadcast_rejects_action_decode_that_disagrees_with_the_exact_tail_audit(self) -> None:
+        video = self.write_broadcast_video("unexpected-readable-tail.avi")
+        with mock.patch.object(self.service, "_start_thread_or_cleanup") as starter:
+            run = self.service.create_run(self.terminal_tail_request(video))
+        thread = starter.call_args.args[1]
+        output_dir = Path(run["output_dir"])
+
+        def fake_tracking(progress_callback=None, should_cancel=None) -> None:
+            _write_json(
+                output_dir / "tracking_contract.v2.json",
+                build_tracking_contract(
+                    source={
+                        "video_sha256": _sha256(video),
+                        "fps": 20.0,
+                        "width": 64,
+                        "height": 36,
+                        "frame_count": 12,
+                    },
+                    frames=[{"frame_index": index, "status": "unknown"} for index in range(10)],
+                ),
+            )
+            _write_json(
+                output_dir / "temporal_chunks_report.json",
+                _terminal_tail_report(verified_count=10, reported_count=12),
+            )
+
+        capture = _ActionSignalCapture(
+            [np.zeros((36, 64, 3), dtype=np.uint8) for _ in range(11)],
+            reported_frame_count=12,
+            fps=20.0,
+        )
+        with (
+            mock.patch.object(self.service, "_tracking_runner", return_value=fake_tracking),
+            mock.patch("football_tracking.action_signal.cv2.VideoCapture", return_value=capture),
+        ):
+            thread.run()
+
+        failed = self.service.get_run(run["run_id"])
+        self.assertEqual("failed", failed["status"])
+        self.assertIn("premature_read_failure", failed["error"])
+        self.assertFalse((output_dir / "action_signal_report.v1.json").exists())
+        self.assertFalse((output_dir / "action_signal_binding.v1.json").exists())
+
+    def test_broadcast_terminal_shortfall_policy_rejects_large_slow_or_untrusted_gaps(self) -> None:
+        cases = (
+            ("three-frames", 60.0, 9, "exceeds the fail-closed policy", None),
+            ("slow-one-frame", 5.0, 11, "exceeds the fail-closed policy", None),
+            ("two-events", 20.0, 10, "audit evidence is invalid", "duplicate_event"),
+            ("noncontiguous", 20.0, 10, "not contiguous", "noncontiguous_contract"),
+            ("source-fps", 20.0, 10, "source FPS changed", "source_fps"),
+            ("source-count", 20.0, 10, "source frame count changed", "source_count"),
+            ("source-resolution", 20.0, 10, "source resolution changed", "source_resolution"),
+            ("source-hash", 20.0, 10, "source SHA-256", "source_hash"),
+            ("source-size", 20.0, 10, "source size changed", "source_size"),
+        )
+        for name, fps, verified_count, expected_error, mutation in cases:
+            with self.subTest(name=name):
+                video = self.write_broadcast_video(f"{name}.avi", fps=fps)
+                with mock.patch.object(self.service, "_start_thread_or_cleanup") as starter:
+                    run = self.service.create_run(self.terminal_tail_request(video))
+                thread = starter.call_args.args[1]
+                output_dir = Path(run["output_dir"])
+
+                def fake_tracking(progress_callback=None, should_cancel=None) -> None:
+                    frame_indices = list(range(verified_count))
+                    if mutation == "noncontiguous_contract":
+                        frame_indices[-1] += 1
+                    source = {
+                        "video_sha256": _sha256(video),
+                        "fps": fps,
+                        "width": 64,
+                        "height": 36,
+                        "frame_count": 12,
+                    }
+                    if mutation == "source_fps":
+                        source["fps"] = fps + 1.0
+                    elif mutation == "source_count":
+                        source["frame_count"] = 13
+                    elif mutation == "source_resolution":
+                        source["width"] = 63
+                    elif mutation == "source_hash":
+                        source["video_sha256"] = "0" * 64
+                    _write_json(
+                        output_dir / "tracking_contract.v2.json",
+                        build_tracking_contract(
+                            source=source,
+                            frames=[{"frame_index": index, "status": "unknown"} for index in frame_indices],
+                        ),
+                    )
+                    temporal = _terminal_tail_report(verified_count=verified_count, reported_count=12)
+                    if mutation == "duplicate_event":
+                        temporal["boundary_events"] = [
+                            *temporal["boundary_events"],  # type: ignore[index]
+                            dict(temporal["boundary_events"][0]),  # type: ignore[index]
+                        ]
+                    _write_json(output_dir / "temporal_chunks_report.json", temporal)
+                    if mutation == "source_size":
+                        with video.open("ab") as handle:
+                            handle.write(b"tampered")
+
+                capture = _ActionSignalCapture(
+                    [np.zeros((36, 64, 3), dtype=np.uint8) for _ in range(verified_count)],
+                    reported_frame_count=12,
+                    fps=fps,
+                )
+                with (
+                    mock.patch.object(self.service, "_tracking_runner", return_value=fake_tracking),
+                    mock.patch("football_tracking.action_signal.cv2.VideoCapture", return_value=capture),
+                ):
+                    thread.run()
+
+                failed = self.service.get_run(run["run_id"])
+                self.assertEqual("failed", failed["status"])
+                self.assertIn(expected_error, failed["error"])
+                self.assertFalse((output_dir / "action_signal_report.v1.json").exists())
+
     def test_action_signal_cancellation_publishes_no_partial_artifacts(self) -> None:
         output_dir = self.repo_root / "outputs" / "cancelled-action"
         calibration = self.request()["calibration_confirmation"]
@@ -1213,6 +2214,7 @@ class BroadcastApiServiceTests(unittest.TestCase):
             self.service.submit_broadcast_review_actions(
                 "broadcast-test",
                 {
+                    "queue_sha256": windows["queue_sha256"],
                     "actions": [
                         {
                             "action_id": "action-1",
@@ -1224,7 +2226,7 @@ class BroadcastApiServiceTests(unittest.TestCase):
                             "noise_subtype": None,
                             "keypoints": [{"frame_index": 2, "status": "detected", "x": 10.0, "y": 11.0}],
                         }
-                    ]
+                    ],
                 },
             )
         self.assertFalse((output_dir / "review_decisions.json").exists())
@@ -1239,7 +2241,7 @@ class BroadcastApiServiceTests(unittest.TestCase):
 
         submitted = self.service.submit_broadcast_review_actions(
             "broadcast-test",
-            {"actions": []},
+            {"queue_sha256": empty_windows["queue_sha256"], "actions": []},
         )
         self.assertEqual("review_actions_accepted", submitted["reason"])
         decisions = json.loads((output_dir / "review_decisions.json").read_text(encoding="utf-8"))
@@ -1315,14 +2317,24 @@ class BroadcastApiServiceTests(unittest.TestCase):
             "football_tracking.api.service.validate_broadcast_quality_report",
             side_effect=BroadcastApiError("published broadcast artifact changed"),
         ):
-            self.assertEqual([], self.service.list_artifacts("broadcast-test"))
+            self.assertEqual(
+                [],
+                self.service.list_artifacts(
+                    "broadcast-test",
+                    expected_status_generation=str(quality["status_generation"]),
+                ),
+            )
             with self.assertRaises(FileNotFoundError):
-                self.service.get_artifact_path("broadcast-test", "broadcast.mp4")
+                self.service.get_artifact_path(
+                    "broadcast-test",
+                    "broadcast.mp4",
+                    expected_status_generation=str(quality["status_generation"]),
+                )
 
     def test_ready_broadcast_artifacts_require_the_run_status_generation(self) -> None:
         output_dir = self.repo_root / "outputs" / "runs" / "match" / "broadcast-test"
         output_dir.mkdir(parents=True)
-        self._write_mock_ready_delivery_contract(output_dir)
+        quality, _ = self._write_mock_ready_delivery_contract(output_dir)
         self._register_broadcast_run(output_dir)
         registry = self.service._read_registry()
         run = next(item for item in registry["runs"] if item["run_id"] == "broadcast-test")
@@ -1333,11 +2345,156 @@ class BroadcastApiServiceTests(unittest.TestCase):
             "football_tracking.api.service.validate_broadcast_quality_report",
             side_effect=AssertionError("missing generation must reject before validation"),
         ):
-            self.assertEqual([], self.service.list_artifacts("broadcast-test"))
-            with self.assertRaises(FileNotFoundError):
-                self.service.get_artifact_path("broadcast-test", "broadcast.mp4")
-            with self.assertRaises(FileNotFoundError):
-                self.service.acquire_artifact_response_lease("broadcast-test", "broadcast.mp4")
+            for operation in (
+                lambda: self.service.list_artifacts(
+                    "broadcast-test",
+                    expected_status_generation=str(quality["status_generation"]),
+                ),
+                lambda: self.service.get_artifact_path(
+                    "broadcast-test",
+                    "broadcast.mp4",
+                    expected_status_generation=str(quality["status_generation"]),
+                ),
+                lambda: self.service.acquire_artifact_response_lease(
+                    "broadcast-test",
+                    "broadcast.mp4",
+                    expected_status_generation=str(quality["status_generation"]),
+                ),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "authoritative missing"):
+                    operation()
+
+    def test_ready_broadcast_artifact_routes_enforce_the_requested_status_generation(self) -> None:
+        output_dir = self.repo_root / "outputs" / "runs" / "match" / "broadcast-test"
+        output_dir.mkdir(parents=True)
+        quality, _ = self._write_mock_ready_delivery_contract(output_dir)
+        generation = str(quality["status_generation"])
+        stale_generation = "b" * 64
+        self._register_broadcast_run(output_dir)
+        registry = self.service._read_registry()
+        run = next(item for item in registry["runs"] if item["run_id"] == "broadcast-test")
+        run["broadcast"] = {"status": "ready", "status_generation": generation}
+        self.service._write_registry(registry)
+        app = create_app(initialize_service=False)
+        app.dependency_overrides[get_service] = lambda: self.service
+
+        with (
+            mock.patch(
+                "football_tracking.api.service.validate_broadcast_quality_report",
+                return_value=quality,
+            ),
+            TestClient(app) as client,
+        ):
+            for method, path, has_body in (
+                (client.get, "/api/v1/runs/broadcast-test/artifacts", True),
+                (client.get, "/api/v1/runs/broadcast-test/artifacts/broadcast.mp4", True),
+                (client.head, "/api/v1/runs/broadcast-test/artifacts/broadcast.mp4", False),
+            ):
+                response = method(path)
+                self.assertEqual(409, response.status_code)
+                if has_body:
+                    self.assertIn("requires status_generation", response.json()["detail"])
+
+            listed = client.get(
+                "/api/v1/runs/broadcast-test/artifacts",
+                params={"status_generation": generation},
+            )
+            downloaded = client.get(
+                "/api/v1/runs/broadcast-test/artifacts/broadcast.mp4",
+                params={"status_generation": generation},
+            )
+            headed = client.head(
+                "/api/v1/runs/broadcast-test/artifacts/broadcast.mp4",
+                params={"status_generation": generation},
+            )
+            camera_path = client.get("/api/v1/runs/broadcast-test/camera-path")
+            missing_report = client.get("/api/v1/runs/broadcast-test/cleanup-report")
+
+            self.assertEqual(200, listed.status_code)
+            self.assertEqual(8, len(listed.json()))
+            self.assertEqual(b"broadcast.mp4-bytes", downloaded.content)
+            self.assertEqual(200, headed.status_code)
+            self.assertEqual(b"", headed.content)
+            self.assertEqual(200, camera_path.status_code)
+            self.assertEqual(404, missing_report.status_code)
+
+            for method, path, has_body in (
+                (client.get, "/api/v1/runs/broadcast-test/artifacts", True),
+                (client.get, "/api/v1/runs/broadcast-test/artifacts/broadcast.mp4", True),
+                (client.head, "/api/v1/runs/broadcast-test/artifacts/broadcast.mp4", False),
+            ):
+                response = method(path, params={"status_generation": stale_generation})
+                self.assertEqual(409, response.status_code)
+                if has_body:
+                    self.assertIn("status generation", response.json()["detail"])
+
+            invalid = client.get(
+                "/api/v1/runs/broadcast-test/artifacts",
+                params={"status_generation": "NOT-A-GENERATION"},
+            )
+            self.assertEqual(422, invalid.status_code)
+
+    def test_non_ready_broadcast_artifact_routes_preserve_unbound_legacy_access(self) -> None:
+        output_dir = self.repo_root / "outputs" / "runs" / "match" / "broadcast-test"
+        output_dir.mkdir(parents=True)
+        artifact = output_dir / "preview.mp4"
+        artifact.write_bytes(b"preview-bytes")
+        self._register_broadcast_run(output_dir)
+        app = create_app(initialize_service=False)
+        app.dependency_overrides[get_service] = lambda: self.service
+
+        with TestClient(app) as client:
+            listed = client.get("/api/v1/runs/broadcast-test/artifacts")
+            downloaded = client.get("/api/v1/runs/broadcast-test/artifacts/preview.mp4")
+            headed = client.head("/api/v1/runs/broadcast-test/artifacts/preview.mp4")
+
+        self.assertEqual(200, listed.status_code)
+        self.assertIn("preview.mp4", {item["name"] for item in listed.json()})
+        self.assertEqual(200, downloaded.status_code)
+        self.assertEqual(b"preview-bytes", downloaded.content)
+        self.assertEqual(200, headed.status_code)
+        self.assertEqual(b"", headed.content)
+
+    def test_ready_broadcast_generation_change_cannot_serve_a_cached_old_product(self) -> None:
+        output_dir = self.repo_root / "outputs" / "runs" / "match" / "broadcast-test"
+        output_dir.mkdir(parents=True)
+        quality, _ = self._write_mock_ready_delivery_contract(output_dir)
+        generation = str(quality["status_generation"])
+        self._register_broadcast_run(output_dir)
+        registry = self.service._read_registry()
+        run = next(item for item in registry["runs"] if item["run_id"] == "broadcast-test")
+        run["broadcast"] = {"status": "ready", "status_generation": generation}
+        self.service._write_registry(registry)
+        app = create_app(initialize_service=False)
+        app.dependency_overrides[get_service] = lambda: self.service
+
+        with (
+            mock.patch(
+                "football_tracking.api.service.validate_broadcast_quality_report",
+                return_value=quality,
+            ) as validation,
+            TestClient(app) as client,
+        ):
+            first = client.get(
+                "/api/v1/runs/broadcast-test/artifacts/broadcast.mp4",
+                params={"status_generation": generation},
+            )
+            self.assertEqual(200, first.status_code)
+            self.assertEqual(1, validation.call_count)
+
+            registry = self.service._read_registry()
+            run = next(item for item in registry["runs"] if item["run_id"] == "broadcast-test")
+            run["broadcast"]["status_generation"] = "c" * 64
+            self.service._write_registry(registry)
+
+            stale = client.get(
+                "/api/v1/runs/broadcast-test/artifacts/broadcast.mp4",
+                params={"status_generation": generation},
+            )
+
+        self.assertEqual(409, stale.status_code)
+        self.assertIn("status generation", stale.json()["detail"])
+        self.assertEqual(1, validation.call_count)
 
     def test_ready_broadcast_artifact_validation_reuses_a_sealed_delivery_snapshot(self) -> None:
         output_dir = self.repo_root / "outputs" / "ready-cache"
@@ -1416,12 +2573,21 @@ class BroadcastApiServiceTests(unittest.TestCase):
             "football_tracking.api.service.validate_broadcast_quality_report",
             side_effect=[quality, BroadcastApiError("generation lineage changed")],
         ) as full_validation:
-            self.assertEqual(8, len(self.service.list_artifacts("broadcast-test")))
+            self.assertEqual(
+                8,
+                len(
+                    self.service.list_artifacts(
+                        "broadcast-test",
+                        expected_status_generation=str(quality["status_generation"]),
+                    )
+                ),
+            )
             generation_payload.write_bytes(b"omega")
             with self.assertRaises(FileNotFoundError):
                 self.service.acquire_artifact_response_lease(
                     "broadcast-test",
                     "broadcast.mp4",
+                    expected_status_generation=str(quality["status_generation"]),
                 )
 
         self.assertEqual(2, full_validation.call_count)
@@ -1717,23 +2883,35 @@ class BroadcastApiServiceTests(unittest.TestCase):
             return_value=quality,
         ) as full_validation:
             listed_run = next(run for run in self.service.list_runs() if run["run_id"] == "broadcast-test")
-            listed_artifacts = self.service.list_artifacts("broadcast-test")
-            snapshot_path = self.service.get_artifact_path("broadcast-test", "broadcast.mp4")
-            repeated_path = self.service.get_artifact_path("broadcast-test", "broadcast.mp4")
-            ranged_response = get_artifact("broadcast-test", "broadcast.mp4", self.service)
+            status_generation = str(quality["status_generation"])
+            listed_artifacts = self.service.list_artifacts(
+                "broadcast-test",
+                expected_status_generation=status_generation,
+            )
+            snapshot_path = self.service.get_artifact_path(
+                "broadcast-test",
+                "broadcast.mp4",
+                expected_status_generation=status_generation,
+            )
+            repeated_path = self.service.get_artifact_path(
+                "broadcast-test",
+                "broadcast.mp4",
+                expected_status_generation=status_generation,
+            )
+            ranged_response = get_artifact("broadcast-test", "broadcast.mp4", self.service, status_generation)
             ranged_handle = ranged_response._lease.handle
             ranged_status, ranged_headers, ranged_body = self._invoke_artifact_response(
                 ranged_response,
                 method="GET",
                 headers=[(b"range", b"bytes=2-7")],
             )
-            headed_response = get_artifact("broadcast-test", "broadcast.mp4", self.service)
+            headed_response = get_artifact("broadcast-test", "broadcast.mp4", self.service, status_generation)
             headed_handle = headed_response._lease.handle
             headed_status, headed_headers, headed_body = self._invoke_artifact_response(
                 headed_response,
                 method="HEAD",
             )
-            truncated_response = get_artifact("broadcast-test", "broadcast.mp4", self.service)
+            truncated_response = get_artifact("broadcast-test", "broadcast.mp4", self.service, status_generation)
             truncated_handle = truncated_response._lease.handle
             with (
                 mock.patch.object(truncated_response, "_read", new=mock.AsyncMock(return_value=b"")),
@@ -1744,7 +2922,7 @@ class BroadcastApiServiceTests(unittest.TestCase):
                     method="GET",
                     headers=[(b"range", b"bytes=0-1,4-5")],
                 )
-            partial_response = get_artifact("broadcast-test", "broadcast.mp4", self.service)
+            partial_response = get_artifact("broadcast-test", "broadcast.mp4", self.service, status_generation)
             partial_handle = partial_response._lease.handle
             with (
                 mock.patch.object(
@@ -1795,7 +2973,15 @@ class BroadcastApiServiceTests(unittest.TestCase):
             "football_tracking.api.service.validate_broadcast_quality_report",
             return_value=quality,
         ):
-            self.assertEqual(8, len(self.service.list_artifacts("broadcast-test")))
+            self.assertEqual(
+                8,
+                len(
+                    self.service.list_artifacts(
+                        "broadcast-test",
+                        expected_status_generation=str(quality["status_generation"]),
+                    )
+                ),
+            )
             deleted = self.service.delete_run_output("broadcast-test")
 
         self.assertTrue(deleted["deleted"])
@@ -1820,7 +3006,15 @@ class BroadcastApiServiceTests(unittest.TestCase):
             "football_tracking.api.service.validate_broadcast_quality_report",
             return_value=quality,
         ):
-            self.assertEqual(8, len(self.service.list_artifacts("broadcast-test")))
+            self.assertEqual(
+                8,
+                len(
+                    self.service.list_artifacts(
+                        "broadcast-test",
+                        expected_status_generation=str(quality["status_generation"]),
+                    )
+                ),
+            )
             deleted = self.service.delete_input_video("match.avi")
 
         self.assertTrue(deleted["deleted"])
@@ -1841,7 +3035,11 @@ class BroadcastApiServiceTests(unittest.TestCase):
             "football_tracking.api.service.validate_broadcast_quality_report",
             return_value=quality,
         ):
-            response_lease = self.service.acquire_artifact_response_lease("broadcast-test", "broadcast.mp4")
+            response_lease = self.service.acquire_artifact_response_lease(
+                "broadcast-test",
+                "broadcast.mp4",
+                expected_status_generation=str(quality["status_generation"]),
+            )
             for index in range(4):
                 other_output = self.repo_root / "outputs" / f"ready-cache-slow-response-{index}"
                 other_output.mkdir()
@@ -1877,7 +3075,11 @@ class BroadcastApiServiceTests(unittest.TestCase):
             "football_tracking.api.service.validate_broadcast_quality_report",
             return_value=quality,
         ):
-            response_lease = self.service.acquire_artifact_response_lease("broadcast-test", "broadcast.mp4")
+            response_lease = self.service.acquire_artifact_response_lease(
+                "broadcast-test",
+                "broadcast.mp4",
+                expected_status_generation=str(quality["status_generation"]),
+            )
         snapshot_root = self.service._ready_broadcast_delivery_temp
         assert snapshot_root is not None
 

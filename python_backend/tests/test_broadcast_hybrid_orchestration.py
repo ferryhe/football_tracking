@@ -43,7 +43,7 @@ from football_tracking.selective_review import (
     REVIEW_QUEUE_NAME,
     TRAJECTORY_CORRECTIONS_NAME,
 )
-from football_tracking.tracking_contracts import TRACKING_CONTRACT_REPORT_NAME
+from football_tracking.tracking_contracts import TRACKING_CONTRACT_REPORT_NAME, build_tracking_contract
 
 
 def _sha256(path: Path) -> str:
@@ -177,6 +177,165 @@ class _BoundRun:
                 },
             },
         )
+
+
+def _configure_target_queue(bound: _BoundRun) -> dict[str, object]:
+    queue = json.loads(bound.queue_path.read_text(encoding="utf-8"))
+    for name in (
+        "qualification_dataset",
+        "qualification_predictions",
+        "qualification_decisions",
+        "target_audit_plan",
+        "target_audit_labels",
+        "target_qualification",
+        "target_frozen_application",
+        "target_prelabel_commitment",
+    ):
+        path = bound.run_dir / "inputs" / f"{name}.json"
+        _write_json(path, {"artifact_type": name})
+        bound.paths[name] = path
+        queue["bindings"][name] = {
+            "path": path.relative_to(bound.run_dir).as_posix(),
+            "sha256": _sha256(path),
+        }
+    queue["artifact_type"] = "target_finite_population_review_queue"
+    queue["qualification_scope"] = "target_finite_population"
+    queue["target_bindings"] = {
+        "target_run_id": "run-target-fixture",
+        "confirmed_config_sha256": "a" * 64,
+    }
+    _write_json(bound.queue_path, queue)
+    return queue
+
+
+def _configure_terminal_shortfall(bound: _BoundRun) -> None:
+    contract_path = bound.paths["contract"]
+    contract = build_tracking_contract(
+        source={
+            "video_sha256": _sha256(bound.source_video),
+            "fps": 20.0,
+            "width": 64,
+            "height": 36,
+            "frame_count": 12,
+        },
+        frames=[{"frame_index": index, "status": "unknown"} for index in range(10)],
+    )
+    _write_json(contract_path, contract)
+    temporal_path = bound.run_dir / "temporal_chunks_report.json"
+    temporal = {
+        "chunk_count": 1,
+        "frame_count": 10,
+        "chunks_root_name": "chunks",
+        "source_chunk_names": ["chunk_0000"],
+        "chunks": [
+            {
+                "index": 0,
+                "name": "chunk_0000",
+                "decode_start_frame": 0,
+                "start_frame": 0,
+                "end_frame": 11,
+                "core_start_frame": 0,
+                "core_end_frame": 11,
+            }
+        ],
+        "boundary_events": [
+            {
+                "type": "truncated_final_tail",
+                "chunk_index": 0,
+                "chunk_name": "chunk_0000",
+                "first_missing_frame": 10,
+                "last_missing_frame": 11,
+                "missing_frame_count": 2,
+                "planned_core_end_frame": 11,
+                "stitched_core_end_frame": 9,
+            }
+        ],
+        "stitch": {"status": "succeeded"},
+        "execution": {
+            "status": "succeeded",
+            "results": [
+                {
+                    "chunk": {"index": 0, "name": "chunk_0000"},
+                    "chunk_index": 0,
+                    "chunk_name": "chunk_0000",
+                    "exit_code": 0,
+                }
+            ],
+        },
+    }
+    _write_json(temporal_path, temporal)
+    action_track = bound.run_dir / "action_track.csv"
+    action_report_path = bound.run_dir / "action_signal_report.v1.json"
+    limitation = {
+        "code": "action_signal_terminal_decoder_shortfall",
+        "requires_manual_review": True,
+        "reported_frame_count": 12,
+        "verified_frame_count": 10,
+        "expected_frame_count": 12,
+        "decoded_frame_count": 10,
+        "missing_terminal_frames": 2,
+        "missing_terminal_seconds": 0.1,
+        "expected_terminal_shortfall_frames": 2,
+        "max_accepted_terminal_shortfall_seconds": 0.1,
+        "policy": "trusted_full_source_terminal_tail_only",
+    }
+    _write_json(
+        action_report_path,
+        {
+            "schema_version": "1.0",
+            "artifact_type": "action_signal_report",
+            "status": "complete_with_terminal_shortfall",
+            "termination_reason": "terminal_decoder_shortfall",
+            "input_video": str(bound.source_video.resolve()),
+            "source_resolution": [64, 36],
+            "source_frame_count": 12,
+            "fps": 20.0,
+            "start_frame": 0,
+            "max_frames": None,
+            "expected_frame_count": 12,
+            "frame_count": 10,
+            "limitations": [limitation],
+            "artifacts": {"track": "action_track.csv", "diagnostics": "action_signal_diagnostics.v1.jsonl"},
+        },
+    )
+    contract_sha256 = _sha256(contract_path)
+    evidence = {
+        "tracking_contract_sha256": contract_sha256,
+        "source_video_sha256": _sha256(bound.source_video),
+        "source_width": 64,
+        "source_height": 36,
+        "source_fps": 20.0,
+        "reported_frame_count": 12,
+        "verified_frame_count": 10,
+        "temporal_chunks_report_sha256": _sha256(temporal_path),
+        "first_missing_frame": 10,
+        "last_missing_frame": 11,
+        "missing_frame_count": 2,
+        "missing_duration_seconds": 0.1,
+        "policy": {"max_missing_frames": 2, "max_missing_seconds": 0.1, "requires_manual_review": True},
+    }
+    _write_json(
+        bound.run_dir / orchestration.ACTION_SIGNAL_BINDING_NAME,
+        {
+            "schema_version": "1.0",
+            "artifact_type": "broadcast_action_signal_binding",
+            "source": {
+                "video_sha256": _sha256(bound.source_video),
+                "tracking_contract_sha256": contract_sha256,
+            },
+            "artifacts": {
+                "action_track.csv": {
+                    "sha256": _sha256(action_track),
+                    "size_bytes": action_track.stat().st_size,
+                },
+                "action_signal_report.v1.json": {
+                    "sha256": _sha256(action_report_path),
+                    "size_bytes": action_report_path.stat().st_size,
+                },
+            },
+            "terminal_shortfall_evidence": evidence,
+        },
+    )
 
 
 def _fake_materialize(
@@ -536,6 +695,20 @@ class BroadcastHybridOrchestrationTests(unittest.TestCase):
                 target_height=18,
             )
 
+    def test_terminal_shortfall_binding_is_semantically_revalidated(self) -> None:
+        _configure_terminal_shortfall(self.fixture)
+
+        binding_path = orchestration._validate_action_signal_binding(
+            self.fixture.run_dir,
+            source_video=self.fixture.source_video,
+            source_contract_sha256=_sha256(self.fixture.paths["contract"]),
+        )
+
+        self.assertEqual(
+            (self.fixture.run_dir / orchestration.ACTION_SIGNAL_BINDING_NAME).resolve(),
+            binding_path.resolve(),
+        )
+
     def test_action_signal_binding_accepts_a_byte_identical_relocated_source(self) -> None:
         relocated_source = self.fixture.run_dir / "activated-source.avi"
         relocated_source.write_bytes(self.fixture.source_video.read_bytes())
@@ -550,6 +723,43 @@ class BroadcastHybridOrchestrationTests(unittest.TestCase):
             (self.fixture.run_dir / orchestration.ACTION_SIGNAL_BINDING_NAME).resolve(),
             binding_path.resolve(),
         )
+
+    def test_terminal_shortfall_semantic_revalidation_rejects_tampered_evidence(self) -> None:
+        cases = ("binding_gap", "multiple_temporal_events", "report_gap")
+        for case in cases:
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as temp_name:
+                bound = _BoundRun(Path(temp_name))
+                _configure_terminal_shortfall(bound)
+                binding_path = bound.run_dir / orchestration.ACTION_SIGNAL_BINDING_NAME
+                binding = json.loads(binding_path.read_text(encoding="utf-8"))
+                if case == "binding_gap":
+                    binding["terminal_shortfall_evidence"]["missing_frame_count"] = 1
+                elif case == "multiple_temporal_events":
+                    temporal_path = bound.run_dir / "temporal_chunks_report.json"
+                    temporal = json.loads(temporal_path.read_text(encoding="utf-8"))
+                    temporal["boundary_events"].append(dict(temporal["boundary_events"][0]))
+                    _write_json(temporal_path, temporal)
+                    binding["terminal_shortfall_evidence"]["temporal_chunks_report_sha256"] = _sha256(temporal_path)
+                else:
+                    report_path = bound.run_dir / "action_signal_report.v1.json"
+                    report = json.loads(report_path.read_text(encoding="utf-8"))
+                    report["limitations"][0]["missing_terminal_frames"] = 1
+                    _write_json(report_path, report)
+                    binding["artifacts"]["action_signal_report.v1.json"] = {
+                        "sha256": _sha256(report_path),
+                        "size_bytes": report_path.stat().st_size,
+                    }
+                _write_json(binding_path, binding)
+
+                with self.assertRaisesRegex(
+                    orchestration.BroadcastHybridOrchestrationError,
+                    "terminal shortfall",
+                ):
+                    orchestration._validate_action_signal_binding(
+                        bound.run_dir,
+                        source_video=bound.source_video,
+                        source_contract_sha256=_sha256(bound.paths["contract"]),
+                    )
 
     def test_action_signal_binding_rejects_a_relocated_source_with_different_content(self) -> None:
         relocated_source = self.fixture.run_dir / "activated-source.avi"
@@ -664,21 +874,12 @@ class BroadcastHybridOrchestrationTests(unittest.TestCase):
         (self.fixture.run_dir / TRACK_NAME).write_bytes(b"mutated-public-copy")
         self.assertEqual(immutable_bytes, immutable_track.read_bytes())
 
-    def test_target_queue_passes_independent_qualification_bindings_to_materializer(self) -> None:
-        queue = json.loads(self.fixture.queue_path.read_text(encoding="utf-8"))
-        for name in (
-            "qualification_dataset",
-            "qualification_predictions",
-            "qualification_decisions",
-        ):
-            path = self.fixture.run_dir / "inputs" / f"{name}.json"
-            _write_json(path, {"artifact_type": name})
-            self.fixture.paths[name] = path
-            queue["bindings"][name] = {
-                "path": path.relative_to(self.fixture.run_dir).as_posix(),
-                "sha256": _sha256(path),
-            }
-        _write_json(self.fixture.queue_path, queue)
+    def test_target_queue_actions_preflight_and_recompute_preserve_exact_audit_lineage(self) -> None:
+        _configure_target_queue(self.fixture)
+        queue_sha256 = _sha256(self.fixture.queue_path)
+
+        preflight = orchestration.preflight_recompute_reviewed_trajectory(self.fixture.run_dir)
+        self.assertEqual(queue_sha256, preflight["queue_sha256"])
 
         with (
             mock.patch.object(
@@ -694,21 +895,95 @@ class BroadcastHybridOrchestrationTests(unittest.TestCase):
             ),
         ):
             orchestration.recompute_reviewed_trajectory(self.fixture.run_dir)
+            orchestration._VALIDATED_MATERIALIZATION_GENERATIONS.clear()
+            orchestration.recompute_reviewed_trajectory(self.fixture.run_dir)
 
+        self.assertEqual(2, materialize.call_count)
         for name in (
             "qualification_dataset",
             "qualification_predictions",
             "qualification_decisions",
+            "target_audit_plan",
+            "target_audit_labels",
+            "target_qualification",
+            "target_frozen_application",
+            "target_prelabel_commitment",
         ):
-            keyword = (
-                "qualification_dataset_manifest_path"
-                if name == "qualification_dataset"
-                else f"{name}_path"
-            )
+            keyword = {
+                "qualification_dataset": "qualification_dataset_manifest_path",
+                "target_qualification": "target_qualification_path",
+                "target_frozen_application": "target_frozen_application_path",
+                "target_prelabel_commitment": "target_prelabel_commitment_path",
+            }.get(name, f"{name}_path")
             self.assertEqual(
                 self.fixture.paths[name].resolve(),
                 materialize.call_args.kwargs[keyword].resolve(),
             )
+        review_report = json.loads(
+            next(
+                (self.fixture.run_dir / "broadcast_generations").glob(
+                    f"review-*/{MATERIALIZATION_REPORT_NAME}"
+                )
+            ).read_text(encoding="utf-8")
+        )
+        self.assertEqual(queue_sha256, review_report["bindings"]["queue"]["sha256"])
+        for name in (
+            "target_audit_plan",
+            "target_audit_labels",
+            "target_qualification",
+            "target_frozen_application",
+            "target_prelabel_commitment",
+        ):
+            self.assertEqual(
+                _sha256(self.fixture.paths[name]),
+                review_report["bindings"][name]["sha256"],
+            )
+
+    def test_target_queue_rejects_incomplete_or_unexpected_audit_lineage_before_generation(self) -> None:
+        cases = {
+            "missing qualification": "qualification_predictions",
+            "missing target audit": "target_audit_labels",
+            "unexpected binding": None,
+        }
+        for case, removed_name in cases.items():
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as temp_name:
+                bound = _BoundRun(Path(temp_name))
+                queue = _configure_target_queue(bound)
+                if removed_name is None:
+                    queue["bindings"]["unexpected"] = queue["bindings"]["target_audit_plan"]
+                else:
+                    del queue["bindings"][removed_name]
+                _write_json(bound.queue_path, queue)
+
+                with self.assertRaisesRegex(
+                    orchestration.BroadcastHybridOrchestrationError,
+                    "binding keys|bindings must be complete",
+                ):
+                    orchestration.preflight_recompute_reviewed_trajectory(bound.run_dir)
+                self.assertFalse((bound.run_dir / "broadcast_generations").exists())
+
+    def test_legacy_queue_rejects_target_audit_bindings_before_generation(self) -> None:
+        for case in ("binding", "top_level"):
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as temp_name:
+                bound = _BoundRun(Path(temp_name))
+                queue = json.loads(bound.queue_path.read_text(encoding="utf-8"))
+                if case == "binding":
+                    path = bound.run_dir / "inputs" / "target_audit_plan.json"
+                    _write_json(path, {"artifact_type": "target_audit_plan"})
+                    queue["bindings"]["target_audit_plan"] = {
+                        "path": path.relative_to(bound.run_dir).as_posix(),
+                        "sha256": _sha256(path),
+                    }
+                else:
+                    queue["target_bindings"] = {"target_run_id": "mixed-envelope"}
+                _write_json(bound.queue_path, queue)
+
+                with self.assertRaisesRegex(
+                    orchestration.BroadcastHybridOrchestrationError,
+                    "legacy selective review queue may not carry target audit bindings",
+                ):
+                    orchestration.preflight_recompute_reviewed_trajectory(bound.run_dir)
+                self.assertFalse((bound.run_dir / "broadcast_generations").exists())
 
     def test_ready_facade_revalidates_every_bound_dataset_sample_artifact(self) -> None:
         evidence = self.fixture.paths["dataset"].parent / "evidence.bin"

@@ -24,6 +24,7 @@ import {
 } from "@/components/ui/card";
 import { useLanguage } from "@/contexts/LanguageContext";
 import type { ProductionCalibrationDraft } from "@/lib/productionCalibration";
+import { productionFullRunRequiresStop } from "@/lib/productionBroadcast";
 import type {
   ProductionConfigEvidence,
   ProductionPendingConfigConfirmation,
@@ -34,10 +35,13 @@ import {
   deriveProductionWorkflow,
   productionTrialRequiresStop,
   type ProductionDraft,
+  type ProductionFullRunState,
+  type ProductionProductEvidence,
   type ProductionUserStage,
   type SourceSignature,
 } from "@/lib/productionWorkflow";
 import { ProductionCalibrationStep } from "./ProductionCalibrationStep";
+import { ProductionFullRunStep } from "./ProductionFullRunStep";
 import { ProductionTrialStep } from "./ProductionTrialStep";
 
 const USER_STAGES: ProductionUserStage[] = [
@@ -54,6 +58,7 @@ export interface ProductionWorkspaceProps {
   sourceIssue?: "missing" | "changed" | null;
   notice?: string | null;
   error?: string | null;
+  requestedRunId?: string | null;
   onSourceChange: (source: SourceSignature) => void;
   onCalibrationChange: (calibration: ProductionCalibrationDraft) => void;
   onTrialChange: (
@@ -69,6 +74,16 @@ export interface ProductionWorkspaceProps {
     confirmed: ProductionConfigEvidence,
     expectedPending: ProductionPendingConfigConfirmation,
   ) => boolean;
+  onFullRunChange: (
+    fullRun: ProductionFullRunState,
+    expectedRevision: number,
+  ) => boolean;
+  onPersistCurrent: (expectedRevision: number) => boolean;
+  onVerifiedProduct: (
+    product: ProductionProductEvidence,
+    expectedRevision: number,
+  ) => boolean;
+  onParentRunIdChange: (runId: string) => void;
   onInvalidate: (from: "calibration") => boolean;
   onSaveExit: () => void;
   onStartNew: () => void;
@@ -87,11 +102,16 @@ export function ProductionWorkspace({
   sourceIssue = null,
   notice = null,
   error = null,
+  requestedRunId = null,
   onSourceChange,
   onCalibrationChange,
   onTrialChange,
   onPendingConfigChange,
   onConfirmedConfigChange,
+  onFullRunChange,
+  onPersistCurrent,
+  onVerifiedProduct,
+  onParentRunIdChange,
   onInvalidate,
   onSaveExit,
   onStartNew,
@@ -100,17 +120,21 @@ export function ProductionWorkspace({
   const { t } = useLanguage();
   const derived = deriveProductionWorkflow(draft);
   const trialDiscardBlocked = productionTrialRequiresStop(draft.trial);
+  const fullRunDiscardBlocked = productionFullRunRequiresStop(draft.full_run);
+  const workDiscardBlocked = trialDiscardBlocked || fullRunDiscardBlocked;
   const pendingTrialNeedsReconcile = Boolean(draft.trial?.pending_submission);
   const activeTrialNeedsStop =
     trialDiscardBlocked && !pendingTrialNeedsReconcile;
   const [viewStage, setViewStage] = useState<ProductionUserStage>(() =>
-    trialDiscardBlocked
-      ? "trial"
-      : sourceIssue
-        ? "source"
-        : draft.confirmed_config && !draft.full_run
-          ? "trial"
-          : derived.user_stage,
+    fullRunDiscardBlocked
+      ? "full_tracking"
+      : trialDiscardBlocked
+        ? "trial"
+        : sourceIssue
+          ? "source"
+          : draft.confirmed_config && !draft.full_run
+            ? "trial"
+            : derived.user_stage,
   );
   const [calibrationPreviewUsable, setCalibrationPreviewUsable] =
     useState(false);
@@ -119,6 +143,7 @@ export function ProductionWorkspace({
     { kind: "calibration" } | { kind: "source"; source: SourceSignature } | null
   >(null);
   const [activeStopFocusRequest, setActiveStopFocusRequest] = useState(0);
+  const [fullRunFocusRequest, setFullRunFocusRequest] = useState(0);
   const backButtonRef = useRef<HTMLButtonElement>(null);
   const sourceSelectRef = useRef<HTMLSelectElement>(null);
   const stopButtonRef = useRef<HTMLButtonElement>(null);
@@ -153,11 +178,13 @@ export function ProductionWorkspace({
   };
 
   const derivedStageIndex = USER_STAGES.indexOf(derived.user_stage);
-  const reachableStageIndex = trialDiscardBlocked
-    ? USER_STAGES.indexOf("trial")
-    : sourceIssue
-      ? 0
-      : derivedStageIndex;
+  const reachableStageIndex = fullRunDiscardBlocked
+    ? USER_STAGES.indexOf("full_tracking")
+    : trialDiscardBlocked
+      ? USER_STAGES.indexOf("trial")
+      : sourceIssue
+        ? 0
+        : derivedStageIndex;
   const requestedStageIndex = USER_STAGES.indexOf(viewStage);
   const currentIndex = Math.min(requestedStageIndex, reachableStageIndex);
   const effectiveStage = USER_STAGES[currentIndex];
@@ -194,7 +221,7 @@ export function ProductionWorkspace({
   }
 
   const canContinue =
-    !trialDiscardBlocked &&
+    !workDiscardBlocked &&
     sourceIssue === null &&
     nextStage !== null &&
     currentIndex + 1 <= reachableStageIndex &&
@@ -202,16 +229,21 @@ export function ProductionWorkspace({
     (effectiveStage !== "trial" || trialUsable) &&
     canEnterUserStage(nextStage);
 
-  function blockActiveTrialDiscard(): boolean {
-    if (!trialDiscardBlocked) return false;
+  function blockActiveWorkDiscard(): boolean {
+    if (!workDiscardBlocked) return false;
     setPendingUpstreamEdit(null);
-    setViewStage("trial");
-    setActiveStopFocusRequest((request) => request + 1);
+    if (fullRunDiscardBlocked) {
+      setViewStage("full_tracking");
+      setFullRunFocusRequest((request) => request + 1);
+    } else {
+      setViewStage("trial");
+      setActiveStopFocusRequest((request) => request + 1);
+    }
     return true;
   }
 
   function handleSourceSelection(path: string) {
-    if (blockActiveTrialDiscard()) return;
+    if (blockActiveWorkDiscard()) return;
     const source = videos.find((video) => video.path === path);
     if (!source) return;
     if (
@@ -241,7 +273,7 @@ export function ProductionWorkspace({
 
   function handleBack() {
     if (currentIndex <= 0) return;
-    if (blockActiveTrialDiscard()) return;
+    if (blockActiveWorkDiscard()) return;
     if (
       effectiveStage === "trial" &&
       (draft.trial?.attempts.length ||
@@ -273,9 +305,12 @@ export function ProductionWorkspace({
             .join(" · ") || t.common.notAvailable
         );
       case "full_tracking":
-        return draft.full_run
-          ? `${draft.full_run.run_id} · ${draft.full_run.status}`
-          : t.common.notAvailable;
+        if (!draft.full_run?.current_run_id) return t.common.notAvailable;
+        return `${draft.full_run.current_run_id} · ${
+          draft.full_run.attempts.find(
+            (attempt) => attempt.run_id === draft.full_run?.current_run_id,
+          )?.last_observed.workflow_state ?? t.common.notAvailable
+        }`;
       case "ready":
         return draft.verified_product?.artifact_name ?? t.common.notAvailable;
     }
@@ -404,6 +439,27 @@ export function ProductionWorkspace({
             onUsabilityChange={setTrialUsable}
             stopButtonRef={stopButtonRef}
           />
+        ) : (effectiveStage === "full_tracking" ||
+            effectiveStage === "ready") &&
+          draft.source &&
+          draft.calibration &&
+          draft.trial &&
+          draft.confirmed_config ? (
+          <ProductionFullRunStep
+            workflowId={draft.workflow_id}
+            source={draft.source}
+            calibration={draft.calibration}
+            trial={draft.trial}
+            confirmedConfig={draft.confirmed_config}
+            fullRun={draft.full_run}
+            verifiedProduct={draft.verified_product}
+            requestedRunId={requestedRunId}
+            focusRequest={fullRunFocusRequest}
+            onFullRunChange={onFullRunChange}
+            onPersistCurrent={onPersistCurrent}
+            onVerifiedProduct={onVerifiedProduct}
+            onParentRunIdChange={onParentRunIdChange}
+          />
         ) : (
           <Alert>
             <AlertDescription>
@@ -467,7 +523,7 @@ export function ProductionWorkspace({
           type="button"
           variant="outline"
           onClick={() => {
-            if (!blockActiveTrialDiscard()) onStartNew();
+            if (!blockActiveWorkDiscard()) onStartNew();
           }}
         >
           {t.production.startNew}
@@ -492,15 +548,20 @@ export function ProductionWorkspace({
           <AlertDescription>{error}</AlertDescription>
         </Alert>
       )}
-      {trialDiscardBlocked && activeStopFocusRequest > 0 && (
-        <Alert role="status">
-          <AlertDescription>
-            {pendingTrialNeedsReconcile
-              ? t.production.pendingTrialMustReconcile
-              : t.production.activeTrialMustStop}
-          </AlertDescription>
-        </Alert>
-      )}
+      {workDiscardBlocked &&
+        (activeStopFocusRequest > 0 || fullRunFocusRequest > 0) && (
+          <Alert role="status">
+            <AlertDescription>
+              {fullRunDiscardBlocked
+                ? draft.full_run?.pending_submission
+                  ? t.production.pendingFullRunMustReconcile
+                  : t.production.activeFullRunMustStop
+                : pendingTrialNeedsReconcile
+                  ? t.production.pendingTrialMustReconcile
+                  : t.production.activeTrialMustStop}
+            </AlertDescription>
+          </Alert>
+        )}
 
       <div className="space-y-4">
         {USER_STAGES.slice(0, reachableStageIndex + 1).map((stage, index) => {

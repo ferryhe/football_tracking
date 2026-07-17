@@ -312,6 +312,62 @@ describe("BroadcastReviewEvidenceStep", () => {
     expect(onPrepare).toHaveBeenCalledTimes(1);
   });
 
+  it("requires explicit distinct operator and reviewer identities before reconfirming the displayed challenge", async () => {
+    const user = userEvent.setup();
+    const onReconfirm = vi.fn();
+    render(
+      <BroadcastReviewEvidenceStep
+        state={{
+          status: "blocked",
+          blockerCode: "confirmed_config_lineage_reconfirmation_required",
+          recoveryAction: "Reconfirm the production configuration.",
+          configLineageReconfirmation: {
+            targetRunId: "production-run-1",
+            confirmedConfigName: "generated/production.yaml",
+            confirmedTextSha256: "b".repeat(64),
+            expectedObservedRawSha256: "c".repeat(64),
+            workflowBindings: { workflow_id: "workflow-1" },
+          },
+        }}
+        onReconfirmConfigLineage={onReconfirm}
+      />,
+    );
+
+    expect(screen.getByText("production-run-1")).toBeVisible();
+    expect(screen.getByText("generated/production.yaml")).toBeVisible();
+    expect(screen.getByText("b".repeat(64))).toBeVisible();
+    expect(screen.getByText("c".repeat(64))).toBeVisible();
+    expect(screen.getByText("workflow-1")).toBeVisible();
+    const submit = screen.getByRole("button", {
+      name: "Reconfirm production configuration",
+    });
+    expect(submit).toBeDisabled();
+
+    await user.type(screen.getByLabelText("Operator ID"), "operator-1");
+    await user.type(
+      screen.getByLabelText("Independent reviewer ID"),
+      "operator-1",
+    );
+    expect(submit).toBeDisabled();
+    expect(
+      screen.getByText("Operator and reviewer must be different people."),
+    ).toBeVisible();
+
+    await user.clear(screen.getByLabelText("Independent reviewer ID"));
+    await user.type(
+      screen.getByLabelText("Independent reviewer ID"),
+      "reviewer-1",
+    );
+    submit.focus();
+    await user.keyboard("{Enter}");
+
+    expect(onReconfirm).toHaveBeenCalledTimes(1);
+    expect(onReconfirm).toHaveBeenCalledWith({
+      operatorId: "operator-1",
+      reviewerId: "reviewer-1",
+    });
+  });
+
   it("disables mutations while the host is pending or disabled", () => {
     const { rerender } = render(
       <BroadcastReviewEvidenceStep

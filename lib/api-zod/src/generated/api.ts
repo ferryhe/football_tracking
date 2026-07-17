@@ -1164,6 +1164,7 @@ export const ListRunsResponseItem = zod.object({
           zod.enum([
             "queued",
             "running",
+            "reconciling",
             "committing",
             "copying",
             "validating",
@@ -1742,6 +1743,7 @@ export const ListAssetGroupsResponseItem = zod.object({
                 zod.enum([
                   "queued",
                   "running",
+                  "reconciling",
                   "committing",
                   "copying",
                   "validating",
@@ -2202,6 +2204,7 @@ export const ListAssetGroupsResponseItem = zod.object({
                 zod.enum([
                   "queued",
                   "running",
+                  "reconciling",
                   "committing",
                   "copying",
                   "validating",
@@ -2655,6 +2658,7 @@ export const GetRunResponse = zod.object({
           zod.enum([
             "queued",
             "running",
+            "reconciling",
             "committing",
             "copying",
             "validating",
@@ -3097,6 +3101,19 @@ export const ListArtifactsParams = zod.object({
   run_id: zod.coerce.string(),
 });
 
+export const listArtifactsQueryStatusGenerationOneRegExp = new RegExp(
+  "^[0-9a-f]{64}$",
+);
+
+export const ListArtifactsQueryParams = zod.object({
+  status_generation: zod
+    .union([
+      zod.coerce.string().regex(listArtifactsQueryStatusGenerationOneRegExp),
+      zod.null(),
+    ])
+    .optional(),
+});
+
 export const ListArtifactsResponseItem = zod.object({
   name: zod.string(),
   path: zod.string(),
@@ -3113,6 +3130,19 @@ export const ListArtifactsResponse = zod.array(ListArtifactsResponseItem);
 export const GetArtifactParams = zod.object({
   run_id: zod.coerce.string(),
   artifact_name: zod.coerce.string(),
+});
+
+export const getArtifactQueryStatusGenerationOneRegExp = new RegExp(
+  "^[0-9a-f]{64}$",
+);
+
+export const GetArtifactQueryParams = zod.object({
+  status_generation: zod
+    .union([
+      zod.coerce.string().regex(getArtifactQueryStatusGenerationOneRegExp),
+      zod.null(),
+    ])
+    .optional(),
 });
 
 export const GetArtifactResponse = zod.unknown();
@@ -3193,6 +3223,8 @@ export const ReconfirmBroadcastConfigLineageParams = zod.object({
   run_id: zod.coerce.string(),
 });
 
+export const reconfirmBroadcastConfigLineageBodyConfirmedTextSha256RegExp =
+  new RegExp("^[0-9a-f]{64}$");
 export const reconfirmBroadcastConfigLineageBodyExpectedObservedRawSha256RegExp =
   new RegExp("^[0-9a-f]{64}$");
 export const reconfirmBroadcastConfigLineageBodyOperatorIdMax = 200;
@@ -3200,6 +3232,11 @@ export const reconfirmBroadcastConfigLineageBodyOperatorIdMax = 200;
 export const reconfirmBroadcastConfigLineageBodyReviewerIdMax = 200;
 
 export const ReconfirmBroadcastConfigLineageBody = zod.object({
+  target_run_id: zod.string().min(1),
+  confirmed_config_name: zod.string().min(1),
+  confirmed_text_sha256: zod
+    .string()
+    .regex(reconfirmBroadcastConfigLineageBodyConfirmedTextSha256RegExp),
   expected_observed_raw_sha256: zod
     .string()
     .regex(reconfirmBroadcastConfigLineageBodyExpectedObservedRawSha256RegExp),
@@ -3294,6 +3331,9 @@ export const SubmitBroadcastReviewActionsParams = zod.object({
   run_id: zod.coerce.string(),
 });
 
+export const submitBroadcastReviewActionsBodyQueueSha256RegExp = new RegExp(
+  "^[0-9a-f]{64}$",
+);
 export const submitBroadcastReviewActionsBodyActionsItemActionIdMax = 200;
 
 export const submitBroadcastReviewActionsBodyActionsItemReviewItemIdMax = 200;
@@ -3303,6 +3343,9 @@ export const submitBroadcastReviewActionsBodyActionsItemCandidateIdMax = 300;
 export const submitBroadcastReviewActionsBodyActionsItemReviewerIdMax = 200;
 
 export const SubmitBroadcastReviewActionsBody = zod.object({
+  queue_sha256: zod
+    .string()
+    .regex(submitBroadcastReviewActionsBodyQueueSha256RegExp),
   actions: zod.array(
     zod.object({
       action_id: zod
@@ -3341,6 +3384,8 @@ export const SubmitBroadcastReviewActionsBody = zod.object({
 
 export const submitBroadcastReviewActionsResponseDetailsReviewDecisionsSha256OneRegExp =
   new RegExp("^[0-9a-f]{64}$");
+export const submitBroadcastReviewActionsResponseDetailsTerminalTailReviewSha256OneRegExp =
+  new RegExp("^[0-9a-f]{64}$");
 
 export const SubmitBroadcastReviewActionsResponse = zod.object({
   run_id: zod.string(),
@@ -3357,6 +3402,16 @@ export const SubmitBroadcastReviewActionsResponse = zod.object({
             .string()
             .regex(
               submitBroadcastReviewActionsResponseDetailsReviewDecisionsSha256OneRegExp,
+            ),
+          zod.null(),
+        ])
+        .optional(),
+      terminal_tail_review_sha256: zod
+        .union([
+          zod
+            .string()
+            .regex(
+              submitBroadcastReviewActionsResponseDetailsTerminalTailReviewSha256OneRegExp,
             ),
           zod.null(),
         ])
@@ -3412,6 +3467,11 @@ export const getBroadcastReviewEvidenceResponseCapacityOneProvisionerLimitsOneMa
 export const getBroadcastReviewEvidenceResponseCapacityOneProvisionerLimitsOneMaxBundleBytesExclusiveMin = 0;
 
 export const getBroadcastReviewEvidenceResponseCapacityOneProvisionerLimitsOneMaxSingleFileBytesExclusiveMin = 0;
+
+export const getBroadcastReviewEvidenceResponseConfigLineageReconfirmationOneConfirmedTextSha256RegExp =
+  new RegExp("^[0-9a-f]{64}$");
+export const getBroadcastReviewEvidenceResponseConfigLineageReconfirmationOneExpectedObservedRawSha256RegExp =
+  new RegExp("^[0-9a-f]{64}$");
 
 export const GetBroadcastReviewEvidenceResponse = zod.object({
   run_id: zod.string(),
@@ -3643,6 +3703,26 @@ export const GetBroadcastReviewEvidenceResponse = zod.object({
     .optional(),
   blocking_reasons: zod.array(zod.string()).optional(),
   message: zod.union([zod.string(), zod.null()]).optional(),
+  config_lineage_reconfirmation: zod
+    .union([
+      zod.object({
+        target_run_id: zod.string().min(1),
+        confirmed_config_name: zod.string().min(1),
+        confirmed_text_sha256: zod
+          .string()
+          .regex(
+            getBroadcastReviewEvidenceResponseConfigLineageReconfirmationOneConfirmedTextSha256RegExp,
+          ),
+        expected_observed_raw_sha256: zod
+          .string()
+          .regex(
+            getBroadcastReviewEvidenceResponseConfigLineageReconfirmationOneExpectedObservedRawSha256RegExp,
+          ),
+        workflow_bindings: zod.record(zod.string(), zod.unknown()),
+      }),
+      zod.null(),
+    ])
+    .optional(),
 });
 
 /**
@@ -3753,6 +3833,22 @@ export const getBroadcastReviewWindowsResponseItemsItemCandidatesItemEvidenceArt
 export const getBroadcastReviewWindowsResponseItemsItemCandidatesItemEvidenceArtifactsReviewMontageSha256RegExp =
   new RegExp("^[0-9a-f]{64}$");
 export const getBroadcastReviewWindowsResponseItemsItemCandidatesItemEvidenceArtifactsReviewMontageSizeBytesMin = 0;
+
+export const getBroadcastReviewWindowsResponseTerminalTailReviewEvidenceOneSourceVideoSha256RegExp =
+  new RegExp("^[0-9a-f]{64}$");
+export const getBroadcastReviewWindowsResponseTerminalTailReviewEvidenceOneTrackingContractSha256RegExp =
+  new RegExp("^[0-9a-f]{64}$");
+export const getBroadcastReviewWindowsResponseTerminalTailReviewEvidenceOneActionSignalReportSha256RegExp =
+  new RegExp("^[0-9a-f]{64}$");
+export const getBroadcastReviewWindowsResponseTerminalTailReviewEvidenceOneTemporalChunksReportSha256RegExp =
+  new RegExp("^[0-9a-f]{64}$");
+
+export const getBroadcastReviewWindowsResponseTerminalTailReviewEvidenceOneGapSecondsExclusiveMin = 0;
+
+export const getBroadcastReviewWindowsResponseTerminalTailReviewEvidenceOneEvidenceSha256RegExp =
+  new RegExp("^[0-9a-f]{64}$");
+export const getBroadcastReviewWindowsResponseTerminalTailReviewAcknowledgementSha256OneRegExp =
+  new RegExp("^[0-9a-f]{64}$");
 
 export const GetBroadcastReviewWindowsResponse = zod.object({
   run_id: zod.string(),
@@ -3902,6 +3998,129 @@ export const GetBroadcastReviewWindowsResponse = zod.object({
           .optional(),
       }),
     )
+    .optional(),
+  terminal_tail_review: zod
+    .object({
+      status: zod.enum(["not_required", "required", "accepted", "invalid"]),
+      reason: zod.union([zod.string(), zod.null()]).optional(),
+      evidence: zod
+        .union([
+          zod.object({
+            source_video_sha256: zod
+              .string()
+              .regex(
+                getBroadcastReviewWindowsResponseTerminalTailReviewEvidenceOneSourceVideoSha256RegExp,
+              ),
+            tracking_contract_sha256: zod
+              .string()
+              .regex(
+                getBroadcastReviewWindowsResponseTerminalTailReviewEvidenceOneTrackingContractSha256RegExp,
+              ),
+            action_signal_report_sha256: zod
+              .string()
+              .regex(
+                getBroadcastReviewWindowsResponseTerminalTailReviewEvidenceOneActionSignalReportSha256RegExp,
+              ),
+            temporal_chunks_report_sha256: zod
+              .string()
+              .regex(
+                getBroadcastReviewWindowsResponseTerminalTailReviewEvidenceOneTemporalChunksReportSha256RegExp,
+              ),
+            reported_frame_count: zod.number().min(1),
+            verified_frame_count: zod.number().min(1),
+            gap_frames: zod.number().min(1),
+            gap_seconds: zod
+              .number()
+              .gt(
+                getBroadcastReviewWindowsResponseTerminalTailReviewEvidenceOneGapSecondsExclusiveMin,
+              ),
+            evidence_sha256: zod
+              .string()
+              .regex(
+                getBroadcastReviewWindowsResponseTerminalTailReviewEvidenceOneEvidenceSha256RegExp,
+              ),
+          }),
+          zod.null(),
+        ])
+        .optional(),
+      decision: zod
+        .union([zod.literal("accept_terminal_shortfall"), zod.null()])
+        .optional(),
+      reviewer_id: zod.union([zod.string(), zod.null()]).optional(),
+      reviewed_at: zod.union([zod.string(), zod.null()]).optional(),
+      acknowledgement_sha256: zod
+        .union([
+          zod
+            .string()
+            .regex(
+              getBroadcastReviewWindowsResponseTerminalTailReviewAcknowledgementSha256OneRegExp,
+            ),
+          zod.null(),
+        ])
+        .optional(),
+    })
+    .optional(),
+});
+
+/**
+ * @summary Submit Broadcast Terminal Tail Review
+ */
+export const SubmitBroadcastTerminalTailReviewParams = zod.object({
+  run_id: zod.coerce.string(),
+});
+
+export const submitBroadcastTerminalTailReviewBodyReviewerIdMax = 200;
+
+export const submitBroadcastTerminalTailReviewBodyEvidenceSha256RegExp =
+  new RegExp("^[0-9a-f]{64}$");
+
+export const SubmitBroadcastTerminalTailReviewBody = zod.object({
+  decision: zod.literal("accept_terminal_shortfall"),
+  reviewer_id: zod
+    .string()
+    .min(1)
+    .max(submitBroadcastTerminalTailReviewBodyReviewerIdMax),
+  evidence_sha256: zod
+    .string()
+    .regex(submitBroadcastTerminalTailReviewBodyEvidenceSha256RegExp),
+});
+
+export const submitBroadcastTerminalTailReviewResponseDetailsReviewDecisionsSha256OneRegExp =
+  new RegExp("^[0-9a-f]{64}$");
+export const submitBroadcastTerminalTailReviewResponseDetailsTerminalTailReviewSha256OneRegExp =
+  new RegExp("^[0-9a-f]{64}$");
+
+export const SubmitBroadcastTerminalTailReviewResponse = zod.object({
+  run_id: zod.string(),
+  parent_run_id: zod.union([zod.string(), zod.null()]).optional(),
+  status: zod.enum(["ready", "queued", "completed", "needs_review"]),
+  reason: zod.union([zod.string(), zod.null()]).optional(),
+  artifact: zod.union([zod.string(), zod.null()]).optional(),
+  generation_id: zod.union([zod.string(), zod.null()]).optional(),
+  details: zod
+    .object({
+      review_decisions_sha256: zod
+        .union([
+          zod
+            .string()
+            .regex(
+              submitBroadcastTerminalTailReviewResponseDetailsReviewDecisionsSha256OneRegExp,
+            ),
+          zod.null(),
+        ])
+        .optional(),
+      terminal_tail_review_sha256: zod
+        .union([
+          zod
+            .string()
+            .regex(
+              submitBroadcastTerminalTailReviewResponseDetailsTerminalTailReviewSha256OneRegExp,
+            ),
+          zod.null(),
+        ])
+        .optional(),
+      message: zod.union([zod.string(), zod.null()]).optional(),
+    })
     .optional(),
 });
 
@@ -4104,6 +4323,7 @@ export const CancelRunResponse = zod.object({
           zod.enum([
             "queued",
             "running",
+            "reconciling",
             "committing",
             "copying",
             "validating",

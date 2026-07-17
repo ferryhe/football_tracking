@@ -252,10 +252,88 @@ export const translations = {
         "A trial is still queued or running. Cancel it in the Trial step and wait for a stopped or completed status before going back, replacing the source, or starting over.",
       pendingTrialMustReconcile:
         "A trial submission is still being checked. Wait for it to reconcile with the server before going back, replacing the source, or starting over.",
+      activeFullRunMustStop:
+        "Full tracking is active. Cancel it and wait for a stopped status before going back, replacing the source, or starting over.",
+      pendingFullRunMustReconcile:
+        "A full-run submission is still being reconciled. Finish reconciliation before going back, replacing the source, or starting over.",
       fullTrackingDescription:
         "Run full tracking and complete manual review only when evidence requires it.",
       fullTrackingPending:
         "Full tracking and review controls arrive in a later delivery.",
+      fullRunTitle: "Full tracking run",
+      fullStates: {
+        tracking: "Tracking",
+        needs_review: "Needs review",
+        recomputing: "Recomputing trajectory",
+        trajectory_ready: "Trajectory ready",
+        rendering: "Rendering",
+        ready: "Product ready",
+        failed: "Failed",
+        cancelled: "Cancelled",
+      },
+      fullNotStarted: "Not started",
+      fullStart: "Start full tracking",
+      fullIntegrityValidatingTitle: "Validating saved run",
+      fullIntegrityValidating:
+        "Saved request integrity is being verified before any backend data or action is enabled.",
+      fullIntegrityInvalidTitle: "Saved run evidence is invalid",
+      fullIntegrityInvalid:
+        "The saved full-run request no longer matches its recorded digest. No backend action or product is available; start a new production to recover safely.",
+      fullConfigUnverifiable:
+        "The confirmed configuration could not be freshly verified. Nothing was submitted.",
+      fullConfigChanged:
+        "The confirmed configuration no longer matches its canonical content. Nothing was submitted.",
+      fullPrerequisitesChanged:
+        "The source video or accepted trial no longer matches its verified evidence. The draft was kept and nothing was submitted.",
+      fullDraftStale:
+        "This production changed in another update. Refresh before continuing.",
+      fullHealthUnavailable:
+        "Run service health could not be verified. The pending request was kept for reconciliation and nothing was submitted.",
+      fullActiveConflict: (runId: string) =>
+        `Another backend task is active: ${runId}. The pending request was kept for exact reconciliation.`,
+      fullSubmissionUncertain:
+        "The submission response is uncertain. Reconcile the exact request before retrying.",
+      fullReconcileRetry: "Reconcile and retry with a new request",
+      fullTracking: "Tracking the full source",
+      fullProgress: "Full tracking progress",
+      fullCancel: "Cancel full tracking",
+      fullFailed: "Full tracking failed",
+      fullCancelled: "Full tracking stopped",
+      fullRetry: "Retry full tracking",
+      fullTerminalTailTitle: "Terminal source limitation requires review",
+      fullTerminalTailDescription: (
+        reported: number,
+        verified: number,
+        gap: number,
+        seconds: number,
+      ) =>
+        `The source reports ${reported} frames, while tracking and action evidence verify ${verified}. The final ${gap} source frames (${seconds.toFixed(3).replace(/0+$/, "").replace(/\.$/, "")}s) cannot be decoded and will not appear in the product.`,
+      fullTerminalTailConfirm:
+        "I reviewed and accept that the verified product excludes this damaged terminal tail.",
+      fullTerminalTailSubmit: "Confirm terminal source limitation",
+      fullTerminalTailSubmitting: "Confirming terminal source limitation…",
+      fullTerminalTailAcceptedTitle: "Terminal source limitation accepted",
+      fullTerminalTailAccepted: (reviewer: string) =>
+        `Accepted by ${reviewer}. The limitation remains recorded in final quality evidence.`,
+      fullTerminalTailInvalidTitle: "Terminal-tail evidence is invalid",
+      fullTerminalTailInvalid:
+        "The source, tracking, and action evidence do not agree. Recompute and rendering remain blocked.",
+      fullDeliveryValidating: "Validating sealed delivery evidence…",
+      fullVideoValidating:
+        "The quality report passed. Checking that the final video metadata loads and the video can play.",
+      fullDeliveryBlockedTitle: "Delivery verification blocked",
+      fullDeliveryBlocked:
+        "No product URLs are available because the sealed delivery evidence did not pass verification.",
+      fullDeliveryRetry: "Retry delivery verification",
+      fullProductReady: "Verified product",
+      fullQualityVerified: "Quality report verified",
+      fullNoLimitations: "No known limitations were reported.",
+      fullProductStale:
+        "The run changed while the product was being verified. Refresh and verify the current generation again.",
+      fullUrlConflictTitle: "Run link does not match this production",
+      fullUrlConflict:
+        "The URL is unknown or belongs to another parent run. This production was not changed.",
+      fullOpenLegacy: "Open the legacy broadcast record",
       readyDescription:
         "Preview the verified final video and its quality evidence.",
       readyPending: "Final product presentation arrives in a later delivery.",
@@ -478,10 +556,24 @@ export const translations = {
           "Cancellation is unavailable after commit starts.",
         retry: "Retry import",
         retrying: "Retrying import…",
+        reconfirmConfigTitle: "Reconfirm production configuration",
+        reconfirmConfigDescription:
+          "Review the current server-authored configuration identity, then record two independent identities.",
+        targetRun: "Target run",
+        confirmedConfig: "Confirmed configuration",
+        confirmedTextSha256: "Confirmed canonical SHA-256",
+        observedRawSha256: "Current observed SHA-256",
+        workflowIdentity: "Workflow identity",
+        operatorId: "Operator ID",
+        reviewerId: "Independent reviewer ID",
+        identitiesMustDiffer: "Operator and reviewer must be different people.",
+        reconfirmConfig: "Reconfirm production configuration",
+        reconfirmingConfig: "Reconfirming production configuration…",
         loading: "Loading review-evidence state…",
         loadFailed: "Could not load the review-evidence state.",
         prepareFailed: "Could not prepare the review evidence.",
         cancelFailed: "Could not cancel the review-evidence import.",
+        reconfirmFailed: "Could not reconfirm the production configuration.",
         ambiguousBundleRecovery:
           "Keep exactly one compatible bundle in the managed inbox, then refresh.",
         insufficientCapacityRecovery:
@@ -498,6 +590,10 @@ export const translations = {
               "Retry the same review-evidence bundle and terminal job.",
             inspect_or_replace_review_evidence_generation:
               "Inspect or replace the invalid review-evidence generation.",
+            reconfirm_production_config:
+              "Review and reconfirm the current production configuration.",
+            inspect_production_config_lineage:
+              "Inspect the production configuration lineage before retrying.",
           })[action] ?? action,
       },
       setup: {
@@ -1240,8 +1336,79 @@ export const translations = {
         "试跑仍在排队或运行。请先在“试跑”步骤取消任务，并等待状态变为已停止或已完成，再返回、替换原片或新建制作。",
       pendingTrialMustReconcile:
         "试跑提交仍在与服务器核对。请等待核对完成后，再返回、替换原片或新建制作。",
+      activeFullRunMustStop:
+        "整场追踪仍在运行。请先取消并等待任务停止，再返回、替换原片或新建制作。",
+      pendingFullRunMustReconcile:
+        "整场追踪提交仍在精确核对。请先完成核对，再返回、替换原片或新建制作。",
       fullTrackingDescription: "执行整场追踪，并仅在证据需要时进行人工复核。",
       fullTrackingPending: "整场追踪和复核操作将在后续交付中接入。",
+      fullRunTitle: "整场追踪任务",
+      fullStates: {
+        tracking: "正在追踪",
+        needs_review: "需要人工复核",
+        recomputing: "正在重算轨迹",
+        trajectory_ready: "轨迹已就绪",
+        rendering: "正在渲染",
+        ready: "成品已就绪",
+        failed: "失败",
+        cancelled: "已取消",
+      },
+      fullNotStarted: "尚未开始",
+      fullStart: "开始整场追踪",
+      fullIntegrityValidatingTitle: "正在验证已保存任务",
+      fullIntegrityValidating:
+        "正在验证已保存请求的完整性；验证完成前不会读取后端任务或开放任何操作。",
+      fullIntegrityInvalidTitle: "已保存任务凭据无效",
+      fullIntegrityInvalid:
+        "已保存的全量请求与其摘要不再一致。后端操作和成品均已禁用；请新建制作以安全恢复。",
+      fullConfigUnverifiable: "无法重新验证已确认配置，未提交任何任务。",
+      fullConfigChanged: "已确认配置与其标准内容不再一致，未提交任何任务。",
+      fullPrerequisitesChanged:
+        "原片或已验收试跑与已确认凭据不再一致。草稿已保留，未提交任何任务。",
+      fullDraftStale: "当前制作已被其他更新修改，请刷新后继续。",
+      fullHealthUnavailable:
+        "无法验证任务服务状态。待提交请求已保留用于核对，未向后端提交任务。",
+      fullActiveConflict: (runId: string) =>
+        `后端已有任务运行：${runId}。待提交请求已保留用于精确核对。`,
+      fullSubmissionUncertain: "提交结果不确定，请先精确核对原请求再重试。",
+      fullReconcileRetry: "核对并使用新请求重试",
+      fullTracking: "正在追踪整场原片",
+      fullProgress: "整场追踪进度",
+      fullCancel: "取消整场追踪",
+      fullFailed: "整场追踪失败",
+      fullCancelled: "整场追踪已停止",
+      fullRetry: "重新运行整场追踪",
+      fullTerminalTailTitle: "原片尾段限制需要人工确认",
+      fullTerminalTailDescription: (
+        reported: number,
+        verified: number,
+        gap: number,
+        seconds: number,
+      ) =>
+        `原片报告 ${reported} 帧，追踪与动作证据共同验证了 ${verified} 帧。最后 ${gap} 帧（${seconds.toFixed(3).replace(/0+$/, "").replace(/\.$/, "")} 秒）无法解码，不会出现在成品中。`,
+      fullTerminalTailConfirm:
+        "我已复核并接受：已验证成品不包含这段损坏的原片尾部。",
+      fullTerminalTailSubmit: "确认原片尾段限制",
+      fullTerminalTailSubmitting: "正在确认原片尾段限制……",
+      fullTerminalTailAcceptedTitle: "原片尾段限制已确认",
+      fullTerminalTailAccepted: (reviewer: string) =>
+        `确认人：${reviewer}。该限制仍会保留在最终质量凭据中。`,
+      fullTerminalTailInvalidTitle: "尾段证据无效",
+      fullTerminalTailInvalid:
+        "原片、追踪与动作证据不一致；轨迹重算与渲染仍被阻断。",
+      fullDeliveryValidating: "正在验证密封的交付证据……",
+      fullVideoValidating:
+        "质量报告已通过，正在检查成品视频的元数据是否可读取且视频可播放。",
+      fullDeliveryBlockedTitle: "交付验证被阻断",
+      fullDeliveryBlocked: "密封交付证据未通过验证，因此不会显示任何成品链接。",
+      fullDeliveryRetry: "重新验证交付物",
+      fullProductReady: "已验证成品",
+      fullQualityVerified: "质量报告已验证",
+      fullNoLimitations: "质量报告未列出已知限制。",
+      fullProductStale: "验证成品期间任务已变化，请刷新后重新验证当前版本。",
+      fullUrlConflictTitle: "任务链接与当前制作不一致",
+      fullUrlConflict: "URL 未知或属于其他父任务；当前制作未被修改。",
+      fullOpenLegacy: "打开旧版导播记录",
       readyDescription: "预览已验证的成品视频及质量证据。",
       readyPending: "成品展示将在后续交付中接入。",
       completed: "已完成",
@@ -1453,10 +1620,24 @@ export const translations = {
         cancelUnavailableDuringCommit: "提交开始后不能再取消。",
         retry: "重试导入",
         retrying: "正在重试导入…",
+        reconfirmConfigTitle: "重新确认生产配置",
+        reconfirmConfigDescription:
+          "请核对服务端生成的当前配置身份，并填写两个相互独立的操作身份。",
+        targetRun: "目标任务",
+        confirmedConfig: "已确认配置",
+        confirmedTextSha256: "已确认规范文本 SHA-256",
+        observedRawSha256: "当前原始文件 SHA-256",
+        workflowIdentity: "工作流身份",
+        operatorId: "操作人 ID",
+        reviewerId: "独立复核人 ID",
+        identitiesMustDiffer: "操作人与复核人必须是不同人员。",
+        reconfirmConfig: "重新确认生产配置",
+        reconfirmingConfig: "正在重新确认生产配置…",
         loading: "正在加载复核证据状态…",
         loadFailed: "无法加载复核证据状态。",
         prepareFailed: "无法准备复核证据。",
         cancelFailed: "无法取消复核证据导入。",
+        reconfirmFailed: "无法重新确认生产配置。",
         ambiguousBundleRecovery:
           "请在受管收件箱中只保留一个兼容证据包，然后刷新。",
         insufficientCapacityRecovery:
@@ -1471,6 +1652,9 @@ export const translations = {
             retry_review_evidence_import: "请使用同一证据包和终态子任务重试。",
             inspect_or_replace_review_evidence_generation:
               "请检查或替换无效的复核证据代次。",
+            reconfirm_production_config: "请核对并重新确认当前生产配置。",
+            inspect_production_config_lineage:
+              "请先检查生产配置谱系，再尝试恢复。",
           })[action] ?? action,
       },
       setup: {

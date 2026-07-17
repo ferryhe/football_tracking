@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import csv
 import json
+import os
+import subprocess
 import tempfile
 import unittest
+from concurrent.futures import CancelledError
 from pathlib import Path
 from unittest import mock
 
@@ -34,12 +37,28 @@ class DummyCapture:
     def __init__(self, frame_count: int, width: int = 1280, height: int = 720) -> None:
         self.frames_remaining = frame_count
         self.frame = np.zeros((height, width, 3), dtype=np.uint8)
+        self.released = False
+
+    def isOpened(self) -> bool:
+        return True
+
+    def get(self, prop_id: int) -> float:
+        if prop_id == 5:
+            return 20.0
+        if prop_id == 3:
+            return float(self.frame.shape[1])
+        if prop_id == 4:
+            return float(self.frame.shape[0])
+        return 0.0
 
     def read(self) -> tuple[bool, np.ndarray | None]:
         if self.frames_remaining <= 0:
             return False, None
         self.frames_remaining -= 1
         return True, self.frame.copy()
+
+    def release(self) -> None:
+        self.released = True
 
 
 class DummyWriter:
@@ -54,6 +73,9 @@ class DummyWriter:
 
 
 class DummyVideoCapture:
+    def __init__(self) -> None:
+        self.released = False
+
     def isOpened(self) -> bool:
         return True
 
@@ -67,7 +89,7 @@ class DummyVideoCapture:
         return 0.0
 
     def release(self) -> None:
-        pass
+        self.released = True
 
 
 class FollowCamTests(unittest.TestCase):
@@ -346,8 +368,18 @@ class FollowCamTests(unittest.TestCase):
         self.assertEqual(300.0, entries[0].track_y)
         self.assertEqual("ball_players", entries[0].action_center_source)
         self.assertEqual(1, entries[0].action_center_player_count)
-        self.assertGreater(entries[0].action_center_x, entries[0].track_x)
-        self.assertGreater(entries[0].action_center_y, entries[0].track_y)
+        action_center_x = entries[0].action_center_x
+        action_center_y = entries[0].action_center_y
+        track_x = entries[0].track_x
+        track_y = entries[0].track_y
+        self.assertIsNotNone(action_center_x)
+        self.assertIsNotNone(action_center_y)
+        self.assertIsNotNone(track_x)
+        self.assertIsNotNone(track_y)
+        assert action_center_x is not None and track_x is not None
+        assert action_center_y is not None and track_y is not None
+        self.assertGreater(action_center_x, track_x)
+        self.assertGreater(action_center_y, track_y)
 
     def test_lost_tail_after_right_edge_action_holds_camera_target(self) -> None:
         generator = FollowCamGenerator(
@@ -733,12 +765,17 @@ class FollowCamTests(unittest.TestCase):
                 self.camera_path_entry(1, center_x=180.0, pan_mode="glide"),
             ]
 
+            def open_pending_writer(path: Path, _fps: float) -> DummyWriter:
+                path.write_bytes(b"pending browser output")
+                return DummyWriter()
+
             with (
                 mock.patch("football_tracking.follow_cam.cv2.VideoCapture", return_value=DummyVideoCapture()),
                 mock.patch.object(generator, "_resolve_track_csv", return_value=(track_csv, "raw")),
                 mock.patch.object(generator, "_load_frames", return_value=frames),
-                mock.patch.object(generator, "_open_writer", return_value=DummyWriter()),
+                mock.patch.object(generator, "_open_writer", side_effect=open_pending_writer),
                 mock.patch.object(generator, "_render_follow_cam", return_value=path_entries),
+                mock.patch.object(generator, "_validate_browser_video"),
             ):
                 generator.run()
 
@@ -755,6 +792,549 @@ class FollowCamTests(unittest.TestCase):
             },
             report_payload["camera_motion_audit"],
         )
+
+    def test_browser_video_writer_publishes_h264_yuv420p_faststart_mp4(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            generator = FollowCamGenerator(
+                self.make_app_config(
+                    FollowCamConfig(
+                        enabled=True,
+                        target_width=64,
+                        target_height=64,
+                        output_video_name="follow_cam.stable.mp4",
+                    ),
+                    output_dir=output_dir,
+                )
+            )
+            pending_path = output_dir / ".follow_cam.stable.pending.mp4"
+            output_path = output_dir / "follow_cam.stable.mp4"
+
+            writer = generator._open_writer(pending_path, 5.0)
+            for channel in range(3):
+                frame = np.zeros((64, 64, 3), dtype=np.uint8)
+                frame[:, :, channel] = 255
+                writer.write(frame)
+            writer.release()
+
+            generator._publish_browser_video(pending_path, output_path, expected_frame_count=3)
+
+            import imageio_ffmpeg  # pyright: ignore[reportMissingImports]
+
+            reader = imageio_ffmpeg.read_frames(output_path, pix_fmt="rgb24")
+            try:
+                metadata = next(reader)
+                first_frame = next(reader)
+            finally:
+                reader.close()
+
+            self.assertFalse(pending_path.exists())
+            self.assertTrue(output_path.exists())
+            self.assertEqual("h264", metadata["codec"])
+            self.assertTrue(str(metadata["pix_fmt"]).startswith("yuv420p"))
+            self.assertEqual((64, 64), metadata["size"])
+            self.assertEqual(64 * 64 * 3, len(first_frame))
+            box_types = generator._mp4_top_level_box_types(output_path)
+            self.assertLess(box_types.index(b"moov"), box_types.index(b"mdat"))
+            self.assertIn(b"avc1", output_path.read_bytes()[: 1024 * 1024])
+
+    def test_publish_browser_video_rejects_incompatible_codec_without_replacing_output(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            generator = FollowCamGenerator(
+                self.make_app_config(
+                    FollowCamConfig(enabled=True, target_width=64, target_height=64),
+                    output_dir=output_dir,
+                )
+            )
+            pending_path = output_dir / ".follow_cam.pending.mp4"
+            output_path = output_dir / "follow_cam.mp4"
+            output_path.write_bytes(b"previous browser-compatible output")
+
+            import imageio_ffmpeg  # pyright: ignore[reportMissingImports]
+
+            writer = imageio_ffmpeg.write_frames(
+                pending_path,
+                (64, 64),
+                pix_fmt_in="bgr24",
+                pix_fmt_out="yuv420p",
+                fps=5.0,
+                codec="mpeg4",
+                macro_block_size=1,
+                ffmpeg_log_level="error",
+            )
+            writer.send(None)
+            writer.send(np.zeros((64, 64, 3), dtype=np.uint8).tobytes())
+            writer.close()
+
+            with self.assertRaisesRegex(RuntimeError, "not H.264"):
+                generator._publish_browser_video(pending_path, output_path, expected_frame_count=1)
+
+            self.assertEqual(b"previous browser-compatible output", output_path.read_bytes())
+            self.assertTrue(pending_path.exists())
+
+    def test_run_cancellation_cleans_pending_video_without_replacing_existing_output(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            track_csv = output_dir / "ball_track.csv"
+            generator = FollowCamGenerator(self.make_app_config(FollowCamConfig(enabled=True), output_dir=output_dir))
+            output_path = output_dir / generator.config.output_video_name
+            output_path.write_bytes(b"previous browser-compatible output")
+            frames = [FollowCamFrame(0, 100.0, 100.0, 0.9, OutputStatus.DETECTED)]
+
+            def open_pending_writer(path: Path, _fps: float) -> DummyWriter:
+                path.write_bytes(b"partial output")
+                return DummyWriter()
+
+            with (
+                mock.patch("football_tracking.follow_cam.cv2.VideoCapture", return_value=DummyVideoCapture()),
+                mock.patch.object(generator, "_resolve_track_csv", return_value=(track_csv, "raw")),
+                mock.patch.object(generator, "_load_frames", return_value=frames),
+                mock.patch.object(generator, "_open_writer", side_effect=open_pending_writer),
+                mock.patch.object(generator, "_render_follow_cam", side_effect=CancelledError()),
+            ):
+                with self.assertRaises(CancelledError):
+                    generator.run()
+
+            self.assertEqual(b"previous browser-compatible output", output_path.read_bytes())
+            self.assertEqual([], list(output_dir.glob(".*.pending.mp4")))
+
+    def test_open_writer_fails_closed_when_h264_encoder_cannot_start(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            generator = FollowCamGenerator(
+                self.make_app_config(
+                    FollowCamConfig(enabled=True, target_width=64, target_height=64),
+                    output_dir=output_dir,
+                )
+            )
+            pending_path = output_dir / ".follow_cam.pending.mp4"
+
+            with mock.patch("imageio_ffmpeg.write_frames", side_effect=OSError("libx264 unavailable")):
+                with self.assertRaisesRegex(RuntimeError, "bundled ffmpeg with libx264 is required"):
+                    generator._open_writer(pending_path, 5.0)
+
+            self.assertFalse(pending_path.exists())
+
+    def test_publish_browser_video_rejects_partial_frame_count_without_replacing_output(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            generator = FollowCamGenerator(
+                self.make_app_config(
+                    FollowCamConfig(enabled=True, target_width=64, target_height=64),
+                    output_dir=output_dir,
+                )
+            )
+            pending_path = output_dir / ".follow_cam.partial.mp4"
+            output_path = output_dir / "follow_cam.mp4"
+            output_path.write_bytes(b"previous browser-compatible output")
+            writer = generator._open_writer(pending_path, 5.0)
+            writer.write(np.zeros((64, 64, 3), dtype=np.uint8))
+            writer.release()
+
+            with self.assertRaisesRegex(RuntimeError, "expected 3, got 1"):
+                generator._publish_browser_video(pending_path, output_path, expected_frame_count=3)
+
+            self.assertEqual(b"previous browser-compatible output", output_path.read_bytes())
+            self.assertTrue(pending_path.exists())
+
+    def test_run_checks_cancellation_after_sidecars_and_before_video_replace(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            track_csv = output_dir / "ball_track.csv"
+            generator = FollowCamGenerator(
+                self.make_app_config(FollowCamConfig(enabled=True), output_dir=output_dir)
+            )
+            output_path = output_dir / generator.config.output_video_name
+            existing_delivery = {
+                output_path: b"previous browser-compatible output",
+                output_dir / generator.config.camera_path_name: b"previous camera path",
+                output_dir / "camera_motion_audit.json": b"previous camera audit",
+                output_dir / generator.config.report_name: b"previous follow-cam report",
+            }
+            for path, content in existing_delivery.items():
+                path.write_bytes(content)
+            frames = [FollowCamFrame(0, 100.0, 100.0, 0.9, OutputStatus.DETECTED)]
+            path_entries = [self.camera_path_entry(0, center_x=100.0, pan_mode="glide")]
+            capture = DummyVideoCapture()
+
+            def open_pending_writer(path: Path, _fps: float) -> DummyWriter:
+                path.write_bytes(b"pending browser output")
+                return DummyWriter()
+
+            should_cancel = mock.Mock(side_effect=[False, False, True])
+            with (
+                mock.patch("football_tracking.follow_cam.cv2.VideoCapture", return_value=capture),
+                mock.patch.object(generator, "_resolve_track_csv", return_value=(track_csv, "raw")),
+                mock.patch.object(generator, "_load_frames", return_value=frames),
+                mock.patch.object(generator, "_open_writer", side_effect=open_pending_writer),
+                mock.patch.object(generator, "_render_follow_cam", return_value=path_entries),
+                mock.patch.object(generator, "_validate_browser_video") as validate_video,
+            ):
+                with self.assertRaises(CancelledError):
+                    generator.run(should_cancel=should_cancel)
+
+            validate_video.assert_called_once_with(
+                mock.ANY,
+                expected_frame_count=1,
+                expected_fps=20.0,
+                should_cancel=should_cancel,
+            )
+            for path, content in existing_delivery.items():
+                self.assertEqual(content, path.read_bytes())
+            self.assertTrue(capture.released)
+            self.assertEqual([], list(output_dir.glob(".*.pending.mp4")))
+            self.assertEqual([], list(output_dir.glob(".follow_cam.*.pending")))
+
+    def test_run_sidecar_failure_does_not_replace_existing_video(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            track_csv = output_dir / "ball_track.csv"
+            generator = FollowCamGenerator(
+                self.make_app_config(FollowCamConfig(enabled=True), output_dir=output_dir)
+            )
+            output_path = output_dir / generator.config.output_video_name
+            output_path.write_bytes(b"previous browser-compatible output")
+            frames = [FollowCamFrame(0, 100.0, 100.0, 0.9, OutputStatus.DETECTED)]
+            path_entries = [self.camera_path_entry(0, center_x=100.0, pan_mode="glide")]
+
+            def open_pending_writer(path: Path, _fps: float) -> DummyWriter:
+                path.write_bytes(b"pending browser output")
+                return DummyWriter()
+
+            with (
+                mock.patch("football_tracking.follow_cam.cv2.VideoCapture", return_value=DummyVideoCapture()),
+                mock.patch.object(generator, "_resolve_track_csv", return_value=(track_csv, "raw")),
+                mock.patch.object(generator, "_load_frames", return_value=frames),
+                mock.patch.object(generator, "_open_writer", side_effect=open_pending_writer),
+                mock.patch.object(generator, "_render_follow_cam", return_value=path_entries),
+                mock.patch.object(generator, "_write_report", side_effect=OSError("sidecar write failed")),
+                mock.patch.object(generator, "_publish_delivery_bundle") as publish_bundle,
+            ):
+                with self.assertRaisesRegex(OSError, "sidecar write failed"):
+                    generator.run()
+
+            publish_bundle.assert_not_called()
+            self.assertEqual(b"previous browser-compatible output", output_path.read_bytes())
+            self.assertEqual([], list(output_dir.glob(".*.pending.mp4")))
+            self.assertEqual([], list(output_dir.glob(".follow_cam.*.pending")))
+
+    def test_run_rejects_non_mp4_final_output_before_opening_capture(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            generator = FollowCamGenerator(
+                self.make_app_config(
+                    FollowCamConfig(enabled=True, output_video_name="follow_cam.avi"),
+                    output_dir=output_dir,
+                )
+            )
+
+            with mock.patch("football_tracking.follow_cam.cv2.VideoCapture") as video_capture:
+                with self.assertRaisesRegex(RuntimeError, "must use an .mp4 container"):
+                    generator.run()
+
+            video_capture.assert_not_called()
+
+    def test_open_writer_configures_finite_ffmpeg_finalize_timeout(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            generator = FollowCamGenerator(
+                self.make_app_config(
+                    FollowCamConfig(enabled=True, target_width=64, target_height=64),
+                    output_dir=output_dir,
+                )
+            )
+            imageio_writer = mock.MagicMock()
+
+            with mock.patch("imageio_ffmpeg.write_frames", return_value=imageio_writer) as write_frames:
+                writer = generator._open_writer(output_dir / ".follow_cam.pending.mp4", 5.0)
+                writer.release()
+
+            self.assertEqual(30.0, write_frames.call_args.kwargs["ffmpeg_timeout"])
+
+    def test_finalize_failure_releases_capture_and_cleans_pending_video(self) -> None:
+        class FinalizeFailureWriter(DummyWriter):
+            def release(self) -> None:
+                raise RuntimeError("ffmpeg finalize timeout")
+
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            track_csv = output_dir / "ball_track.csv"
+            generator = FollowCamGenerator(
+                self.make_app_config(FollowCamConfig(enabled=True), output_dir=output_dir)
+            )
+            output_path = output_dir / generator.config.output_video_name
+            output_path.write_bytes(b"previous browser-compatible output")
+            capture = DummyVideoCapture()
+            frames = [FollowCamFrame(0, 100.0, 100.0, 0.9, OutputStatus.DETECTED)]
+            path_entries = [self.camera_path_entry(0, center_x=100.0, pan_mode="glide")]
+
+            def open_pending_writer(path: Path, _fps: float) -> FinalizeFailureWriter:
+                path.write_bytes(b"partial output")
+                return FinalizeFailureWriter()
+
+            with (
+                mock.patch("football_tracking.follow_cam.cv2.VideoCapture", return_value=capture),
+                mock.patch.object(generator, "_resolve_track_csv", return_value=(track_csv, "raw")),
+                mock.patch.object(generator, "_load_frames", return_value=frames),
+                mock.patch.object(generator, "_open_writer", side_effect=open_pending_writer),
+                mock.patch.object(generator, "_render_follow_cam", return_value=path_entries),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "ffmpeg finalize timeout"):
+                    generator.run()
+
+            self.assertTrue(capture.released)
+            self.assertEqual(b"previous browser-compatible output", output_path.read_bytes())
+            self.assertEqual([], list(output_dir.glob(".*.pending.mp4")))
+
+    def test_seek_failure_releases_capture_without_creating_pending_video(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            track_csv = output_dir / "ball_track.csv"
+            generator = FollowCamGenerator(
+                self.make_app_config(FollowCamConfig(enabled=True), output_dir=output_dir)
+            )
+            capture = DummyVideoCapture()
+            frames = [FollowCamFrame(10, 100.0, 100.0, 0.9, OutputStatus.DETECTED)]
+
+            with (
+                mock.patch("football_tracking.follow_cam.cv2.VideoCapture", return_value=capture),
+                mock.patch.object(generator, "_resolve_track_csv", return_value=(track_csv, "raw")),
+                mock.patch.object(generator, "_load_frames", return_value=frames),
+                mock.patch.object(generator, "_seek_to_frame", side_effect=RuntimeError("seek failed")),
+                mock.patch.object(generator, "_open_writer") as open_writer,
+            ):
+                with self.assertRaisesRegex(RuntimeError, "seek failed"):
+                    generator.run()
+
+            open_writer.assert_not_called()
+            self.assertTrue(capture.released)
+            self.assertEqual([], list(output_dir.glob(".*.pending.mp4")))
+
+    def test_run_rejects_early_capture_eof_and_preserves_existing_video(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            track_csv = output_dir / "ball_track.csv"
+            generator = FollowCamGenerator(
+                self.make_app_config(
+                    FollowCamConfig(
+                        enabled=True,
+                        target_width=64,
+                        target_height=64,
+                        draw_ball_marker=False,
+                        draw_frame_text=False,
+                    ),
+                    output_dir=output_dir,
+                )
+            )
+            output_path = output_dir / generator.config.output_video_name
+            output_path.write_bytes(b"previous browser-compatible output")
+            capture = DummyCapture(frame_count=1)
+            frames = [
+                FollowCamFrame(0, 100.0, 100.0, 0.9, OutputStatus.DETECTED),
+                FollowCamFrame(1, 110.0, 100.0, 0.9, OutputStatus.DETECTED),
+            ]
+            writer = DummyWriter()
+
+            def open_pending_writer(path: Path, _fps: float) -> DummyWriter:
+                path.write_bytes(b"partial output")
+                return writer
+
+            with (
+                mock.patch("football_tracking.follow_cam.cv2.VideoCapture", return_value=capture),
+                mock.patch.object(generator, "_resolve_track_csv", return_value=(track_csv, "raw")),
+                mock.patch.object(generator, "_load_frames", return_value=frames),
+                mock.patch.object(generator, "_open_writer", side_effect=open_pending_writer),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "expected 2, got 1"):
+                    generator.run()
+
+            self.assertEqual(1, len(writer.frames))
+            self.assertTrue(capture.released)
+            self.assertEqual(b"previous browser-compatible output", output_path.read_bytes())
+            self.assertEqual([], list(output_dir.glob(".*.pending.mp4")))
+
+    def test_video_validation_failure_preserves_entire_existing_delivery(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            track_csv = output_dir / "ball_track.csv"
+            generator = FollowCamGenerator(
+                self.make_app_config(FollowCamConfig(enabled=True), output_dir=output_dir)
+            )
+            existing_delivery = {
+                output_dir / generator.config.output_video_name: b"previous video",
+                output_dir / generator.config.camera_path_name: b"previous camera path",
+                output_dir / "camera_motion_audit.json": b"previous camera audit",
+                output_dir / generator.config.report_name: b"previous report",
+            }
+            for path, content in existing_delivery.items():
+                path.write_bytes(content)
+            frames = [FollowCamFrame(0, 100.0, 100.0, 0.9, OutputStatus.DETECTED)]
+            path_entries = [self.camera_path_entry(0, center_x=100.0, pan_mode="glide")]
+
+            def open_pending_writer(path: Path, _fps: float) -> DummyWriter:
+                path.write_bytes(b"invalid pending video")
+                return DummyWriter()
+
+            with (
+                mock.patch("football_tracking.follow_cam.cv2.VideoCapture", return_value=DummyVideoCapture()),
+                mock.patch.object(generator, "_resolve_track_csv", return_value=(track_csv, "raw")),
+                mock.patch.object(generator, "_load_frames", return_value=frames),
+                mock.patch.object(generator, "_open_writer", side_effect=open_pending_writer),
+                mock.patch.object(generator, "_render_follow_cam", return_value=path_entries),
+                mock.patch.object(
+                    generator,
+                    "_validate_browser_video",
+                    side_effect=RuntimeError("video validation failed"),
+                ),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "video validation failed"):
+                    generator.run()
+
+            for path, content in existing_delivery.items():
+                self.assertEqual(content, path.read_bytes())
+            self.assertEqual([], list(output_dir.glob(".*.backup")))
+
+    def test_second_sidecar_replace_failure_rolls_back_entire_delivery_bundle(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            track_csv = output_dir / "ball_track.csv"
+            generator = FollowCamGenerator(
+                self.make_app_config(FollowCamConfig(enabled=True), output_dir=output_dir)
+            )
+            existing_delivery = {
+                output_dir / generator.config.output_video_name: b"previous video",
+                output_dir / generator.config.camera_path_name: b"previous camera path",
+                output_dir / "camera_motion_audit.json": b"previous camera audit",
+                output_dir / generator.config.report_name: b"previous report",
+            }
+            for path, content in existing_delivery.items():
+                path.write_bytes(content)
+            frames = [FollowCamFrame(0, 100.0, 100.0, 0.9, OutputStatus.DETECTED)]
+            path_entries = [self.camera_path_entry(0, center_x=100.0, pan_mode="glide")]
+
+            def open_pending_writer(path: Path, _fps: float) -> DummyWriter:
+                path.write_bytes(b"new video")
+                return DummyWriter()
+
+            real_replace = os.replace
+            failed_second_sidecar = False
+
+            def fail_second_sidecar(source: str | os.PathLike[str], target: str | os.PathLike[str]) -> None:
+                nonlocal failed_second_sidecar
+                source_path = Path(source)
+                target_path = Path(target)
+                if (
+                    not failed_second_sidecar
+                    and source_path.parent.name.startswith(".follow_cam.")
+                    and source_path.name == "camera_motion_audit.json"
+                    and target_path.name == "camera_motion_audit.json"
+                ):
+                    failed_second_sidecar = True
+                    raise OSError("second sidecar replace failed")
+                real_replace(source, target)
+
+            with (
+                mock.patch("football_tracking.follow_cam.cv2.VideoCapture", return_value=DummyVideoCapture()),
+                mock.patch.object(generator, "_resolve_track_csv", return_value=(track_csv, "raw")),
+                mock.patch.object(generator, "_load_frames", return_value=frames),
+                mock.patch.object(generator, "_open_writer", side_effect=open_pending_writer),
+                mock.patch.object(generator, "_render_follow_cam", return_value=path_entries),
+                mock.patch.object(generator, "_validate_browser_video"),
+                mock.patch("football_tracking.follow_cam.os.replace", side_effect=fail_second_sidecar),
+            ):
+                with self.assertRaisesRegex(OSError, "second sidecar replace failed"):
+                    generator.run()
+
+            self.assertTrue(failed_second_sidecar)
+            for path, content in existing_delivery.items():
+                self.assertEqual(content, path.read_bytes())
+            self.assertEqual([], list(output_dir.glob(".*.backup")))
+
+    def test_ffmpeg_probe_cancellation_terminates_process_and_closes_streams(self) -> None:
+        generator = FollowCamGenerator(
+            self.make_app_config(FollowCamConfig(enabled=True, target_width=64, target_height=64))
+        )
+        process = mock.MagicMock()
+        process.poll.return_value = None
+        process.wait.return_value = 0
+        process.stdin = mock.MagicMock()
+        process.stdout = mock.MagicMock()
+        process.stderr = mock.MagicMock()
+
+        with mock.patch("football_tracking.follow_cam.subprocess.Popen", return_value=process):
+            with self.assertRaises(CancelledError):
+                generator._probe_browser_video(
+                    Path("pending.mp4"),
+                    expected_frame_count=1,
+                    expected_fps=20.0,
+                    should_cancel=lambda: True,
+                )
+
+        process.terminate.assert_called_once_with()
+        process.wait.assert_called_once_with(timeout=2.0)
+        process.kill.assert_not_called()
+        process.stdin.close.assert_called_once_with()
+        process.stdout.close.assert_called_once_with()
+        process.stderr.close.assert_called_once_with()
+
+    def test_ffmpeg_probe_timeout_kills_waits_and_closes_process_streams(self) -> None:
+        generator = FollowCamGenerator(
+            self.make_app_config(FollowCamConfig(enabled=True, target_width=64, target_height=64))
+        )
+        process = mock.MagicMock()
+        process.poll.return_value = None
+        process.wait.side_effect = [subprocess.TimeoutExpired("ffmpeg", 2.0), 0]
+        process.stdin = mock.MagicMock()
+        process.stdout = mock.MagicMock()
+        process.stderr = mock.MagicMock()
+
+        with (
+            mock.patch("football_tracking.follow_cam.subprocess.Popen", return_value=process),
+            mock.patch.object(generator, "_probe_timeout_seconds", return_value=0.0),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "probe timed out"):
+                generator._probe_browser_video(
+                    Path("pending.mp4"),
+                    expected_frame_count=1,
+                    expected_fps=20.0,
+                    should_cancel=None,
+                )
+
+        process.terminate.assert_called_once_with()
+        process.kill.assert_called_once_with()
+        self.assertEqual(2, process.wait.call_count)
+        process.stdin.close.assert_called_once_with()
+        process.stdout.close.assert_called_once_with()
+        process.stderr.close.assert_called_once_with()
+
+    def test_ffmpeg_probe_timeout_scales_with_expected_media_duration(self) -> None:
+        generator = FollowCamGenerator(self.make_app_config(FollowCamConfig(enabled=True)))
+
+        timeout_seconds = generator._probe_timeout_seconds(90 * 60 * 20, 20.0)
+
+        self.assertGreater(timeout_seconds, 90 * 60)
+        self.assertGreater(timeout_seconds, 600.0)
+
+    def test_bundle_backup_cleanup_failure_does_not_reverse_success(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            output_dir = Path(temp_name)
+            staged_path = output_dir / ".new-report.json"
+            output_path = output_dir / "report.json"
+            staged_path.write_bytes(b"new report")
+            output_path.write_bytes(b"old report")
+            real_unlink = Path.unlink
+
+            def fail_backup_cleanup(path: Path, missing_ok: bool = False) -> None:
+                if path.name.endswith(".backup"):
+                    raise PermissionError("backup held by antivirus")
+                real_unlink(path, missing_ok=missing_ok)
+
+            with mock.patch("pathlib.Path.unlink", autospec=True, side_effect=fail_backup_cleanup):
+                generator = FollowCamGenerator(self.make_app_config(FollowCamConfig(enabled=True)))
+                generator._replace_artifact_bundle([(staged_path, output_path)])
+
+            self.assertEqual(b"new report", output_path.read_bytes())
 
     def write_yaml(self, repo_root: Path, payload: object) -> Path:
         config_path = repo_root / "config" / "default.yaml"

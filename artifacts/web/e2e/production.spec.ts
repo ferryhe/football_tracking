@@ -1,5 +1,49 @@
 import AxeBuilder from "@axe-core/playwright";
-import { expect, test, type Page } from "@playwright/test";
+import { expect, test, type Page, type Route } from "@playwright/test";
+import { createHash } from "node:crypto";
+import type {
+  ArtifactSummary,
+  BroadcastOperationResponse,
+  BroadcastRenderRequest,
+  BroadcastReviewEvidenceImportRequest,
+  BroadcastReviewEvidenceRevokeResponse,
+  BroadcastReviewEvidenceStateResponse,
+  BroadcastReviewActionsRequest,
+  BroadcastReviewWindowsResponse,
+  BroadcastTerminalTailReviewRequest,
+  BroadcastTrajectoryRecomputeRequest,
+  ConfigDetail,
+  ConfigListItem,
+  CreateRunRequest,
+  HealthResponse,
+  RunRecord,
+} from "@workspace/api-client-react";
+
+import {
+  buildProductionConfigConfirmation,
+  expectedProductionConfigName,
+  finalizeProductionConfigConfirmation,
+} from "../src/lib/productionConfigFreeze";
+import type { ProductionCalibrationDraft } from "../src/lib/productionCalibration";
+import {
+  acceptProductionTrial,
+  appendProductionTrialAttempt,
+  buildProductionTrialSubmission,
+  canonicalJson,
+  createProductionTrialState,
+  setPendingProductionTrial,
+  sha256Text,
+} from "../src/lib/productionTrial";
+import {
+  createProductionDraft,
+  PRODUCTION_DRAFT_STORAGE_KEY,
+  updateConfirmedProductionConfig,
+  updateProductionCalibration,
+  updateProductionSource,
+  updateProductionTrial,
+  type ProductionDraft,
+} from "../src/lib/productionWorkflow";
+import { PRODUCTION_BROADCAST_DELIVERY_ARTIFACTS } from "../src/lib/broadcastDelivery";
 
 const inputCatalog = {
   root_dir: "data",
@@ -843,6 +887,1429 @@ async function finishTrialForAcceptance(
   await expect(page.getByText("Trial accepted")).toBeVisible();
 }
 
+const BROADCAST_E2E_NOW = "2026-07-15T18:00:00.000Z";
+const ACCEPTED_TRIAL_RUN_ID = "trial-broadcast-accepted";
+const TRAJECTORY_GENERATION_ID = `trajectory-${"a".repeat(24)}`;
+
+interface ConfirmedBroadcastDraftFixture {
+  draft: ProductionDraft;
+  config: ConfigDetail;
+  calibration: ProductionCalibrationDraft;
+}
+
+function cloneJson<T>(value: T): T {
+  return structuredClone(value);
+}
+
+function sha256Bytes(value: Uint8Array | Buffer): string {
+  return createHash("sha256").update(value).digest("hex");
+}
+
+async function buildConfirmedBroadcastDraft(): Promise<ConfirmedBroadcastDraftFixture> {
+  const workflowId = "workflow-broadcast-e2e";
+  const source = cloneJson(inputCatalog.videos[0]);
+  const calibration = cloneJson(
+    draftWithCompletedCalibration().calibration,
+  ) as ProductionCalibrationDraft;
+  const settings = {
+    base_config_name: "default.yaml",
+    start_frame: 125,
+    max_frames: 300,
+    enable_postprocess: true,
+    enable_follow_cam: true,
+    tuning_patch: {
+      detector: { confidence: 0.2 },
+      output: { dir: "trial-only", video_name: "trial.mp4" },
+      runtime: { start_frame: 125, max_frames: 300 },
+      follow_cam: { enabled: true, legacy_render: true },
+    },
+  };
+  const trialSubmission = await buildProductionTrialSubmission({
+    workflow_id: workflowId,
+    source,
+    calibration,
+    settings,
+    parent_run_id: null,
+    submission_id: "broadcast-trial-submission",
+    output_id: "broadcast-trial-output",
+    generation: 1,
+    created_at: BROADCAST_E2E_NOW,
+  });
+  const observedTrial = appendProductionTrialAttempt(
+    setPendingProductionTrial(
+      createProductionTrialState(settings),
+      trialSubmission.pending,
+    ),
+    {
+      run: { run_id: ACCEPTED_TRIAL_RUN_ID, status: "completed" },
+      pending: trialSubmission.pending,
+      observed_at: BROADCAST_E2E_NOW,
+    },
+  );
+  const trial = acceptProductionTrial(observedTrial, {
+    run: { run_id: ACCEPTED_TRIAL_RUN_ID, status: "completed" },
+    current_intent_sha256: trialSubmission.pending.intent_sha256,
+    readiness: {
+      run_id: ACCEPTED_TRIAL_RUN_ID,
+      request_sha256: trialSubmission.pending.request_sha256,
+      evidence_generation: "e".repeat(64),
+      verified_at: BROADCAST_E2E_NOW,
+      video_artifact_name: "follow_cam.webm",
+      artifact_names: [
+        "run_manifest.json",
+        "metrics_report.json",
+        "ball_track.csv",
+        "ball_audit.json",
+        "ball_track.cleaned.csv",
+        "follow_cam.webm",
+      ],
+      quality: {
+        frame_count: 300,
+        detected: 210,
+        predicted: 50,
+        lost: 40,
+        detected_ratio: 0.7,
+        predicted_ratio: 1 / 6,
+        lost_ratio: 2 / 15,
+        longest_lost_streak: 4,
+        false_positive_island_count: 1,
+        max_step_px: 20,
+        audit_tracklet_count: 0,
+        audit_suspicious_tracklet_count: 0,
+        audit_review_event_count: 0,
+        audit_lost_gap_count: 0,
+        quality_gate_status: "warn",
+      },
+    },
+    accepted_at: BROADCAST_E2E_NOW,
+  });
+  const pendingConfig = await buildProductionConfigConfirmation({
+    workflow_id: workflowId,
+    source,
+    calibration,
+    trial,
+    output_id: "11111111-1111-4111-8111-111111111111",
+    generation: 1,
+    confirmed_at: BROADCAST_E2E_NOW,
+  });
+  const configName = expectedProductionConfigName(pendingConfig.output_name);
+  const config: ConfigDetail = {
+    name: configName,
+    path: `configs/${configName}`,
+    text: "input_video: data/match-a.mp4\noutput:\n  save_tracking_contract: true\n",
+    raw: pendingConfig.request.patch ?? {},
+    resolved: pendingConfig.request.patch ?? {},
+    summary: {
+      name: configName,
+      path: `configs/${configName}`,
+      input_video: source.path,
+      postprocess_enabled: true,
+      follow_cam_enabled: false,
+      exists: { yaml: true },
+    },
+  };
+  const confirmedConfig = await finalizeProductionConfigConfirmation(
+    pendingConfig,
+    config,
+  );
+  let draft = createProductionDraft(BROADCAST_E2E_NOW, workflowId);
+  draft = updateProductionSource(draft, source, BROADCAST_E2E_NOW);
+  draft = updateProductionCalibration(draft, calibration, BROADCAST_E2E_NOW);
+  draft = updateProductionTrial(draft, trial, BROADCAST_E2E_NOW);
+  draft = updateConfirmedProductionConfig(
+    draft,
+    confirmedConfig,
+    BROADCAST_E2E_NOW,
+  );
+  return { draft, config, calibration };
+}
+
+async function expectNoSeriousAccessibilityFindings(page: Page) {
+  const results = await new AxeBuilder({ page })
+    .include("main")
+    .withTags(["wcag2a", "wcag2aa", "wcag21a", "wcag21aa"])
+    .analyze();
+  expect(
+    results.violations.filter(
+      (violation) =>
+        violation.impact === "critical" || violation.impact === "serious",
+    ),
+  ).toEqual([]);
+}
+
+interface BroadcastScenarioAudit {
+  unhandledApi: string[];
+  contractViolations: string[];
+}
+
+const broadcastScenarioAudits = new WeakMap<Page, BroadcastScenarioAudit>();
+
+type ZeroReviewBroadcastPhase =
+  | "tracking"
+  | "needs_review"
+  | "recomputing"
+  | "trajectory_ready"
+  | "rendering"
+  | "ready"
+  | "failed"
+  | "cancelled";
+
+interface ZeroReviewBroadcastScenario {
+  audit: BroadcastScenarioAudit;
+  createBodies: CreateRunRequest[];
+  reviewBodies: BroadcastReviewActionsRequest[];
+  terminalTailReviewBodies: BroadcastTerminalTailReviewRequest[];
+  recomputeBodies: BroadcastTrajectoryRecomputeRequest[];
+  renderBodies: BroadcastRenderRequest[];
+  cancelIds: string[];
+  healthActiveRunIds: Array<string | null>;
+  configReads: Array<{ name: string; cacheControl: string }>;
+  authoritativeReads: Array<{
+    kind:
+      | "config"
+      | "run-list"
+      | "run"
+      | "artifact-list"
+      | "artifact"
+      | "review-evidence"
+      | "review";
+    path: string;
+    cacheControl: string;
+  }>;
+  artifactReads: Array<{
+    method: string;
+    name: string;
+    statusGeneration: string | null;
+    range: string | null;
+  }>;
+  reviewWindowReads: Array<{
+    method: string;
+    runId: string;
+    phase: ZeroReviewBroadcastPhase;
+  }>;
+  reviewEvidenceImportBodies: BroadcastReviewEvidenceImportRequest[];
+  reviewEvidenceRevokes: Array<{
+    generationId: string;
+    queueSha256: string | null;
+  }>;
+  qualityStable: Record<string, unknown>;
+  qualityBytes: Buffer;
+  statusGeneration: string;
+  flipReadyGeneration: () => string;
+  parentRunId: () => string;
+  phase: () => ZeroReviewBroadcastPhase;
+  blockingReasons: () => string[];
+  setConfigMode: (mode: "ok" | "tampered" | "missing") => void;
+  usePopulatedReview: () => void;
+  useMissingReviewQueue: () => void;
+  requireTerminalTailReview: () => void;
+  allowOneTrajectoryReadyReviewRead: () => void;
+  setDeliveryMode: (mode: "ok" | "missing_video") => void;
+  failNextCreateWithConflict: (runId: string) => void;
+  failNextRenderWithConflict: (runId: string) => void;
+  clearForeignBlocker: () => void;
+  setRunning: () => void;
+  setFailed: () => void;
+  setNeedsReview: () => void;
+  completeRecomputeChildOnly: () => void;
+  publishTrajectoryReady: () => void;
+  completeRecompute: () => void;
+  completeRenderChildOnly: () => void;
+  publishReady: () => void;
+  completeRender: () => void;
+}
+
+function cloneRun(run: RunRecord): RunRecord {
+  return cloneJson(run);
+}
+
+async function fulfillByteRange(
+  route: Route,
+  body: Buffer,
+  contentType: string,
+) {
+  const requestedRange = route.request().headers()["range"] ?? null;
+  if (!requestedRange) {
+    await route.fulfill({
+      status: 200,
+      body,
+      contentType,
+      headers: {
+        "Accept-Ranges": "bytes",
+        "Content-Length": String(body.byteLength),
+      },
+    });
+    return;
+  }
+  const match = /^bytes=(\d*)-(\d*)$/.exec(requestedRange);
+  if (!match) {
+    await route.fulfill({
+      status: 416,
+      headers: { "Content-Range": `bytes */${body.byteLength}` },
+    });
+    return;
+  }
+  const start = match[1] ? Number(match[1]) : 0;
+  const requestedEnd = match[2] ? Number(match[2]) : body.byteLength - 1;
+  const end = Math.min(requestedEnd, body.byteLength - 1);
+  if (start < 0 || start >= body.byteLength || end < start) {
+    await route.fulfill({
+      status: 416,
+      headers: { "Content-Range": `bytes */${body.byteLength}` },
+    });
+    return;
+  }
+  const chunk = body.subarray(start, end + 1);
+  await route.fulfill({
+    status: 206,
+    body: chunk,
+    contentType,
+    headers: {
+      "Accept-Ranges": "bytes",
+      "Content-Length": String(chunk.byteLength),
+      "Content-Range": `bytes ${start}-${end}/${body.byteLength}`,
+    },
+  });
+}
+
+async function installZeroReviewBroadcastScenario(
+  page: Page,
+  fixture: ConfirmedBroadcastDraftFixture,
+): Promise<ZeroReviewBroadcastScenario> {
+  const audit: BroadcastScenarioAudit = {
+    unhandledApi: [],
+    contractViolations: [],
+  };
+  broadcastScenarioAudits.set(page, audit);
+  const videoFixture = await createPlayableVideoFixture(page);
+  const videoBytes = Buffer.from(videoFixture.bodyBase64, "base64");
+  const reviewDecisionBytes = Buffer.from(
+    canonicalJson({ actions: [], queue_sha256: "1".repeat(64) }),
+    "utf8",
+  );
+  const reviewDecisionSha256 = sha256Bytes(reviewDecisionBytes);
+  const qualityStable: Record<string, unknown> = {
+    schema_version: "1.0",
+    artifact_type: "broadcast_quality_report",
+    status: "ready",
+    blocking_reasons: [],
+    limitations: ["source_audio_not_preserved"],
+    lineage: { sources: {} },
+    artifacts: {
+      "broadcast.mp4": {
+        status: "available",
+        path: "broadcast.mp4",
+        sha256: sha256Bytes(videoBytes),
+        size_bytes: videoBytes.byteLength,
+      },
+    },
+    final_bindings: {},
+    capabilities: {},
+  };
+  const statusGeneration = await sha256Text(canonicalJson(qualityStable));
+  let enforcedStatusGeneration = statusGeneration;
+  const qualityReport = {
+    ...qualityStable,
+    generated_at: BROADCAST_E2E_NOW,
+    status_generation: statusGeneration,
+  };
+  const qualityBytes = Buffer.from(canonicalJson(qualityReport), "utf8");
+  const artifactBodies = new Map<string, Buffer>([
+    ["broadcast.mp4", videoBytes],
+    ["broadcast_quality_report.json", qualityBytes],
+    ["camera_target.csv", Buffer.from("frame,x,y\n0,960,540\n")],
+    ["ball_track.v2.csv", Buffer.from("frame,x,y,status\n0,10,20,detected\n")],
+    ["review_decisions.json", reviewDecisionBytes],
+    ["action_track.csv", Buffer.from("frame,action\n0,hold\n")],
+    ["candidate_classifications.jsonl", Buffer.from('{"candidate":null}\n')],
+    ["ball_candidates.jsonl", Buffer.from('{"candidate":null}\n')],
+  ]);
+  const montageBodies = new Map<string, Buffer>([
+    ["review/candidate-1.svg", Buffer.from(squarePreviewSvg, "utf8")],
+    ["review/candidate-2.svg", Buffer.from(squarePreviewSvg, "utf8")],
+  ]);
+  const montageArtifacts: ArtifactSummary[] = [...montageBodies].map(
+    ([name, body]) => ({
+      name,
+      path: name,
+      kind: "image",
+      exists: true,
+      size_bytes: body.byteLength,
+      content_type: "image/svg+xml",
+    }),
+  );
+  const deliveryArtifacts: ArtifactSummary[] =
+    PRODUCTION_BROADCAST_DELIVERY_ARTIFACTS.map((name) => ({
+      name,
+      path: `sealed/${name}`,
+      kind: name === "broadcast.mp4" ? "video" : "file",
+      exists: true,
+      size_bytes: artifactBodies.get(name)!.byteLength,
+      content_type:
+        name === "broadcast.mp4"
+          ? videoFixture.contentType
+          : name.endsWith(".json") || name.endsWith(".jsonl")
+            ? "application/json"
+            : "text/csv",
+    }));
+
+  const createBodies: CreateRunRequest[] = [];
+  const reviewBodies: BroadcastReviewActionsRequest[] = [];
+  const terminalTailReviewBodies: BroadcastTerminalTailReviewRequest[] = [];
+  const reviewEvidenceImportBodies: BroadcastReviewEvidenceImportRequest[] = [];
+  const reviewEvidenceRevokes: ZeroReviewBroadcastScenario["reviewEvidenceRevokes"] =
+    [];
+  const recomputeBodies: BroadcastTrajectoryRecomputeRequest[] = [];
+  const renderBodies: BroadcastRenderRequest[] = [];
+  const cancelIds: string[] = [];
+  const healthActiveRunIds: Array<string | null> = [];
+  const configReads: Array<{ name: string; cacheControl: string }> = [];
+  const authoritativeReads: ZeroReviewBroadcastScenario["authoritativeReads"] =
+    [];
+  const artifactReads: ZeroReviewBroadcastScenario["artifactReads"] = [];
+  const reviewWindowReads: ZeroReviewBroadcastScenario["reviewWindowReads"] =
+    [];
+  const acceptedTrial = fixture.draft.trial!.accepted!;
+  const acceptedAttempt = fixture.draft.trial!.attempts.find(
+    (attempt) => attempt.run_id === acceptedTrial.run_id,
+  )!;
+  const trialArtifacts: ArtifactSummary[] = [
+    ["run_manifest.json", 100, "application/json"],
+    ["metrics_report.json", 100, "application/json"],
+    ["ball_track.csv", Buffer.byteLength(trialRawTrackCsv), "text/csv"],
+    ["ball_audit.json", 100, "application/json"],
+    [
+      "ball_track.cleaned.csv",
+      Buffer.byteLength(trialCleanedTrackCsv),
+      "text/csv",
+    ],
+    ["follow_cam.webm", videoBytes.byteLength, videoFixture.contentType],
+  ].map(([name, size, contentType]) => ({
+    name: String(name),
+    path: String(name),
+    kind: String(name).endsWith(".webm") ? "video" : "file",
+    exists: true,
+    size_bytes: Number(size),
+    content_type: String(contentType),
+  }));
+  const trialRun: RunRecord = {
+    run_id: acceptedTrial.run_id,
+    source: "api",
+    status: "completed",
+    created_at: BROADCAST_E2E_NOW,
+    completed_at: BROADCAST_E2E_NOW,
+    config_name: backendMaterializedRunConfigName(
+      acceptedAttempt.request.config_name,
+      acceptedTrial.run_id,
+    ),
+    input_video: acceptedAttempt.request.input_video,
+    parent_run_id: acceptedAttempt.request.parent_run_id,
+    output_dir: `outputs/${acceptedTrial.run_id}`,
+    modules_enabled: {
+      postprocess: Boolean(acceptedAttempt.request.enable_postprocess),
+      follow_cam: Boolean(acceptedAttempt.request.enable_follow_cam),
+    },
+    artifacts: trialArtifacts,
+    stats: {},
+    notes: acceptedAttempt.request.notes,
+    error: null,
+  };
+  let currentPhase: ZeroReviewBroadcastPhase = "tracking";
+  let configMode: "ok" | "tampered" | "missing" = "ok";
+  let reviewMode: "zero" | "populated" | "missing" = "zero";
+  let terminalTailReviewMode: "not_required" | "required" | "accepted" =
+    "not_required";
+  const terminalTailEvidence = {
+    source_video_sha256: "1".repeat(64),
+    tracking_contract_sha256: "2".repeat(64),
+    action_signal_report_sha256: "3".repeat(64),
+    temporal_chunks_report_sha256: "4".repeat(64),
+    reported_frame_count: 5194,
+    verified_frame_count: 5192,
+    gap_frames: 2,
+    gap_seconds: 0.1,
+    evidence_sha256: "5".repeat(64),
+  };
+  const reviewEvidenceGenerationId = `review-evidence-${"7".repeat(24)}`;
+  const reviewEvidenceQueueSha256 = "1".repeat(64);
+  let reviewEvidenceRevoked = false;
+  let deliveryMode: "ok" | "missing_video" = "ok";
+  let allowedTrajectoryReadyReviewReads = 0;
+  let submittedReviewDecisionSha256 = reviewDecisionSha256;
+  let createConflictRunId: string | null = null;
+  let renderConflictRunId: string | null = null;
+  let foreignActiveRunId: string | null = null;
+  let parent: RunRecord | null = null;
+  const priorParents: RunRecord[] = [];
+  let recomputeChild: RunRecord | null = null;
+  let renderChild: RunRecord | null = null;
+  const trajectoryGenerationId = TRAJECTORY_GENERATION_ID;
+
+  function requireParent(): RunRecord {
+    if (!parent)
+      throw new Error("The full-production parent has not been created");
+    return parent;
+  }
+
+  function runs(): RunRecord[] {
+    return [
+      ...(renderChild ? [cloneRun(renderChild)] : []),
+      ...(recomputeChild ? [cloneRun(recomputeChild)] : []),
+      ...(parent ? [cloneRun(parent)] : []),
+      ...priorParents.map(cloneRun),
+      cloneRun(trialRun),
+    ];
+  }
+
+  function setConfigMode(mode: "ok" | "tampered" | "missing") {
+    configMode = mode;
+  }
+
+  function usePopulatedReview() {
+    reviewMode = "populated";
+  }
+
+  function useMissingReviewQueue() {
+    reviewMode = "missing";
+  }
+
+  function requireTerminalTailReview() {
+    terminalTailReviewMode = "required";
+  }
+
+  function allowOneTrajectoryReadyReviewRead() {
+    allowedTrajectoryReadyReviewReads = 1;
+  }
+
+  function setDeliveryMode(mode: "ok" | "missing_video") {
+    deliveryMode = mode;
+  }
+
+  function failNextCreateWithConflict(runId: string) {
+    createConflictRunId = runId;
+  }
+
+  function failNextRenderWithConflict(runId: string) {
+    renderConflictRunId = runId;
+  }
+
+  function clearForeignBlocker() {
+    foreignActiveRunId = null;
+  }
+
+  function setRunning() {
+    const run = requireParent();
+    currentPhase = "tracking";
+    run.status = "running";
+    run.started_at = BROADCAST_E2E_NOW;
+    run.progress = {
+      stage: "tracking",
+      current_frame: 500,
+      total_frames: 1_000,
+      percent: 50,
+    };
+    run.broadcast = { ...run.broadcast, status: "tracking" };
+  }
+
+  function setFailed() {
+    const run = requireParent();
+    currentPhase = "failed";
+    run.status = "failed";
+    run.completed_at = BROADCAST_E2E_NOW;
+    run.progress = null;
+    run.error = "full production failed";
+    run.broadcast = { ...run.broadcast, status: "failed" };
+  }
+
+  function setNeedsReview() {
+    const run = requireParent();
+    currentPhase = "needs_review";
+    run.status = "completed";
+    run.completed_at = BROADCAST_E2E_NOW;
+    run.progress = null;
+    run.broadcast = {
+      ...run.broadcast,
+      status: "needs_review",
+      blocking_reasons: [
+        ...(terminalTailReviewMode === "required"
+          ? ["terminal_decoder_shortfall_requires_operator_review"]
+          : []),
+        ...(reviewMode === "missing"
+          ? ["missing_qualified_selective_review_queue"]
+          : []),
+      ],
+      last_operation: undefined,
+    };
+  }
+
+  function queueRecomputeChild() {
+    const run = requireParent();
+    currentPhase = "recomputing";
+    recomputeChild = {
+      run_id: "broadcast-recompute-zero-review",
+      source: "broadcast_hybrid_recompute",
+      status: "running",
+      created_at: "2026-07-15T18:01:00.000Z",
+      started_at: "2026-07-15T18:01:00.000Z",
+      parent_run_id: run.run_id,
+      output_dir: "outputs/broadcast-recompute-zero-review",
+      progress: { stage: "recompute", percent: 40 },
+      broadcast: {
+        operation: "recompute",
+        operation_status: "running",
+        parent_run_id: run.run_id,
+        request: { review_decisions_sha256: submittedReviewDecisionSha256 },
+      },
+    };
+    run.broadcast = {
+      ...run.broadcast,
+      status: "needs_review",
+      last_operation: {
+        operation_run_id: recomputeChild.run_id,
+        operation: "recompute",
+        status: "running",
+      },
+    };
+  }
+
+  function completeRecomputeChildOnly() {
+    if (!recomputeChild) throw new Error("Recompute was not queued");
+    recomputeChild.status = "completed";
+    recomputeChild.completed_at = "2026-07-15T18:02:00.000Z";
+    recomputeChild.progress = null;
+    recomputeChild.broadcast = {
+      ...recomputeChild.broadcast,
+      operation_status: "completed",
+      result: { trajectory_generation_id: trajectoryGenerationId },
+    };
+  }
+
+  function publishTrajectoryReady() {
+    const run = requireParent();
+    if (!recomputeChild || recomputeChild.status !== "completed") {
+      throw new Error("Completed recompute evidence is unavailable");
+    }
+    currentPhase = "trajectory_ready";
+    run.broadcast = {
+      ...run.broadcast,
+      status: "trajectory_ready",
+      trajectory_generation_id: trajectoryGenerationId,
+      last_operation: {
+        operation_run_id: recomputeChild.run_id,
+        operation: "recompute",
+        status: "completed",
+      },
+    };
+  }
+
+  function completeRecompute() {
+    completeRecomputeChildOnly();
+    publishTrajectoryReady();
+  }
+
+  function queueRenderChild() {
+    const run = requireParent();
+    currentPhase = "rendering";
+    renderChild = {
+      run_id: "broadcast-render-zero-review",
+      source: "broadcast_hybrid_render",
+      status: "running",
+      created_at: "2026-07-15T18:03:00.000Z",
+      started_at: "2026-07-15T18:03:00.000Z",
+      parent_run_id: run.run_id,
+      output_dir: "outputs/broadcast-render-zero-review",
+      progress: { stage: "render", percent: 35 },
+      broadcast: {
+        operation: "render",
+        operation_status: "running",
+        parent_run_id: run.run_id,
+        request: { trajectory_generation_id: trajectoryGenerationId },
+      },
+    };
+    run.broadcast = {
+      ...run.broadcast,
+      status: "trajectory_ready",
+      last_operation: {
+        operation_run_id: renderChild.run_id,
+        operation: "render",
+        status: "running",
+      },
+    };
+  }
+
+  function completeRenderChildOnly() {
+    if (!renderChild) throw new Error("Render was not queued");
+    renderChild.status = "completed";
+    renderChild.completed_at = "2026-07-15T18:04:00.000Z";
+    renderChild.progress = null;
+    renderChild.broadcast = {
+      ...renderChild.broadcast,
+      operation_status: "completed",
+      result: {
+        trajectory_generation_id: trajectoryGenerationId,
+        render_generation_id: "render-ready-zero-review",
+      },
+    };
+  }
+
+  function publishReady() {
+    const run = requireParent();
+    if (!renderChild || renderChild.status !== "completed") {
+      throw new Error("Completed render evidence is unavailable");
+    }
+    currentPhase = "ready";
+    run.artifacts =
+      deliveryMode === "missing_video"
+        ? deliveryArtifacts.filter(
+            (artifact) => artifact.name !== "broadcast.mp4",
+          )
+        : deliveryArtifacts;
+    run.broadcast = {
+      ...run.broadcast,
+      status: "ready",
+      status_generation: statusGeneration,
+      trajectory_generation_id: trajectoryGenerationId,
+      limitations: ["source_audio_not_preserved"],
+      last_operation: {
+        operation_run_id: renderChild.run_id,
+        operation: "render",
+        status: "completed",
+      },
+    };
+  }
+
+  function completeRender() {
+    completeRenderChildOnly();
+    publishReady();
+  }
+
+  function captureAuthoritativeRead(
+    kind: ZeroReviewBroadcastScenario["authoritativeReads"][number]["kind"],
+    request: ReturnType<Route["request"]>,
+  ) {
+    authoritativeReads.push({
+      kind,
+      path: new URL(request.url()).pathname,
+      cacheControl:
+        request.headers()["cache-control"] ?? request.headers()["pragma"] ?? "",
+    });
+  }
+
+  await page.route("**/api/**", async (route) => {
+    const request = route.request();
+    const url = new URL(request.url());
+    const method = request.method();
+    const path = url.pathname;
+    const key = `${method} ${path}`;
+    if (
+      path === "/api/inputs" ||
+      path === "/api/inputs/field-preview" ||
+      path === "/api/inputs/field-suggestion"
+    ) {
+      await route.fallback();
+      return;
+    }
+    if (method === "GET" && path === "/api/configs") {
+      const summary: ConfigListItem = fixture.config.summary;
+      await route.fulfill({ json: [summary] });
+      return;
+    }
+    const configMatch = path.match(/^\/api\/configs\/(.+)$/);
+    if (method === "GET" && configMatch) {
+      captureAuthoritativeRead("config", request);
+      const name = decodeURIComponent(configMatch[1]);
+      configReads.push({
+        name,
+        cacheControl:
+          request.headers()["cache-control"] ??
+          request.headers()["pragma"] ??
+          "",
+      });
+      if (name !== fixture.config.name) {
+        audit.contractViolations.push(`unexpected config GET ${name}`);
+        await route.fulfill({ status: 404, json: { detail: "missing" } });
+        return;
+      }
+      if (configMode === "missing") {
+        await route.fulfill({ status: 404, json: { detail: "missing" } });
+        return;
+      }
+      await route.fulfill({
+        json:
+          configMode === "tampered"
+            ? {
+                ...fixture.config,
+                text: `${fixture.config.text}tampered: true\n`,
+              }
+            : fixture.config,
+        headers: { "Cache-Control": "no-store" },
+      });
+      return;
+    }
+    if (
+      method === "GET" &&
+      (path === "/api/health" || path === "/api/healthz")
+    ) {
+      const health: HealthResponse = {
+        status: "ok",
+        active_run_id:
+          foreignActiveRunId ??
+          (parent?.status === "queued" || parent?.status === "running"
+            ? parent.run_id
+            : null),
+        config_count: 1,
+        run_count: runs().length,
+      };
+      healthActiveRunIds.push(health.active_run_id ?? null);
+      await route.fulfill({
+        json: health,
+        headers: { "Cache-Control": "no-store" },
+      });
+      return;
+    }
+    if (method === "GET" && path === "/api/runs") {
+      captureAuthoritativeRead("run-list", request);
+      await route.fulfill({
+        json: runs(),
+        headers: { "Cache-Control": "no-store" },
+      });
+      return;
+    }
+    if (method === "POST" && path === "/api/runs") {
+      const body = request.postDataJSON() as CreateRunRequest;
+      createBodies.push(cloneJson(body));
+      if (createConflictRunId) {
+        foreignActiveRunId = createConflictRunId;
+        createConflictRunId = null;
+        await route.fulfill({
+          status: 409,
+          json: {
+            detail: `Another run is already active: ${foreignActiveRunId}`,
+          },
+        });
+        return;
+      }
+      if (parent) {
+        if (parent.status === "failed" || parent.status === "cancelled") {
+          priorParents.push(cloneRun(parent));
+        } else {
+          audit.contractViolations.push("duplicate full-run create");
+        }
+      }
+      parent = {
+        run_id: String(body.output_dir_name),
+        source: "broadcast_hybrid",
+        status: "queued",
+        created_at: BROADCAST_E2E_NOW,
+        config_name: body.config_name,
+        config_path: `configs/${body.config_name}`,
+        input_video: body.input_video,
+        parent_run_id: body.parent_run_id,
+        output_dir: `outputs/${body.output_dir_name}`,
+        modules_enabled: {
+          postprocess: Boolean(body.enable_postprocess),
+          follow_cam: Boolean(body.enable_follow_cam),
+        },
+        artifacts: [],
+        stats: {},
+        progress: { stage: "queued", percent: 0 },
+        notes: body.notes,
+        error: null,
+        broadcast: {
+          status: "tracking",
+          quality_profile: "stable_broadcast",
+          max_manual_review_windows: body.max_manual_review_windows,
+        },
+      };
+      currentPhase = "tracking";
+      await route.fulfill({ status: 201, json: cloneRun(parent) });
+      return;
+    }
+    const cancelMatch = path.match(/^\/api\/runs\/([^/]+)\/cancel$/);
+    if (method === "POST" && cancelMatch) {
+      const runId = decodeURIComponent(cancelMatch[1]);
+      cancelIds.push(runId);
+      const run = requireParent();
+      if (run.run_id !== runId) {
+        audit.contractViolations.push("cancel targeted the wrong full parent");
+        await route.fulfill({ status: 404, json: { detail: "missing" } });
+        return;
+      }
+      currentPhase = "cancelled";
+      run.status = "cancelled";
+      run.completed_at = BROADCAST_E2E_NOW;
+      run.progress = null;
+      run.broadcast = { ...run.broadcast, status: "cancelled" };
+      await route.fulfill({ json: cloneRun(run) });
+      return;
+    }
+    const reviewEvidenceImportMatch = path.match(
+      /^\/api\/runs\/([^/]+)\/broadcast\/review-evidence\/import$/,
+    );
+    if (method === "POST" && reviewEvidenceImportMatch) {
+      const runId = decodeURIComponent(reviewEvidenceImportMatch[1]);
+      const body =
+        request.postDataJSON() as BroadcastReviewEvidenceImportRequest;
+      reviewEvidenceImportBodies.push(cloneJson(body));
+      if (runId !== requireParent().run_id) {
+        audit.contractViolations.push(
+          "review-evidence import targeted the wrong parent",
+        );
+      }
+      reviewEvidenceRevoked = false;
+      await route.fulfill({
+        status: 202,
+        json: {
+          run_id: `review-evidence-import-${"8".repeat(24)}`,
+          parent_run_id: requireParent().run_id,
+          status: "queued",
+          generation_id: reviewEvidenceGenerationId,
+        } satisfies BroadcastOperationResponse,
+      });
+      return;
+    }
+    const reviewEvidenceRevokeMatch = path.match(
+      /^\/api\/runs\/([^/]+)\/broadcast\/review-evidence\/([^/]+)$/,
+    );
+    if (method === "DELETE" && reviewEvidenceRevokeMatch) {
+      const runId = decodeURIComponent(reviewEvidenceRevokeMatch[1]);
+      const generationId = decodeURIComponent(reviewEvidenceRevokeMatch[2]);
+      const queueSha256 = url.searchParams.get("queue_sha256");
+      reviewEvidenceRevokes.push({ generationId, queueSha256 });
+      if (
+        runId !== requireParent().run_id ||
+        generationId !== reviewEvidenceGenerationId ||
+        queueSha256 !== reviewEvidenceQueueSha256
+      ) {
+        audit.contractViolations.push(
+          "review-evidence revoke did not match the active generation",
+        );
+      }
+      reviewEvidenceRevoked = true;
+      await route.fulfill({
+        json: {
+          run_id: requireParent().run_id,
+          status: "revoked",
+          generation_id: reviewEvidenceGenerationId,
+          queue_sha256: reviewEvidenceQueueSha256,
+          revoked_at: BROADCAST_E2E_NOW,
+        } satisfies BroadcastReviewEvidenceRevokeResponse,
+      });
+      return;
+    }
+    const reviewEvidenceMatch = path.match(
+      /^\/api\/runs\/([^/]+)\/broadcast\/review-evidence$/,
+    );
+    if (method === "GET" && reviewEvidenceMatch) {
+      captureAuthoritativeRead("review-evidence", request);
+      const runId = decodeURIComponent(reviewEvidenceMatch[1]);
+      if (runId !== requireParent().run_id) {
+        audit.contractViolations.push(
+          "review evidence requested for the wrong parent",
+        );
+      }
+      const blocked = reviewMode === "missing" || reviewEvidenceRevoked;
+      const response: BroadcastReviewEvidenceStateResponse = blocked
+        ? {
+            run_id: runId,
+            status: "blocked",
+            blocker_code: "review_evidence_bundle_not_available",
+            recovery_action: "provision_qualified_review_evidence",
+            retryable: false,
+            can_cancel: false,
+            bundles: [],
+            blocking_reasons: ["missing_qualified_selective_review_queue"],
+          }
+        : {
+            run_id: runId,
+            status: "ready",
+            generation_id: reviewEvidenceGenerationId,
+            queue_sha256: reviewEvidenceQueueSha256,
+            stage: "ready",
+            progress_percent: 100,
+            retryable: false,
+            can_cancel: false,
+            bundles: [],
+          };
+      await route.fulfill({
+        json: response,
+        headers: { "Cache-Control": "no-store" },
+      });
+      return;
+    }
+    const reviewMatch = path.match(
+      /^\/api\/runs\/([^/]+)\/broadcast\/review-windows$/,
+    );
+    if (method === "GET" && reviewMatch) {
+      captureAuthoritativeRead("review", request);
+      const runId = decodeURIComponent(reviewMatch[1]);
+      reviewWindowReads.push({ method, runId, phase: currentPhase });
+      const exactTransitionRead =
+        runId === requireParent().run_id &&
+        currentPhase === "trajectory_ready" &&
+        allowedTrajectoryReadyReviewReads > 0;
+      if (exactTransitionRead) {
+        allowedTrajectoryReadyReviewReads -= 1;
+      } else if (
+        runId !== requireParent().run_id ||
+        (currentPhase !== "needs_review" && currentPhase !== "recomputing")
+      ) {
+        audit.contractViolations.push(
+          `review windows requested during ${currentPhase}`,
+        );
+      }
+      const candidates = [...montageBodies].map(
+        ([montagePath, montageBody], index) => ({
+          candidate_id: `candidate-${index + 1}`,
+          candidate_fingerprint: String(index + 1).repeat(64),
+          variant_id: "full",
+          frame_index: 100 + index * 20,
+          bbox: [10 + index, 20 + index, 30 + index, 40 + index] as [
+            number,
+            number,
+            number,
+            number,
+          ],
+          detector_source: "detector",
+          detector_confidence: 0.8,
+          predicted_label: index === 0 ? "match_ball" : "noise",
+          prediction_confidence: 0.7,
+          selective_decision: "abstain" as const,
+          decision_reasons: ["manual_review_required"],
+          review_kind: "policy_abstention",
+          evidence: {
+            sample_id: `sample-${index + 1}`,
+            sha256: "a".repeat(64),
+            dataset_version: "b".repeat(64),
+            artifacts: {
+              tight_tensor: {
+                path: `review/candidate-${index + 1}-tight.npy`,
+                sha256: "c".repeat(64),
+                size_bytes: 10,
+              },
+              context_tensor: {
+                path: `review/candidate-${index + 1}-context.npy`,
+                sha256: "d".repeat(64),
+                size_bytes: 20,
+              },
+              review_montage: {
+                path: montagePath,
+                sha256: sha256Bytes(montageBody),
+                size_bytes: montageBody.byteLength,
+              },
+            },
+          },
+        }),
+      );
+      const response: BroadcastReviewWindowsResponse =
+        reviewMode === "missing"
+          ? {
+              run_id: runId,
+              status: "needs_review",
+              reason: "missing_qualified_selective_review_queue",
+              queue_sha256: null,
+              review_item_count: 0,
+              items: [],
+            }
+          : reviewMode === "populated"
+            ? {
+                run_id: runId,
+                status: "ready",
+                queue_sha256: "1".repeat(64),
+                review_item_count: 1,
+                items: [
+                  {
+                    review_item_id: "window-1",
+                    variant_id: "full",
+                    start_frame: 90,
+                    end_frame: 140,
+                    duration_seconds: 2,
+                    compliance: "compliant",
+                    priority: 1,
+                    candidates,
+                  },
+                ],
+              }
+            : {
+                run_id: runId,
+                status: "ready",
+                queue_sha256: "1".repeat(64),
+                review_item_count: 0,
+                items: [],
+              };
+      response.terminal_tail_review =
+        terminalTailReviewMode === "not_required"
+          ? { status: "not_required" }
+          : terminalTailReviewMode === "required"
+            ? {
+                status: "required",
+                reason: "terminal_decoder_shortfall_requires_operator_review",
+                evidence: terminalTailEvidence,
+              }
+            : {
+                status: "accepted",
+                evidence: terminalTailEvidence,
+                decision: "accept_terminal_shortfall",
+                reviewer_id: "quality-lead",
+                reviewed_at: BROADCAST_E2E_NOW,
+                acknowledgement_sha256: "6".repeat(64),
+              };
+      await route.fulfill({
+        json: response,
+        headers: { "Cache-Control": "no-store" },
+      });
+      return;
+    }
+    const terminalTailReviewMatch = path.match(
+      /^\/api\/runs\/([^/]+)\/broadcast\/terminal-tail-review$/,
+    );
+    if (method === "POST" && terminalTailReviewMatch) {
+      const body = request.postDataJSON() as BroadcastTerminalTailReviewRequest;
+      terminalTailReviewBodies.push(cloneJson(body));
+      if (
+        decodeURIComponent(terminalTailReviewMatch[1]) !==
+          requireParent().run_id ||
+        terminalTailReviewMode !== "required" ||
+        body.decision !== "accept_terminal_shortfall" ||
+        body.evidence_sha256 !== terminalTailEvidence.evidence_sha256 ||
+        !body.reviewer_id.trim()
+      ) {
+        audit.contractViolations.push(
+          "terminal-tail acknowledgement did not match current evidence",
+        );
+      }
+      terminalTailReviewMode = "accepted";
+      const parentRun = requireParent();
+      parentRun.broadcast = {
+        ...parentRun.broadcast,
+        blocking_reasons: (parentRun.broadcast?.blocking_reasons ?? []).filter(
+          (reason) =>
+            reason !== "terminal_decoder_shortfall_requires_operator_review",
+        ),
+      };
+      await route.fulfill({
+        json: {
+          run_id: requireParent().run_id,
+          status: "completed",
+          artifact: "terminal_tail_review.v1.json",
+          details: { terminal_tail_review_sha256: "6".repeat(64) },
+        } satisfies BroadcastOperationResponse,
+      });
+      return;
+    }
+    const reviewActionsMatch = path.match(
+      /^\/api\/runs\/([^/]+)\/broadcast\/review-actions$/,
+    );
+    if (method === "POST" && reviewActionsMatch) {
+      const body = request.postDataJSON() as BroadcastReviewActionsRequest;
+      reviewBodies.push(cloneJson(body));
+      submittedReviewDecisionSha256 = sha256Bytes(
+        Buffer.from(canonicalJson(body), "utf8"),
+      );
+      if (
+        decodeURIComponent(reviewActionsMatch[1]) !== requireParent().run_id
+      ) {
+        audit.contractViolations.push(
+          "review actions targeted the wrong parent",
+        );
+      }
+      if (body.queue_sha256 !== reviewEvidenceQueueSha256) {
+        audit.contractViolations.push(
+          "review actions did not bind the current review-evidence queue",
+        );
+      }
+      await route.fulfill({
+        json: {
+          run_id: requireParent().run_id,
+          status: "completed",
+          artifact: "review_decisions.json",
+          details: {
+            review_decisions_sha256: submittedReviewDecisionSha256,
+          },
+        } satisfies BroadcastOperationResponse,
+      });
+      return;
+    }
+    const recomputeMatch = path.match(
+      /^\/api\/runs\/([^/]+)\/broadcast\/trajectory-recompute$/,
+    );
+    if (method === "POST" && recomputeMatch) {
+      const body =
+        request.postDataJSON() as BroadcastTrajectoryRecomputeRequest;
+      recomputeBodies.push(cloneJson(body));
+      if (
+        decodeURIComponent(recomputeMatch[1]) !== requireParent().run_id ||
+        body.review_decisions_sha256 !== submittedReviewDecisionSha256
+      ) {
+        audit.contractViolations.push(
+          "recompute lineage did not match review evidence",
+        );
+      }
+      queueRecomputeChild();
+      await route.fulfill({
+        status: 202,
+        json: {
+          run_id: recomputeChild!.run_id,
+          parent_run_id: requireParent().run_id,
+          status: "queued",
+        } satisfies BroadcastOperationResponse,
+      });
+      return;
+    }
+    const renderMatch = path.match(/^\/api\/runs\/([^/]+)\/broadcast\/render$/);
+    if (method === "POST" && renderMatch) {
+      const body = request.postDataJSON() as BroadcastRenderRequest;
+      renderBodies.push(cloneJson(body));
+      if (
+        decodeURIComponent(renderMatch[1]) !== requireParent().run_id ||
+        body.trajectory_generation_id !== trajectoryGenerationId
+      ) {
+        audit.contractViolations.push(
+          "render lineage did not match the trajectory",
+        );
+      }
+      if (renderConflictRunId) {
+        const blocker = renderConflictRunId;
+        renderConflictRunId = null;
+        await route.fulfill({
+          status: 409,
+          json: { detail: `Another run is already active: ${blocker}` },
+        });
+        return;
+      }
+      queueRenderChild();
+      await route.fulfill({
+        status: 202,
+        json: {
+          run_id: renderChild!.run_id,
+          parent_run_id: requireParent().run_id,
+          status: "queued",
+        } satisfies BroadcastOperationResponse,
+      });
+      return;
+    }
+    const artifactsMatch = path.match(/^\/api\/runs\/([^/]+)\/artifacts$/);
+    if (method === "GET" && artifactsMatch) {
+      const runId = decodeURIComponent(artifactsMatch[1]);
+      captureAuthoritativeRead("artifact-list", request);
+      if (runId === trialRun.run_id) {
+        await route.fulfill({ json: trialArtifacts });
+        return;
+      }
+      if (parent && runId === parent.run_id) {
+        if (
+          currentPhase === "ready" &&
+          url.searchParams.get("status_generation") !== enforcedStatusGeneration
+        ) {
+          await route.fulfill({
+            status: 409,
+            json: { detail: "stale generation" },
+          });
+          return;
+        }
+        await route.fulfill({
+          json:
+            currentPhase === "ready"
+              ? (parent.artifacts ?? [])
+              : reviewMode === "populated" &&
+                  (currentPhase === "needs_review" ||
+                    currentPhase === "recomputing")
+                ? montageArtifacts
+                : [],
+          headers: { "Cache-Control": "no-store" },
+        });
+        return;
+      }
+      await route.fulfill({ status: 404, json: { detail: "missing" } });
+      return;
+    }
+    const auditMatch = path.match(/^\/api\/runs\/([^/]+)\/ball-audit$/);
+    if (method === "GET" && auditMatch) {
+      if (decodeURIComponent(auditMatch[1]) !== trialRun.run_id) {
+        audit.contractViolations.push(
+          "ball audit requested for a non-trial run",
+        );
+      }
+      await route.fulfill({
+        json: {
+          schema_version: "1.0",
+          generated_at: BROADCAST_E2E_NOW,
+          summary: {
+            frame_count: 300,
+            source_count: 2,
+            tracklet_count: 0,
+            suspicious_tracklet_count: 0,
+            review_event_count: 0,
+            lost_gap_count: 0,
+            max_step_px: 20,
+          },
+          sources: [],
+          tracklets: [],
+          review_events: [],
+        },
+      });
+      return;
+    }
+    const artifactMatch = path.match(/^\/api\/runs\/([^/]+)\/artifacts\/(.+)$/);
+    if ((method === "GET" || method === "HEAD") && artifactMatch) {
+      const runId = decodeURIComponent(artifactMatch[1]);
+      const name = decodeURIComponent(artifactMatch[2]);
+      if (
+        name !== "follow_cam.webm" &&
+        name !== "broadcast.mp4" &&
+        !name.endsWith(".svg")
+      ) {
+        captureAuthoritativeRead("artifact", request);
+      }
+      if (runId === trialRun.run_id) {
+        if (name === "run_manifest.json") {
+          await route.fulfill({ json: { run_id: trialRun.run_id } });
+          return;
+        }
+        if (name === "metrics_report.json") {
+          await route.fulfill({ json: { quality_gate: { status: "warn" } } });
+          return;
+        }
+        if (name === "ball_track.csv" || name === "ball_track.cleaned.csv") {
+          await route.fulfill({
+            contentType: "text/csv",
+            body: name.includes("cleaned")
+              ? trialCleanedTrackCsv
+              : trialRawTrackCsv,
+          });
+          return;
+        }
+        if (name === "follow_cam.webm") {
+          await fulfillByteRange(route, videoBytes, videoFixture.contentType);
+          return;
+        }
+      }
+      if (parent && runId === parent.run_id && montageBodies.has(name)) {
+        await route.fulfill({
+          status: 200,
+          body: montageBodies.get(name)!,
+          contentType: "image/svg+xml",
+          headers: { "Cache-Control": "no-store" },
+        });
+        return;
+      }
+      if (parent && runId === parent.run_id && artifactBodies.has(name)) {
+        const generation = url.searchParams.get("status_generation");
+        const range = request.headers()["range"] ?? null;
+        artifactReads.push({
+          method,
+          name,
+          statusGeneration: generation,
+          range,
+        });
+        if (
+          currentPhase === "ready" &&
+          generation !== enforcedStatusGeneration
+        ) {
+          await route.fulfill({
+            status: 409,
+            json: { detail: "stale generation" },
+          });
+          return;
+        }
+        const bytes = artifactBodies.get(name)!;
+        if (method === "HEAD") {
+          await route.fulfill({
+            status: 200,
+            headers: {
+              "Cache-Control": "no-store",
+              "Content-Length": String(bytes.byteLength),
+            },
+          });
+          return;
+        }
+        if (name === "broadcast.mp4") {
+          await fulfillByteRange(route, bytes, videoFixture.contentType);
+        } else {
+          await route.fulfill({
+            status: 200,
+            body: bytes,
+            contentType: name.endsWith(".json")
+              ? "application/json"
+              : "application/octet-stream",
+            headers: { "Cache-Control": "no-store" },
+          });
+        }
+        return;
+      }
+      await route.fulfill({ status: 404, json: { detail: "missing" } });
+      return;
+    }
+    const runMatch = path.match(/^\/api\/runs\/([^/]+)$/);
+    if (method === "GET" && runMatch) {
+      captureAuthoritativeRead("run", request);
+      const runId = decodeURIComponent(runMatch[1]);
+      const run = runs().find((candidate) => candidate.run_id === runId);
+      if (!run) {
+        await route.fulfill({ status: 404, json: { detail: "missing" } });
+        return;
+      }
+      await route.fulfill({
+        json: run,
+        headers: { "Cache-Control": "no-store" },
+      });
+      return;
+    }
+    audit.unhandledApi.push(key);
+    await route.fulfill({
+      status: 501,
+      json: { detail: `Unhandled zero-review scenario request: ${key}` },
+    });
+  });
+
+  return {
+    audit,
+    createBodies,
+    reviewBodies,
+    terminalTailReviewBodies,
+    recomputeBodies,
+    renderBodies,
+    cancelIds,
+    healthActiveRunIds,
+    configReads,
+    authoritativeReads,
+    artifactReads,
+    reviewWindowReads,
+    reviewEvidenceImportBodies,
+    reviewEvidenceRevokes,
+    qualityStable,
+    qualityBytes,
+    statusGeneration,
+    flipReadyGeneration: () => {
+      enforcedStatusGeneration = "9".repeat(64);
+      return enforcedStatusGeneration;
+    },
+    parentRunId: () => requireParent().run_id,
+    phase: () => currentPhase,
+    blockingReasons: () => [
+      ...(requireParent().broadcast?.blocking_reasons ?? []),
+    ],
+    setConfigMode,
+    usePopulatedReview,
+    useMissingReviewQueue,
+    requireTerminalTailReview,
+    allowOneTrajectoryReadyReviewRead,
+    setDeliveryMode,
+    failNextCreateWithConflict,
+    failNextRenderWithConflict,
+    clearForeignBlocker,
+    setRunning,
+    setFailed,
+    setNeedsReview,
+    completeRecomputeChildOnly,
+    publishTrajectoryReady,
+    completeRecompute,
+    completeRenderChildOnly,
+    publishReady,
+    completeRender,
+  };
+}
+
 test.beforeEach(async ({ page }) => {
   await watchRuntimeErrors(page);
   await mockInputs(page);
@@ -858,6 +2325,975 @@ test.afterEach(async ({ page }) => {
     return false;
   });
   expect(unexpected).toEqual([]);
+});
+
+test("completes a zero-review full production and verifies the product", async ({
+  page,
+}) => {
+  const fixture = await buildConfirmedBroadcastDraft();
+  const scenario = await installZeroReviewBroadcastScenario(page, fixture);
+  await page.addInitScript(
+    ({ key, draft }) => {
+      if (localStorage.getItem(key) === null) {
+        localStorage.setItem(key, JSON.stringify(draft));
+      }
+    },
+    { key: PRODUCTION_DRAFT_STORAGE_KEY, draft: fixture.draft },
+  );
+
+  await page.goto("/production");
+  await expect(
+    page.getByRole("heading", { name: "Trial and tuning" }),
+  ).toBeVisible();
+  const next = page.getByRole("button", { name: "Next" });
+  await expect(next).toBeEnabled();
+  await next.click();
+  await expect(
+    page.getByRole("heading", {
+      name: "Full tracking and review",
+      exact: true,
+    }),
+  ).toBeVisible();
+
+  await page.getByTestId("production-start-full-run").dblclick();
+  await expect.poll(() => scenario.createBodies.length).toBe(1);
+  const create = scenario.createBodies[0];
+  expect(create).toMatchObject({
+    config_name: fixture.config.name,
+    input_video: fixture.draft.source!.path,
+    parent_run_id: ACCEPTED_TRIAL_RUN_ID,
+    enable_postprocess: true,
+    enable_follow_cam: false,
+    start_frame: 0,
+    max_frames: null,
+    pipeline_mode: "broadcast_hybrid",
+    quality_profile: "stable_broadcast",
+    max_manual_review_windows: 30,
+  });
+  expect(create.output_dir_name).toMatch(
+    /^production_full_[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+  );
+  expect("config_patch" in create).toBe(false);
+  expect(create.calibration_confirmation?.confirmed_sample_frames).toHaveLength(
+    3,
+  );
+  await expect(page).toHaveURL(
+    new RegExp(`/production\\?run=${scenario.parentRunId()}$`),
+  );
+  expect(
+    scenario.configReads.some((read) => read.name === fixture.config.name),
+  ).toBe(true);
+  expect(
+    scenario.configReads
+      .filter((read) => read.name === fixture.config.name)
+      .some((read) => /no-cache|no-store/i.test(read.cacheControl)),
+  ).toBe(true);
+
+  scenario.setRunning();
+  await page.reload();
+  await expect(page.getByTestId("production-full-run-status")).toHaveText(
+    "Tracking",
+  );
+  await expect(page).toHaveURL(
+    new RegExp(`/production\\?run=${scenario.parentRunId()}$`),
+  );
+  expect(scenario.createBodies).toHaveLength(1);
+
+  scenario.setNeedsReview();
+  await expect(page.getByTestId("production-full-run-status")).toHaveText(
+    "Needs review",
+    { timeout: 15_000 },
+  );
+  const reviewStep = page.getByTestId("broadcast-review-step");
+  await expect(reviewStep).toContainText("No review candidates were returned");
+  await page
+    .getByRole("button", { name: "Continue without candidate decisions" })
+    .dblclick();
+  await expect.poll(() => scenario.reviewBodies.length).toBe(1);
+  await expect.poll(() => scenario.recomputeBodies.length).toBe(1);
+  expect(scenario.reviewBodies[0]).toEqual({
+    queue_sha256: "1".repeat(64),
+    actions: [],
+  });
+  expect(scenario.phase()).toBe("recomputing");
+  await expect(page.getByTestId("production-full-run-status")).toHaveText(
+    "Recomputing trajectory",
+  );
+
+  scenario.completeRecompute();
+  await expect(page.getByTestId("production-full-run-status")).toHaveText(
+    "Trajectory ready",
+    { timeout: 15_000 },
+  );
+  await page.getByRole("button", { name: "Render broadcast" }).dblclick();
+  await expect.poll(() => scenario.renderBodies.length).toBe(1);
+  expect(scenario.renderBodies[0]).toEqual({
+    trajectory_generation_id: TRAJECTORY_GENERATION_ID,
+    target_width: 1920,
+    target_height: 1080,
+  });
+  expect(scenario.phase()).toBe("rendering");
+  await expect(page.getByTestId("production-full-run-status")).toHaveText(
+    "Rendering",
+  );
+
+  scenario.completeRender();
+  const product = page.getByTestId("production-product-ready");
+  await expect(product).toBeVisible({ timeout: 20_000 });
+  await expect(page.getByTestId("production-full-run-status")).toHaveText(
+    "Product ready",
+  );
+  await expect(product.getByText("Quality report verified")).toBeVisible();
+  await expect(product.getByText("source_audio_not_preserved")).toBeVisible();
+  const video = product.getByLabel("Broadcast video");
+  await expect(video).toBeVisible();
+  await expect
+    .poll(async () =>
+      video.evaluate((element: HTMLVideoElement) => ({
+        readyState: element.readyState,
+        duration: element.duration,
+      })),
+    )
+    .toMatchObject({
+      readyState: expect.any(Number),
+      duration: expect.any(Number),
+    });
+  expect(
+    await video.evaluate((element: HTMLVideoElement) => element.readyState),
+  ).toBeGreaterThanOrEqual(3);
+
+  const downloads = product.getByRole("link");
+  await expect(downloads).toHaveCount(8);
+  const downloadHrefs = await downloads.evaluateAll((links) =>
+    links.map((link) => link.getAttribute("href")),
+  );
+  expect(downloadHrefs.sort()).toEqual(
+    [...PRODUCTION_BROADCAST_DELIVERY_ARTIFACTS]
+      .map(
+        (name) =>
+          `/api/runs/${scenario.parentRunId()}/artifacts/${name}?status_generation=${scenario.statusGeneration}`,
+      )
+      .sort(),
+  );
+  expect(await sha256Text(canonicalJson(scenario.qualityStable))).toBe(
+    scenario.statusGeneration,
+  );
+  expect(JSON.parse(scenario.qualityBytes.toString("utf8"))).toMatchObject({
+    status: "ready",
+    status_generation: scenario.statusGeneration,
+    blocking_reasons: [],
+  });
+  expect(
+    scenario.artifactReads.some(
+      (read) =>
+        read.name === "broadcast_quality_report.json" &&
+        read.statusGeneration === scenario.statusGeneration,
+    ),
+  ).toBe(true);
+  expect(
+    scenario.artifactReads.some(
+      (read) =>
+        read.name === "broadcast.mp4" &&
+        read.statusGeneration === scenario.statusGeneration &&
+        read.range?.startsWith("bytes=") === true,
+    ),
+  ).toBe(true);
+
+  const requiredAuthoritativeKinds = [
+    "config",
+    "run-list",
+    "run",
+    "artifact-list",
+    "artifact",
+    "review",
+  ] as const;
+  for (const kind of requiredAuthoritativeKinds) {
+    const reads = scenario.authoritativeReads.filter(
+      (read) => read.kind === kind,
+    );
+    expect(reads.length, `missing authoritative ${kind} GET`).toBeGreaterThan(
+      0,
+    );
+    expect(
+      reads.some((read) => /no-cache|no-store/i.test(read.cacheControl)),
+      `no fresh ${kind} GET bypassed the HTTP cache`,
+    ).toBe(true);
+  }
+
+  const staleGeneration = scenario.statusGeneration;
+  for (let index = 0; index < 12; index += 1) {
+    allowRuntimeError(
+      page,
+      /^console\.error: Failed to load resource: the server responded with a status of 409 \(Conflict\)$/,
+    );
+  }
+  const nextGeneration = scenario.flipReadyGeneration();
+  expect(nextGeneration).not.toBe(staleGeneration);
+  const staleStatuses = await page.evaluate(
+    async ({ parentRunId, generation }) => {
+      const base = `/api/runs/${parentRunId}/artifacts`;
+      const query = `status_generation=${generation}`;
+      const [list, get, head] = await Promise.all([
+        fetch(`${base}?${query}`, { cache: "no-store" }),
+        fetch(`${base}/broadcast_quality_report.json?${query}`, {
+          cache: "no-store",
+        }),
+        fetch(`${base}/broadcast_quality_report.json?${query}`, {
+          method: "HEAD",
+          cache: "no-store",
+        }),
+      ]);
+      return [list.status, get.status, head.status];
+    },
+    { parentRunId: scenario.parentRunId(), generation: staleGeneration },
+  );
+  expect(staleStatuses).toEqual([409, 409, 409]);
+
+  await expectNoSeriousAccessibilityFindings(page);
+  expect(scenario.createBodies).toHaveLength(1);
+  expect(scenario.reviewBodies).toHaveLength(1);
+  expect(scenario.recomputeBodies).toHaveLength(1);
+  expect(scenario.renderBodies).toHaveLength(1);
+  expect(scenario.audit.unhandledApi).toEqual([]);
+  expect(scenario.audit.contractViolations).toEqual([]);
+});
+
+test("requires explicit terminal-tail acknowledgement before zero-candidate recompute", async ({
+  page,
+}) => {
+  const fixture = await buildConfirmedBroadcastDraft();
+  const scenario = await installZeroReviewBroadcastScenario(page, fixture);
+  scenario.requireTerminalTailReview();
+  await page.addInitScript(
+    ({ key, draft }) => {
+      localStorage.setItem(key, JSON.stringify(draft));
+    },
+    { key: PRODUCTION_DRAFT_STORAGE_KEY, draft: fixture.draft },
+  );
+
+  await page.goto("/production");
+  await page.getByRole("button", { name: "Next" }).click();
+  await page.getByTestId("production-start-full-run").click();
+  await expect.poll(() => scenario.createBodies.length).toBe(1);
+  scenario.setNeedsReview();
+
+  const tailReview = page.getByTestId("production-terminal-tail-review");
+  await expect(tailReview).toBeVisible({ timeout: 15_000 });
+  await expect(tailReview).toContainText("reports 5194 frames");
+  await expect(tailReview).toContainText("final 2 source frames (0.1s)");
+  const continueButton = page.getByRole("button", {
+    name: "Continue without candidate decisions",
+  });
+  await expect(continueButton).toBeDisabled();
+  expect(scenario.terminalTailReviewBodies).toHaveLength(0);
+  expect(scenario.reviewBodies).toHaveLength(0);
+  expect(scenario.recomputeBodies).toHaveLength(0);
+
+  const reviewer = page.getByLabel("Reviewer ID");
+  await reviewer.fill("quality-lead");
+  await page
+    .getByLabel(
+      "I reviewed and accept that the verified product excludes this damaged terminal tail.",
+    )
+    .check();
+  await expect(continueButton).toBeEnabled();
+  await continueButton.click();
+
+  await expect.poll(() => scenario.terminalTailReviewBodies.length).toBe(1);
+  await expect.poll(() => scenario.reviewBodies.length).toBe(1);
+  await expect.poll(() => scenario.recomputeBodies.length).toBe(1);
+  expect(scenario.terminalTailReviewBodies[0]).toEqual({
+    decision: "accept_terminal_shortfall",
+    reviewer_id: "quality-lead",
+    evidence_sha256: "5".repeat(64),
+  });
+  expect(scenario.audit.unhandledApi).toEqual([]);
+  expect(scenario.audit.contractViolations).toEqual([]);
+});
+
+test("acknowledges the terminal tail independently when the qualified review queue is missing", async ({
+  page,
+}) => {
+  const fixture = await buildConfirmedBroadcastDraft();
+  const scenario = await installZeroReviewBroadcastScenario(page, fixture);
+  scenario.useMissingReviewQueue();
+  scenario.requireTerminalTailReview();
+  await page.addInitScript(
+    ({ key, draft }) => {
+      localStorage.setItem(key, JSON.stringify(draft));
+    },
+    { key: PRODUCTION_DRAFT_STORAGE_KEY, draft: fixture.draft },
+  );
+
+  await page.goto("/production");
+  await page.getByRole("button", { name: "Next" }).click();
+  await page.getByTestId("production-start-full-run").click();
+  await expect.poll(() => scenario.createBodies.length).toBe(1);
+  scenario.setNeedsReview();
+
+  const tailReview = page.getByTestId("production-terminal-tail-review");
+  await expect(tailReview).toBeVisible({ timeout: 15_000 });
+  const evidence = page.getByTestId("broadcast-review-evidence-step");
+  await expect(evidence).toBeVisible();
+  await expect(
+    evidence.getByText("review_evidence_bundle_not_available"),
+  ).toBeVisible();
+  await expect(evidence).toContainText(
+    "Provision a qualified review-evidence bundle in the managed inbox.",
+  );
+  await expect(page.getByTestId("broadcast-review-step")).toHaveCount(0);
+  await expect(
+    page.getByRole("button", { name: "Continue without candidate decisions" }),
+  ).toHaveCount(0);
+  const acknowledge = page.getByRole("button", {
+    name: "Confirm terminal source limitation",
+  });
+  await expect(acknowledge).toBeDisabled();
+
+  await page.getByLabel("Reviewer ID").fill("quality-lead");
+  await page
+    .getByLabel(
+      "I reviewed and accept that the verified product excludes this damaged terminal tail.",
+    )
+    .check();
+  await expect(acknowledge).toBeEnabled();
+  await acknowledge.dblclick();
+
+  await expect.poll(() => scenario.terminalTailReviewBodies.length).toBe(1);
+  await expect(
+    page.getByText("Terminal source limitation accepted"),
+  ).toBeVisible();
+  expect(scenario.terminalTailReviewBodies[0]).toEqual({
+    decision: "accept_terminal_shortfall",
+    reviewer_id: "quality-lead",
+    evidence_sha256: "5".repeat(64),
+  });
+  expect(scenario.reviewBodies).toHaveLength(0);
+  expect(scenario.recomputeBodies).toHaveLength(0);
+  expect(scenario.blockingReasons()).toEqual([
+    "missing_qualified_selective_review_queue",
+  ]);
+  expect(scenario.audit.unhandledApi).toEqual([]);
+  expect(scenario.audit.contractViolations).toEqual([]);
+});
+
+test("[PR4 C2] blocks full production when the canonical config changes or disappears", async ({
+  page,
+}) => {
+  allowRuntimeError(
+    page,
+    /^console\.error: Failed to load resource: the server responded with a status of 404 \(Not Found\)$/,
+  );
+  const fixture = await buildConfirmedBroadcastDraft();
+  const scenario = await installZeroReviewBroadcastScenario(page, fixture);
+  await page.addInitScript(
+    ({ key, draft }) => {
+      if (localStorage.getItem(key) === null) {
+        localStorage.setItem(key, JSON.stringify(draft));
+      }
+    },
+    { key: PRODUCTION_DRAFT_STORAGE_KEY, draft: fixture.draft },
+  );
+  await page.goto("/production");
+  const next = page.getByRole("button", { name: "Next" });
+  await expect(next).toBeEnabled();
+  await next.click();
+  const start = page.getByTestId("production-start-full-run");
+  const initialConfigReads = scenario.configReads.length;
+  const cases = [
+    {
+      mode: "tampered" as const,
+      message: "The confirmed configuration no longer matches",
+    },
+    {
+      mode: "missing" as const,
+      message: "The confirmed configuration could not be freshly verified",
+    },
+  ];
+  for (const configCase of cases) {
+    scenario.setConfigMode(configCase.mode);
+    await start.click();
+    await expect(page.getByTestId("production-full-run-error")).toContainText(
+      configCase.message,
+    );
+    expect(scenario.createBodies).toHaveLength(0);
+  }
+  expect(scenario.configReads).toHaveLength(initialConfigReads + cases.length);
+  expect(
+    scenario.configReads
+      .slice(initialConfigReads)
+      .every((read) => read.name === fixture.config.name),
+  ).toBe(true);
+  await expectNoSeriousAccessibilityFindings(page);
+  expect(scenario.reviewBodies).toEqual([]);
+  expect(scenario.recomputeBodies).toEqual([]);
+  expect(scenario.renderBodies).toEqual([]);
+  expect(scenario.cancelIds).toEqual([]);
+  expect(scenario.audit.unhandledApi).toEqual([]);
+  expect(scenario.audit.contractViolations).toEqual([]);
+});
+
+test("[PR4 C2] reconciles a create conflict before explicitly retrying with a new UUID", async ({
+  page,
+}) => {
+  allowRuntimeError(
+    page,
+    /^console\.error: Failed to load resource: the server responded with a status of 409 \(Conflict\)$/,
+  );
+  const fixture = await buildConfirmedBroadcastDraft();
+  const scenario = await installZeroReviewBroadcastScenario(page, fixture);
+  await page.addInitScript(
+    ({ key, draft }) => {
+      if (localStorage.getItem(key) === null) {
+        localStorage.setItem(key, JSON.stringify(draft));
+      }
+    },
+    { key: PRODUCTION_DRAFT_STORAGE_KEY, draft: fixture.draft },
+  );
+  await page.goto("/production");
+  const next = page.getByRole("button", { name: "Next" });
+  await expect(next).toBeEnabled();
+  await next.click();
+
+  scenario.failNextCreateWithConflict("foreign-blocker");
+  const healthReadStart = scenario.healthActiveRunIds.length;
+  await page.getByTestId("production-start-full-run").dblclick();
+  await expect.poll(() => scenario.createBodies.length).toBe(1);
+  await expect(page.getByTestId("production-full-run-error")).toContainText(
+    "foreign-blocker",
+  );
+  const firstRequest = scenario.createBodies[0];
+  expect(scenario.healthActiveRunIds.slice(healthReadStart)).toEqual([
+    null,
+    "foreign-blocker",
+  ]);
+  const blockedDraft = await page.evaluate((key) => {
+    const raw = localStorage.getItem(key);
+    return raw ? JSON.parse(raw) : null;
+  }, PRODUCTION_DRAFT_STORAGE_KEY);
+  expect(blockedDraft).toMatchObject({
+    source: fixture.draft.source,
+    trial: { accepted: { run_id: ACCEPTED_TRIAL_RUN_ID } },
+    confirmed_config: {
+      name: fixture.config.name,
+      sha256: fixture.draft.confirmed_config!.sha256,
+    },
+    full_run: {
+      attempts: [],
+      current_run_id: null,
+      pending_submission: {
+        expected_run_id: firstRequest.output_dir_name,
+      },
+    },
+  });
+
+  scenario.clearForeignBlocker();
+  await page.getByTestId("production-retry-full-run").dblclick();
+  await expect.poll(() => scenario.createBodies.length).toBe(2);
+  const secondRequest = scenario.createBodies[1];
+  expect(secondRequest.output_dir_name).not.toBe(firstRequest.output_dir_name);
+  for (const body of scenario.createBodies) {
+    expect(body).toMatchObject({
+      config_name: fixture.config.name,
+      input_video: fixture.draft.source!.path,
+      parent_run_id: ACCEPTED_TRIAL_RUN_ID,
+      pipeline_mode: "broadcast_hybrid",
+      quality_profile: "stable_broadcast",
+      start_frame: 0,
+      max_frames: null,
+      enable_follow_cam: false,
+    });
+    expect("config_patch" in body).toBe(false);
+  }
+  await expect(page).toHaveURL(
+    new RegExp(`/production\\?run=${scenario.parentRunId()}$`),
+  );
+  await expectNoSeriousAccessibilityFindings(page);
+  expect(scenario.reviewBodies).toEqual([]);
+  expect(scenario.recomputeBodies).toEqual([]);
+  expect(scenario.renderBodies).toEqual([]);
+  expect(scenario.cancelIds).toEqual([]);
+  expect(scenario.audit.unhandledApi).toEqual([]);
+  expect(scenario.audit.contractViolations).toEqual([]);
+});
+
+test("[PR4 C2] cancels the tracking parent once and restores it without rebuilding", async ({
+  page,
+}) => {
+  const fixture = await buildConfirmedBroadcastDraft();
+  const scenario = await installZeroReviewBroadcastScenario(page, fixture);
+  await page.addInitScript(
+    ({ key, draft }) => {
+      if (localStorage.getItem(key) === null) {
+        localStorage.setItem(key, JSON.stringify(draft));
+      }
+    },
+    { key: PRODUCTION_DRAFT_STORAGE_KEY, draft: fixture.draft },
+  );
+  await page.goto("/production");
+  const next = page.getByRole("button", { name: "Next" });
+  await expect(next).toBeEnabled();
+  await next.click();
+  await page.getByTestId("production-start-full-run").click();
+  await expect.poll(() => scenario.createBodies.length).toBe(1);
+  expect(scenario.createBodies[0]).toMatchObject({
+    config_name: fixture.config.name,
+    input_video: fixture.draft.source!.path,
+    parent_run_id: ACCEPTED_TRIAL_RUN_ID,
+    pipeline_mode: "broadcast_hybrid",
+    quality_profile: "stable_broadcast",
+    start_frame: 0,
+    max_frames: null,
+    enable_follow_cam: false,
+  });
+  expect("config_patch" in scenario.createBodies[0]).toBe(false);
+  const parentRunId = scenario.parentRunId();
+  scenario.setRunning();
+  await expect(page.getByText("50.0%")).toBeVisible({ timeout: 15_000 });
+  await page.getByRole("button", { name: "Cancel full tracking" }).dblclick();
+  await expect.poll(() => scenario.cancelIds.length).toBe(1);
+  expect(scenario.cancelIds).toEqual([parentRunId]);
+  await expect(page.getByTestId("production-full-run-status")).toHaveText(
+    "Cancelled",
+    { timeout: 15_000 },
+  );
+
+  await page.reload();
+  await expect(page.getByTestId("production-full-run-status")).toHaveText(
+    "Cancelled",
+  );
+  expect(scenario.createBodies).toHaveLength(1);
+  expect(scenario.cancelIds).toHaveLength(1);
+  const restoredDraft = await page.evaluate((key) => {
+    const raw = localStorage.getItem(key);
+    return raw ? JSON.parse(raw) : null;
+  }, PRODUCTION_DRAFT_STORAGE_KEY);
+  expect(restoredDraft.full_run).toMatchObject({
+    current_run_id: parentRunId,
+    attempts: [
+      {
+        run_id: parentRunId,
+        parent_trial_run_id: ACCEPTED_TRIAL_RUN_ID,
+        last_observed: {
+          run_status: "cancelled",
+          workflow_state: "cancelled",
+        },
+      },
+    ],
+  });
+  await expectNoSeriousAccessibilityFindings(page);
+  expect(scenario.reviewBodies).toEqual([]);
+  expect(scenario.recomputeBodies).toEqual([]);
+  expect(scenario.renderBodies).toEqual([]);
+  expect(scenario.audit.unhandledApi).toEqual([]);
+  expect(scenario.audit.contractViolations).toEqual([]);
+});
+
+test("[PR4 C2] retries a failed restored parent with a new full-run UUID and preserved lineage", async ({
+  page,
+}) => {
+  const fixture = await buildConfirmedBroadcastDraft();
+  const scenario = await installZeroReviewBroadcastScenario(page, fixture);
+  await page.addInitScript(
+    ({ key, draft }) => {
+      if (localStorage.getItem(key) === null) {
+        localStorage.setItem(key, JSON.stringify(draft));
+      }
+    },
+    { key: PRODUCTION_DRAFT_STORAGE_KEY, draft: fixture.draft },
+  );
+  await page.goto("/production");
+  const next = page.getByRole("button", { name: "Next" });
+  await expect(next).toBeEnabled();
+  await next.click();
+  await page.getByTestId("production-start-full-run").click();
+  await expect.poll(() => scenario.createBodies.length).toBe(1);
+  const firstRunId = scenario.parentRunId();
+  scenario.setFailed();
+  await page.reload();
+  await expect(page.getByTestId("production-full-run-status")).toHaveText(
+    "Failed",
+  );
+
+  await page.getByTestId("production-retry-full-run").click();
+  await expect.poll(() => scenario.createBodies.length).toBe(2);
+  const secondRunId = scenario.parentRunId();
+  expect(secondRunId).not.toBe(firstRunId);
+  expect(scenario.createBodies.map((body) => body.parent_run_id)).toEqual([
+    ACCEPTED_TRIAL_RUN_ID,
+    ACCEPTED_TRIAL_RUN_ID,
+  ]);
+  expect(scenario.createBodies.every((body) => !("config_patch" in body))).toBe(
+    true,
+  );
+  for (const body of scenario.createBodies) {
+    expect(body).toMatchObject({
+      config_name: fixture.config.name,
+      input_video: fixture.draft.source!.path,
+      pipeline_mode: "broadcast_hybrid",
+      quality_profile: "stable_broadcast",
+      start_frame: 0,
+      max_frames: null,
+      enable_follow_cam: false,
+    });
+  }
+  await expect(page).toHaveURL(new RegExp(`/production\\?run=${secondRunId}$`));
+  await expect
+    .poll(() =>
+      page.evaluate((key) => {
+        const raw = localStorage.getItem(key);
+        if (!raw) return null;
+        const draft = JSON.parse(raw);
+        return {
+          current: draft.full_run?.current_run_id,
+          attempts: draft.full_run?.attempts?.map(
+            (attempt: {
+              run_id: string;
+              parent_trial_run_id: string;
+              last_observed: { workflow_state: string };
+            }) => ({
+              run_id: attempt.run_id,
+              parent_trial_run_id: attempt.parent_trial_run_id,
+              workflow_state: attempt.last_observed.workflow_state,
+            }),
+          ),
+        };
+      }, PRODUCTION_DRAFT_STORAGE_KEY),
+    )
+    .toEqual({
+      current: secondRunId,
+      attempts: [
+        {
+          run_id: firstRunId,
+          parent_trial_run_id: ACCEPTED_TRIAL_RUN_ID,
+          workflow_state: "failed",
+        },
+        {
+          run_id: secondRunId,
+          parent_trial_run_id: ACCEPTED_TRIAL_RUN_ID,
+          workflow_state: "tracking",
+        },
+      ],
+    });
+  await expectNoSeriousAccessibilityFindings(page);
+  expect(scenario.cancelIds).toEqual([]);
+  expect(scenario.reviewBodies).toEqual([]);
+  expect(scenario.recomputeBodies).toEqual([]);
+  expect(scenario.renderBodies).toEqual([]);
+  expect(scenario.audit.unhandledApi).toEqual([]);
+  expect(scenario.audit.contractViolations).toEqual([]);
+});
+
+test("[PR4 C3] completes populated review through delayed child commits and verifies the product", async ({
+  page,
+}) => {
+  allowRuntimeError(
+    page,
+    /^console\.error: Failed to load resource: the server responded with a status of 409 \(Conflict\)$/,
+  );
+  const conflictResponses: Array<{ method: string; url: string }> = [];
+  page.on("response", (response) => {
+    if (response.status() === 409) {
+      conflictResponses.push({
+        method: response.request().method(),
+        url: response.url(),
+      });
+    }
+  });
+  const fixture = await buildConfirmedBroadcastDraft();
+  const scenario = await installZeroReviewBroadcastScenario(page, fixture);
+  scenario.usePopulatedReview();
+  await page.addInitScript(
+    ({ key, draft }) => {
+      if (localStorage.getItem(key) === null) {
+        localStorage.setItem(key, JSON.stringify(draft));
+      }
+    },
+    { key: PRODUCTION_DRAFT_STORAGE_KEY, draft: fixture.draft },
+  );
+  await page.goto("/production");
+  const next = page.getByRole("button", { name: "Next" });
+  await expect(next).toBeEnabled();
+  await next.click();
+  await page.getByTestId("production-start-full-run").dblclick();
+  await expect.poll(() => scenario.createBodies.length).toBe(1);
+  const parentRunId = scenario.parentRunId();
+  scenario.setNeedsReview();
+  await expect(page.getByTestId("production-full-run-status")).toHaveText(
+    "Needs review",
+    { timeout: 15_000 },
+  );
+
+  const review = page.getByTestId("broadcast-review-step");
+  const montages = review.getByAltText(/Verified candidate review montage/);
+  await expect(montages).toHaveCount(2);
+  await expect
+    .poll(async () =>
+      montages.evaluateAll((images: HTMLImageElement[]) =>
+        images.every((image) => image.complete && image.naturalWidth > 0),
+      ),
+    )
+    .toBe(true);
+  await page.getByLabel("Reviewer id").fill("quality-lead");
+  const candidates = review.locator("article");
+  await candidates.nth(0).getByRole("radio", { name: "Confirm ball" }).click();
+  await candidates
+    .nth(1)
+    .getByRole("radio", { name: "Reject as noise" })
+    .click();
+  await candidates
+    .nth(1)
+    .getByRole("combobox", { name: "Noise subtype" })
+    .click();
+  await page.getByRole("option", { name: "Field line or mark" }).click();
+  await page
+    .getByRole("button", { name: "Submit review decisions" })
+    .dblclick();
+  await expect.poll(() => scenario.reviewBodies.length).toBe(1);
+  await expect.poll(() => scenario.recomputeBodies.length).toBe(1);
+  const actions = scenario.reviewBodies[0].actions;
+  expect(
+    actions.map(({ created_at: _createdAt, ...action }) => action),
+  ).toEqual([
+    {
+      action_id: "broadcast-review-0001",
+      review_item_id: "window-1",
+      candidate_id: "candidate-1",
+      reviewer_id: "quality-lead",
+      action: "confirm_ball",
+    },
+    {
+      action_id: "broadcast-review-0002",
+      review_item_id: "window-1",
+      candidate_id: "candidate-2",
+      reviewer_id: "quality-lead",
+      action: "reject_noise",
+      noise_subtype: "field_line_or_mark",
+    },
+  ]);
+  expect(
+    actions.every(
+      (action) =>
+        typeof action.created_at === "string" &&
+        Number.isFinite(Date.parse(action.created_at)),
+    ),
+  ).toBe(true);
+  expect(scenario.recomputeBodies[0]).toEqual({
+    review_decisions_sha256: sha256Bytes(
+      Buffer.from(canonicalJson(scenario.reviewBodies[0]), "utf8"),
+    ),
+  });
+  expect(scenario.phase()).toBe("recomputing");
+  await page.reload();
+  await expect(page.getByTestId("production-full-run-status")).toHaveText(
+    "Recomputing trajectory",
+  );
+  scenario.completeRecomputeChildOnly();
+  await page.reload();
+  await expect(page.getByTestId("production-full-run-status")).toHaveText(
+    "Recomputing trajectory",
+  );
+  scenario.publishTrajectoryReady();
+  await expect(page.getByTestId("production-full-run-status")).toHaveText(
+    "Trajectory ready",
+    { timeout: 15_000 },
+  );
+
+  await page.getByRole("button", { name: "Render broadcast" }).dblclick();
+  await expect.poll(() => scenario.renderBodies.length).toBe(1);
+  expect(scenario.phase()).toBe("rendering");
+  await page.reload();
+  await expect(page.getByTestId("production-full-run-status")).toHaveText(
+    "Rendering",
+  );
+  scenario.completeRenderChildOnly();
+  await page.reload();
+  await expect(page.getByTestId("production-full-run-status")).toHaveText(
+    "Rendering",
+  );
+  scenario.publishReady();
+  const product = page.getByTestId("production-product-ready");
+  await expect(product).toBeVisible({ timeout: 20_000 });
+  await expect(product.getByLabel("Broadcast video")).toBeVisible();
+  await expect(product.getByRole("link")).toHaveCount(8);
+  await expect(page).toHaveURL(new RegExp(`/production\\?run=${parentRunId}$`));
+  expect(scenario.createBodies).toHaveLength(1);
+  expect(scenario.reviewBodies).toHaveLength(1);
+  expect(scenario.recomputeBodies).toHaveLength(1);
+  expect(scenario.renderBodies).toHaveLength(1);
+  expect(scenario.cancelIds).toEqual([]);
+  await expectNoSeriousAccessibilityFindings(page);
+  expect(scenario.audit.unhandledApi).toEqual([]);
+  expect(scenario.audit.contractViolations).toEqual([]);
+  expect(conflictResponses.length).toBeLessThanOrEqual(1);
+  expect(conflictResponses).toEqual(
+    conflictResponses.length === 0
+      ? []
+      : [
+          {
+            method: "GET",
+            url: `http://127.0.0.1:4173/api/runs/${parentRunId}/artifacts`,
+          },
+        ],
+  );
+});
+
+test("[PR4 C3] keeps trajectory evidence safe after a render conflict and queues only an explicit retry", async ({
+  page,
+}) => {
+  allowRuntimeError(
+    page,
+    /^console\.error: Failed to load resource: the server responded with a status of 409 \(Conflict\)$/,
+  );
+  const fixture = await buildConfirmedBroadcastDraft();
+  const scenario = await installZeroReviewBroadcastScenario(page, fixture);
+  scenario.allowOneTrajectoryReadyReviewRead();
+  await page.addInitScript(
+    ({ key, draft }) => {
+      if (localStorage.getItem(key) === null) {
+        localStorage.setItem(key, JSON.stringify(draft));
+      }
+    },
+    { key: PRODUCTION_DRAFT_STORAGE_KEY, draft: fixture.draft },
+  );
+  await page.goto("/production");
+  const next = page.getByRole("button", { name: "Next" });
+  await expect(next).toBeEnabled();
+  await next.click();
+  await page.getByTestId("production-start-full-run").click();
+  await expect.poll(() => scenario.createBodies.length).toBe(1);
+  const parentRunId = scenario.parentRunId();
+  scenario.setNeedsReview();
+  await expect(page.getByTestId("broadcast-review-step")).toBeVisible({
+    timeout: 15_000,
+  });
+  await page
+    .getByRole("button", { name: "Continue without candidate decisions" })
+    .click();
+  await expect.poll(() => scenario.recomputeBodies.length).toBe(1);
+  scenario.completeRecompute();
+  const render = page.getByRole("button", { name: "Render broadcast" });
+  await expect(render).toBeVisible({ timeout: 15_000 });
+  scenario.failNextRenderWithConflict("foreign-render");
+  await render.dblclick();
+  await expect.poll(() => scenario.renderBodies.length).toBe(1);
+  expect(scenario.phase()).toBe("trajectory_ready");
+  await expect(render).toBeEnabled();
+  await expect(page.getByTestId("production-product-ready")).toHaveCount(0);
+  await expect(
+    page.getByTestId("production-full-run-step").locator("video"),
+  ).toHaveCount(0);
+  await expect(
+    page.getByTestId("production-full-run-step").getByRole("link"),
+  ).toHaveCount(0);
+
+  await render.dblclick();
+  await expect.poll(() => scenario.renderBodies.length).toBe(2);
+  expect(scenario.phase()).toBe("rendering");
+  await expect(page.getByTestId("production-full-run-status")).toHaveText(
+    "Rendering",
+  );
+  expect(scenario.renderBodies[0]).toEqual(scenario.renderBodies[1]);
+  await expect(page).toHaveURL(new RegExp(`/production\\?run=${parentRunId}$`));
+  expect(scenario.createBodies).toHaveLength(1);
+  expect(scenario.reviewBodies).toHaveLength(1);
+  expect(scenario.recomputeBodies).toHaveLength(1);
+  expect(scenario.cancelIds).toEqual([]);
+  await expectNoSeriousAccessibilityFindings(page);
+  expect(scenario.audit.unhandledApi).toEqual([]);
+  expect(scenario.audit.contractViolations).toEqual([]);
+});
+
+test("[PR4 C3] blocks a ready generation whose sealed delivery is missing broadcast video", async ({
+  page,
+}) => {
+  allowRuntimeError(
+    page,
+    /^console\.error: Failed to load resource: the server responded with a status of 409 \(Conflict\)$/,
+  );
+  const conflictResponses: Array<{ method: string; url: string }> = [];
+  page.on("response", (response) => {
+    if (response.status() === 409) {
+      conflictResponses.push({
+        method: response.request().method(),
+        url: response.url(),
+      });
+    }
+  });
+  const fixture = await buildConfirmedBroadcastDraft();
+  const scenario = await installZeroReviewBroadcastScenario(page, fixture);
+  scenario.setDeliveryMode("missing_video");
+  scenario.allowOneTrajectoryReadyReviewRead();
+  await page.addInitScript(
+    ({ key, draft }) => {
+      if (localStorage.getItem(key) === null) {
+        localStorage.setItem(key, JSON.stringify(draft));
+      }
+    },
+    { key: PRODUCTION_DRAFT_STORAGE_KEY, draft: fixture.draft },
+  );
+  await page.goto("/production");
+  const next = page.getByRole("button", { name: "Next" });
+  await expect(next).toBeEnabled();
+  await next.click();
+  await page.getByTestId("production-start-full-run").click();
+  await expect.poll(() => scenario.createBodies.length).toBe(1);
+  const parentRunId = scenario.parentRunId();
+  scenario.setNeedsReview();
+  await expect(page.getByTestId("broadcast-review-step")).toBeVisible({
+    timeout: 15_000,
+  });
+  await page
+    .getByRole("button", { name: "Continue without candidate decisions" })
+    .click();
+  await expect.poll(() => scenario.recomputeBodies.length).toBe(1);
+  scenario.completeRecompute();
+  await page.getByRole("button", { name: "Render broadcast" }).click();
+  await expect.poll(() => scenario.renderBodies.length).toBe(1);
+  scenario.completeRender();
+
+  const blocked = page.getByTestId("production-delivery-blocked");
+  await expect(blocked).toBeVisible({ timeout: 20_000 });
+  await expect(blocked).toContainText("artifact_set_mismatch");
+  expect(scenario.statusGeneration).toMatch(/^[0-9a-f]{64}$/);
+  await expect(page.getByTestId("production-product-ready")).toHaveCount(0);
+  const fullStep = page.getByTestId("production-full-run-step");
+  await expect(fullStep.locator("video")).toHaveCount(0);
+  await expect(fullStep.getByRole("link")).toHaveCount(0);
+  const restored = await page.evaluate((key) => {
+    const raw = localStorage.getItem(key);
+    return raw ? JSON.parse(raw) : null;
+  }, PRODUCTION_DRAFT_STORAGE_KEY);
+  expect(restored.verified_product).toBeNull();
+  await expect(page).toHaveURL(new RegExp(`/production\\?run=${parentRunId}$`));
+  expect(scenario.createBodies).toHaveLength(1);
+  expect(scenario.reviewBodies).toHaveLength(1);
+  expect(scenario.recomputeBodies).toHaveLength(1);
+  expect(scenario.renderBodies).toHaveLength(1);
+  expect(scenario.cancelIds).toEqual([]);
+  await expectNoSeriousAccessibilityFindings(page);
+  const trajectoryReadyReviewReads = scenario.reviewWindowReads.filter(
+    (read) => read.phase === "trajectory_ready",
+  );
+  expect(trajectoryReadyReviewReads.length).toBeLessThanOrEqual(1);
+  expect(trajectoryReadyReviewReads).toEqual(
+    trajectoryReadyReviewReads.length === 0
+      ? []
+      : [{ method: "GET", runId: parentRunId, phase: "trajectory_ready" }],
+  );
+  expect(scenario.audit.unhandledApi).toEqual([]);
+  expect(scenario.audit.contractViolations).toEqual([]);
+  expect(conflictResponses.length).toBeLessThanOrEqual(1);
+  expect(conflictResponses).toEqual(
+    conflictResponses.length === 0
+      ? []
+      : [
+          {
+            method: "GET",
+            url: `http://127.0.0.1:4173/api/runs/${parentRunId}/artifacts`,
+          },
+        ],
+  );
 });
 
 test("selects an original video, advances, and restores after refresh", async ({

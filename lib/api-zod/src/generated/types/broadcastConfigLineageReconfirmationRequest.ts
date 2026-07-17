@@ -7,6 +7,12 @@
 import type { BroadcastConfigLineageReconfirmationRequestWorkflowBindings } from "./broadcastConfigLineageReconfirmationRequestWorkflowBindings";
 
 export interface BroadcastConfigLineageReconfirmationRequest {
+  /** @minLength 1 */
+  target_run_id: string;
+  /** @minLength 1 */
+  confirmed_config_name: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  confirmed_text_sha256: string;
   /** @pattern ^[0-9a-f]{64}$ */
   expected_observed_raw_sha256: string;
   workflow_bindings: BroadcastConfigLineageReconfirmationRequestWorkflowBindings;

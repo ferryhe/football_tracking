@@ -3,17 +3,59 @@ from __future__ import annotations
 import csv
 import json
 import math
+import os
+import re
+import shutil
+import subprocess
 import time
+import uuid
 from concurrent.futures import CancelledError
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Protocol
 
 import cv2
 
 from football_tracking.camera_motion_audit import write_camera_motion_audit_report
 from football_tracking.config import AppConfig
 from football_tracking.types import OutputStatus
+
+_FFMPEG_FINALIZE_TIMEOUT_SECONDS = 30.0
+_FFMPEG_PROBE_FALLBACK_TIMEOUT_SECONDS = 600.0
+_FFMPEG_PROBE_MINIMUM_TIMEOUT_SECONDS = 60.0
+_FFMPEG_PROBE_DURATION_MULTIPLIER = 1.25
+_FFMPEG_PROBE_POLL_SECONDS = 0.1
+_FFMPEG_PROBE_STOP_TIMEOUT_SECONDS = 2.0
+
+
+class _FrameWriter(Protocol):
+    def write(self, frame: Any) -> None: ...
+
+    def release(self) -> None: ...
+
+
+class _ImageioH264Writer:
+    def __init__(self, writer: Any, output_path: Path) -> None:
+        self._writer = writer
+        self._output_path = output_path
+        self._released = False
+
+    def write(self, frame: Any) -> None:
+        if self._released:
+            raise RuntimeError("Follow-cam H.264 writer is already closed")
+        try:
+            self._writer.send(frame.tobytes())
+        except (OSError, RuntimeError) as exc:
+            raise RuntimeError("Follow-cam H.264 encoding failed; the bundled ffmpeg must provide libx264") from exc
+
+    def release(self) -> None:
+        if self._released:
+            return
+        self._released = True
+        try:
+            self._writer.close()
+        except (OSError, RuntimeError) as exc:
+            raise RuntimeError(f"Unable to finalize browser-compatible follow-cam video: {self._output_path}") from exc
 
 
 @dataclass(slots=True)
@@ -73,6 +115,10 @@ class FollowCamGenerator:
             return
 
         output_dir = self.app_config.output_dir
+        output_path = output_dir / self.config.output_video_name
+        if output_path.suffix.lower() != ".mp4":
+            raise RuntimeError(f"Follow-cam browser output must use an .mp4 container: {output_path}")
+
         track_csv_path, track_source = self._resolve_track_csv(output_dir)
         frames = self._load_frames(track_csv_path)
         if not frames:
@@ -83,42 +129,71 @@ class FollowCamGenerator:
         if not capture.isOpened():
             raise RuntimeError(f"Unable to reopen input video for follow-cam: {self.app_config.input_video}")
 
-        start_frame = frames[0].frame_index
-        self._seek_to_frame(capture, start_frame)
-
-        fps = capture.get(cv2.CAP_PROP_FPS) or 20.0
-        source_width = int(capture.get(cv2.CAP_PROP_FRAME_WIDTH))
-        source_height = int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        writer = self._open_writer(output_dir, fps)
+        transaction_id = uuid.uuid4().hex
+        pending_output_path = output_path.with_name(f".{output_path.name}.{transaction_id}.pending.mp4")
+        sidecar_staging_dir = output_dir / f".follow_cam.{transaction_id}.pending"
 
         try:
-            path_entries = self._render_follow_cam(
-                capture=capture,
-                writer=writer,
-                frames=frames,
-                source_width=source_width,
-                source_height=source_height,
-                progress_callback=progress_callback,
+            start_frame = frames[0].frame_index
+            self._seek_to_frame(capture, start_frame)
+
+            fps = capture.get(cv2.CAP_PROP_FPS) or 20.0
+            source_width = int(capture.get(cv2.CAP_PROP_FRAME_WIDTH))
+            source_height = int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            writer = self._open_writer(pending_output_path, fps)
+            try:
+                path_entries = self._render_follow_cam(
+                    capture=capture,
+                    writer=writer,
+                    frames=frames,
+                    source_width=source_width,
+                    source_height=source_height,
+                    progress_callback=progress_callback,
+                    should_cancel=should_cancel,
+                )
+            finally:
+                writer.release()
+
+            if len(path_entries) != len(frames):
+                raise RuntimeError(
+                    "Follow-cam render ended before all input frames were written: "
+                    f"expected {len(frames)}, got {len(path_entries)}"
+                )
+            self._raise_if_cancelled(should_cancel)
+            sidecar_staging_dir.mkdir(parents=True, exist_ok=False)
+            staged_camera_path = sidecar_staging_dir / self.config.camera_path_name
+            staged_camera_path.parent.mkdir(parents=True, exist_ok=True)
+            self._write_camera_path(staged_camera_path, path_entries)
+            camera_motion_audit = write_camera_motion_audit_report(
+                sidecar_staging_dir,
+                target_width=self.config.target_width,
+                target_height=self.config.target_height,
+                camera_path_name=self.config.camera_path_name,
+            )
+            staged_report = sidecar_staging_dir / self.config.report_name
+            staged_report.parent.mkdir(parents=True, exist_ok=True)
+            self._write_report(
+                staged_report,
+                track_csv_path,
+                track_source,
+                path_entries,
+                camera_motion_audit=camera_motion_audit,
+            )
+
+            self._raise_if_cancelled(should_cancel)
+            self._publish_delivery_bundle(
+                pending_output_path,
+                output_path,
+                sidecar_staging_dir=sidecar_staging_dir,
+                output_dir=output_dir,
+                expected_frame_count=len(frames),
+                expected_fps=fps,
                 should_cancel=should_cancel,
             )
         finally:
-            writer.release()
             capture.release()
-
-        self._write_camera_path(output_dir / self.config.camera_path_name, path_entries)
-        camera_motion_audit = write_camera_motion_audit_report(
-            output_dir,
-            target_width=self.config.target_width,
-            target_height=self.config.target_height,
-            camera_path_name=self.config.camera_path_name,
-        )
-        self._write_report(
-            output_dir / self.config.report_name,
-            track_csv_path,
-            track_source,
-            path_entries,
-            camera_motion_audit=camera_motion_audit,
-        )
+            pending_output_path.unlink(missing_ok=True)
+            shutil.rmtree(sidecar_staging_dir, ignore_errors=True)
 
     def _resolve_track_csv(self, output_dir: Path) -> tuple[Path, str]:
         cleaned_csv = output_dir / self.app_config.postprocess.cleaned_csv_name
@@ -235,18 +310,338 @@ class FollowCamGenerator:
             len(player_points),
         )
 
-    def _open_writer(self, output_dir: Path, fps: float) -> cv2.VideoWriter:
-        output_path = output_dir / self.config.output_video_name
-        fourcc = cv2.VideoWriter_fourcc(*self.app_config.output.video_codec)
-        writer = cv2.VideoWriter(
-            str(output_path),
-            fourcc,
-            fps,
-            (self.config.target_width, self.config.target_height),
+    def _open_writer(self, output_path: Path, fps: float) -> _FrameWriter:
+        if output_path.suffix.lower() != ".mp4":
+            raise RuntimeError(f"Follow-cam browser output must use an .mp4 container: {output_path}")
+        if self.config.target_width % 2 != 0 or self.config.target_height % 2 != 0:
+            raise RuntimeError("Follow-cam H.264 output dimensions must both be even")
+        if not math.isfinite(fps) or fps <= 0:
+            raise RuntimeError(f"Follow-cam output FPS must be positive: {fps}")
+        try:
+            import imageio_ffmpeg  # pyright: ignore[reportMissingImports]
+
+            writer = imageio_ffmpeg.write_frames(
+                output_path,
+                (self.config.target_width, self.config.target_height),
+                pix_fmt_in="bgr24",
+                pix_fmt_out="yuv420p",
+                fps=fps,
+                quality=6,
+                codec="libx264",
+                macro_block_size=1,
+                ffmpeg_log_level="error",
+                ffmpeg_timeout=_FFMPEG_FINALIZE_TIMEOUT_SECONDS,
+                output_params=["-movflags", "+faststart", "-tag:v", "avc1"],
+            )
+            writer.send(None)
+        except (ImportError, OSError, RuntimeError) as exc:
+            raise RuntimeError(
+                "Unable to start browser-compatible follow-cam encoding; bundled ffmpeg with libx264 is required"
+            ) from exc
+        return _ImageioH264Writer(writer, output_path)
+
+    def _publish_browser_video(
+        self,
+        pending_path: Path,
+        output_path: Path,
+        *,
+        expected_frame_count: int,
+        expected_fps: float | None = None,
+        should_cancel: Callable[[], bool] | None = None,
+    ) -> None:
+        if output_path.suffix.lower() != ".mp4":
+            raise RuntimeError(f"Follow-cam browser output must use an .mp4 container: {output_path}")
+        if pending_path.parent.resolve() != output_path.parent.resolve():
+            raise RuntimeError("Follow-cam video must be atomically published within one output directory")
+        self._validate_browser_video(
+            pending_path,
+            expected_frame_count=expected_frame_count,
+            expected_fps=expected_fps,
+            should_cancel=should_cancel,
         )
-        if not writer.isOpened():
-            raise RuntimeError(f"Unable to open follow-cam writer: {output_path}")
-        return writer
+        self._raise_if_cancelled(should_cancel)
+        self._replace_artifact_bundle([(pending_path, output_path)])
+
+    def _publish_delivery_bundle(
+        self,
+        pending_video_path: Path,
+        output_video_path: Path,
+        *,
+        sidecar_staging_dir: Path,
+        output_dir: Path,
+        expected_frame_count: int,
+        expected_fps: float,
+        should_cancel: Callable[[], bool] | None,
+    ) -> None:
+        if output_video_path.suffix.lower() != ".mp4":
+            raise RuntimeError(f"Follow-cam browser output must use an .mp4 container: {output_video_path}")
+        if pending_video_path.parent.resolve() != output_video_path.parent.resolve():
+            raise RuntimeError("Follow-cam video must be atomically published within one output directory")
+
+        sidecar_names = (
+            self.config.camera_path_name,
+            "camera_motion_audit.json",
+            self.config.report_name,
+        )
+        artifacts = [
+            (sidecar_staging_dir / sidecar_name, output_dir / sidecar_name)
+            for sidecar_name in sidecar_names
+        ]
+        artifacts.append((pending_video_path, output_video_path))
+        targets = [target.resolve() for _source, target in artifacts]
+        if len(targets) != len(set(targets)):
+            raise RuntimeError("Follow-cam delivery artifact names must be unique")
+        for source, target in artifacts:
+            if not source.is_file():
+                raise RuntimeError(f"Follow-cam delivery artifact was not staged: {source}")
+            target.parent.mkdir(parents=True, exist_ok=True)
+
+        self._validate_browser_video(
+            pending_video_path,
+            expected_frame_count=expected_frame_count,
+            expected_fps=expected_fps,
+            should_cancel=should_cancel,
+        )
+        self._raise_if_cancelled(should_cancel)
+        self._replace_artifact_bundle(artifacts)
+
+    @staticmethod
+    def _replace_artifact_bundle(artifacts: list[tuple[Path, Path]]) -> None:
+        backup_id = uuid.uuid4().hex
+        backups: list[tuple[Path, Path]] = []
+        published_targets: list[Path] = []
+        try:
+            for _source, target in artifacts:
+                if not target.exists():
+                    continue
+                backup = target.with_name(f".{target.name}.{backup_id}.backup")
+                os.replace(target, backup)
+                backups.append((target, backup))
+            for source, target in artifacts:
+                os.replace(source, target)
+                published_targets.append(target)
+        except BaseException as exc:
+            rollback_errors: list[str] = []
+            for target in reversed(published_targets):
+                try:
+                    target.unlink(missing_ok=True)
+                except OSError as rollback_exc:
+                    rollback_errors.append(f"remove {target}: {rollback_exc}")
+            for target, backup in reversed(backups):
+                try:
+                    os.replace(backup, target)
+                except OSError as rollback_exc:
+                    rollback_errors.append(f"restore {target}: {rollback_exc}")
+            if rollback_errors:
+                detail = "; ".join(rollback_errors)
+                raise RuntimeError(f"Follow-cam delivery failed and rollback was incomplete: {detail}") from exc
+            raise
+        else:
+            for _target, backup in backups:
+                try:
+                    backup.unlink(missing_ok=True)
+                except OSError:
+                    pass
+
+    @staticmethod
+    def _raise_if_cancelled(should_cancel: Callable[[], bool] | None) -> None:
+        if should_cancel and should_cancel():
+            raise CancelledError("Run cancelled by user.")
+
+    def _validate_browser_video(
+        self,
+        path: Path,
+        *,
+        expected_frame_count: int,
+        expected_fps: float | None = None,
+        should_cancel: Callable[[], bool] | None = None,
+    ) -> None:
+        if expected_frame_count <= 0:
+            raise RuntimeError("Follow-cam output must contain at least one rendered frame")
+        try:
+            metadata = self._probe_browser_video(
+                path,
+                expected_frame_count=expected_frame_count,
+                expected_fps=expected_fps,
+                should_cancel=should_cancel,
+            )
+        except (ImportError, OSError, ValueError) as exc:
+            raise RuntimeError(f"Follow-cam H.264 output is not decodable: {path}") from exc
+
+        actual_frame_count = metadata["frame_count"]
+        if actual_frame_count != expected_frame_count:
+            raise RuntimeError(
+                "Follow-cam output frame count does not match rendered frames: "
+                f"expected {expected_frame_count}, got {actual_frame_count}"
+            )
+
+        expected_size = (self.config.target_width, self.config.target_height)
+        if metadata.get("codec") != "h264":
+            raise RuntimeError(f"Follow-cam output is not H.264: {metadata.get('codec')}")
+        if not str(metadata.get("pix_fmt", "")).startswith("yuv420p"):
+            raise RuntimeError(f"Follow-cam output is not yuv420p: {metadata.get('pix_fmt')}")
+        if tuple(metadata.get("size", ())) != expected_size:
+            raise RuntimeError(f"Follow-cam output size changed during encoding: {metadata.get('size')}")
+
+        box_types = self._mp4_top_level_box_types(path)
+        if b"moov" not in box_types or b"mdat" not in box_types:
+            raise RuntimeError("Follow-cam output is missing required MP4 media boxes")
+        if box_types.index(b"moov") > box_types.index(b"mdat"):
+            raise RuntimeError("Follow-cam MP4 metadata is not faststart-compatible")
+        with path.open("rb") as handle:
+            prefix = handle.read(1024 * 1024)
+        if b"avc1" not in prefix:
+            raise RuntimeError("Follow-cam MP4 does not advertise an avc1 browser codec")
+
+    def _probe_browser_video(
+        self,
+        path: Path,
+        *,
+        expected_frame_count: int,
+        expected_fps: float | None,
+        should_cancel: Callable[[], bool] | None,
+    ) -> dict[str, Any]:
+        import imageio_ffmpeg  # pyright: ignore[reportMissingImports]
+
+        command = [
+            imageio_ffmpeg.get_ffmpeg_exe(),
+            "-hide_banner",
+            "-nostdin",
+            "-progress",
+            "pipe:1",
+            "-nostats",
+            "-i",
+            str(path),
+            "-map",
+            "0:v:0",
+            "-an",
+            "-vf",
+            "null",
+            "-f",
+            "null",
+            "-",
+        ]
+        process = subprocess.Popen(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+        stdout = ""
+        stderr = ""
+        probe_timeout_seconds = self._probe_timeout_seconds(expected_frame_count, expected_fps)
+        deadline = time.monotonic() + probe_timeout_seconds
+        try:
+            while True:
+                self._raise_if_cancelled(should_cancel)
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise RuntimeError(
+                        f"Follow-cam ffmpeg probe timed out after {probe_timeout_seconds:.1f} seconds"
+                    )
+                try:
+                    stdout, stderr = process.communicate(
+                        timeout=min(_FFMPEG_PROBE_POLL_SECONDS, remaining)
+                    )
+                    break
+                except subprocess.TimeoutExpired:
+                    continue
+        except BaseException:
+            self._stop_probe_process(process)
+            raise
+        finally:
+            self._close_probe_streams(process)
+
+        if process.returncode != 0:
+            raise RuntimeError(f"ffmpeg probe exited with code {process.returncode}: {stderr[-2000:]}")
+        if "progress=end" not in stdout:
+            raise RuntimeError("ffmpeg probe did not report a completed decode")
+
+        frame_count = 0
+        for line in stdout.splitlines():
+            if line.startswith("frame="):
+                frame_count = int(line.split("=", 1)[1].strip())
+        video_line = next((line for line in stderr.splitlines() if "Video:" in line), None)
+        if video_line is None:
+            raise RuntimeError("ffmpeg probe did not report a video stream")
+        video_fields = [field.strip() for field in video_line.split("Video:", 1)[1].split(",")]
+        if len(video_fields) < 3:
+            raise RuntimeError("ffmpeg probe returned an incomplete video stream description")
+        codec = video_fields[0].split()[0]
+        pix_fmt = video_fields[1].split("(", 1)[0]
+        size_match = next(
+            (match for field in video_fields[2:] if (match := re.search(r"\b(\d{2,6})x(\d{2,6})\b", field))),
+            None,
+        )
+        if size_match is None:
+            raise RuntimeError("ffmpeg probe did not report video dimensions")
+        return {
+            "codec": codec,
+            "pix_fmt": pix_fmt,
+            "size": (int(size_match.group(1)), int(size_match.group(2))),
+            "frame_count": frame_count,
+        }
+
+    @staticmethod
+    def _probe_timeout_seconds(expected_frame_count: int, expected_fps: float | None) -> float:
+        if expected_fps is None or not math.isfinite(expected_fps) or expected_fps <= 0:
+            return _FFMPEG_PROBE_FALLBACK_TIMEOUT_SECONDS
+        expected_duration = expected_frame_count / expected_fps
+        return max(
+            _FFMPEG_PROBE_MINIMUM_TIMEOUT_SECONDS,
+            expected_duration * _FFMPEG_PROBE_DURATION_MULTIPLIER
+            + _FFMPEG_PROBE_MINIMUM_TIMEOUT_SECONDS,
+        )
+
+    @staticmethod
+    def _stop_probe_process(process: subprocess.Popen[str]) -> None:
+        if process.poll() is not None:
+            return
+        try:
+            process.terminate()
+            process.wait(timeout=_FFMPEG_PROBE_STOP_TIMEOUT_SECONDS)
+        except (OSError, subprocess.TimeoutExpired):
+            try:
+                process.kill()
+            finally:
+                process.wait()
+
+    @staticmethod
+    def _close_probe_streams(process: subprocess.Popen[str]) -> None:
+        for stream in (process.stdin, process.stdout, process.stderr):
+            if stream is not None:
+                stream.close()
+
+    @staticmethod
+    def _mp4_top_level_box_types(path: Path) -> list[bytes]:
+        file_size = path.stat().st_size
+        offset = 0
+        box_types: list[bytes] = []
+        with path.open("rb") as handle:
+            while offset + 8 <= file_size:
+                handle.seek(offset)
+                header = handle.read(8)
+                if len(header) != 8:
+                    break
+                box_size = int.from_bytes(header[:4], "big")
+                header_size = 8
+                if box_size == 1:
+                    extended_size = handle.read(8)
+                    if len(extended_size) != 8:
+                        raise RuntimeError("Follow-cam MP4 has a truncated extended box")
+                    box_size = int.from_bytes(extended_size, "big")
+                    header_size = 16
+                elif box_size == 0:
+                    box_size = file_size - offset
+                if box_size < header_size or offset + box_size > file_size:
+                    raise RuntimeError("Follow-cam MP4 has an invalid top-level box")
+                box_types.append(header[4:8])
+                offset += box_size
+        if offset != file_size:
+            raise RuntimeError("Follow-cam MP4 has trailing or truncated bytes")
+        return box_types
 
     def _seek_to_frame(self, capture, frame_index: int) -> None:
         if frame_index <= 0:
@@ -269,7 +664,7 @@ class FollowCamGenerator:
     def _render_follow_cam(
         self,
         capture,
-        writer: cv2.VideoWriter,
+        writer: _FrameWriter,
         frames: list[FollowCamFrame],
         source_width: int,
         source_height: int,
@@ -353,6 +748,7 @@ class FollowCamGenerator:
                 )
 
             if has_track_point:
+                assert frame_info.x is not None and frame_info.y is not None
                 lost_streak = 0
                 current_point = (float(frame_info.x), float(frame_info.y))
                 smoothed_velocity = self._update_velocity(
@@ -412,13 +808,13 @@ class FollowCamGenerator:
                 player_points=player_points_by_frame.get(frame_info.frame_index, []),
             )
             if has_track_point:
-                camera_target = (
-                    (action_center.x, action_center.y)
-                    if action_center.x is not None and action_center.y is not None
-                    else (float(frame_info.x), float(frame_info.y))
-                )
+                if action_center.x is not None and action_center.y is not None:
+                    camera_target = (action_center.x, action_center.y)
+                else:
+                    assert frame_info.x is not None and frame_info.y is not None
+                    camera_target = (frame_info.x, frame_info.y)
                 anchor_x, anchor_y = self._apply_look_ahead(
-                    current_point=(float(camera_target[0]), float(camera_target[1])),
+                    current_point=camera_target,
                     velocity=smoothed_velocity,
                 )
                 desired_center = (
@@ -427,7 +823,7 @@ class FollowCamGenerator:
                 )
                 if self._can_seed_lost_action_hold(
                     frame_info=frame_info,
-                    action_center=(float(camera_target[0]), float(camera_target[1])),
+                    action_center=camera_target,
                     source_width=source_width,
                     source_height=source_height,
                 ):

@@ -1,3 +1,5 @@
+import { useEffect, useId, useState } from "react";
+
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -8,6 +10,8 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
 import { Progress } from "@/components/ui/progress";
 import { formatBytes } from "@/lib/utils";
 
@@ -36,6 +40,19 @@ export interface BroadcastReviewEvidenceCapacity {
   status?: "sufficient" | "insufficient" | null;
 }
 
+export interface BroadcastConfigLineageReconfirmationState {
+  targetRunId: string;
+  confirmedConfigName: string;
+  confirmedTextSha256: string;
+  expectedObservedRawSha256: string;
+  workflowBindings: Record<string, unknown>;
+}
+
+export interface BroadcastConfigLineageReconfirmationIdentity {
+  operatorId: string;
+  reviewerId: string;
+}
+
 export interface BroadcastReviewEvidenceState {
   status: BroadcastReviewEvidenceStatus;
   bundle?: BroadcastReviewEvidenceBundleIdentity | null;
@@ -47,6 +64,7 @@ export interface BroadcastReviewEvidenceState {
   generationId?: string | null;
   queueSha256?: string | null;
   capacity?: BroadcastReviewEvidenceCapacity | null;
+  configLineageReconfirmation?: BroadcastConfigLineageReconfirmationState | null;
 }
 
 export interface BroadcastReviewEvidenceStepLabels {
@@ -86,6 +104,18 @@ export interface BroadcastReviewEvidenceStepLabels {
   cancelUnavailableDuringCommit: string;
   retry: string;
   retrying: string;
+  reconfirmConfigTitle: string;
+  reconfirmConfigDescription: string;
+  targetRun: string;
+  confirmedConfig: string;
+  confirmedTextSha256: string;
+  observedRawSha256: string;
+  workflowIdentity: string;
+  operatorId: string;
+  reviewerId: string;
+  identitiesMustDiffer: string;
+  reconfirmConfig: string;
+  reconfirmingConfig: string;
 }
 
 export interface BroadcastReviewEvidenceStepProps {
@@ -96,9 +126,13 @@ export interface BroadcastReviewEvidenceStepProps {
   ) => void;
   onCancel?: () => void;
   onRetry?: () => void;
+  onReconfirmConfigLineage?: (
+    identities: BroadcastConfigLineageReconfirmationIdentity,
+  ) => void;
   isPreparing?: boolean;
   isCancelling?: boolean;
   isRetrying?: boolean;
+  isReconfirming?: boolean;
   disabled?: boolean;
   labels?: Partial<BroadcastReviewEvidenceStepLabels>;
 }
@@ -142,6 +176,19 @@ const DEFAULT_LABELS: BroadcastReviewEvidenceStepLabels = {
     "Cancellation is unavailable after commit starts.",
   retry: "Retry import",
   retrying: "Retrying import…",
+  reconfirmConfigTitle: "Reconfirm production configuration",
+  reconfirmConfigDescription:
+    "Review the current server-authored configuration identity, then record two independent identities.",
+  targetRun: "Target run",
+  confirmedConfig: "Confirmed configuration",
+  confirmedTextSha256: "Confirmed canonical SHA-256",
+  observedRawSha256: "Current observed SHA-256",
+  workflowIdentity: "Workflow identity",
+  operatorId: "Operator ID",
+  reviewerId: "Independent reviewer ID",
+  identitiesMustDiffer: "Operator and reviewer must be different people.",
+  reconfirmConfig: "Reconfirm production configuration",
+  reconfirmingConfig: "Reconfirming production configuration…",
 };
 
 const ACTIVE_STATUSES = new Set<BroadcastReviewEvidenceStatus>([
@@ -192,17 +239,33 @@ export function BroadcastReviewEvidenceStep({
   onPrepareAlternative,
   onCancel,
   onRetry,
+  onReconfirmConfigLineage,
   isPreparing = false,
   isCancelling = false,
   isRetrying = false,
+  isReconfirming = false,
   disabled = false,
   labels: labelOverrides,
 }: BroadcastReviewEvidenceStepProps) {
   const labels = { ...DEFAULT_LABELS, ...labelOverrides };
+  const operatorInputId = useId();
+  const reviewerInputId = useId();
+  const identityErrorId = useId();
+  const [operatorId, setOperatorId] = useState("");
+  const [reviewerId, setReviewerId] = useState("");
+  const configLineageReconfirmation = state.configLineageReconfirmation;
+  useEffect(() => {
+    setOperatorId("");
+    setReviewerId("");
+  }, [
+    configLineageReconfirmation?.targetRunId,
+    configLineageReconfirmation?.expectedObservedRawSha256,
+  ]);
   const status = statusText(state.status, labels);
   const progress = progressValue(state.progressPercent);
   const active = ACTIVE_STATUSES.has(state.status);
-  const retryable = RETRYABLE_STATUSES.has(state.status);
+  const retryable =
+    RETRYABLE_STATUSES.has(state.status) && !configLineageReconfirmation;
   const bundleValid = Boolean(
     state.bundle?.bundleId.trim() &&
     SHA256_PATTERN.test(state.bundle.manifestSha256.trim()),
@@ -212,7 +275,27 @@ export function BroadcastReviewEvidenceStep({
     SHA256_PATTERN.test(state.alternativeBundle.manifestSha256.trim()),
   );
   const capacityInsufficient = state.capacity?.status === "insufficient";
-  const showFooter = state.status === "available" || active || retryable;
+  const workflowIdentity =
+    typeof configLineageReconfirmation?.workflowBindings.workflow_id ===
+    "string"
+      ? configLineageReconfirmation.workflowBindings.workflow_id
+      : "—";
+  const operatorValid =
+    operatorId.length > 0 && operatorId === operatorId.trim();
+  const reviewerValid =
+    reviewerId.length > 0 && reviewerId === reviewerId.trim();
+  const identitiesMatch =
+    operatorValid && reviewerValid && operatorId === reviewerId;
+  const canReconfirm =
+    Boolean(configLineageReconfirmation && onReconfirmConfigLineage) &&
+    operatorValid &&
+    reviewerValid &&
+    !identitiesMatch;
+  const showFooter =
+    state.status === "available" ||
+    active ||
+    retryable ||
+    Boolean(configLineageReconfirmation);
 
   return (
     <Card
@@ -355,6 +438,95 @@ export function BroadcastReviewEvidenceStep({
           </dl>
         )}
 
+        {configLineageReconfirmation && (
+          <section
+            className="min-w-0 space-y-4 rounded-lg border p-4"
+            aria-labelledby={`${operatorInputId}-title`}
+          >
+            <div className="space-y-1">
+              <h3 id={`${operatorInputId}-title`} className="font-medium">
+                {labels.reconfirmConfigTitle}
+              </h3>
+              <p className="text-sm text-muted-foreground">
+                {labels.reconfirmConfigDescription}
+              </p>
+            </div>
+            <dl className="grid min-w-0 gap-3 text-sm sm:grid-cols-2">
+              <div className="min-w-0">
+                <dt className="text-muted-foreground">{labels.targetRun}</dt>
+                <dd className="break-all font-mono">
+                  {configLineageReconfirmation.targetRunId}
+                </dd>
+              </div>
+              <div className="min-w-0">
+                <dt className="text-muted-foreground">
+                  {labels.confirmedConfig}
+                </dt>
+                <dd className="break-all font-mono">
+                  {configLineageReconfirmation.confirmedConfigName}
+                </dd>
+              </div>
+              <div className="min-w-0">
+                <dt className="text-muted-foreground">
+                  {labels.confirmedTextSha256}
+                </dt>
+                <dd className="break-all font-mono">
+                  {configLineageReconfirmation.confirmedTextSha256}
+                </dd>
+              </div>
+              <div className="min-w-0">
+                <dt className="text-muted-foreground">
+                  {labels.observedRawSha256}
+                </dt>
+                <dd className="break-all font-mono">
+                  {configLineageReconfirmation.expectedObservedRawSha256}
+                </dd>
+              </div>
+              <div className="min-w-0 sm:col-span-2">
+                <dt className="text-muted-foreground">
+                  {labels.workflowIdentity}
+                </dt>
+                <dd className="break-all font-mono">{workflowIdentity}</dd>
+              </div>
+            </dl>
+            <div className="grid gap-3 sm:grid-cols-2">
+              <div className="space-y-2">
+                <Label htmlFor={operatorInputId}>{labels.operatorId}</Label>
+                <Input
+                  id={operatorInputId}
+                  value={operatorId}
+                  autoComplete="off"
+                  disabled={disabled || isReconfirming}
+                  onChange={(event) => setOperatorId(event.target.value)}
+                />
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor={reviewerInputId}>{labels.reviewerId}</Label>
+                <Input
+                  id={reviewerInputId}
+                  value={reviewerId}
+                  autoComplete="off"
+                  disabled={disabled || isReconfirming}
+                  aria-invalid={identitiesMatch || undefined}
+                  aria-describedby={
+                    identitiesMatch ? identityErrorId : undefined
+                  }
+                  onChange={(event) => setReviewerId(event.target.value)}
+                />
+              </div>
+            </div>
+            {identitiesMatch && (
+              <p
+                id={identityErrorId}
+                role="alert"
+                className="text-sm text-destructive"
+              >
+                {labels.identitiesMustDiffer}
+              </p>
+            )}
+          </section>
+        )}
+
         {state.status === "ready" &&
           (state.generationId || state.queueSha256) && (
             <dl className="grid min-w-0 gap-3 text-sm sm:grid-cols-2">
@@ -406,6 +578,24 @@ export function BroadcastReviewEvidenceStep({
 
       {showFooter && (
         <CardFooter className="flex flex-col items-stretch gap-2 sm:flex-row sm:items-center sm:justify-end">
+          {configLineageReconfirmation && (
+            <Button
+              type="button"
+              onClick={() =>
+                onReconfirmConfigLineage?.({ operatorId, reviewerId })
+              }
+              disabled={
+                disabled ||
+                isReconfirming ||
+                !canReconfirm ||
+                !onReconfirmConfigLineage
+              }
+            >
+              {isReconfirming
+                ? labels.reconfirmingConfig
+                : labels.reconfirmConfig}
+            </Button>
+          )}
           {state.status === "available" && (
             <Button
               type="button"

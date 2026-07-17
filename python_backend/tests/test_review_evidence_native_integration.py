@@ -9,14 +9,17 @@ import time
 import unittest
 from copy import deepcopy
 from pathlib import Path
+from unittest import mock
 
 import cv2
 import numpy as np
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from test_broadcast_hybrid_orchestration import _fake_solve_trajectory
 from test_candidate_classifier import _write_sample, _write_training_inputs
 from test_selective_policy import _write_inputs
 
+from football_tracking.api.broadcast_api import build_review_action_envelope
 from football_tracking.api.dependencies import get_service
 from football_tracking.api.routes.broadcast import router as broadcast_router
 from football_tracking.api.service import ApiService
@@ -162,6 +165,7 @@ class ReviewEvidenceNativeIntegrationTests(unittest.TestCase):
                 action_response = client.post(
                     "/runs/run-native-e2e/broadcast/review-actions",
                     json={
+                        "queue_sha256": windows["queue_sha256"],
                         "actions": [
                             {
                                 "action_id": "native-e2e-confirm",
@@ -172,7 +176,7 @@ class ReviewEvidenceNativeIntegrationTests(unittest.TestCase):
                                 "action": "confirm_ball",
                                 "noise_subtype": None,
                             }
-                        ]
+                        ],
                     },
                 )
                 self.assertEqual(200, action_response.status_code, action_response.text)
@@ -341,6 +345,95 @@ class ReviewEvidenceNativeIntegrationTests(unittest.TestCase):
                     if name.startswith("qualification_")
                 },
             )
+            queue_path = activated.queue_path
+
+            def bound(name: str) -> Path:
+                binding = active_queue["bindings"][name]
+                return queue_path.parent / binding["path"]
+
+            actions = []
+            for item in active_queue["items"]:
+                for candidate in item["candidates"]:
+                    actions.append(
+                        {
+                            "action_id": f"target-confirm-{candidate['candidate_id']}",
+                            "review_item_id": item["review_item_id"],
+                            "candidate_id": candidate["candidate_id"],
+                            "reviewer_id": "native-target-reviewer",
+                            "created_at": "2026-07-15T12:00:00Z",
+                            "action": "confirm_ball",
+                        }
+                    )
+            actions_path = activation_output / "review_decisions.json"
+            action_envelope = build_review_action_envelope(queue_path, actions)
+            _write_json(actions_path, action_envelope)
+            root_contract = activation_output / TRACKING_CONTRACT_REPORT_NAME
+            shutil.copyfile(bound("contract"), root_contract)
+            dataset = _read_json(bound("dataset"))
+            source_descriptor = dataset["sources"][0]
+            source_video = (bound("dataset").parent / source_descriptor["path"]).resolve()
+            action_track = activation_output / "action_track.csv"
+            action_track.write_text("Frame,Action\n0,open_play\n", encoding="utf-8")
+            action_report = activation_output / "action_signal_report.v1.json"
+            _write_json(
+                action_report,
+                {
+                    "schema_version": "1.0",
+                    "artifact_type": "action_signal_report",
+                    "status": "complete",
+                    "input_video": str(source_video),
+                    "artifacts": {"track": action_track.name},
+                },
+            )
+            _write_json(
+                activation_output / "action_signal_binding.v1.json",
+                {
+                    "schema_version": "1.0",
+                    "artifact_type": "broadcast_action_signal_binding",
+                    "source": {
+                        "video_sha256": sha256_file(source_video),
+                        "tracking_contract_sha256": sha256_file(root_contract),
+                    },
+                    "artifacts": {
+                        action_track.name: {
+                            "sha256": sha256_file(action_track),
+                            "size_bytes": action_track.stat().st_size,
+                        },
+                        action_report.name: {
+                            "sha256": sha256_file(action_report),
+                            "size_bytes": action_report.stat().st_size,
+                        },
+                    },
+                },
+            )
+
+            preflight = preflight_recompute_reviewed_trajectory(activation_output)
+            self.assertEqual(sha256_file(queue_path), preflight["queue_sha256"])
+            with mock.patch(
+                "football_tracking.broadcast_hybrid_orchestration.solve_global_ball_trajectory",
+                side_effect=_fake_solve_trajectory,
+            ):
+                recomputed = recompute_reviewed_trajectory(activation_output, batch_size=128)
+            self.assertEqual("completed", recomputed["status"])
+            materialization_path = (
+                activation_output
+                / "broadcast_generations"
+                / recomputed["review_generation_id"]
+                / MATERIALIZATION_REPORT_NAME
+            )
+            materialization = _read_json(materialization_path)
+            self.assertEqual(sha256_file(queue_path), materialization["bindings"]["queue"]["sha256"])
+            for name in (
+                "target_audit_plan",
+                "target_audit_labels",
+                "target_qualification",
+                "target_frozen_application",
+                "target_prelabel_commitment",
+            ):
+                self.assertEqual(
+                    active_queue["bindings"][name]["sha256"],
+                    materialization["bindings"][name]["sha256"],
+                )
 
     def _build_model_development(self, root: Path) -> dict[str, Path]:
         root.mkdir()
@@ -362,7 +455,12 @@ class ReviewEvidenceNativeIntegrationTests(unittest.TestCase):
         dataset = _read_json(inputs["dataset"])
         dataset["samples"] = [row for row in dataset["samples"] if row["candidate_id"] in selected_ids]
         dataset["sources"] = [
-            {**row, "candidate_ids": [candidate_id for candidate_id in row["candidate_ids"] if candidate_id in selected_ids]}
+            {
+                **row,
+                "candidate_ids": [
+                    candidate_id for candidate_id in row["candidate_ids"] if candidate_id in selected_ids
+                ],
+            }
             for row in dataset["sources"]
             if any(candidate_id in selected_ids for candidate_id in row["candidate_ids"])
         ]
@@ -1147,14 +1245,10 @@ class ReviewEvidenceNativeIntegrationTests(unittest.TestCase):
         dev_resolved, dev_resolved_sha = package_file(development["resolved_contract"])
         qualification_source, qualification_source_sha = package_file(qualification["source_contract"])
         qualification_ledger, qualification_ledger_sha = package_file(qualification["vote_ledger"])
-        qualification_annotation, qualification_annotation_sha = package_file(
-            qualification["annotation_resolution"]
-        )
+        qualification_annotation, qualification_annotation_sha = package_file(qualification["annotation_resolution"])
         qualification_resolved, qualification_resolved_sha = package_file(qualification["resolved_contract"])
         qualification_predictions, qualification_predictions_sha = package_file(qualification["predictions"])
-        qualification_decisions, qualification_decisions_sha = package_file(
-            qualification["qualification_decisions"]
-        )
+        qualification_decisions, qualification_decisions_sha = package_file(qualification["qualification_decisions"])
         qualification_roles, qualification_roles_sha = package_file(qualification["policy_roles"])
         target_dataset, target_dataset_sha = package_file(Path(target["dataset"]))
         target_predictions, target_predictions_sha = package_file(Path(target["predictions"]))
@@ -1271,21 +1365,22 @@ class ReviewEvidenceNativeIntegrationTests(unittest.TestCase):
     ) -> None:
         development_root = development["root"]
         qualification_root = qualification["root"]
+        undeclared_sample_ids = (
+            "ai-unknown",
+            "conflict",
+            "g0-unknown",
+            "g1-unknown",
+            "g2-unknown",
+            "prelabel-only",
+            "single-vote",
+        )
         undeclared = [
             development_root / "annotation_resolution.v1.json",
             development_root / "resolved-contract.json",
             development_root / "input" / TRACKING_CONTRACT_REPORT_NAME,
             *[
                 development_root / "dataset" / "samples" / sample_id / artifact_name
-                for sample_id in (
-                    "ai-unknown",
-                    "conflict",
-                    "g0-unknown",
-                    "g1-unknown",
-                    "g2-unknown",
-                    "prelabel-only",
-                    "single-vote",
-                )
+                for sample_id in undeclared_sample_ids
                 for artifact_name in ("context.npy", "review_montage.png", "tight.npy")
             ],
             qualification_root / "dataset" / "annotation_resolution.v1.json",
@@ -1305,6 +1400,10 @@ class ReviewEvidenceNativeIntegrationTests(unittest.TestCase):
         for path in undeclared:
             self.assertTrue(path.is_file(), f"expected undeclared fixture output is missing: {path}")
             path.unlink()
+        for sample_id in undeclared_sample_ids:
+            sample_dir = development_root / "dataset" / "samples" / sample_id
+            self.assertEqual([], list(sample_dir.iterdir()), f"undeclared sample fixture is not empty: {sample_dir}")
+            sample_dir.rmdir()
 
     def _create_service_parent(
         self,

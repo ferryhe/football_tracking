@@ -4,6 +4,7 @@
  * Api
  * OpenAPI spec version: 0.1.0
  */
+import type { BroadcastConfigLineageReconfirmationChallenge } from "./broadcastConfigLineageReconfirmationChallenge";
 import type { BroadcastReviewEvidenceBundleSummary } from "./broadcastReviewEvidenceBundleSummary";
 import type { BroadcastReviewEvidenceCapacity } from "./broadcastReviewEvidenceCapacity";
 import type { BroadcastReviewEvidenceStateResponseStatus } from "./broadcastReviewEvidenceStateResponseStatus";
@@ -30,5 +31,6 @@ export interface BroadcastReviewEvidenceStateResponse {
   capacity?: BroadcastReviewEvidenceCapacity | null;
   blocking_reasons?: string[];
   message?: string | null;
+  config_lineage_reconfirmation?: BroadcastConfigLineageReconfirmationChallenge | null;
   [key: string]: unknown;
 }

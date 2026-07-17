@@ -580,6 +580,15 @@ paths:
         schema:
           type: string
           title: Run Id
+      - name: status_generation
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+            pattern: ^[0-9a-f]{64}$
+          - type: 'null'
+          title: Status Generation
       responses:
         '200':
           description: Successful Response
@@ -590,6 +599,12 @@ paths:
                 items:
                   $ref: '#/components/schemas/ArtifactSummary'
                 title: Response List Artifacts Api V1 Runs  Run Id  Artifacts Get
+        '409':
+          description: Ready product generation conflict
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiErrorResponse'
         '422':
           description: Validation Error
           content:
@@ -615,12 +630,27 @@ paths:
         schema:
           type: string
           title: Artifact Name
+      - name: status_generation
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+            pattern: ^[0-9a-f]{64}$
+          - type: 'null'
+          title: Status Generation
       responses:
         '200':
           description: Successful Response
           content:
             application/json:
               schema: {}
+        '409':
+          description: Ready product generation conflict
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiErrorResponse'
         '422':
           description: Validation Error
           content:
@@ -900,6 +930,42 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/BroadcastReviewWindowsResponse'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /runs/{run_id}/broadcast/terminal-tail-review:
+    post:
+      tags:
+      - broadcast
+      summary: Submit Broadcast Terminal Tail Review
+      operationId: submit_broadcast_terminal_tail_review
+      parameters:
+      - name: run_id
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Run Id
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BroadcastTerminalTailReviewRequest'
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BroadcastOperationResponse'
+        '404':
+          description: Run not found
+        '409':
+          description: Evidence or run state conflict
         '422':
           description: Validation Error
           content:
@@ -3016,8 +3082,51 @@ components:
       - blocker_code
       - detail
       title: BroadcastConfigLineageBlockerResponse
+    BroadcastConfigLineageReconfirmationChallenge:
+      properties:
+        target_run_id:
+          type: string
+          minLength: 1
+          title: Target Run Id
+        confirmed_config_name:
+          type: string
+          minLength: 1
+          title: Confirmed Config Name
+        confirmed_text_sha256:
+          type: string
+          pattern: ^[0-9a-f]{64}$
+          title: Confirmed Text Sha256
+        expected_observed_raw_sha256:
+          type: string
+          pattern: ^[0-9a-f]{64}$
+          title: Expected Observed Raw Sha256
+        workflow_bindings:
+          additionalProperties: true
+          type: object
+          title: Workflow Bindings
+      additionalProperties: false
+      type: object
+      required:
+      - target_run_id
+      - confirmed_config_name
+      - confirmed_text_sha256
+      - expected_observed_raw_sha256
+      - workflow_bindings
+      title: BroadcastConfigLineageReconfirmationChallenge
     BroadcastConfigLineageReconfirmationRequest:
       properties:
+        target_run_id:
+          type: string
+          minLength: 1
+          title: Target Run Id
+        confirmed_config_name:
+          type: string
+          minLength: 1
+          title: Confirmed Config Name
+        confirmed_text_sha256:
+          type: string
+          pattern: ^[0-9a-f]{64}$
+          title: Confirmed Text Sha256
         expected_observed_raw_sha256:
           type: string
           pattern: ^[0-9a-f]{64}$
@@ -3039,6 +3148,9 @@ components:
       additionalProperties: false
       type: object
       required:
+      - target_run_id
+      - confirmed_config_name
+      - confirmed_text_sha256
       - expected_observed_raw_sha256
       - workflow_bindings
       - operator_id
@@ -3139,6 +3251,12 @@ components:
             pattern: ^[0-9a-f]{64}$
           - type: 'null'
           title: Review Decisions Sha256
+        terminal_tail_review_sha256:
+          anyOf:
+          - type: string
+            pattern: ^[0-9a-f]{64}$
+          - type: 'null'
+          title: Terminal Tail Review Sha256
         message:
           anyOf:
           - type: string
@@ -3392,13 +3510,19 @@ components:
       title: BroadcastReviewAction
     BroadcastReviewActionsRequest:
       properties:
+        queue_sha256:
+          type: string
+          pattern: ^[0-9a-f]{64}$
+          title: Queue Sha256
         actions:
           items:
             $ref: '#/components/schemas/BroadcastReviewAction'
           type: array
           title: Actions
+      additionalProperties: false
       type: object
       required:
+      - queue_sha256
       - actions
       title: BroadcastReviewActionsRequest
     BroadcastReviewCandidate:
@@ -3864,6 +3988,10 @@ components:
           - type: string
           - type: 'null'
           title: Message
+        config_lineage_reconfirmation:
+          anyOf:
+          - $ref: '#/components/schemas/BroadcastConfigLineageReconfirmationChallenge'
+          - type: 'null'
       additionalProperties: true
       type: object
       required:
@@ -3944,6 +4072,8 @@ components:
             $ref: '#/components/schemas/BroadcastReviewWindow'
           type: array
           title: Items
+        terminal_tail_review:
+          $ref: '#/components/schemas/BroadcastTerminalTailReviewState'
       type: object
       required:
       - run_id
@@ -4019,6 +4149,7 @@ components:
             enum:
             - queued
             - running
+            - reconciling
             - committing
             - copying
             - validating
@@ -4082,6 +4213,125 @@ components:
       type: object
       title: BroadcastRunState
       description: Stable public broadcast fields; extra lineage remains forward compatible.
+    BroadcastTerminalTailReviewEvidence:
+      properties:
+        source_video_sha256:
+          type: string
+          pattern: ^[0-9a-f]{64}$
+          title: Source Video Sha256
+        tracking_contract_sha256:
+          type: string
+          pattern: ^[0-9a-f]{64}$
+          title: Tracking Contract Sha256
+        action_signal_report_sha256:
+          type: string
+          pattern: ^[0-9a-f]{64}$
+          title: Action Signal Report Sha256
+        temporal_chunks_report_sha256:
+          type: string
+          pattern: ^[0-9a-f]{64}$
+          title: Temporal Chunks Report Sha256
+        reported_frame_count:
+          type: integer
+          minimum: 1.0
+          title: Reported Frame Count
+        verified_frame_count:
+          type: integer
+          minimum: 1.0
+          title: Verified Frame Count
+        gap_frames:
+          type: integer
+          minimum: 1.0
+          title: Gap Frames
+        gap_seconds:
+          type: number
+          exclusiveMinimum: 0.0
+          title: Gap Seconds
+        evidence_sha256:
+          type: string
+          pattern: ^[0-9a-f]{64}$
+          title: Evidence Sha256
+      additionalProperties: false
+      type: object
+      required:
+      - source_video_sha256
+      - tracking_contract_sha256
+      - action_signal_report_sha256
+      - temporal_chunks_report_sha256
+      - reported_frame_count
+      - verified_frame_count
+      - gap_frames
+      - gap_seconds
+      - evidence_sha256
+      title: BroadcastTerminalTailReviewEvidence
+    BroadcastTerminalTailReviewRequest:
+      properties:
+        decision:
+          type: string
+          const: accept_terminal_shortfall
+          title: Decision
+        reviewer_id:
+          type: string
+          maxLength: 200
+          minLength: 1
+          title: Reviewer Id
+        evidence_sha256:
+          type: string
+          pattern: ^[0-9a-f]{64}$
+          title: Evidence Sha256
+      additionalProperties: false
+      type: object
+      required:
+      - decision
+      - reviewer_id
+      - evidence_sha256
+      title: BroadcastTerminalTailReviewRequest
+    BroadcastTerminalTailReviewState:
+      properties:
+        status:
+          type: string
+          enum:
+          - not_required
+          - required
+          - accepted
+          - invalid
+          title: Status
+        reason:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Reason
+        evidence:
+          anyOf:
+          - $ref: '#/components/schemas/BroadcastTerminalTailReviewEvidence'
+          - type: 'null'
+        decision:
+          anyOf:
+          - type: string
+            const: accept_terminal_shortfall
+          - type: 'null'
+          title: Decision
+        reviewer_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Reviewer Id
+        reviewed_at:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Reviewed At
+        acknowledgement_sha256:
+          anyOf:
+          - type: string
+            pattern: ^[0-9a-f]{64}$
+          - type: 'null'
+          title: Acknowledgement Sha256
+      additionalProperties: false
+      type: object
+      required:
+      - status
+      title: BroadcastTerminalTailReviewState
     BroadcastTrajectoryRecomputeRequest:
       properties:
         review_decisions_sha256:

@@ -1,4 +1,4 @@
-import type { ReactNode } from "react";
+import { StrictMode, type ReactNode } from "react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
@@ -39,6 +39,7 @@ let cancelMutation: Record<string, unknown>;
 let evidenceQuery: Record<string, unknown>;
 let importMutation: Record<string, unknown>;
 let operationQuery: Record<string, unknown>;
+let reconfirmMutation: Record<string, unknown>;
 let reviewQuery: Record<string, unknown>;
 
 vi.mock("wouter", () => ({
@@ -138,9 +139,11 @@ vi.mock("@workspace/api-client-react", () => ({
     error: null,
     isLoading: false,
   }),
+  useReconfirmBroadcastConfigLineage: () => reconfirmMutation,
   useRecomputeBroadcastTrajectory: idleMutation,
   useRenderBroadcastHybrid: idleMutation,
   useSubmitBroadcastReviewActions: idleMutation,
+  useSubmitBroadcastTerminalTailReview: idleMutation,
 }));
 
 import BroadcastPage from "./broadcast";
@@ -164,6 +167,7 @@ beforeEach(() => {
   host.prepare.mockResolvedValue({ run_id: "import-job-1" });
   host.cancel.mockResolvedValue(undefined);
   host.refresh.mockResolvedValue(undefined);
+  reconfirmMutation = idleMutation();
   evidenceQuery = {
     data: {
       run_id: "parent-run",
@@ -190,10 +194,17 @@ beforeEach(() => {
     reset: host.resetCancel,
   };
   reviewQuery = {
-    data: undefined,
+    data: {
+      run_id: "parent-run",
+      status: "ready",
+      queue_sha256: queueSha256,
+      review_item_count: 0,
+      items: [],
+    },
     error: null,
     isError: false,
     isLoading: false,
+    isSuccess: true,
   };
 });
 
@@ -220,13 +231,18 @@ describe("legacy Broadcast review-evidence host", () => {
 
   it("moves from unavailable through explicit prepare, progress/cancel, and ready review handoff", async () => {
     const user = userEvent.setup();
-    const view = render(<BroadcastPage />, { wrapper });
+    const renderPage = () => (
+      <StrictMode>
+        <BroadcastPage />
+      </StrictMode>
+    );
+    const view = render(renderPage(), { wrapper });
 
     expect(screen.getByRole("status")).toHaveTextContent(
       "No compatible evidence bundle",
     );
     expect((host.reviewOptions?.query as { enabled?: boolean }).enabled).toBe(
-      false,
+      true,
     );
     expect(screen.queryByTestId("existing-broadcast-review")).toBeNull();
 
@@ -250,7 +266,7 @@ describe("legacy Broadcast review-evidence host", () => {
         ],
       },
     };
-    view.rerender(<BroadcastPage />);
+    view.rerender(renderPage());
     expect(host.prepare).not.toHaveBeenCalled();
     expect(screen.getByText("Required free space")).toBeVisible();
     expect(screen.getByText("96.0 MB")).toBeVisible();
@@ -293,7 +309,7 @@ describe("legacy Broadcast review-evidence host", () => {
         },
       },
     };
-    view.rerender(<BroadcastPage />);
+    view.rerender(renderPage());
     expect(
       screen.getByRole("progressbar", { name: "Evidence import progress" }),
     ).toHaveAttribute("aria-valuenow", "37.5");
@@ -322,7 +338,7 @@ describe("legacy Broadcast review-evidence host", () => {
       isError: false,
       isLoading: false,
     };
-    view.rerender(<BroadcastPage />);
+    view.rerender(renderPage());
 
     expect(screen.getByText("review-evidence-generation-1")).toBeVisible();
     expect(screen.getByText(queueSha256)).toBeVisible();

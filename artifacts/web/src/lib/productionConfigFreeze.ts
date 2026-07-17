@@ -89,7 +89,9 @@ function sourceSignature(value: unknown): value is SourceSignature {
   );
 }
 
-function cloneJsonObject(value: Record<string, unknown>): Record<string, unknown> {
+function cloneJsonObject(
+  value: Record<string, unknown>,
+): Record<string, unknown> {
   return JSON.parse(canonicalJson(value)) as Record<string, unknown>;
 }
 
@@ -150,7 +152,9 @@ function canonicalEvidenceName(name: unknown, workflowId: unknown): boolean {
   );
 }
 
-function polygonBounds(points: [number, number][]): [number, number, number, number] {
+function polygonBounds(
+  points: [number, number][],
+): [number, number, number, number] {
   return [
     Math.min(...points.map(([x]) => x)),
     Math.min(...points.map(([, y]) => y)),
@@ -229,7 +233,9 @@ export async function buildProductionConfigConfirmation(input: {
     calibration: input.calibration,
     settings: input.trial.settings,
   });
-  if ((await sha256Text(canonicalJson(currentIntent))) !== accepted.intent_sha256) {
+  if (
+    (await sha256Text(canonicalJson(currentIntent))) !== accepted.intent_sha256
+  ) {
     throw new TypeError("Accepted trial intent is stale");
   }
   const trialPatch = isRecord(attempt.request.config_patch)
@@ -237,11 +243,9 @@ export async function buildProductionConfigConfirmation(input: {
     : {};
   const tuningPatch = cloneJsonObject(trialPatch);
   delete tuningPatch.output;
-  for (const trialOnlyLeaf of [
-    ["runtime", "start_frame"],
-    ["runtime", "max_frames"],
-    ["metadata", "production_workflow"],
-  ] as const) {
+  delete tuningPatch.runtime;
+  delete tuningPatch.follow_cam;
+  for (const trialOnlyLeaf of [["metadata", "production_workflow"]] as const) {
     deleteLeaf(tuningPatch, trialOnlyLeaf);
   }
   const points = clonePolygon(input.calibration.approved_polygon);
@@ -262,6 +266,7 @@ export async function buildProductionConfigConfirmation(input: {
     },
     runtime: { start_frame: 0, max_frames: null },
     follow_cam: { enabled: false },
+    output: { save_tracking_contract: true },
   });
   const patch_sha256 = await sha256Text(canonicalJson(persistent_patch));
   const trial_patch_sha256 = await sha256Text(canonicalJson(trialPatch));
@@ -313,18 +318,18 @@ function lineageMatches(
   const workflow = isRecord(metadata) ? metadata.production_workflow : null;
   return Boolean(
     isRecord(workflow) &&
-      workflow.schema_version === PRODUCTION_CONFIG_METADATA_VERSION &&
-      workflow.workflow_id === expected.workflow_id &&
-      workflow.base_config_name === expected.base_config_name &&
-      workflow.accepted_trial_run_id === expected.accepted_trial_run_id &&
-      workflow.calibration_digest === expected.calibration_digest &&
-      workflow.trial_intent_sha256 === expected.trial_intent_sha256 &&
-      workflow.trial_request_sha256 === expected.trial_request_sha256 &&
-      workflow.trial_patch_sha256 === expected.trial_patch_sha256 &&
-      workflow.patch_sha256 === expected.patch_sha256 &&
-      workflow.confirmed_at === expected.confirmed_at &&
-      canonicalJson(workflow.source_signature) ===
-        canonicalJson(expected.source_signature),
+    workflow.schema_version === PRODUCTION_CONFIG_METADATA_VERSION &&
+    workflow.workflow_id === expected.workflow_id &&
+    workflow.base_config_name === expected.base_config_name &&
+    workflow.accepted_trial_run_id === expected.accepted_trial_run_id &&
+    workflow.calibration_digest === expected.calibration_digest &&
+    workflow.trial_intent_sha256 === expected.trial_intent_sha256 &&
+    workflow.trial_request_sha256 === expected.trial_request_sha256 &&
+    workflow.trial_patch_sha256 === expected.trial_patch_sha256 &&
+    workflow.patch_sha256 === expected.patch_sha256 &&
+    workflow.confirmed_at === expected.confirmed_at &&
+    canonicalJson(workflow.source_signature) ===
+      canonicalJson(expected.source_signature),
   );
 }
 
@@ -336,10 +341,52 @@ function validPatchPolygon(value: unknown): boolean {
       (point) =>
         Array.isArray(point) &&
         point.length === 2 &&
-        point.every((coordinate) =>
-          typeof coordinate === "number" && Number.isFinite(coordinate),
+        point.every(
+          (coordinate) =>
+            typeof coordinate === "number" && Number.isFinite(coordinate),
         ),
     )
+  );
+}
+
+function forcedExecutionObjectsAreExact(
+  patch: Record<string, unknown>,
+): boolean {
+  const runtime = patch.runtime;
+  const followCam = patch.follow_cam;
+  const output = patch.output;
+  return Boolean(
+    isRecord(runtime) &&
+    Object.keys(runtime).length === 2 &&
+    runtime.start_frame === 0 &&
+    runtime.max_frames === null &&
+    isRecord(followCam) &&
+    Object.keys(followCam).length === 1 &&
+    followCam.enabled === false &&
+    isRecord(output) &&
+    Object.keys(output).length === 1 &&
+    output.save_tracking_contract === true,
+  );
+}
+
+function mergedExecutionConfigMatchesForcedValues(
+  patch: Record<string, unknown>,
+): boolean {
+  const runtime = patch.runtime;
+  const followCam = patch.follow_cam;
+  const output = patch.output;
+  return Boolean(
+    isRecord(runtime) &&
+    runtime.start_frame === 0 &&
+    runtime.max_frames === null &&
+    !Object.prototype.hasOwnProperty.call(runtime, "trial_stride") &&
+    isRecord(followCam) &&
+    followCam.enabled === false &&
+    !Object.prototype.hasOwnProperty.call(followCam, "legacy_render") &&
+    !Object.prototype.hasOwnProperty.call(followCam, "preview_codec") &&
+    isRecord(output) &&
+    output.save_tracking_contract === true &&
+    !Object.prototype.hasOwnProperty.call(output, "dir"),
   );
 }
 
@@ -347,14 +394,15 @@ function executionPatchMatchesLineage(
   expected: Omit<ProductionConfigEvidence, "name" | "sha256" | "patch">,
   patch: unknown,
 ): patch is Record<string, unknown> {
-  if (!isRecord(patch) || patch.input_video !== expected.source_signature.path) {
+  if (
+    !isRecord(patch) ||
+    patch.input_video !== expected.source_signature.path
+  ) {
     return false;
   }
   const filtering = patch.filtering;
   const sceneBias = patch.scene_bias;
   const postprocess = patch.postprocess;
-  const runtime = patch.runtime;
-  const followCam = patch.follow_cam;
   if (
     !isRecord(filtering) ||
     !Array.isArray(filtering.roi) ||
@@ -378,11 +426,7 @@ function executionPatchMatchesLineage(
     ) ||
     !isRecord(postprocess) ||
     typeof postprocess.enabled !== "boolean" ||
-    !isRecord(runtime) ||
-    runtime.start_frame !== 0 ||
-    runtime.max_frames !== null ||
-    !isRecord(followCam) ||
-    followCam.enabled !== false
+    !forcedExecutionObjectsAreExact(patch)
   ) {
     return false;
   }
@@ -402,7 +446,10 @@ export async function finalizeProductionConfigConfirmation(
   pending: ProductionPendingConfigConfirmation,
   detail: ConfigDetail,
 ): Promise<ProductionConfigEvidence> {
-  if (!isProductionPendingConfigConfirmation(pending) || !configDetail(detail)) {
+  if (
+    !isProductionPendingConfigConfirmation(pending) ||
+    !configDetail(detail)
+  ) {
     throw new TypeError("Configuration confirmation response is invalid");
   }
   if (detail.name !== expectedProductionConfigName(pending.output_name)) {
@@ -420,11 +467,16 @@ export async function finalizeProductionConfigConfirmation(
     source_signature: pending.source_signature,
     confirmed_at: pending.confirmed_at,
   };
-  if (!lineageMatches(expected, detail.raw)) {
+  if (
+    !mergedExecutionConfigMatchesForcedValues(detail.raw) ||
+    !lineageMatches(expected, detail.raw)
+  ) {
     throw new Error("Derived configuration lineage does not match the request");
   }
   if (!recursiveSubset(pending.request.patch ?? {}, detail.raw)) {
-    throw new Error("Derived configuration raw patch does not match the request");
+    throw new Error(
+      "Derived configuration raw patch does not match the request",
+    );
   }
   return {
     name: detail.name,
@@ -446,6 +498,7 @@ export async function verifyProductionConfigDetail(
   const digest = await sha256Text(detail.text);
   if (digest !== expected.sha256) return { status: "digest_mismatch" };
   if (
+    !mergedExecutionConfigMatchesForcedValues(detail.raw) ||
     !lineageMatches(expected, detail.raw) ||
     !recursiveSubset(expected.patch, detail.raw)
   ) {
@@ -460,30 +513,35 @@ export function isProductionPendingConfigConfirmation(
   if (
     !isRecord(value) ||
     !(
-    Number.isInteger(value.generation) &&
-    Number(value.generation) > 0 &&
-    uuid(String(value.output_id)) &&
-    value.output_name ===
-      productionOutputName(String(value.workflow_id), String(value.output_id)) &&
-    isRecord(value.request) &&
-    value.request.output_name === value.output_name &&
-    isRecord(value.persistent_patch) &&
-    sha256String(value.patch_sha256) &&
-    sha256String(value.trial_patch_sha256) &&
-    safeWorkflowName(String(value.workflow_id)) &&
-    nonEmpty(value.base_config_name) &&
-    nonEmpty(value.accepted_trial_run_id) &&
-    sha256String(value.trial_intent_sha256) &&
-    sha256String(value.trial_request_sha256) &&
-    sha256String(value.calibration_digest) &&
-    sourceSignature(value.source_signature) &&
-    nonEmpty(value.confirmed_at)
+      Number.isInteger(value.generation) &&
+      Number(value.generation) > 0 &&
+      uuid(String(value.output_id)) &&
+      value.output_name ===
+        productionOutputName(
+          String(value.workflow_id),
+          String(value.output_id),
+        ) &&
+      isRecord(value.request) &&
+      value.request.output_name === value.output_name &&
+      isRecord(value.persistent_patch) &&
+      sha256String(value.patch_sha256) &&
+      sha256String(value.trial_patch_sha256) &&
+      safeWorkflowName(String(value.workflow_id)) &&
+      nonEmpty(value.base_config_name) &&
+      nonEmpty(value.accepted_trial_run_id) &&
+      sha256String(value.trial_intent_sha256) &&
+      sha256String(value.trial_request_sha256) &&
+      sha256String(value.calibration_digest) &&
+      sourceSignature(value.source_signature) &&
+      nonEmpty(value.confirmed_at)
     )
-  ) return false;
+  )
+    return false;
   const request = value.request as Record<string, unknown>;
   return (
     request.base_config_name === value.base_config_name &&
     isRecord(request.patch) &&
+    forcedExecutionObjectsAreExact(value.persistent_patch) &&
     recursiveSubset(value.persistent_patch, request.patch) &&
     executionPatchMatchesLineage(
       value as unknown as Omit<
@@ -501,21 +559,22 @@ export function isProductionConfigEvidence(
   if (
     !isRecord(value) ||
     !(
-    canonicalEvidenceName(value.name, value.workflow_id) &&
-    sha256String(value.sha256) &&
-    nonEmpty(value.base_config_name) &&
-    isRecord(value.patch) &&
-    sha256String(value.patch_sha256) &&
-    sha256String(value.trial_patch_sha256) &&
-    safeWorkflowName(String(value.workflow_id)) &&
-    nonEmpty(value.accepted_trial_run_id) &&
-    sha256String(value.trial_intent_sha256) &&
-    sha256String(value.trial_request_sha256) &&
-    sha256String(value.calibration_digest) &&
-    sourceSignature(value.source_signature) &&
-    nonEmpty(value.confirmed_at)
+      canonicalEvidenceName(value.name, value.workflow_id) &&
+      sha256String(value.sha256) &&
+      nonEmpty(value.base_config_name) &&
+      isRecord(value.patch) &&
+      sha256String(value.patch_sha256) &&
+      sha256String(value.trial_patch_sha256) &&
+      safeWorkflowName(String(value.workflow_id)) &&
+      nonEmpty(value.accepted_trial_run_id) &&
+      sha256String(value.trial_intent_sha256) &&
+      sha256String(value.trial_request_sha256) &&
+      sha256String(value.calibration_digest) &&
+      sourceSignature(value.source_signature) &&
+      nonEmpty(value.confirmed_at)
     )
-  ) return false;
+  )
+    return false;
   return executionPatchMatchesLineage(
     value as unknown as Omit<
       ProductionConfigEvidence,

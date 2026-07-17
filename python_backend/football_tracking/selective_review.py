@@ -55,6 +55,32 @@ _MAX_JSON_ARTIFACT_BYTES = 256 * 1024 * 1024
 
 _NOISE_LABELS = tuple(label for label in CLASSIFICATION_LABELS if label not in {"match_ball", "unknown"})
 _ACTIONS = frozenset({"confirm_ball", "reject_noise", "mark_unknown", "correct_trajectory"})
+_ACTION_BASE_BINDING_FIELDS = {
+    "timing_sha256": "review_timing",
+    "policy_sha256": "policy",
+    "decisions_sha256": "decisions",
+    "model_sha256": "model",
+    "training_report_sha256": "training_report",
+    "model_weights_sha256": "model_weights",
+    "dataset_sha256": "dataset",
+    "predictions_sha256": "predictions",
+    "contract_sha256": "contract",
+    "annotation_resolution_sha256": "annotation_resolution",
+    "resolved_tracking_contract_sha256": "resolved_tracking_contract",
+    "policy_roles_sha256": "policy_roles",
+}
+_ACTION_QUALIFICATION_BINDING_FIELDS = {
+    "qualification_dataset_sha256": "qualification_dataset",
+    "qualification_predictions_sha256": "qualification_predictions",
+    "qualification_decisions_sha256": "qualification_decisions",
+}
+_ACTION_TARGET_BINDING_FIELDS = {
+    "target_audit_plan_sha256": "target_audit_plan",
+    "target_audit_labels_sha256": "target_audit_labels",
+    "target_qualification_sha256": "target_qualification",
+    "target_frozen_application_sha256": "target_frozen_application",
+    "target_prelabel_commitment_sha256": "target_prelabel_commitment",
+}
 
 
 class SelectiveReviewError(RuntimeError):
@@ -1589,6 +1615,33 @@ def _validate_actions(
     timings: dict[str, dict[str, Any]],
 ) -> list[dict[str, Any]]:
     queue_bindings = _required_object(queue.get("bindings"), "queue.bindings")
+    target_finite_queue = queue.get("artifact_type") == "target_finite_population_review_queue"
+    present_qualification_bindings = {
+        field: name
+        for field, name in _ACTION_QUALIFICATION_BINDING_FIELDS.items()
+        if name in queue_bindings
+    }
+    if present_qualification_bindings and len(present_qualification_bindings) != len(
+        _ACTION_QUALIFICATION_BINDING_FIELDS
+    ):
+        raise SelectiveReviewError("queue qualification bindings must be complete")
+    if target_finite_queue and present_qualification_bindings != _ACTION_QUALIFICATION_BINDING_FIELDS:
+        raise SelectiveReviewError("target finite-population queue qualification bindings must be complete")
+    present_target_bindings = {
+        field: name for field, name in _ACTION_TARGET_BINDING_FIELDS.items() if name in queue_bindings
+    }
+    if target_finite_queue and present_target_bindings != _ACTION_TARGET_BINDING_FIELDS:
+        raise SelectiveReviewError("target finite-population queue audit bindings must be complete")
+    if not target_finite_queue and present_target_bindings:
+        raise SelectiveReviewError("legacy selective review queue may not carry target audit bindings")
+    expected_binding_fields = {
+        "queue_sha256",
+        "evidence_sha256",
+        "candidate_fingerprint",
+        *_ACTION_BASE_BINDING_FIELDS,
+        *present_qualification_bindings,
+        *present_target_bindings,
+    }
     item_by_id: dict[str, dict[str, Any]] = {}
     candidate_entries: dict[str, tuple[dict[str, Any], dict[str, Any]]] = {}
     for item in queue["items"]:
@@ -1626,42 +1679,23 @@ def _validate_actions(
         if action_name not in _ACTIONS:
             raise SelectiveReviewError(f"{prefix}.action must be one of {sorted(_ACTIONS)}")
         bindings = _required_object(action.get("bindings"), f"{prefix}.bindings")
+        if set(bindings) != expected_binding_fields:
+            raise SelectiveReviewError(
+                f"{prefix}.bindings fields are incomplete or unexpected: "
+                f"missing={sorted(expected_binding_fields - set(bindings))}, "
+                f"unexpected={sorted(set(bindings) - expected_binding_fields)}"
+            )
         _expect_hash(bindings.get("queue_sha256"), queue_sha256, f"{prefix}.bindings.queue_sha256")
-        for binding_name in (
-            "timing",
-            "policy",
-            "decisions",
-            "model",
-            "training_report",
-            "model_weights",
-            "dataset",
-            "predictions",
-            "contract",
-            "annotation_resolution",
-            "resolved_tracking_contract",
-            "policy_roles",
-        ):
-            queue_name = "review_timing" if binding_name == "timing" else binding_name
+        for field, queue_name in {
+            **_ACTION_BASE_BINDING_FIELDS,
+            **present_qualification_bindings,
+            **present_target_bindings,
+        }.items():
             descriptor = _required_object(queue_bindings.get(queue_name), f"queue.bindings.{queue_name}")
             _expect_hash(
-                bindings.get(f"{binding_name}_sha256"),
+                bindings.get(field),
                 descriptor.get("sha256"),
-                f"{prefix}.bindings.{binding_name}_sha256",
-            )
-        qualification_binding_names = (
-            "qualification_dataset",
-            "qualification_predictions",
-            "qualification_decisions",
-        )
-        present_qualification_bindings = [name for name in qualification_binding_names if name in queue_bindings]
-        if present_qualification_bindings and len(present_qualification_bindings) != len(qualification_binding_names):
-            raise SelectiveReviewError("queue qualification bindings must be complete")
-        for binding_name in present_qualification_bindings:
-            descriptor = _required_object(queue_bindings.get(binding_name), f"queue.bindings.{binding_name}")
-            _expect_hash(
-                bindings.get(f"{binding_name}_sha256"),
-                descriptor.get("sha256"),
-                f"{prefix}.bindings.{binding_name}_sha256",
+                f"{prefix}.bindings.{field}",
             )
         _expect_hash(
             bindings.get("evidence_sha256"),

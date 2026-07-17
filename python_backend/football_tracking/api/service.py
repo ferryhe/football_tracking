@@ -5,6 +5,7 @@ import csv
 import hashlib
 import inspect
 import json
+import math
 import mimetypes
 import os
 import re
@@ -30,8 +31,13 @@ import yaml
 
 from football_tracking.action_signal import (
     ACTION_SIGNAL_DIAGNOSTICS_NAME,
+    ACTION_SIGNAL_MAX_TERMINAL_SHORTFALL_FRAMES,
+    ACTION_SIGNAL_MAX_TERMINAL_SHORTFALL_SECONDS,
     ACTION_SIGNAL_REPORT_NAME,
     ACTION_SIGNAL_SUCCESS_STATUSES,
+    ACTION_SIGNAL_TERMINAL_SHORTFALL_LIMITATION,
+    ACTION_SIGNAL_TERMINAL_SHORTFALL_REASON,
+    ACTION_SIGNAL_TERMINAL_SHORTFALL_STATUS,
     ACTION_TRACK_NAME,
     ActionCalibration,
     generate_action_track,
@@ -49,9 +55,12 @@ from football_tracking.ai_improvement import (
 from football_tracking.ai_review_triggers import compact_ai_review_trigger_summary
 from football_tracking.api.ai_provider import OpenAIResponsesClient, load_provider_settings
 from football_tracking.api.broadcast_api import (
+    TERMINAL_TAIL_REVIEW_NAME,
     BroadcastApiError,
     build_review_action_envelope,
+    build_terminal_tail_review_acknowledgement,
     collect_review_evidence_paths,
+    inspect_terminal_tail_review,
     load_bound_json,
     publish_broadcast_facade,
     publish_json_exclusive,
@@ -130,7 +139,7 @@ from football_tracking.review_evidence_bundle import (
     discover_review_evidence_bundles,
     revoke_review_evidence_activation,
 )
-from football_tracking.tracking_contracts import TRACKING_CONTRACT_REPORT_NAME
+from football_tracking.tracking_contracts import TRACKING_CONTRACT_REPORT_NAME, normalize_tracking_contract_payload
 
 _WINDOWS_RESERVED_NAMES = {
     "CON",
@@ -167,6 +176,10 @@ class _ReviewEvidenceTargetContextError(RuntimeError):
     def __init__(self, code: str, message: str) -> None:
         super().__init__(message)
         self.code = code
+
+
+class ArtifactStatusGenerationConflict(RuntimeError):
+    """The requested ready-product generation is no longer authoritative."""
 
 
 @dataclass(frozen=True)
@@ -1216,22 +1229,41 @@ class ApiService:
             self._attach_ai_candidate_lifecycle(snapshot)
         return snapshot
 
-    def list_artifacts(self, run_id: str) -> list[dict[str, Any]]:
+    def list_artifacts(
+        self,
+        run_id: str,
+        *,
+        expected_status_generation: str | None = None,
+    ) -> list[dict[str, Any]]:
         run = self.get_run(run_id)
         if self._is_ready_broadcast_run(run):
+            status_generation = self._ready_broadcast_expected_status_generation(
+                run,
+                expected_status_generation=expected_status_generation,
+            )
             try:
                 output_dir = self._resolve_safe_run_output(Path(run["output_dir"]))
             except (KeyError, RuntimeError):
                 return []
             return self._ready_broadcast_artifact_summaries(
                 output_dir,
-                expected_status_generation=self._ready_broadcast_status_generation(run),
+                expected_status_generation=status_generation,
             )
         return run.get("artifacts", [])
 
-    def get_artifact_path(self, run_id: str, artifact_name: str) -> Path:
+    def get_artifact_path(
+        self,
+        run_id: str,
+        artifact_name: str,
+        *,
+        expected_status_generation: str | None = None,
+    ) -> Path:
         run = self.get_run(run_id)
         if self._is_ready_broadcast_run(run):
+            status_generation = self._ready_broadcast_expected_status_generation(
+                run,
+                expected_status_generation=expected_status_generation,
+            )
             relative = Path(artifact_name)
             normalized_name = relative.as_posix()
             if (
@@ -1247,7 +1279,7 @@ class ApiService:
                 raise FileNotFoundError(artifact_name) from exc
             snapshots = self._ready_broadcast_delivery_snapshots(
                 output_dir,
-                expected_status_generation=self._ready_broadcast_status_generation(run),
+                expected_status_generation=status_generation,
             )
             if snapshots is None or normalized_name not in snapshots:
                 raise FileNotFoundError(artifact_name)
@@ -1270,13 +1302,18 @@ class ApiService:
         self,
         run_id: str,
         artifact_name: str,
+        *,
+        expected_status_generation: str | None = None,
     ) -> _ArtifactResponseLease:
         run = self.get_run(run_id)
         if not self._is_ready_broadcast_run(run):
             lease = self._acquire_ready_broadcast_file_lease(self.get_artifact_path(run_id, artifact_name))
             return _ArtifactResponseLease(lease.path, lease.handle, lease.stat_token)
 
-        status_generation = self._ready_broadcast_status_generation(run)
+        status_generation = self._ready_broadcast_expected_status_generation(
+            run,
+            expected_status_generation=expected_status_generation,
+        )
         relative = Path(artifact_name)
         normalized_name = relative.as_posix()
         if (
@@ -1334,6 +1371,23 @@ class ApiService:
             return None
         status_generation = broadcast.get("status_generation")
         return status_generation if isinstance(status_generation, str) else None
+
+    @classmethod
+    def _ready_broadcast_expected_status_generation(
+        cls,
+        run: dict[str, Any],
+        *,
+        expected_status_generation: str | None,
+    ) -> str:
+        authoritative = cls._ready_broadcast_status_generation(run)
+        if expected_status_generation is None:
+            raise ArtifactStatusGenerationConflict("Ready broadcast artifact access requires status_generation")
+        if expected_status_generation != authoritative:
+            raise ArtifactStatusGenerationConflict(
+                "Ready broadcast status generation conflict: "
+                f"requested {expected_status_generation}, authoritative {authoritative or 'missing'}"
+            )
+        return expected_status_generation
 
     def _ready_broadcast_artifacts_are_valid(
         self,
@@ -2123,11 +2177,25 @@ class ApiService:
     def get_player_tracks_report(self, run_id: str) -> dict[str, Any]:
         return self._load_optional_json_artifact(run_id, "player_tracks.json")
 
+    def _get_internal_artifact_path(self, run_id: str, artifact_name: str) -> Path:
+        run = self.get_run(run_id)
+        expected_status_generation = (
+            self._ready_broadcast_status_generation(run) if self._is_ready_broadcast_run(run) else None
+        )
+        try:
+            return self.get_artifact_path(
+                run_id,
+                artifact_name,
+                expected_status_generation=expected_status_generation,
+            )
+        except ArtifactStatusGenerationConflict as exc:
+            raise FileNotFoundError(artifact_name) from exc
+
     def get_camera_path(self, run_id: str, offset: int, limit: int) -> dict[str, Any]:
         camera_path: Path | None = None
         for name in ("camera_target.csv", "camera_path.v2.csv", "camera_path.csv"):
             try:
-                camera_path = self.get_artifact_path(run_id, name)
+                camera_path = self._get_internal_artifact_path(run_id, name)
                 break
             except FileNotFoundError:
                 continue
@@ -3606,6 +3674,268 @@ class ApiService:
         artifact_name = str(request.get("approved_actions_artifact_name") or "").strip()
         return bool(approved_ids or artifact_name)
 
+    @staticmethod
+    def _machine_run_note(notes: Any) -> dict[str, Any] | None:
+        if not isinstance(notes, str) or not notes.strip():
+            return None
+        try:
+            parsed = json.loads(notes)
+        except (TypeError, ValueError):
+            return None
+        return parsed if isinstance(parsed, dict) else None
+
+    def _preflight_production_full_parent(
+        self,
+        request: dict[str, Any],
+        note: dict[str, Any],
+        *,
+        config_path: Path,
+        config: AppConfig,
+        calibration: ActionCalibration,
+        video_path: Path,
+        source_stat: os.stat_result,
+    ) -> None:
+        required_strings = (
+            "workflow_id",
+            "submission_id",
+            "output_id",
+            "accepted_trial_run_id",
+            "confirmed_config_name",
+        )
+        required_hashes = (
+            "accepted_trial_request_sha256",
+            "expected_config_sha256",
+            "config_patch_sha256",
+            "calibration_digest",
+        )
+        if note.get("schema_version") != "1.0" or any(
+            not isinstance(note.get(name), str) or not str(note[name]).strip() for name in required_strings
+        ):
+            raise ValueError("production_full notes do not match schema version 1.0")
+        if any(
+            not isinstance(note.get(name), str) or re.fullmatch(r"[0-9a-f]{64}", str(note[name])) is None
+            for name in required_hashes
+        ):
+            raise ValueError("production_full notes require lowercase SHA-256 lineage fields")
+        generation = note.get("generation")
+        if isinstance(generation, bool) or not isinstance(generation, int) or generation <= 0:
+            raise ValueError("production_full notes require a positive generation")
+        source_signature = note.get("source_signature")
+        if (
+            not isinstance(source_signature, dict)
+            or not isinstance(source_signature.get("path"), str)
+            or isinstance(source_signature.get("size_bytes"), bool)
+            or not isinstance(source_signature.get("size_bytes"), int)
+            or source_signature["size_bytes"] < 0
+            or not isinstance(source_signature.get("modified_at"), str)
+            or not source_signature["modified_at"].strip()
+        ):
+            raise ValueError("production_full notes require a valid source_signature")
+        expected_output_name = f"production_full_{note['output_id']}"
+        if request.get("output_dir_name") != expected_output_name:
+            raise ValueError(f"production_full output_dir_name must be {expected_output_name}")
+        if request.get("config_patch"):
+            raise ValueError("production_full requires a confirmed config without config_patch")
+        if request.get("config_name") != note["confirmed_config_name"]:
+            raise ValueError("production_full confirmed_config_name does not match config_name")
+        request_start_frame = request.get("start_frame")
+        if (
+            isinstance(request_start_frame, bool)
+            or not isinstance(request_start_frame, int)
+            or request_start_frame != 0
+        ):
+            raise ValueError("production_full requires request start_frame=0")
+        if "max_frames" not in request or request.get("max_frames") is not None:
+            raise ValueError("production_full requires request max_frames=null")
+        if request.get("enable_follow_cam") is not False:
+            raise ValueError("production_full requires request enable_follow_cam=false")
+        if (
+            not isinstance(request.get("enable_postprocess"), bool)
+            or request.get("enable_postprocess") is not config.postprocess.enabled
+        ):
+            raise ValueError("production_full enable_postprocess must match the confirmed configuration")
+
+        confirmed_raw = self._load_raw_yaml(config_path)
+        runtime_raw = confirmed_raw.get("runtime")
+        follow_cam_raw = confirmed_raw.get("follow_cam")
+        output_raw = confirmed_raw.get("output")
+        if (
+            not isinstance(runtime_raw, dict)
+            or isinstance(runtime_raw.get("start_frame"), bool)
+            or not isinstance(runtime_raw.get("start_frame"), int)
+            or runtime_raw.get("start_frame") != 0
+            or "max_frames" not in runtime_raw
+            or runtime_raw.get("max_frames") is not None
+            or not isinstance(follow_cam_raw, dict)
+            or follow_cam_raw.get("enabled") is not False
+            or not isinstance(output_raw, dict)
+            or output_raw.get("save_tracking_contract") is not True
+        ):
+            raise RuntimeError("Confirmed production configuration execution invariants are invalid")
+
+        def normalized_polygon(value: Any) -> list[list[float]] | None:
+            if not isinstance(value, list):
+                return None
+            normalized: list[list[float]] = []
+            for point in value:
+                if (
+                    not isinstance(point, (list, tuple))
+                    or len(point) != 2
+                    or any(isinstance(coordinate, bool) for coordinate in point)
+                    or any(not isinstance(coordinate, (int, float)) for coordinate in point)
+                    or any(not np.isfinite(float(coordinate)) for coordinate in point)
+                ):
+                    return None
+                normalized.append([float(point[0]), float(point[1])])
+            return normalized
+
+        expected_field_polygon = [[float(x), float(y)] for x, y in calibration.field_polygon]
+        expected_exclusions = [[[float(x), float(y)] for x, y in polygon] for polygon in calibration.exclusion_polygons]
+        filtering_raw = confirmed_raw.get("filtering")
+        scene_bias_raw = confirmed_raw.get("scene_bias")
+        ground_zones = scene_bias_raw.get("ground_zones") if isinstance(scene_bias_raw, dict) else None
+        negative_rois = scene_bias_raw.get("negative_rois") if isinstance(scene_bias_raw, dict) else None
+        production_zones = (
+            [zone for zone in ground_zones if isinstance(zone, dict) and zone.get("name") == "production_field"]
+            if isinstance(ground_zones, list)
+            else []
+        )
+        expected_roi = [
+            min(point[0] for point in expected_field_polygon),
+            min(point[1] for point in expected_field_polygon),
+            max(point[0] for point in expected_field_polygon),
+            max(point[1] for point in expected_field_polygon),
+        ]
+        raw_roi = filtering_raw.get("roi") if isinstance(filtering_raw, dict) else None
+        normalized_roi = (
+            [float(value) for value in raw_roi]
+            if isinstance(raw_roi, list)
+            and len(raw_roi) == 4
+            and all(not isinstance(value, bool) and isinstance(value, (int, float)) for value in raw_roi)
+            and all(np.isfinite(float(value)) for value in raw_roi)
+            else None
+        )
+        geometry_matches = (
+            isinstance(scene_bias_raw, dict)
+            and scene_bias_raw.get("enabled") is True
+            and isinstance(ground_zones, list)
+            and len(ground_zones) == 1
+            and len(production_zones) == 1
+            and set(production_zones[0]) == {"name", "points"}
+            and normalized_polygon(production_zones[0].get("points")) == expected_field_polygon
+            and isinstance(negative_rois, list)
+            and len(negative_rois) == len(expected_exclusions)
+            and all(
+                isinstance(zone, dict)
+                and set(zone) == {"name", "points"}
+                and zone.get("name") == f"production_exclusion_{index + 1}"
+                and normalized_polygon(zone.get("points")) == expected_polygon
+                for index, (zone, expected_polygon) in enumerate(zip(negative_rois, expected_exclusions, strict=True))
+            )
+            and normalized_roi == expected_roi
+        )
+        if not geometry_matches:
+            raise RuntimeError("Confirmed production configuration geometry does not match calibration_confirmation")
+
+        parent_run_id = request.get("parent_run_id")
+        if not isinstance(parent_run_id, str) or not parent_run_id.strip():
+            raise ValueError("production_full requires parent_run_id")
+        if parent_run_id != note["accepted_trial_run_id"]:
+            raise ValueError("production_full parent_run_id must equal notes.accepted_trial_run_id")
+        try:
+            parent = self.get_run(parent_run_id)
+        except KeyError as exc:
+            raise FileNotFoundError(f"Accepted production trial run not found: {parent_run_id}") from exc
+        if parent.get("status") != "completed":
+            raise RuntimeError(f"Accepted production trial must be completed: {parent_run_id}")
+        if parent.get("source") != "api":
+            raise RuntimeError("Accepted production trial source is not a standard production trial")
+
+        parent_note_raw = parent.get("notes")
+        try:
+            parent_note = json.loads(parent_note_raw) if isinstance(parent_note_raw, str) else None
+        except (TypeError, ValueError):
+            parent_note = None
+        if not isinstance(parent_note, dict):
+            raise RuntimeError("Accepted production trial lineage note is unavailable")
+        parent_note_matches = (
+            parent_note.get("schema_version") == "1.0"
+            and parent_note.get("purpose") == "production_trial"
+            and parent_note.get("workflow_id") == note["workflow_id"]
+            and parent_note.get("calibration_digest") == note["calibration_digest"]
+            and isinstance(parent_note.get("submission_id"), str)
+            and bool(parent_note["submission_id"].strip())
+            and isinstance(parent_note.get("generation"), int)
+            and not isinstance(parent_note["generation"], bool)
+            and parent_note["generation"] > 0
+            and isinstance(parent_note.get("intent_sha256"), str)
+            and re.fullmatch(r"[0-9a-f]{64}", parent_note["intent_sha256"]) is not None
+            and isinstance(parent_note.get("output_id"), str)
+            and bool(parent_note["output_id"].strip())
+            and isinstance(parent_note.get("start_frame"), int)
+            and not isinstance(parent_note["start_frame"], bool)
+            and parent_note["start_frame"] >= 0
+            and isinstance(parent_note.get("max_frames"), int)
+            and not isinstance(parent_note["max_frames"], bool)
+            and parent_note["max_frames"] > 0
+            and isinstance(parent_note.get("enable_postprocess"), bool)
+            and isinstance(parent_note.get("enable_follow_cam"), bool)
+            and parent_run_id == f"production_trial_{parent_note['output_id']}"
+        )
+        if not parent_note_matches:
+            raise RuntimeError("Accepted production trial lineage does not match production_full notes")
+
+        actual_source_signature = {
+            "path": str(video_path),
+            "size_bytes": source_stat.st_size,
+            "modified_at": datetime.fromtimestamp(source_stat.st_mtime, tz=timezone.utc).isoformat(),
+        }
+        if source_signature != actual_source_signature:
+            raise RuntimeError("production_full source signature is stale or invalid")
+        parent_input = parent.get("input_video")
+        if not isinstance(parent_input, str) or Path(parent_input).resolve() != video_path:
+            raise RuntimeError("Accepted production trial source does not match production_full source")
+        if config.input_video.resolve() != video_path:
+            raise RuntimeError("Confirmed production configuration source does not match production_full source")
+
+        try:
+            parent_config_path, _ = self._resolve_run_config_reference(parent)
+            parent_config = self._load_raw_yaml(parent_config_path)
+        except (FileNotFoundError, OSError, RuntimeError, ValueError) as exc:
+            raise RuntimeError("Accepted production trial configuration evidence is unavailable") from exc
+        parent_metadata = parent_config.get("metadata")
+        parent_workflow = parent_metadata.get("production_workflow") if isinstance(parent_metadata, dict) else None
+        if (
+            not isinstance(parent_workflow, dict)
+            or any(parent_workflow.get(key) != value for key, value in parent_note.items())
+            or parent_workflow.get("source_signature") != source_signature
+            or parent_workflow.get("output_dir_name") != parent_run_id
+            or Path(str(parent_config.get("input_video") or "")).resolve() != video_path
+        ):
+            raise RuntimeError("Accepted production trial configuration lineage is invalid")
+
+        config_text_sha256 = hashlib.sha256(config_path.read_text(encoding="utf-8").encode("utf-8")).hexdigest()
+        if config_text_sha256 != note["expected_config_sha256"]:
+            raise RuntimeError("Confirmed production configuration digest does not match production_full notes")
+        confirmed_metadata = confirmed_raw.get("metadata")
+        confirmed_workflow = (
+            confirmed_metadata.get("production_workflow") if isinstance(confirmed_metadata, dict) else None
+        )
+        expected_confirmed_lineage = {
+            "schema_version": "1.0",
+            "workflow_id": note["workflow_id"],
+            "accepted_trial_run_id": parent_run_id,
+            "calibration_digest": note["calibration_digest"],
+            "source_signature": source_signature,
+            "trial_intent_sha256": parent_note["intent_sha256"],
+            "trial_request_sha256": note["accepted_trial_request_sha256"],
+            "patch_sha256": note["config_patch_sha256"],
+        }
+        if not isinstance(confirmed_workflow, dict) or any(
+            confirmed_workflow.get(key) != value for key, value in expected_confirmed_lineage.items()
+        ):
+            raise RuntimeError("Confirmed configuration lineage does not bind the accepted production trial")
+
     def _preflight_broadcast_request(self, request: dict[str, Any]) -> dict[str, Any]:
         if self._is_approved_child_run_request(request):
             raise ValueError("approved child recovery cannot be combined with broadcast_hybrid")
@@ -3617,12 +3947,35 @@ class ApiService:
         calibration_raw = request.get("calibration_confirmation")
         if not isinstance(calibration_raw, dict):
             raise ValueError("broadcast_hybrid requires calibration_confirmation")
-        calibration = ActionCalibration.from_dict({"schema_version": "1.0", **calibration_raw})
+        calibration = ActionCalibration.from_dict(_jsonable({"schema_version": "1.0", **calibration_raw}))
         config_name = request.get("config_name")
         if not isinstance(config_name, str) or not config_name.strip():
             raise ValueError("broadcast_hybrid requires config_name")
         config_path, _ = self._resolve_config_path(config_name)
         config = load_config(config_path)
+        config_raw = self._load_raw_yaml(config_path)
+        config_metadata = config_raw.get("metadata")
+        machine_note = self._machine_run_note(request.get("notes"))
+        output_dir_name = request.get("output_dir_name")
+        has_production_identity = (
+            isinstance(output_dir_name, str)
+            and output_dir_name.startswith("production_full_")
+            or isinstance(config_metadata, dict)
+            and "production_workflow" in config_metadata
+            or machine_note is not None
+            and machine_note.get("purpose") == "production_full"
+        )
+        production_full_note: dict[str, Any] | None = None
+        if has_production_identity:
+            if (
+                machine_note is None
+                or machine_note.get("schema_version") != "1.0"
+                or machine_note.get("purpose") != "production_full"
+            ):
+                raise ValueError(
+                    "Production-identified broadcast runs require schema_version=1.0 production_full notes"
+                )
+            production_full_note = machine_note
         config_patch = request.get("config_patch") or {}
         if not isinstance(config_patch, dict):
             raise ValueError("config_patch must be an object")
@@ -3632,6 +3985,17 @@ class ApiService:
         if not raw_video_path.is_absolute():
             raw_video_path = self.repo_root / raw_video_path
         video_path = self._resolve_input_video_path(str(raw_video_path))
+        source_stat = video_path.stat()
+        if production_full_note is not None:
+            self._preflight_production_full_parent(
+                request,
+                production_full_note,
+                config_path=config_path,
+                config=config,
+                calibration=calibration,
+                video_path=video_path,
+                source_stat=source_stat,
+            )
         output_patch = config_patch.get("output") or {}
         if not isinstance(output_patch, dict):
             raise ValueError("config_patch.output must be an object")
@@ -3685,14 +4049,13 @@ class ApiService:
             )
         finally:
             capture.release()
-        stat = video_path.stat()
         return {
             "input_video": str(video_path),
             "source_resolution": [source_width, source_height],
             "source_frame_count": source_frame_count,
             "fps": fps,
-            "source_size_bytes": stat.st_size,
-            "source_mtime_ns": stat.st_mtime_ns,
+            "source_size_bytes": source_stat.st_size,
+            "source_mtime_ns": source_stat.st_mtime_ns,
             "calibration": calibration.to_dict(),
             "classifier_status": "missing_until_hash_bound_predictions_are_supplied",
             "selective_policy_status": "missing_until_qualified_evidence_is_supplied",
@@ -4410,56 +4773,24 @@ class ApiService:
         parent: dict[str, Any],
         registry: dict[str, Any],
     ) -> dict[str, Any]:
-        notes = parent.get("notes")
-        if notes is None:
-            raise ConfigLineageError(
-                CONFIG_LINEAGE_REQUIRED,
-                "review evidence target confirmation record is required",
-            )
-        try:
-            confirmation = json.loads(notes) if isinstance(notes, str) else notes
-        except json.JSONDecodeError as exc:
-            raise ConfigLineageError(
-                CONFIG_LINEAGE_MISMATCH,
-                "review evidence target confirmation record is malformed",
-            ) from exc
-        if not isinstance(confirmation, dict):
-            raise ConfigLineageError(
-                CONFIG_LINEAGE_MISMATCH,
-                "review evidence target confirmation record is malformed",
-            )
-        confirmed_name = confirmation.get("confirmed_config_name")
-        confirmed_sha256 = confirmation.get("expected_config_sha256")
-        if confirmed_name is None:
-            raise ConfigLineageError(
-                CONFIG_LINEAGE_REQUIRED,
-                "review evidence target confirmation record has no config name",
-            )
-        if not isinstance(confirmed_name, str) or not confirmed_name.strip():
-            raise ConfigLineageError(
-                CONFIG_LINEAGE_MISMATCH,
-                "review evidence target confirmation config name is malformed",
-            )
-        if confirmed_sha256 is None:
-            raise ConfigLineageError(
-                CONFIG_LINEAGE_REQUIRED,
-                "review evidence target confirmation record has no config SHA-256",
-            )
-        if not isinstance(confirmed_sha256, str) or re.fullmatch(r"[0-9a-f]{64}", confirmed_sha256) is None:
-            raise ConfigLineageError(
-                CONFIG_LINEAGE_MISMATCH,
-                "review evidence target confirmation config SHA-256 is malformed",
-            )
+        challenge = self._broadcast_config_lineage_reconfirmation_authority(
+            parent,
+            registry=registry,
+        )
+        confirmed_name = challenge["confirmed_config_name"]
+        confirmed_sha256 = challenge["confirmed_text_sha256"]
         config_path_value = parent.get("config_path")
-        if config_path_value is None:
-            raise ConfigLineageError(
-                CONFIG_LINEAGE_REQUIRED,
-                "review evidence target confirmed config is required",
-            )
-        if not isinstance(config_path_value, str) or not config_path_value.strip():
+        assert isinstance(config_path_value, str)
+        authoritative_workflow_bindings = challenge["workflow_bindings"]
+        if (
+            request.get("target_run_id") != run_id
+            or request.get("target_run_id") != challenge["target_run_id"]
+            or request.get("confirmed_config_name") != confirmed_name
+            or request.get("confirmed_text_sha256") != confirmed_sha256
+        ):
             raise ConfigLineageError(
                 CONFIG_LINEAGE_MISMATCH,
-                "review evidence target confirmed config authority is malformed",
+                "config lineage reconfirmation challenge does not match current server-derived authority",
             )
         workflow_bindings = request.get("workflow_bindings")
         if not isinstance(workflow_bindings, dict):
@@ -4467,27 +4798,14 @@ class ApiService:
                 CONFIG_LINEAGE_MISMATCH,
                 "config lineage workflow bindings are malformed",
             )
-        operator_id = request.get("operator_id")
-        reviewer_id = request.get("reviewer_id")
-        observed_raw_sha256 = request.get("expected_observed_raw_sha256")
-        try:
-            authoritative_workflow_bindings = self._derive_config_lineage_workflow_bindings(
-                parent,
-                Path(config_path_value),
-                registry=registry,
-            )
-        except ConfigLineageError:
-            raise
-        except (ValueError, RuntimeError) as exc:
-            raise ConfigLineageError(
-                CONFIG_LINEAGE_MISMATCH,
-                "config lineage registry authority does not match the target",
-            ) from exc
         if workflow_bindings != authoritative_workflow_bindings:
             raise ConfigLineageError(
                 CONFIG_LINEAGE_MISMATCH,
                 "config lineage workflow bindings do not match server-derived authority",
             )
+        operator_id = request.get("operator_id")
+        reviewer_id = request.get("reviewer_id")
+        observed_raw_sha256 = request.get("expected_observed_raw_sha256")
         try:
             generation = reconfirm_config_lineage(
                 trusted_config_root=self.config_dir,
@@ -4576,11 +4894,178 @@ class ApiService:
             **generation.manifest["projection"],
         }
 
+    def _broadcast_config_lineage_reconfirmation_authority(
+        self,
+        parent: dict[str, Any],
+        *,
+        registry: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Derive current reconfirmation authority without trusting client input."""
+
+        notes = parent.get("notes")
+        if notes is None:
+            raise ConfigLineageError(
+                CONFIG_LINEAGE_REQUIRED,
+                "review evidence target confirmation record is required",
+            )
+        try:
+            confirmation = json.loads(notes) if isinstance(notes, str) else notes
+        except json.JSONDecodeError as exc:
+            raise ConfigLineageError(
+                CONFIG_LINEAGE_MISMATCH,
+                "review evidence target confirmation record is malformed",
+            ) from exc
+        if not isinstance(confirmation, dict):
+            raise ConfigLineageError(
+                CONFIG_LINEAGE_MISMATCH,
+                "review evidence target confirmation record is malformed",
+            )
+        confirmed_name = confirmation.get("confirmed_config_name")
+        confirmed_sha256 = confirmation.get("expected_config_sha256")
+        if confirmed_name is None:
+            raise ConfigLineageError(
+                CONFIG_LINEAGE_REQUIRED,
+                "review evidence target confirmation record has no config name",
+            )
+        if (
+            not isinstance(confirmed_name, str)
+            or not confirmed_name.strip()
+            or confirmed_name != confirmed_name.strip()
+        ):
+            raise ConfigLineageError(
+                CONFIG_LINEAGE_MISMATCH,
+                "review evidence target confirmation config name is malformed",
+            )
+        if confirmed_sha256 is None:
+            raise ConfigLineageError(
+                CONFIG_LINEAGE_REQUIRED,
+                "review evidence target confirmation record has no config SHA-256",
+            )
+        if not isinstance(confirmed_sha256, str) or re.fullmatch(r"[0-9a-f]{64}", confirmed_sha256) is None:
+            raise ConfigLineageError(
+                CONFIG_LINEAGE_MISMATCH,
+                "review evidence target confirmation config SHA-256 is malformed",
+            )
+        config_path_value = parent.get("config_path")
+        if config_path_value is None:
+            raise ConfigLineageError(
+                CONFIG_LINEAGE_REQUIRED,
+                "review evidence target confirmed config is required",
+            )
+        if not isinstance(config_path_value, str) or not config_path_value.strip():
+            raise ConfigLineageError(
+                CONFIG_LINEAGE_MISMATCH,
+                "review evidence target confirmed config authority is malformed",
+            )
+        try:
+            authoritative_workflow_bindings = self._derive_config_lineage_workflow_bindings(
+                parent,
+                Path(config_path_value),
+                registry=registry,
+            )
+        except ConfigLineageError:
+            raise
+        except (ValueError, RuntimeError) as exc:
+            raise ConfigLineageError(
+                CONFIG_LINEAGE_MISMATCH,
+                "config lineage registry authority does not match the target",
+            ) from exc
+        target_run_id = parent.get("run_id")
+        if (
+            not isinstance(target_run_id, str)
+            or not target_run_id
+            or target_run_id != target_run_id.strip()
+        ):
+            raise ConfigLineageError(
+                CONFIG_LINEAGE_MISMATCH,
+                "review evidence target run identity is malformed",
+            )
+        return {
+            "target_run_id": target_run_id,
+            "confirmed_config_name": confirmed_name,
+            "confirmed_text_sha256": confirmed_sha256,
+            "workflow_bindings": authoritative_workflow_bindings,
+        }
+
+    def _broadcast_config_lineage_reconfirmation_challenge(
+        self,
+        parent: dict[str, Any],
+        *,
+        registry: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Build a current server-authored challenge without trusting client-derived lineage."""
+
+        authority = self._broadcast_config_lineage_reconfirmation_authority(
+            parent,
+            registry=registry,
+        )
+        config_path_value = parent.get("config_path")
+        assert isinstance(config_path_value, str)
+        try:
+            _, inspection = capture_config_bytes(
+                self.config_dir,
+                Path(config_path_value),
+            )
+        except ConfigLineageError:
+            raise
+        if inspection.confirmed_text_sha256 != authority["confirmed_text_sha256"]:
+            raise ConfigLineageError(
+                CONFIG_LINEAGE_MISMATCH,
+                "confirmed production config canonical digest does not match the target confirmation",
+            )
+        return {
+            **authority,
+            "expected_observed_raw_sha256": inspection.observed_raw_sha256,
+        }
+
     def get_broadcast_review_evidence(self, run_id: str) -> dict[str, Any]:
         parent, output_dir = self._broadcast_run_output(run_id)
+        queue_path = output_dir / "selective_review_queue.v1.json"
+        queue: dict[str, Any] | None = None
+        queue_sha256: str | None = None
         try:
-            target = self._review_evidence_target(run_id, output_dir, parent=parent)
+            with self._lock:
+                with self._registry_file_lock():
+                    registry = self._read_registry()
+                    parent = self._review_evidence_parent_from_registry(registry, run_id, output_dir)
+                    target = self._review_evidence_target(
+                        run_id,
+                        output_dir,
+                        parent=parent,
+                        registry=registry,
+                    )
+                    if queue_path.is_file():
+                        queue, queue_sha256 = self._validate_current_review_queue_locked(
+                            run_id,
+                            output_dir,
+                            parent,
+                            queue_path,
+                            registry=registry,
+                        )
         except _ReviewEvidenceTargetContextError as exc:
+            blocker: ConfigLineageError = ConfigLineageError(exc.code, str(exc))
+            challenge: dict[str, Any] | None = None
+            if exc.code == CONFIG_LINEAGE_REQUIRED:
+                try:
+                    with self._lock:
+                        with self._registry_file_lock():
+                            challenge_registry = self._read_registry()
+                            challenge_parent = self._review_evidence_parent_from_registry(
+                                challenge_registry,
+                                run_id,
+                                output_dir,
+                            )
+                            challenge = self._broadcast_config_lineage_reconfirmation_challenge(
+                                challenge_parent,
+                                registry=challenge_registry,
+                            )
+                except ConfigLineageError as challenge_error:
+                    blocker = challenge_error
+            recovery_action = (
+                "reconfirm_production_config"
+                if blocker.code == CONFIG_LINEAGE_REQUIRED and challenge is not None
+                else "inspect_production_config_lineage"
+            )
             return {
                 "run_id": run_id,
                 "status": "blocked",
@@ -4589,37 +5074,36 @@ class ApiService:
                 "queue_sha256": None,
                 "stage": "confirmation_invalidated",
                 "progress_percent": 0.0,
-                "blocker_code": exc.code,
-                "error_code": exc.code,
-                "recovery_action": "reconfirm_production_config",
+                "blocker_code": blocker.code,
+                "error_code": blocker.code,
+                "recovery_action": recovery_action,
                 "retryable": False,
                 "can_cancel": False,
                 "bundles": [],
-                "blocking_reasons": [exc.code],
+                "blocking_reasons": [blocker.code],
+                "message": str(blocker),
+                "config_lineage_reconfirmation": challenge,
+            }
+        except BroadcastApiError as exc:
+            return {
+                "run_id": run_id,
+                "status": "blocked",
+                "active_job_id": None,
+                "generation_id": None,
+                "queue_sha256": None,
+                "stage": "validation_failed",
+                "progress_percent": 0.0,
+                "blocker_code": "invalid_or_stale_selective_review_evidence",
+                "error_code": "invalid_or_stale_selective_review_evidence",
+                "recovery_action": "inspect_or_replace_review_evidence_generation",
+                "retryable": False,
+                "can_cancel": False,
+                "bundles": [],
+                "blocking_reasons": ["invalid_or_stale_selective_review_evidence"],
                 "message": str(exc),
             }
-        queue_path = output_dir / "selective_review_queue.v1.json"
-        if queue_path.is_file():
-            try:
-                queue, queue_sha256 = validate_review_queue_activation(output_dir, queue_path)
-            except BroadcastApiError as exc:
-                return {
-                    "run_id": run_id,
-                    "status": "blocked",
-                    "active_job_id": None,
-                    "generation_id": None,
-                    "queue_sha256": None,
-                    "stage": "validation_failed",
-                    "progress_percent": 0.0,
-                    "blocker_code": "invalid_or_stale_selective_review_evidence",
-                    "error_code": "invalid_or_stale_selective_review_evidence",
-                    "recovery_action": "inspect_or_replace_review_evidence_generation",
-                    "retryable": False,
-                    "can_cancel": False,
-                    "bundles": [],
-                    "blocking_reasons": ["invalid_or_stale_selective_review_evidence"],
-                    "message": str(exc),
-                }
+        if queue is not None:
+            assert queue_sha256 is not None
             activation = queue.get("activation") if isinstance(queue.get("activation"), dict) else {}
             return {
                 "run_id": run_id,
@@ -5009,6 +5493,7 @@ class ApiService:
                             parent_run_id,
                             parent_output,
                             parent=current_parent,
+                            registry=registry,
                         )
                         if current_target != target:
                             raise ReviewEvidenceBundleError(
@@ -5187,6 +5672,7 @@ class ApiService:
         output_dir: Path,
         *,
         parent: dict[str, Any] | None = None,
+        registry: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         contract_path = output_dir / TRACKING_CONTRACT_REPORT_NAME
         try:
@@ -5209,7 +5695,7 @@ class ApiService:
         if not action_binding_path.is_file():
             raise RuntimeError("review evidence target action-signal binding is unavailable")
         action_signal_binding_sha256 = sha256_file(action_binding_path)
-        config_confirmation = self._review_evidence_config_confirmation(parent)
+        config_confirmation = self._review_evidence_config_confirmation(parent, registry=registry)
         confirmed_config_sha256 = config_confirmation["confirmed_text_sha256"]
         candidate_rows = contract.get("candidates")
         if not isinstance(candidate_rows, list) or not candidate_rows:
@@ -5277,10 +5763,106 @@ class ApiService:
             target["config_lineage"] = projection
         return target
 
+    @staticmethod
+    def _review_evidence_parent_from_registry(
+        registry: dict[str, Any],
+        run_id: str,
+        output_dir: Path,
+    ) -> dict[str, Any]:
+        parent = next((item for item in registry["runs"] if item.get("run_id") == run_id), None)
+        if parent is None or parent.get("source") != "broadcast_hybrid":
+            raise KeyError(run_id)
+        if parent.get("status") != "completed":
+            raise RuntimeError(f"Broadcast run must be completed before review operations: {run_id}")
+        if Path(parent["output_dir"]).resolve() != output_dir:
+            raise RuntimeError("broadcast review output changed during validation")
+        return parent
+
+    def _validate_current_review_queue_locked(
+        self,
+        run_id: str,
+        output_dir: Path,
+        parent: dict[str, Any],
+        queue_path: Path,
+        *,
+        registry: dict[str, Any],
+    ) -> tuple[dict[str, Any], str]:
+        queue, queue_sha256 = validate_review_queue_activation(output_dir, queue_path)
+        if not isinstance(queue.get("activation"), dict):
+            return queue, queue_sha256
+        target_before = self._review_evidence_target(
+            run_id,
+            output_dir,
+            parent=parent,
+            registry=registry,
+        )
+        queue, queue_sha256 = validate_review_queue_activation(
+            output_dir,
+            queue_path,
+            expected_target=target_before,
+        )
+        target_after = self._review_evidence_target(
+            run_id,
+            output_dir,
+            parent=parent,
+            registry=registry,
+        )
+        if target_after != target_before:
+            raise BroadcastApiError("review evidence target changed during activation validation")
+        return queue, queue_sha256
+
+    @staticmethod
+    def _apply_revoked_review_evidence_state(
+        parent: dict[str, Any],
+        quality_report: dict[str, Any],
+        *,
+        generation_id: str,
+        queue_sha256: str,
+        revoked_at: Any,
+    ) -> None:
+        parent_broadcast = parent.get("broadcast") if isinstance(parent.get("broadcast"), dict) else {}
+        preserved_blockers = [
+            reason
+            for reason in parent_broadcast.get("blocking_reasons", [])
+            if reason
+            not in {
+                "missing_qualified_selective_review_queue",
+                "invalid_or_stale_selective_review_evidence",
+                "review_evidence_bundle_not_available",
+            }
+        ]
+        parent["broadcast"] = {
+            **parent_broadcast,
+            "status": quality_report.get("status"),
+            "blocking_reasons": list(
+                dict.fromkeys([*preserved_blockers, *(quality_report.get("blocking_reasons") or [])])
+            ),
+            "limitations": list(
+                dict.fromkeys(
+                    [
+                        *(parent_broadcast.get("limitations") or []),
+                        *(quality_report.get("limitations") or []),
+                    ]
+                )
+            ),
+            "status_generation": quality_report.get("status_generation"),
+            "review_evidence": {
+                "status": "revoked",
+                "generation_id": generation_id,
+                "queue_sha256": queue_sha256,
+                "revoked_at": revoked_at,
+            },
+        }
+
     def _review_evidence_confirmed_config_sha256(self, parent: dict[str, Any]) -> str:
         return self._review_evidence_config_confirmation(parent)["confirmed_text_sha256"]
 
-    def _review_evidence_config_confirmation(self, parent: dict[str, Any]) -> dict[str, Any]:
+    def _review_evidence_config_confirmation(
+        self,
+        parent: dict[str, Any],
+        *,
+        registry: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         notes = parent.get("notes")
         try:
             confirmation = json.loads(notes) if isinstance(notes, str) else notes
@@ -5311,7 +5893,13 @@ class ApiService:
                 CONFIG_LINEAGE_MISMATCH,
                 "confirmed config lineage snapshot does not match the confirmed text",
             )
-        child = self._config_lineage_child(str(parent.get("run_id") or ""))
+        if registry is None:
+            with self._lock:
+                registry = self._read_registry()
+        child = self._config_lineage_child_from_registry(
+            registry,
+            str(parent.get("run_id") or ""),
+        )
         if child is None:
             raise _ReviewEvidenceTargetContextError(
                 CONFIG_LINEAGE_REQUIRED,
@@ -5324,18 +5912,16 @@ class ApiService:
                 CONFIG_LINEAGE_MISMATCH,
                 "config lineage operation has no authoritative workflow bindings",
             )
-        with self._lock:
-            registry = self._read_registry()
-            try:
-                authoritative_workflow_bindings = self._derive_config_lineage_workflow_bindings(
-                    parent,
-                    config_path,
-                    registry=registry,
-                )
-                if workflow_bindings != authoritative_workflow_bindings:
-                    raise ValueError("config lineage operation workflow bindings differ from server-derived authority")
-            except (ValueError, RuntimeError, ConfigLineageError) as exc:
-                raise _ReviewEvidenceTargetContextError(CONFIG_LINEAGE_MISMATCH, str(exc)) from exc
+        try:
+            authoritative_workflow_bindings = self._derive_config_lineage_workflow_bindings(
+                parent,
+                config_path,
+                registry=registry,
+            )
+            if workflow_bindings != authoritative_workflow_bindings:
+                raise ValueError("config lineage operation workflow bindings differ from server-derived authority")
+        except (ValueError, RuntimeError, ConfigLineageError) as exc:
+            raise _ReviewEvidenceTargetContextError(CONFIG_LINEAGE_MISMATCH, str(exc)) from exc
         try:
             generation = load_config_lineage_reconfirmation(
                 self._config_lineage_root(),
@@ -5385,13 +5971,20 @@ class ApiService:
     def _config_lineage_child(self, parent_run_id: str) -> dict[str, Any] | None:
         with self._lock:
             registry = self._read_registry()
-            matches = [
-                deepcopy(item)
-                for item in registry["runs"]
-                if item.get("source") == "config_lineage_reconfirmation"
-                and item.get("parent_run_id") == parent_run_id
-                and item.get("status") == "completed"
-            ]
+            return self._config_lineage_child_from_registry(registry, parent_run_id)
+
+    @staticmethod
+    def _config_lineage_child_from_registry(
+        registry: dict[str, Any],
+        parent_run_id: str,
+    ) -> dict[str, Any] | None:
+        matches = [
+            deepcopy(item)
+            for item in registry["runs"]
+            if item.get("source") == "config_lineage_reconfirmation"
+            and item.get("parent_run_id") == parent_run_id
+            and item.get("status") == "completed"
+        ]
         return matches[-1] if matches else None
 
     def _derive_config_lineage_workflow_bindings(
@@ -5455,24 +6048,23 @@ class ApiService:
         if not isinstance(source_signature, dict) or set(source_signature) != {
             "path",
             "size_bytes",
-            "mtime_ns",
+            "modified_at",
         }:
             raise ConfigLineageError(
                 CONFIG_LINEAGE_MISMATCH,
-                "confirmed config source_signature must exactly bind path, size_bytes, and mtime_ns",
+                "confirmed config source_signature must exactly bind path, size_bytes, and modified_at",
             )
         source_path_value = source_signature.get("path")
         source_size = source_signature.get("size_bytes")
-        source_mtime_ns = source_signature.get("mtime_ns")
+        source_modified_at = source_signature.get("modified_at")
         if (
             not isinstance(source_path_value, str)
             or not source_path_value
             or isinstance(source_size, bool)
             or not isinstance(source_size, int)
             or source_size < 0
-            or isinstance(source_mtime_ns, bool)
-            or not isinstance(source_mtime_ns, int)
-            or source_mtime_ns < 0
+            or not isinstance(source_modified_at, str)
+            or not source_modified_at.strip()
         ):
             raise ConfigLineageError(
                 CONFIG_LINEAGE_MISMATCH,
@@ -5493,10 +6085,14 @@ class ApiService:
                 CONFIG_LINEAGE_UNSAFE,
                 "authoritative production source is unavailable",
             ) from exc
+        actual_modified_at = datetime.fromtimestamp(
+            source_stat["mtime_ns"] / 1_000_000_000,
+            tz=timezone.utc,
+        ).isoformat()
         if (
             declared_source != expected_source
             or source_stat["size_bytes"] != source_size
-            or source_stat["mtime_ns"] != source_mtime_ns
+            or actual_modified_at != source_modified_at
         ):
             raise ConfigLineageError(
                 CONFIG_LINEAGE_MISMATCH,
@@ -5761,12 +6357,19 @@ class ApiService:
                     )
                     completed_at = _utc_now_iso()
                     recovered_result: dict[str, Any] | None = None
+                    target_context_error: _ReviewEvidenceTargetContextError | None = None
                     if parent is not None:
                         parent_output = Path(parent["output_dir"]).resolve()
                         queue_path = parent_output / "selective_review_queue.v1.json"
                         if queue_path.is_file():
                             try:
-                                queue, queue_sha256 = validate_review_queue_activation(parent_output, queue_path)
+                                queue, queue_sha256 = self._validate_current_review_queue_locked(
+                                    str(child.get("parent_run_id") or ""),
+                                    parent_output,
+                                    parent,
+                                    queue_path,
+                                    registry=registry,
+                                )
                                 activation = (
                                     queue.get("activation") if isinstance(queue.get("activation"), dict) else {}
                                 )
@@ -5796,10 +6399,83 @@ class ApiService:
                                         "review_evidence_generation_id": activation.get("generation_id"),
                                         "queue_sha256": queue_sha256,
                                     }
+                            except _ReviewEvidenceTargetContextError as exc:
+                                target_context_error = exc
                             except (BroadcastApiError, OSError, ValueError):
                                 recovered_result = None
                     output_dir = Path(child["output_dir"]).resolve()
-                    if recovered_result is not None:
+                    if target_context_error is not None:
+                        blocker = ConfigLineageError(target_context_error.code, str(target_context_error))
+                        challenge: dict[str, Any] | None = None
+                        if target_context_error.code == CONFIG_LINEAGE_REQUIRED:
+                            assert parent is not None
+                            try:
+                                challenge = self._broadcast_config_lineage_reconfirmation_challenge(
+                                    parent,
+                                    registry=registry,
+                                )
+                            except ConfigLineageError as challenge_error:
+                                blocker = challenge_error
+                        recovery_action = (
+                            "reconfirm_production_config"
+                            if blocker.code == CONFIG_LINEAGE_REQUIRED and challenge is not None
+                            else "inspect_production_config_lineage"
+                        )
+                        error = str(blocker) or blocker.code
+                        child.update(
+                            {
+                                "status": "failed",
+                                "completed_at": child.get("completed_at") or completed_at,
+                                "error": error,
+                                "broadcast": {
+                                    **metadata,
+                                    "operation_status": "blocked",
+                                    "blocker_code": blocker.code,
+                                    "error_code": blocker.code,
+                                    "recovery_action": recovery_action,
+                                    "recovered": True,
+                                    "worker_exited": True,
+                                },
+                                "progress": self._failed_progress(
+                                    child.get("progress"),
+                                    child.get("started_at"),
+                                ),
+                            }
+                        )
+                        assert parent is not None
+                        parent_broadcast = parent.get("broadcast") if isinstance(parent.get("broadcast"), dict) else {}
+                        parent_review_evidence = (
+                            parent_broadcast.get("review_evidence")
+                            if isinstance(parent_broadcast.get("review_evidence"), dict)
+                            else {}
+                        )
+                        preserved_blockers = [
+                            reason
+                            for reason in parent_broadcast.get("blocking_reasons", [])
+                            if reason
+                            not in {
+                                "missing_qualified_selective_review_queue",
+                                "invalid_or_stale_selective_review_evidence",
+                                "review_evidence_bundle_not_available",
+                                *_CONFIG_LINEAGE_BLOCKERS,
+                            }
+                        ]
+                        parent["broadcast"] = {
+                            **parent_broadcast,
+                            "status": "needs_review",
+                            "blocking_reasons": list(dict.fromkeys([*preserved_blockers, blocker.code])),
+                            "review_evidence": {
+                                **parent_review_evidence,
+                                "status": "blocked",
+                                "operation_run_id": child.get("run_id"),
+                                "blocker_code": blocker.code,
+                                "error_code": blocker.code,
+                                "recovery_action": recovery_action,
+                                "message": error,
+                                "config_lineage_reconfirmation": challenge,
+                            },
+                        }
+                    elif recovered_result is not None:
                         child.update(
                             {
                                 "status": "completed",
@@ -5957,25 +6633,14 @@ class ApiService:
                             "revoked_at": revocation.get("revoked_at"),
                         },
                     }
-                    parent_broadcast = parent.get("broadcast") if isinstance(parent.get("broadcast"), dict) else {}
-                    parent["broadcast"] = {
-                        **parent_broadcast,
-                        "status": "needs_review",
-                        "blocking_reasons": list(
-                            dict.fromkeys(
-                                [
-                                    *(parent_broadcast.get("blocking_reasons") or []),
-                                    "missing_qualified_selective_review_queue",
-                                ]
-                            )
-                        ),
-                        "review_evidence": {
-                            "status": "revoked",
-                            "generation_id": generation_id,
-                            "queue_sha256": queue_sha256,
-                            "revoked_at": revocation.get("revoked_at"),
-                        },
-                    }
+                    quality_report = publish_broadcast_facade(parent_output)
+                    self._apply_revoked_review_evidence_state(
+                        parent,
+                        quality_report,
+                        generation_id=generation_id,
+                        queue_sha256=queue_sha256,
+                        revoked_at=revocation.get("revoked_at"),
+                    )
                     parent["artifacts"] = self._collect_artifacts(parent_output)
                     parent["stats"] = self._collect_stats(parent_output)
 
@@ -6054,26 +6719,14 @@ class ApiService:
                     **metadata,
                     "result": {**result, "status": "revoked", "revoked_at": report["revoked_at"]},
                 }
-                parent_broadcast = parent.get("broadcast") if isinstance(parent.get("broadcast"), dict) else {}
-                blockers = list(
-                    dict.fromkeys(
-                        [
-                            *(parent_broadcast.get("blocking_reasons") or []),
-                            "missing_qualified_selective_review_queue",
-                        ]
-                    )
+                quality_report = publish_broadcast_facade(output_dir)
+                self._apply_revoked_review_evidence_state(
+                    parent,
+                    quality_report,
+                    generation_id=generation_id,
+                    queue_sha256=expected_queue_sha256,
+                    revoked_at=report["revoked_at"],
                 )
-                parent["broadcast"] = {
-                    **parent_broadcast,
-                    "status": "needs_review",
-                    "blocking_reasons": blockers,
-                    "review_evidence": {
-                        "status": "revoked",
-                        "generation_id": generation_id,
-                        "queue_sha256": expected_queue_sha256,
-                        "revoked_at": report["revoked_at"],
-                    },
-                }
                 parent["artifacts"] = self._collect_artifacts(output_dir)
                 parent["stats"] = self._collect_stats(output_dir)
         return {
@@ -6086,36 +6739,65 @@ class ApiService:
 
     def get_broadcast_review_windows(self, run_id: str) -> dict[str, Any]:
         run, output_dir = self._broadcast_run_output(run_id)
-        queue_path = output_dir / "selective_review_queue.v1.json"
-        if not queue_path.is_file():
-            return self._broadcast_needs_review(run_id, "missing_qualified_selective_review_queue")
         try:
-            queue, queue_sha256 = validate_review_queue_activation(output_dir, queue_path)
+            terminal_tail_review = inspect_terminal_tail_review(output_dir)
         except BroadcastApiError as exc:
-            return self._broadcast_needs_review(run_id, "invalid_or_stale_selective_review_evidence", message=str(exc))
-        items = queue.get("items")
-        if not isinstance(items, list):
-            return self._broadcast_needs_review(run_id, "invalid_selective_review_queue_items")
-        broadcast = run.get("broadcast")
-        if not isinstance(broadcast, dict):
-            broadcast = {}
-        configured_limit = broadcast.get("max_manual_review_windows", 30)
-        if not isinstance(configured_limit, int) or isinstance(configured_limit, bool):
-            configured_limit = 30
-        if len(items) > configured_limit or queue.get("review_item_count") != len(items):
-            return self._broadcast_needs_review(run_id, "invalid_selective_review_queue_window_count")
-        return {
-            "run_id": run_id,
-            "status": "ready",
-            "reason": None,
-            "queue_sha256": queue_sha256,
-            "review_item_count": len(items),
-            "items": items,
-        }
+            terminal_tail_review = {
+                "status": "invalid",
+                "reason": str(exc),
+                "evidence": None,
+            }
+
+        def unavailable(reason: str, **details: Any) -> dict[str, Any]:
+            return {
+                **self._broadcast_needs_review(run_id, reason, **details),
+                "terminal_tail_review": terminal_tail_review,
+            }
+
+        queue_path = output_dir / "selective_review_queue.v1.json"
+        with self._lock:
+            with self._registry_file_lock():
+                registry = self._read_registry()
+                run = self._review_evidence_parent_from_registry(registry, run_id, output_dir)
+                if not queue_path.is_file():
+                    return unavailable("missing_qualified_selective_review_queue")
+                try:
+                    queue, queue_sha256 = self._validate_current_review_queue_locked(
+                        run_id,
+                        output_dir,
+                        run,
+                        queue_path,
+                        registry=registry,
+                    )
+                except (BroadcastApiError, RuntimeError) as exc:
+                    return unavailable("invalid_or_stale_selective_review_evidence", message=str(exc))
+                items = queue.get("items")
+                if not isinstance(items, list):
+                    return unavailable("invalid_selective_review_queue_items")
+                broadcast = run.get("broadcast")
+                if not isinstance(broadcast, dict):
+                    broadcast = {}
+                configured_limit = broadcast.get("max_manual_review_windows", 30)
+                if not isinstance(configured_limit, int) or isinstance(configured_limit, bool):
+                    configured_limit = 30
+                if len(items) > configured_limit or queue.get("review_item_count") != len(items):
+                    return unavailable("invalid_selective_review_queue_window_count")
+                return {
+                    "run_id": run_id,
+                    "status": "ready",
+                    "reason": None,
+                    "queue_sha256": queue_sha256,
+                    "review_item_count": len(items),
+                    "items": items,
+                    "terminal_tail_review": terminal_tail_review,
+                }
 
     def submit_broadcast_review_actions(self, run_id: str, request: dict[str, Any]) -> dict[str, Any]:
         self._assert_service_open()
         _, output_dir = self._broadcast_run_output(run_id)
+        expected_queue_sha256 = request.get("queue_sha256")
+        if not isinstance(expected_queue_sha256, str) or re.fullmatch(r"[0-9a-f]{64}", expected_queue_sha256) is None:
+            raise ValueError("queue_sha256 must be a lowercase SHA-256")
         window_state = self.get_broadcast_review_windows(run_id)
         if window_state.get("status") != "ready":
             raise RuntimeError(str(window_state.get("reason") or "broadcast review windows are unavailable"))
@@ -6131,6 +6813,7 @@ class ApiService:
             with self._lock:
                 with self._registry_file_lock():
                     registry = self._read_registry()
+                    parent = self._review_evidence_parent_from_registry(registry, run_id, output_dir)
                     if any(
                         item.get("source") == "broadcast_review_evidence_import"
                         and item.get("parent_run_id") == run_id
@@ -6138,13 +6821,23 @@ class ApiService:
                         for item in registry["runs"]
                     ):
                         raise RuntimeError("review evidence activation is still being committed")
-                    validate_review_queue_activation(output_dir, queue_path)
+                    _, current_queue_sha256 = self._validate_current_review_queue_locked(
+                        run_id,
+                        output_dir,
+                        parent,
+                        queue_path,
+                        registry=registry,
+                    )
+                    if current_queue_sha256 != expected_queue_sha256:
+                        raise RuntimeError("selective review queue changed after review windows were loaded")
                     envelope = build_review_action_envelope(queue_path, raw_actions, trusted_root=output_dir)
                     decisions_path = output_dir / "review_decisions.json"
                     decisions_sha256 = publish_json_exclusive(decisions_path, envelope, trusted_root=output_dir)
+        except _ReviewEvidenceTargetContextError as exc:
+            raise RuntimeError(f"review evidence target changed from current run context: {exc}") from exc
         except BroadcastApiError as exc:
             raise RuntimeError(f"invalid or stale selective review evidence: {exc}") from exc
-        self._refresh_run_artifacts_and_stats(run_id, output_dir)
+        self._refresh_broadcast_facade_state(run_id, output_dir)
         return {
             "run_id": run_id,
             "status": "completed",
@@ -6152,6 +6845,63 @@ class ApiService:
             "artifact": "review_decisions.json",
             "generation_id": None,
             "details": {"review_decisions_sha256": decisions_sha256},
+        }
+
+    def submit_broadcast_terminal_tail_review(self, run_id: str, request: dict[str, Any]) -> dict[str, Any]:
+        self._assert_service_open()
+        parent, output_dir = self._broadcast_run_output(run_id)
+        raw_parent_broadcast = parent.get("broadcast")
+        parent_broadcast: dict[str, Any] = raw_parent_broadcast if isinstance(raw_parent_broadcast, dict) else {}
+        if parent_broadcast.get("status") == "ready" or (output_dir / "broadcast_quality_report.json").is_file():
+            raise RuntimeError("ready broadcast artifacts are immutable; start a new run for revised review actions")
+        reviewer_id = request.get("reviewer_id")
+        decision = request.get("decision")
+        expected_evidence_sha256 = request.get("evidence_sha256")
+        if not isinstance(reviewer_id, str) or not reviewer_id.strip():
+            raise ValueError("reviewer_id must not be blank")
+        if decision != "accept_terminal_shortfall":
+            raise ValueError("unsupported terminal-tail review decision")
+        if (
+            not isinstance(expected_evidence_sha256, str)
+            or re.fullmatch(r"[0-9a-f]{64}", expected_evidence_sha256) is None
+        ):
+            raise ValueError("evidence_sha256 must be a lowercase SHA-256")
+        try:
+            acknowledgement = build_terminal_tail_review_acknowledgement(
+                output_dir,
+                decision=decision,
+                reviewer_id=reviewer_id,
+                evidence_sha256=expected_evidence_sha256,
+            )
+            acknowledgement_path = output_dir / TERMINAL_TAIL_REVIEW_NAME
+            try:
+                acknowledgement_sha256 = publish_json_exclusive(
+                    acknowledgement_path,
+                    acknowledgement,
+                    trusted_root=output_dir,
+                )
+            except BroadcastApiError:
+                # A same-evidence retry or concurrent identical request reuses the
+                # immutable winner; a different reviewer/decision remains a conflict.
+                acknowledgement = build_terminal_tail_review_acknowledgement(
+                    output_dir,
+                    decision=decision,
+                    reviewer_id=reviewer_id,
+                    evidence_sha256=expected_evidence_sha256,
+                )
+                acknowledgement_sha256 = sha256_file(acknowledgement_path)
+        except BroadcastApiError as exc:
+            raise RuntimeError(f"invalid or stale terminal-tail review evidence: {exc}") from exc
+        quality_report = self._refresh_broadcast_facade_state(run_id, output_dir)
+        if quality_report.get("status") != "needs_review":
+            raise RuntimeError("terminal-tail acknowledgement produced an unexpected broadcast state")
+        return {
+            "run_id": run_id,
+            "status": "completed",
+            "reason": "terminal_tail_review_accepted",
+            "artifact": TERMINAL_TAIL_REVIEW_NAME,
+            "generation_id": None,
+            "details": {"terminal_tail_review_sha256": acknowledgement_sha256},
         }
 
     def recompute_broadcast_trajectory(self, run_id: str, request: dict[str, Any]) -> dict[str, Any]:
@@ -6162,6 +6912,7 @@ class ApiService:
             parent_broadcast = {}
         if parent_broadcast.get("status") == "ready" or (output_dir / "broadcast_quality_report.json").is_file():
             raise RuntimeError("ready broadcast artifacts are immutable; start a new run for revised review actions")
+        terminal_tail_frozen_inputs = self._terminal_tail_frozen_inputs(output_dir)
         expected_decisions_sha256 = request.get("review_decisions_sha256")
         if not isinstance(expected_decisions_sha256, str) or not re.fullmatch(
             r"[0-9a-f]{64}", expected_decisions_sha256
@@ -6175,6 +6926,7 @@ class ApiService:
             raise RuntimeError("review decisions changed after they were accepted")
         frozen_inputs = {
             **frozen_inputs,
+            **terminal_tail_frozen_inputs,
             "parent_run_id": run_id,
             "parent_output_dir": str(output_dir),
         }
@@ -6193,6 +6945,7 @@ class ApiService:
             parent_broadcast = {}
         if parent_broadcast.get("status") == "ready" or (output_dir / "broadcast_quality_report.json").is_file():
             raise RuntimeError("broadcast render is already ready and immutable")
+        terminal_tail_frozen_inputs = self._terminal_tail_frozen_inputs(output_dir)
         generation_id = request.get("trajectory_generation_id")
         if not isinstance(generation_id, str) or not re.fullmatch(r"trajectory-[0-9a-f]{24}", generation_id):
             raise ValueError("trajectory_generation_id must identify a completed immutable trajectory generation")
@@ -6218,6 +6971,7 @@ class ApiService:
             raise RuntimeError(str(exc)) from exc
         frozen_inputs = {
             **frozen_inputs,
+            **terminal_tail_frozen_inputs,
             "parent_run_id": run_id,
             "parent_output_dir": str(output_dir),
         }
@@ -6441,6 +7195,7 @@ class ApiService:
                 current_inputs = preflight_recompute_reviewed_trajectory(parent_output)
                 current_inputs = {
                     **current_inputs,
+                    **self._terminal_tail_frozen_inputs(parent_output),
                     "parent_run_id": parent_run_id,
                     "parent_output_dir": str(parent_output),
                 }
@@ -6466,6 +7221,7 @@ class ApiService:
                 )
                 current_inputs = {
                     **current_inputs,
+                    **self._terminal_tail_frozen_inputs(parent_output),
                     "parent_run_id": parent_run_id,
                     "parent_output_dir": str(parent_output),
                 }
@@ -6861,6 +7617,197 @@ class ApiService:
             "details": details,
         }
 
+    def _broadcast_action_contract_evidence(
+        self,
+        *,
+        contract: dict[str, Any],
+        contract_path: Path,
+        contract_sha256: str,
+        input_video: Path,
+        preflight: dict[str, Any],
+        config: AppConfig,
+    ) -> tuple[dict[str, Any], dict[str, Any] | None]:
+        normalized = normalize_tracking_contract_payload(contract, path=contract_path)
+        if normalized.get("artifact_status") != "loaded" or normalized.get("validation_errors") != []:
+            raise RuntimeError("broadcast tracking contract failed deep validation")
+        source = normalized.get("source")
+        summary = normalized.get("summary")
+        frames = normalized.get("frames")
+        if not isinstance(source, dict) or not isinstance(summary, dict) or not isinstance(frames, list):
+            raise RuntimeError("broadcast tracking contract is incomplete")
+
+        expected_frame_count = source.get("frame_count")
+        verified_frame_count = summary.get("frame_count")
+        source_width = source.get("width")
+        source_height = source.get("height")
+        source_fps = source.get("fps")
+        if any(
+            isinstance(value, bool) or not isinstance(value, int) or value <= 0
+            for value in (expected_frame_count, source_width, source_height)
+        ):
+            raise RuntimeError("broadcast tracking contract source metadata is invalid")
+        if (
+            isinstance(verified_frame_count, bool)
+            or not isinstance(verified_frame_count, int)
+            or verified_frame_count <= 0
+            or not isinstance(source_fps, (int, float))
+            or isinstance(source_fps, bool)
+            or not math.isfinite(float(source_fps))
+            or float(source_fps) <= 0.0
+        ):
+            raise RuntimeError("broadcast tracking contract frame evidence is invalid")
+        assert isinstance(expected_frame_count, int)
+        assert isinstance(verified_frame_count, int)
+        assert isinstance(source_width, int)
+        assert isinstance(source_height, int)
+        assert isinstance(source_fps, (int, float))
+        if len(frames) != verified_frame_count or any(
+            not isinstance(frame, dict) or frame.get("frame_index") != index for index, frame in enumerate(frames)
+        ):
+            raise RuntimeError("broadcast tracking contract frames are not contiguous from frame 0")
+
+        preflight_resolution = preflight.get("source_resolution")
+        if preflight_resolution != [source_width, source_height]:
+            raise RuntimeError("broadcast tracking contract source resolution changed after preflight")
+        if preflight.get("source_frame_count") != expected_frame_count:
+            raise RuntimeError("broadcast tracking contract source frame count changed after preflight")
+        preflight_fps = preflight.get("fps")
+        if (
+            not isinstance(preflight_fps, (int, float))
+            or isinstance(preflight_fps, bool)
+            or not math.isclose(float(preflight_fps), float(source_fps), rel_tol=0.0, abs_tol=1e-6)
+        ):
+            raise RuntimeError("broadcast tracking contract source FPS changed after preflight")
+        source_size_bytes = preflight.get("source_size_bytes")
+        if (
+            isinstance(source_size_bytes, bool)
+            or not isinstance(source_size_bytes, int)
+            or source_size_bytes <= 0
+            or input_video.stat().st_size != source_size_bytes
+        ):
+            raise RuntimeError("broadcast source size changed after preflight")
+        if source.get("video_sha256") != sha256_file(input_video):
+            raise RuntimeError("broadcast tracking contract source SHA-256 does not match the input video")
+
+        shortfall = expected_frame_count - verified_frame_count
+        if shortfall < 0:
+            raise RuntimeError("broadcast tracking contract contains more frames than the source metadata")
+        contract_evidence = {
+            "tracking_contract_sha256": contract_sha256,
+            "source_video_sha256": source["video_sha256"],
+            "source_width": source_width,
+            "source_height": source_height,
+            "source_fps": float(source_fps),
+            "reported_frame_count": expected_frame_count,
+            "verified_frame_count": verified_frame_count,
+        }
+        if shortfall == 0:
+            return contract_evidence, None
+        if (
+            int(config.runtime.start_frame) != 0
+            or config.runtime.max_frames is not None
+            or not bool(config.temporal_chunks.enabled)
+        ):
+            raise RuntimeError("broadcast terminal frame shortfall is only allowed for an unbounded full-source run")
+        if (
+            shortfall > ACTION_SIGNAL_MAX_TERMINAL_SHORTFALL_FRAMES
+            or shortfall / float(source_fps) > ACTION_SIGNAL_MAX_TERMINAL_SHORTFALL_SECONDS + 1e-9
+        ):
+            raise RuntimeError("broadcast terminal frame shortfall exceeds the fail-closed policy")
+
+        try:
+            temporal_path = self._resolve_safe_descendant(
+                contract_path.parent,
+                contract_path.parent / "temporal_chunks_report.json",
+                expected_kind="file",
+                direct=True,
+            )
+        except RuntimeError:
+            raise RuntimeError("broadcast terminal frame shortfall has no temporal-chunk audit evidence")
+        temporal, temporal_sha256 = load_bound_json(temporal_path, "broadcast temporal chunks report")
+        events = temporal.get("boundary_events")
+        event = events[0] if isinstance(events, list) and len(events) == 1 else None
+        chunks = temporal.get("chunks")
+        source_chunk_names = temporal.get("source_chunk_names")
+        execution = temporal.get("execution")
+        stitch = temporal.get("stitch")
+        results = execution.get("results") if isinstance(execution, dict) else None
+        ordered_chunks = (
+            chunks if isinstance(chunks, list) and chunks and all(isinstance(chunk, dict) for chunk in chunks) else []
+        )
+        expected_chunk_names = [chunk.get("name") for chunk in ordered_chunks]
+        contiguous_cores = bool(ordered_chunks) and ordered_chunks[0].get("core_start_frame") == 0
+        if contiguous_cores:
+            previous_core_end = -1
+            for index, chunk in enumerate(ordered_chunks):
+                core_start = chunk.get("core_start_frame")
+                core_end = chunk.get("core_end_frame")
+                if (
+                    chunk.get("index") != index
+                    or not isinstance(chunk.get("name"), str)
+                    or isinstance(core_start, bool)
+                    or not isinstance(core_start, int)
+                    or isinstance(core_end, bool)
+                    or not isinstance(core_end, int)
+                    or core_start != previous_core_end + 1
+                    or core_end < core_start
+                ):
+                    contiguous_cores = False
+                    break
+                previous_core_end = core_end
+            contiguous_cores = contiguous_cores and previous_core_end == expected_frame_count - 1
+        ordered_results = (
+            isinstance(results, list)
+            and len(results) == len(ordered_chunks)
+            and all(
+                isinstance(result, dict)
+                and isinstance(result.get("chunk"), dict)
+                and result["chunk"].get("index") == index
+                and result["chunk"].get("name") == expected_chunk_names[index]
+                and result.get("chunk_index") == index
+                and result.get("chunk_name") == expected_chunk_names[index]
+                and result.get("exit_code") == 0
+                for index, result in enumerate(results)
+            )
+        )
+        final_chunk = ordered_chunks[-1] if ordered_chunks else None
+        if (
+            temporal.get("frame_count") != verified_frame_count
+            or temporal.get("chunk_count") != len(ordered_chunks)
+            or source_chunk_names != expected_chunk_names
+            or not contiguous_cores
+            or not isinstance(event, dict)
+            or event.get("type") != "truncated_final_tail"
+            or not isinstance(final_chunk, dict)
+            or event.get("chunk_index") != final_chunk.get("index")
+            or event.get("chunk_name") != final_chunk.get("name")
+            or event.get("first_missing_frame") != verified_frame_count
+            or event.get("last_missing_frame") != expected_frame_count - 1
+            or event.get("missing_frame_count") != shortfall
+            or event.get("planned_core_end_frame") != expected_frame_count - 1
+            or event.get("stitched_core_end_frame") != verified_frame_count - 1
+            or final_chunk.get("core_end_frame") != expected_frame_count - 1
+            or not isinstance(stitch, dict)
+            or stitch.get("status") != "succeeded"
+            or not isinstance(execution, dict)
+            or execution.get("status") != "succeeded"
+            or not ordered_results
+        ):
+            raise RuntimeError("broadcast terminal frame shortfall audit evidence is invalid")
+        return contract_evidence, {
+            **contract_evidence,
+            "temporal_chunks_report_sha256": temporal_sha256,
+            "first_missing_frame": verified_frame_count,
+            "last_missing_frame": expected_frame_count - 1,
+            "missing_frame_count": shortfall,
+            "missing_duration_seconds": shortfall / float(source_fps),
+            "policy": {
+                "max_missing_frames": ACTION_SIGNAL_MAX_TERMINAL_SHORTFALL_FRAMES,
+                "max_missing_seconds": ACTION_SIGNAL_MAX_TERMINAL_SHORTFALL_SECONDS,
+                "requires_manual_review": True,
+            },
+        }
+
     def _run_broadcast_action_signal(
         self,
         run_id: str,
@@ -6869,8 +7816,8 @@ class ApiService:
         progress_plan: dict[str, tuple[float, float]],
     ) -> None:
         existing = self.get_run(run_id)
-        broadcast = existing.get("broadcast") if isinstance(existing.get("broadcast"), dict) else {}
-        preflight = broadcast.get("preflight") if isinstance(broadcast.get("preflight"), dict) else {}
+        broadcast: dict[str, Any] = existing["broadcast"] if isinstance(existing.get("broadcast"), dict) else {}
+        preflight: dict[str, Any] = broadcast["preflight"] if isinstance(broadcast.get("preflight"), dict) else {}
         calibration_raw = preflight.get("calibration")
         if not isinstance(calibration_raw, dict):
             raise RuntimeError("broadcast calibration preflight is unavailable")
@@ -6878,8 +7825,14 @@ class ApiService:
 
         output_dir = Path(config.output_dir).resolve()
         calibration_path = output_dir / "action_calibration.v1.json"
-        contract_path = output_dir / TRACKING_CONTRACT_REPORT_NAME
-        if not contract_path.is_file():
+        try:
+            contract_path = self._resolve_safe_descendant(
+                output_dir,
+                output_dir / TRACKING_CONTRACT_REPORT_NAME,
+                expected_kind="file",
+                direct=True,
+            )
+        except RuntimeError:
             raise RuntimeError("broadcast tracking contract is unavailable after tracking")
         contract, contract_sha256 = load_bound_json(contract_path, "broadcast tracking contract")
         source = contract.get("source") if isinstance(contract.get("source"), dict) else {}
@@ -6903,6 +7856,17 @@ class ApiService:
 
         input_video = Path(config.input_video).resolve()
         source_stat = self._broadcast_source_stat_token(input_video)
+        contract_evidence, terminal_shortfall_evidence = self._broadcast_action_contract_evidence(
+            contract=contract,
+            contract_path=contract_path,
+            contract_sha256=contract_sha256,
+            input_video=input_video,
+            preflight=preflight,
+            config=config,
+        )
+        expected_terminal_shortfall = (
+            int(terminal_shortfall_evidence["missing_frame_count"]) if terminal_shortfall_evidence is not None else 0
+        )
         try:
             publish_json_exclusive(calibration_path, calibration.to_dict(), trusted_root=output_dir)
 
@@ -6927,6 +7891,10 @@ class ApiService:
                 calibration_source=calibration_path,
                 progress_callback=update_action_progress,
                 should_cancel=should_cancel,
+                expected_terminal_shortfall_frames=expected_terminal_shortfall,
+                max_terminal_shortfall_seconds=(
+                    ACTION_SIGNAL_MAX_TERMINAL_SHORTFALL_SECONDS if expected_terminal_shortfall else 0.0
+                ),
             )
             if should_cancel():
                 raise CancelledError()
@@ -6935,6 +7903,39 @@ class ApiService:
                     "broadcast action signal did not complete: "
                     f"{report.get('termination_reason', report.get('status', 'unknown'))}"
                 )
+            if (
+                report.get("source_resolution")
+                != [contract_evidence["source_width"], contract_evidence["source_height"]]
+                or report.get("source_frame_count") != contract_evidence["reported_frame_count"]
+                or report.get("frame_count") != contract_evidence["verified_frame_count"]
+                or not isinstance(report.get("fps"), (int, float))
+                or isinstance(report.get("fps"), bool)
+                or not math.isclose(
+                    float(report["fps"]),
+                    float(contract_evidence["source_fps"]),
+                    rel_tol=0.0,
+                    abs_tol=1e-6,
+                )
+            ):
+                raise RuntimeError("broadcast action signal does not match the tracking contract frame evidence")
+            limitations = report.get("limitations")
+            if terminal_shortfall_evidence is None:
+                if report.get("status") == ACTION_SIGNAL_TERMINAL_SHORTFALL_STATUS or limitations:
+                    raise RuntimeError("broadcast action signal reported an untrusted terminal frame shortfall")
+            else:
+                limitation = limitations[0] if isinstance(limitations, list) and len(limitations) == 1 else None
+                if (
+                    report.get("status") != ACTION_SIGNAL_TERMINAL_SHORTFALL_STATUS
+                    or report.get("termination_reason") != ACTION_SIGNAL_TERMINAL_SHORTFALL_REASON
+                    or not isinstance(limitation, dict)
+                    or limitation.get("code") != ACTION_SIGNAL_TERMINAL_SHORTFALL_LIMITATION
+                    or limitation.get("reported_frame_count", report.get("expected_frame_count"))
+                    != terminal_shortfall_evidence["reported_frame_count"]
+                    or limitation.get("decoded_frame_count") != terminal_shortfall_evidence["verified_frame_count"]
+                    or limitation.get("missing_terminal_frames") != terminal_shortfall_evidence["missing_frame_count"]
+                    or limitation.get("requires_manual_review") is not True
+                ):
+                    raise RuntimeError("broadcast action signal terminal shortfall does not match its trusted audit")
             if self._broadcast_source_stat_token(input_video) != source_stat:
                 raise RuntimeError("broadcast source video changed during action-signal generation")
             if sha256_file(input_video) != source_sha256:
@@ -6952,6 +7953,7 @@ class ApiService:
                     path.name: {"sha256": sha256_file(path), "size_bytes": path.stat().st_size}
                     for path in produced_paths[:-1]
                 },
+                "terminal_shortfall_evidence": terminal_shortfall_evidence,
             }
             publish_json_exclusive(produced_paths[-1], binding, trusted_root=output_dir)
         except BaseException:
@@ -7913,6 +8915,57 @@ class ApiService:
                     return
                 raise KeyError(run_id)
 
+    def _refresh_broadcast_facade_state(self, run_id: str, output_dir: Path) -> dict[str, Any]:
+        quality_report = publish_broadcast_facade(output_dir)
+        with self._lock:
+            with self._registry_transaction() as registry:
+                for run in registry["runs"]:
+                    if run.get("run_id") != run_id:
+                        continue
+                    broadcast = run.get("broadcast") if isinstance(run.get("broadcast"), dict) else {}
+                    if broadcast.get("status") == "ready":
+                        raise RuntimeError("ready broadcast artifacts are immutable")
+                    run["broadcast"] = {
+                        **broadcast,
+                        "status": quality_report.get("status"),
+                        "blocking_reasons": quality_report.get("blocking_reasons", []),
+                        "limitations": quality_report.get("limitations", []),
+                        "review_evidence": quality_report.get("review_evidence", {}),
+                        "status_generation": quality_report.get("status_generation"),
+                    }
+                    run["artifacts"] = self._collect_artifacts(output_dir)
+                    run["stats"] = self._collect_stats(output_dir)
+                    run.setdefault("stats", {})["broadcast"] = {
+                        key: value for key, value in run["broadcast"].items() if key != "preflight"
+                    }
+                    self._attach_ai_candidate_lifecycle(run)
+                    return quality_report
+                raise KeyError(run_id)
+
+    @staticmethod
+    def _require_terminal_tail_review_gate(output_dir: Path) -> str | None:
+        try:
+            state = inspect_terminal_tail_review(output_dir)
+        except BroadcastApiError as exc:
+            raise RuntimeError(f"invalid terminal-tail review evidence: {exc}") from exc
+        if state.get("status") == "required":
+            raise RuntimeError("terminal decoder shortfall requires operator review")
+        if state.get("status") == "invalid":
+            raise RuntimeError(str(state.get("reason") or "terminal-tail review evidence is invalid"))
+        if state.get("status") == "accepted":
+            digest = state.get("acknowledgement_sha256")
+            if not isinstance(digest, str) or re.fullmatch(r"[0-9a-f]{64}", digest) is None:
+                raise RuntimeError("terminal-tail acknowledgement digest is invalid")
+            return digest
+        if state.get("status") == "not_required":
+            return None
+        raise RuntimeError("terminal-tail review state is invalid")
+
+    @classmethod
+    def _terminal_tail_frozen_inputs(cls, output_dir: Path) -> dict[str, str]:
+        acknowledgement_sha256 = cls._require_terminal_tail_review_gate(output_dir)
+        return {"terminal_tail_review_sha256": acknowledgement_sha256} if acknowledgement_sha256 is not None else {}
+
     def _ensure_registry_file(self) -> None:
         self.registry_path.parent.mkdir(parents=True, exist_ok=True)
         if not self.registry_path.exists():
@@ -8311,6 +9364,7 @@ class ApiService:
             )
             current_inputs = {
                 **current_inputs,
+                **self._terminal_tail_frozen_inputs(parent_output),
                 "parent_run_id": parent_run_id,
                 "parent_output_dir": str(parent_output),
             }
@@ -8701,6 +9755,7 @@ class ApiService:
             current_inputs = preflight_recompute_reviewed_trajectory(parent_output)
             current_inputs = {
                 **current_inputs,
+                **self._terminal_tail_frozen_inputs(parent_output),
                 "parent_run_id": parent_run_id,
                 "parent_output_dir": str(parent_output),
             }
@@ -8729,6 +9784,7 @@ class ApiService:
             )
             current_inputs = {
                 **current_inputs,
+                **self._terminal_tail_frozen_inputs(parent_output),
                 "parent_run_id": parent_run_id,
                 "parent_output_dir": str(parent_output),
             }
@@ -9869,10 +10925,12 @@ class ApiService:
         frame_width: int,
         frame_height: int,
     ) -> list[tuple[int, int]]:
+        max_x = max(0, frame_width - 1)
+        max_y = max(0, frame_height - 1)
         return [
             (
-                max(0, min(frame_width, int(round(x)))),
-                max(0, min(frame_height, int(round(y)))),
+                max(0, min(max_x, int(round(x)))),
+                max(0, min(max_y, int(round(y)))),
             )
             for x, y in polygon
         ]
@@ -10777,7 +11835,7 @@ class ApiService:
         return artifact_error
 
     def _load_optional_json_artifact(self, run_id: str, name: str) -> dict[str, Any]:
-        artifact_path = self.get_artifact_path(run_id, name)
+        artifact_path = self._get_internal_artifact_path(run_id, name)
         try:
             with artifact_path.open("r", encoding="utf-8") as handle:
                 loaded = json.load(handle)

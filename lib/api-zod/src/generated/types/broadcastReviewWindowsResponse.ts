@@ -6,6 +6,7 @@
  */
 import type { BroadcastReviewWindow } from "./broadcastReviewWindow";
 import type { BroadcastReviewWindowsResponseStatus } from "./broadcastReviewWindowsResponseStatus";
+import type { BroadcastTerminalTailReviewState } from "./broadcastTerminalTailReviewState";
 
 export interface BroadcastReviewWindowsResponse {
   run_id: string;
@@ -14,4 +15,5 @@ export interface BroadcastReviewWindowsResponse {
   queue_sha256?: string | null;
   review_item_count?: number;
   items?: BroadcastReviewWindow[];
+  terminal_tail_review?: BroadcastTerminalTailReviewState;
 }

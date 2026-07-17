@@ -84,6 +84,16 @@ import {
 } from "@/lib/productionTrial";
 import type { SourceSignature } from "@/lib/productionWorkflow";
 
+const NO_STORE_REQUEST = {
+  cache: "no-store" as const,
+  headers: { "Cache-Control": "no-store" },
+};
+
+const NO_STORE_TEXT_REQUEST = {
+  ...NO_STORE_REQUEST,
+  responseType: "text" as const,
+};
+
 interface ProductionTrialStepProps {
   workflowId: string;
   source: SourceSignature;
@@ -260,37 +270,57 @@ export function ProductionTrialStep({
   });
   const run = runQuery.data ?? null;
   const evidenceEnabled = run?.status === "completed";
-  const artifactsQuery = useListArtifacts(monitoredRunId, {
+  const artifactsQuery = useListArtifacts(monitoredRunId, undefined, {
     query: {
       queryKey: getListArtifactsQueryKey(monitoredRunId),
       enabled: evidenceEnabled,
       staleTime: 0,
     },
+    request: NO_STORE_REQUEST,
   });
-  const manifestQuery = useGetArtifact(monitoredRunId, "run_manifest.json", {
-    query: {
-      queryKey: getGetArtifactQueryKey(monitoredRunId, "run_manifest.json"),
-      enabled: evidenceEnabled,
-      staleTime: 0,
+  const manifestQuery = useGetArtifact(
+    monitoredRunId,
+    "run_manifest.json",
+    undefined,
+    {
+      query: {
+        queryKey: getGetArtifactQueryKey(monitoredRunId, "run_manifest.json"),
+        enabled: evidenceEnabled,
+        staleTime: 0,
+      },
+      request: NO_STORE_REQUEST,
     },
-  });
-  const metricsQuery = useGetArtifact(monitoredRunId, "metrics_report.json", {
-    query: {
-      queryKey: getGetArtifactQueryKey(monitoredRunId, "metrics_report.json"),
-      enabled: evidenceEnabled,
-      staleTime: 0,
+  );
+  const metricsQuery = useGetArtifact(
+    monitoredRunId,
+    "metrics_report.json",
+    undefined,
+    {
+      query: {
+        queryKey: getGetArtifactQueryKey(monitoredRunId, "metrics_report.json"),
+        enabled: evidenceEnabled,
+        staleTime: 0,
+      },
+      request: NO_STORE_REQUEST,
     },
-  });
-  const rawTrackQuery = useGetArtifact(monitoredRunId, "ball_track.csv", {
-    query: {
-      queryKey: getGetArtifactQueryKey(monitoredRunId, "ball_track.csv"),
-      enabled: evidenceEnabled,
-      staleTime: 0,
+  );
+  const rawTrackQuery = useGetArtifact(
+    monitoredRunId,
+    "ball_track.csv",
+    undefined,
+    {
+      query: {
+        queryKey: getGetArtifactQueryKey(monitoredRunId, "ball_track.csv"),
+        enabled: evidenceEnabled,
+        staleTime: 0,
+      },
+      request: NO_STORE_TEXT_REQUEST,
     },
-  });
+  );
   const cleanedTrackQuery = useGetArtifact(
     monitoredRunId,
     "ball_track.cleaned.csv",
+    undefined,
     {
       query: {
         queryKey: getGetArtifactQueryKey(
@@ -301,6 +331,7 @@ export function ProductionTrialStep({
           evidenceEnabled && Boolean(latestAttempt?.request.enable_postprocess),
         staleTime: 0,
       },
+      request: NO_STORE_TEXT_REQUEST,
     },
   );
   const auditQuery = useGetBallAuditReport(monitoredRunId, {

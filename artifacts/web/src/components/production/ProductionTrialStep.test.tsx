@@ -41,6 +41,10 @@ const runsRefetch = vi.fn();
 const runRefetch = vi.fn();
 const artifactsRefetch = vi.fn();
 const artifactRefetch = vi.fn();
+const artifactQueryRequests: Array<{
+  name: string;
+  request: Record<string, unknown> | undefined;
+}> = [];
 const auditRefetch = vi.fn();
 let runsData: RunRecord[] = [];
 let runData: RunRecord | undefined;
@@ -110,11 +114,19 @@ vi.mock("@workspace/api-client-react", () => ({
     data: artifactsData,
     refetch: artifactsRefetch,
   }),
-  useGetArtifact: (_runId: string, name: string) => ({
-    ...queryBase,
-    data: artifactBodies[name],
-    refetch: () => artifactRefetch(name),
-  }),
+  useGetArtifact: (
+    _runId: string,
+    name: string,
+    _params: unknown,
+    options?: { request?: Record<string, unknown> },
+  ) => {
+    artifactQueryRequests.push({ name, request: options?.request });
+    return {
+      ...queryBase,
+      data: artifactBodies[name],
+      refetch: () => artifactRefetch(name, options?.request),
+    };
+  },
   useGetBallAuditReport: () => ({
     ...queryBase,
     data: auditData,
@@ -395,6 +407,7 @@ beforeEach(() => {
     isError: false,
     dataUpdatedAt: 2,
   }));
+  artifactQueryRequests.length = 0;
   artifactRefetch.mockReset().mockImplementation(async (name: string) => ({
     data: artifactBodies[name],
     isError: false,
@@ -957,6 +970,40 @@ describe("ProductionTrialStep evidence and configuration", () => {
     installReadableEvidence();
     const { user, onTrialChange } = renderStep({ trial: state });
     expect(
+      artifactQueryRequests.map(({ name, request }) => ({ name, request })),
+    ).toEqual([
+      {
+        name: "run_manifest.json",
+        request: {
+          cache: "no-store",
+          headers: { "Cache-Control": "no-store" },
+        },
+      },
+      {
+        name: "metrics_report.json",
+        request: {
+          cache: "no-store",
+          headers: { "Cache-Control": "no-store" },
+        },
+      },
+      {
+        name: "ball_track.csv",
+        request: {
+          cache: "no-store",
+          headers: { "Cache-Control": "no-store" },
+          responseType: "text",
+        },
+      },
+      {
+        name: "ball_track.cleaned.csv",
+        request: {
+          cache: "no-store",
+          headers: { "Cache-Control": "no-store" },
+          responseType: "text",
+        },
+      },
+    ]);
+    expect(
       screen.queryByRole("button", { name: "Accept this trial" }),
     ).not.toBeInTheDocument();
     const video = screen
@@ -996,6 +1043,28 @@ describe("ProductionTrialStep evidence and configuration", () => {
       "metrics_report.json",
       "ball_track.csv",
       "ball_track.cleaned.csv",
+    ]);
+    expect(
+      artifactRefetch.mock.calls
+        .filter(([name]) => String(name).endsWith(".csv"))
+        .map(([name, request]) => ({ name, request })),
+    ).toEqual([
+      {
+        name: "ball_track.csv",
+        request: {
+          cache: "no-store",
+          headers: { "Cache-Control": "no-store" },
+          responseType: "text",
+        },
+      },
+      {
+        name: "ball_track.cleaned.csv",
+        request: {
+          cache: "no-store",
+          headers: { "Cache-Control": "no-store" },
+          responseType: "text",
+        },
+      },
     ]);
     expect(auditRefetch).toHaveBeenCalledOnce();
   });

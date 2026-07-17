@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import stat
 import tempfile
@@ -9,6 +10,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from football_tracking.action_signal import (
+    ACTION_SIGNAL_MAX_TERMINAL_SHORTFALL_FRAMES,
+    ACTION_SIGNAL_MAX_TERMINAL_SHORTFALL_SECONDS,
+    ACTION_SIGNAL_TERMINAL_SHORTFALL_LIMITATION,
+    ACTION_SIGNAL_TERMINAL_SHORTFALL_REASON,
+    ACTION_SIGNAL_TERMINAL_SHORTFALL_STATUS,
+)
 from football_tracking.broadcast_hybrid_orchestration import (
     BroadcastHybridOrchestrationError,
     validate_final_broadcast_artifacts,
@@ -31,6 +39,10 @@ PUBLIC_ARTIFACT_NAMES = (
 )
 QUALITY_REPORT_NAME = "broadcast_quality_report.json"
 FINAL_BINDINGS_NAME = "broadcast_artifact_bindings.v1.json"
+TERMINAL_TAIL_REVIEW_NAME = "terminal_tail_review.v1.json"
+TERMINAL_TAIL_REVIEW_BLOCKER = "terminal_decoder_shortfall_requires_operator_review"
+TERMINAL_TAIL_REVIEW_INVALID_BLOCKER = "invalid_terminal_decoder_shortfall_review_evidence"
+TERMINAL_TAIL_LIMITATION = ACTION_SIGNAL_TERMINAL_SHORTFALL_LIMITATION
 _QUEUE_NAME = "selective_review_queue.v1.json"
 _REVIEW_EVIDENCE_ACTIVATION_NAME = "review_evidence_activation.v1.json"
 _REVIEW_EVIDENCE_BUNDLE_NAME = "review_evidence_bundle.v1.json"
@@ -122,6 +134,240 @@ def load_bound_json(path: Path, label: str) -> tuple[dict[str, Any], str]:
     if sha256_file(path) != digest:
         raise BroadcastApiError(f"{label} changed while it was being read")
     return payload, digest
+
+
+def inspect_terminal_tail_review(output_dir: Path) -> dict[str, Any]:
+    """Return the evidence-bound operator-review state for an audited terminal shortfall."""
+
+    root = _trusted_directory(output_dir, "terminal-tail review root")
+    binding_path = root / "action_signal_binding.v1.json"
+    acknowledgement_path = root / TERMINAL_TAIL_REVIEW_NAME
+    if not binding_path.is_file():
+        if acknowledgement_path.exists():
+            raise BroadcastApiError("terminal-tail acknowledgement exists without action-signal evidence")
+        return {"status": "not_required", "reason": None, "evidence": None}
+
+    binding, binding_sha256 = load_bound_json(
+        _contained_nonlink_file(root, binding_path, "action-signal binding"),
+        "action-signal binding",
+    )
+    if binding.get("artifact_type") != "broadcast_action_signal_binding":
+        raise BroadcastApiError("action-signal binding artifact_type is invalid")
+    source = _required_mapping(binding.get("source"), "action-signal source")
+    source_video_sha256 = _required_sha256(source.get("video_sha256"), "action-signal source video sha256")
+    tracking_contract_sha256 = _required_sha256(
+        source.get("tracking_contract_sha256"), "action-signal tracking contract sha256"
+    )
+    artifacts = _required_mapping(binding.get("artifacts"), "action-signal artifacts")
+    action_descriptor = _required_mapping(
+        artifacts.get("action_signal_report.v1.json"), "action-signal report descriptor"
+    )
+    action_signal_report_sha256 = _required_sha256(action_descriptor.get("sha256"), "action-signal report sha256")
+    action_size = _required_nonnegative_int(action_descriptor.get("size_bytes"), "action-signal report size")
+    action_path = _contained_nonlink_file(root, root / "action_signal_report.v1.json", "action-signal report")
+    if action_path.stat().st_size != action_size or sha256_file(action_path) != action_signal_report_sha256:
+        raise BroadcastApiError("action-signal report changed after it was bound")
+    action_report, action_snapshot_sha256 = load_bound_json(action_path, "action-signal report")
+    if action_snapshot_sha256 != action_signal_report_sha256:
+        raise BroadcastApiError("action-signal report snapshot does not match its binding")
+
+    raw_audit = binding.get("terminal_shortfall_evidence")
+    if raw_audit is None:
+        limitations = action_report.get("limitations")
+        if (
+            action_report.get("status") == ACTION_SIGNAL_TERMINAL_SHORTFALL_STATUS
+            or isinstance(limitations, list)
+            and any(isinstance(item, dict) and item.get("code") == TERMINAL_TAIL_LIMITATION for item in limitations)
+        ):
+            raise BroadcastApiError("terminal shortfall is missing its trusted audit evidence")
+        if acknowledgement_path.exists():
+            raise BroadcastApiError("terminal-tail acknowledgement exists when no review is required")
+        return {"status": "not_required", "reason": None, "evidence": None}
+
+    audit = _required_mapping(raw_audit, "terminal shortfall audit")
+    if _required_sha256(audit.get("source_video_sha256"), "terminal audit source video sha256") != source_video_sha256:
+        raise BroadcastApiError("terminal audit source video does not match the action-signal binding")
+    if (
+        _required_sha256(audit.get("tracking_contract_sha256"), "terminal audit tracking contract sha256")
+        != tracking_contract_sha256
+    ):
+        raise BroadcastApiError("terminal audit tracking contract does not match the action-signal binding")
+
+    contract_path = _contained_nonlink_file(root, root / "tracking_contract.v2.json", "tracking contract")
+    if sha256_file(contract_path) != tracking_contract_sha256:
+        raise BroadcastApiError("tracking contract changed after terminal evidence was audited")
+    contract, contract_snapshot_sha256 = load_bound_json(contract_path, "tracking contract")
+    if contract_snapshot_sha256 != tracking_contract_sha256:
+        raise BroadcastApiError("tracking contract snapshot does not match terminal evidence")
+    contract_source = _required_mapping(contract.get("source"), "tracking contract source")
+    contract_summary = _required_mapping(contract.get("summary"), "tracking contract summary")
+
+    temporal_chunks_report_sha256 = _required_sha256(
+        audit.get("temporal_chunks_report_sha256"), "terminal audit temporal chunks sha256"
+    )
+    temporal_path = _contained_nonlink_file(root, root / "temporal_chunks_report.json", "temporal chunks report")
+    if sha256_file(temporal_path) != temporal_chunks_report_sha256:
+        raise BroadcastApiError("temporal chunks report changed after terminal evidence was audited")
+    temporal_report, temporal_snapshot_sha256 = load_bound_json(temporal_path, "temporal chunks report")
+    if temporal_snapshot_sha256 != temporal_chunks_report_sha256:
+        raise BroadcastApiError("temporal chunks snapshot does not match terminal evidence")
+
+    reported = _required_positive_int(audit.get("reported_frame_count"), "terminal reported frame count")
+    verified = _required_positive_int(audit.get("verified_frame_count"), "terminal verified frame count")
+    gap_frames = _required_positive_int(audit.get("missing_frame_count"), "terminal missing frame count")
+    gap_seconds = _required_positive_finite(audit.get("missing_duration_seconds"), "terminal missing duration")
+    source_fps = _required_positive_finite(audit.get("source_fps"), "terminal source fps")
+    contract_fps = _required_positive_finite(contract_source.get("fps"), "tracking source fps")
+    action_fps = _required_positive_finite(action_report.get("fps"), "action-signal fps")
+    policy = _required_mapping(audit.get("policy"), "terminal shortfall policy")
+    boundary_events = temporal_report.get("boundary_events")
+    boundary_event = (
+        boundary_events[0]
+        if isinstance(boundary_events, list) and len(boundary_events) == 1 and isinstance(boundary_events[0], dict)
+        else None
+    )
+    limitation_rows = action_report.get("limitations")
+    limitation = (
+        limitation_rows[0]
+        if isinstance(limitation_rows, list) and len(limitation_rows) == 1 and isinstance(limitation_rows[0], dict)
+        else None
+    )
+    if (
+        reported - verified != gap_frames
+        or gap_frames > ACTION_SIGNAL_MAX_TERMINAL_SHORTFALL_FRAMES
+        or gap_seconds > ACTION_SIGNAL_MAX_TERMINAL_SHORTFALL_SECONDS + 1e-9
+        or not math.isclose(gap_seconds, gap_frames / source_fps, rel_tol=0.0, abs_tol=1e-9)
+        or not math.isclose(source_fps, contract_fps, rel_tol=0.0, abs_tol=1e-6)
+        or not math.isclose(source_fps, action_fps, rel_tol=0.0, abs_tol=1e-6)
+        or policy
+        != {
+            "max_missing_frames": ACTION_SIGNAL_MAX_TERMINAL_SHORTFALL_FRAMES,
+            "max_missing_seconds": ACTION_SIGNAL_MAX_TERMINAL_SHORTFALL_SECONDS,
+            "requires_manual_review": True,
+        }
+        or _required_positive_int(contract_source.get("frame_count"), "tracking source frame count") != reported
+        or _required_sha256(contract_source.get("video_sha256"), "tracking source video sha256") != source_video_sha256
+        or _required_positive_int(contract_summary.get("frame_count"), "tracking summary frame count") != verified
+        or temporal_report.get("frame_count") != verified
+        or not isinstance(boundary_event, dict)
+        or boundary_event.get("type") != "truncated_final_tail"
+        or boundary_event.get("first_missing_frame") != verified
+        or boundary_event.get("last_missing_frame") != reported - 1
+        or boundary_event.get("missing_frame_count") != gap_frames
+        or boundary_event.get("planned_core_end_frame") != reported - 1
+        or boundary_event.get("stitched_core_end_frame") != verified - 1
+        or action_report.get("status") != ACTION_SIGNAL_TERMINAL_SHORTFALL_STATUS
+        or action_report.get("termination_reason") != ACTION_SIGNAL_TERMINAL_SHORTFALL_REASON
+        or action_report.get("expected_frame_count") != reported
+        or action_report.get("frame_count") != verified
+        or not isinstance(limitation, dict)
+        or limitation.get("code") != TERMINAL_TAIL_LIMITATION
+        or limitation.get("requires_manual_review") is not True
+        or limitation.get("expected_frame_count") != reported
+        or limitation.get("decoded_frame_count") != verified
+        or limitation.get("missing_terminal_frames") != gap_frames
+        or not _numbers_close(limitation.get("missing_terminal_seconds"), gap_seconds)
+        or limitation.get("expected_terminal_shortfall_frames") != gap_frames
+        or not _numbers_close(
+            limitation.get("max_accepted_terminal_shortfall_seconds"),
+            ACTION_SIGNAL_MAX_TERMINAL_SHORTFALL_SECONDS,
+        )
+        or limitation.get("policy") != "trusted_full_source_terminal_tail_only"
+        or audit.get("first_missing_frame") != verified
+        or audit.get("last_missing_frame") != reported - 1
+    ):
+        raise BroadcastApiError("terminal shortfall evidence is internally inconsistent")
+
+    evidence_core = {
+        "source_video_sha256": source_video_sha256,
+        "tracking_contract_sha256": tracking_contract_sha256,
+        "action_signal_report_sha256": action_signal_report_sha256,
+        "temporal_chunks_report_sha256": temporal_chunks_report_sha256,
+        "reported_frame_count": reported,
+        "verified_frame_count": verified,
+        "gap_frames": gap_frames,
+        "gap_seconds": gap_seconds,
+    }
+    evidence_sha256 = _canonical_sha256(evidence_core)
+    evidence = {**evidence_core, "evidence_sha256": evidence_sha256}
+    if not acknowledgement_path.is_file():
+        return {"status": "required", "reason": TERMINAL_TAIL_REVIEW_BLOCKER, "evidence": evidence}
+
+    acknowledgement, acknowledgement_sha256 = load_bound_json(
+        _contained_nonlink_file(root, acknowledgement_path, "terminal-tail acknowledgement"),
+        "terminal-tail acknowledgement",
+    )
+    if set(acknowledgement) != {
+        "schema_version",
+        "artifact_type",
+        "reviewed_at",
+        "decision",
+        "reviewer_id",
+        "action_signal_binding_sha256",
+        "evidence",
+    }:
+        raise BroadcastApiError("terminal-tail acknowledgement fields do not match the immutable contract")
+    if (
+        acknowledgement.get("schema_version") != "1.0"
+        or acknowledgement.get("artifact_type") != "broadcast_terminal_tail_review"
+        or acknowledgement.get("decision") != "accept_terminal_shortfall"
+        or _required_sha256(
+            acknowledgement.get("action_signal_binding_sha256"),
+            "terminal-tail acknowledgement action binding sha256",
+        )
+        != binding_sha256
+        or _required_mapping(acknowledgement.get("evidence"), "terminal-tail acknowledgement evidence") != evidence
+    ):
+        raise BroadcastApiError("terminal-tail acknowledgement does not match current evidence")
+    reviewer_id = _required_text(acknowledgement.get("reviewer_id"), "terminal-tail reviewer id")
+    reviewed_at = _required_timestamp(acknowledgement.get("reviewed_at"), "terminal-tail reviewed_at")
+    return {
+        "status": "accepted",
+        "reason": None,
+        "evidence": evidence,
+        "decision": "accept_terminal_shortfall",
+        "reviewer_id": reviewer_id,
+        "reviewed_at": reviewed_at,
+        "acknowledgement_sha256": acknowledgement_sha256,
+    }
+
+
+def build_terminal_tail_review_acknowledgement(
+    output_dir: Path,
+    *,
+    decision: str,
+    reviewer_id: str,
+    evidence_sha256: str,
+    reviewed_at: str | None = None,
+) -> dict[str, Any]:
+    state = inspect_terminal_tail_review(output_dir)
+    reviewer = _required_text(reviewer_id, "terminal-tail reviewer id")
+    if decision != "accept_terminal_shortfall":
+        raise BroadcastApiError("terminal-tail review decision is unsupported")
+    expected_evidence_sha256 = _required_sha256(evidence_sha256, "terminal-tail evidence sha256")
+    evidence = _required_mapping(state.get("evidence"), "terminal-tail evidence")
+    if evidence.get("evidence_sha256") != expected_evidence_sha256:
+        raise BroadcastApiError("terminal-tail evidence changed before acknowledgement")
+    if state.get("status") == "accepted":
+        if state.get("reviewer_id") != reviewer or state.get("decision") != decision:
+            raise BroadcastApiError("terminal-tail acknowledgement is immutable")
+        acknowledgement, _ = load_bound_json(
+            Path(output_dir).resolve() / TERMINAL_TAIL_REVIEW_NAME,
+            "terminal-tail acknowledgement",
+        )
+        return acknowledgement
+    if state.get("status") != "required":
+        raise BroadcastApiError("terminal-tail review is not available for acknowledgement")
+    binding_path = Path(output_dir).resolve() / "action_signal_binding.v1.json"
+    return {
+        "schema_version": "1.0",
+        "artifact_type": "broadcast_terminal_tail_review",
+        "reviewed_at": _required_timestamp(reviewed_at or _utc_now_iso(), "terminal-tail reviewed_at"),
+        "decision": decision,
+        "reviewer_id": reviewer,
+        "action_signal_binding_sha256": sha256_file(binding_path),
+        "evidence": evidence,
+    }
 
 
 def build_review_action_envelope(
@@ -435,7 +681,12 @@ def _validate_target_review_queue_chain(
         raise BroadcastApiError("review queue frozen application target identity is inconsistent")
 
 
-def validate_review_queue_activation(output_dir: Path, queue_path: Path) -> tuple[dict[str, Any], str]:
+def validate_review_queue_activation(
+    output_dir: Path,
+    queue_path: Path,
+    *,
+    expected_target: dict[str, Any] | None = None,
+) -> tuple[dict[str, Any], str]:
     """Validate an imported queue's immutable generation and activation manifest, when present."""
 
     root = _trusted_directory(output_dir, "review activation root")
@@ -472,6 +723,12 @@ def validate_review_queue_activation(output_dir: Path, queue_path: Path) -> tupl
         or activation_manifest.get("bundle_id") != bundle_id
     ):
         raise BroadcastApiError("review evidence activation manifest does not match the root queue")
+    activation_target = _required_mapping(
+        activation_manifest.get("target"),
+        "review evidence activation target",
+    )
+    if expected_target is not None and activation_target != expected_target:
+        raise BroadcastApiError("review evidence activation target does not match the current run context")
     expected_queue_sha256 = _required_sha256(
         activation_manifest.get("activated_queue_sha256"),
         "review evidence activation queue sha256",
@@ -501,9 +758,7 @@ def validate_review_queue_activation(output_dir: Path, queue_path: Path) -> tupl
     ):
         raise BroadcastApiError("review evidence bundle manifest changed after activation")
     bundle_manifest, _ = load_bound_json(bundle_manifest_path, "review evidence bundle manifest")
-    if bundle_manifest.get("bundle_id") != bundle_id or bundle_manifest.get("target") != activation_manifest.get(
-        "target"
-    ):
+    if bundle_manifest.get("bundle_id") != bundle_id or bundle_manifest.get("target") != activation_target:
         raise BroadcastApiError("review evidence bundle target does not match activation")
     request_identity = _required_mapping(
         activation_manifest.get("request_identity"), "review evidence activation request identity"
@@ -801,6 +1056,26 @@ def publish_broadcast_facade(output_dir: Path) -> dict[str, Any]:
     if predictions_path.is_file():
         source_bindings["candidate_predictions.v1.json"] = _snapshot_binding(predictions_path, output_dir)
 
+    try:
+        terminal_tail_review = inspect_terminal_tail_review(output_dir)
+    except BroadcastApiError as exc:
+        terminal_tail_review = {
+            "status": "invalid",
+            "reason": str(exc),
+            "evidence": None,
+        }
+    if terminal_tail_review.get("evidence") is not None:
+        for name in (
+            "action_signal_report.v1.json",
+            "temporal_chunks_report.json",
+        ):
+            source_path = output_dir / name
+            if source_path.is_file():
+                source_bindings[name] = _snapshot_binding(source_path, output_dir)
+    if terminal_tail_review.get("status") == "accepted":
+        acknowledgement_path = output_dir / TERMINAL_TAIL_REVIEW_NAME
+        source_bindings[TERMINAL_TAIL_REVIEW_NAME] = _snapshot_binding(acknowledgement_path, output_dir)
+
     artifacts: dict[str, dict[str, Any]] = {}
     for public_name in PUBLIC_ARTIFACT_NAMES:
         if public_name == QUALITY_REPORT_NAME:
@@ -817,6 +1092,10 @@ def publish_broadcast_facade(output_dir: Path) -> dict[str, Any]:
             artifacts[public_name] = {"status": "missing", "path": public_name}
 
     blocking_reasons: list[str] = []
+    if terminal_tail_review.get("status") == "required":
+        blocking_reasons.append(TERMINAL_TAIL_REVIEW_BLOCKER)
+    elif terminal_tail_review.get("status") == "invalid":
+        blocking_reasons.append(TERMINAL_TAIL_REVIEW_INVALID_BLOCKER)
     if artifacts["ball_candidates.jsonl"]["status"] != "available":
         blocking_reasons.append("missing_reviewed_tracking_candidate_contract")
     if artifacts["candidate_classifications.jsonl"]["status"] != "available":
@@ -850,6 +1129,8 @@ def publish_broadcast_facade(output_dir: Path) -> dict[str, Any]:
         "cooperative_cancellation_at_stage_boundaries_only",
         "source_audio_not_preserved",
     ]
+    if terminal_tail_review.get("evidence") is not None:
+        limitations.append(TERMINAL_TAIL_LIMITATION)
 
     state = {
         "schema_version": "1.0",
@@ -857,6 +1138,7 @@ def publish_broadcast_facade(output_dir: Path) -> dict[str, Any]:
         "status": "needs_review" if blocking_reasons else "ready",
         "blocking_reasons": blocking_reasons,
         "limitations": limitations,
+        "review_evidence": {"terminal_tail_review": terminal_tail_review},
         "lineage": {"sources": source_bindings},
         "artifacts": artifacts,
         "final_bindings": final_bindings,
@@ -978,6 +1260,18 @@ def _verify_report_artifacts(output_dir: Path, report: dict[str, Any]) -> None:
     if status == "ready":
         if report.get("blocking_reasons"):
             raise BroadcastApiError("ready broadcast quality report cannot contain blocking reasons")
+        terminal_tail_review = inspect_terminal_tail_review(output_dir)
+        if terminal_tail_review.get("status") not in {"not_required", "accepted"}:
+            raise BroadcastApiError("ready broadcast quality report lacks terminal-tail operator review")
+        review_evidence = _required_mapping(report.get("review_evidence"), "broadcast review evidence")
+        if review_evidence.get("terminal_tail_review") != terminal_tail_review:
+            raise BroadcastApiError("ready broadcast terminal-tail evidence is stale or invalid")
+        limitations = report.get("limitations")
+        if not isinstance(limitations, list):
+            raise BroadcastApiError("ready broadcast limitations are invalid")
+        expects_terminal_limitation = terminal_tail_review.get("evidence") is not None
+        if (TERMINAL_TAIL_LIMITATION in limitations) is not expects_terminal_limitation:
+            raise BroadcastApiError("ready broadcast terminal-tail limitation is inconsistent")
         validate_review_queue_bindings(output_dir / _QUEUE_NAME, trusted_root=output_dir)
         blockers, final_bindings = _validated_final_bindings(output_dir, artifacts)
         if blockers or report.get("final_bindings") != final_bindings:
@@ -1150,6 +1444,42 @@ def _required_nonnegative_int(value: Any, name: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value < 0:
         raise BroadcastApiError(f"{name} must be a non-negative integer")
     return value
+
+
+def _required_positive_int(value: Any, name: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise BroadcastApiError(f"{name} must be a positive integer")
+    return value
+
+
+def _required_positive_finite(value: Any, name: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise BroadcastApiError(f"{name} must be a positive finite number")
+    parsed = float(value)
+    if not math.isfinite(parsed) or parsed <= 0.0:
+        raise BroadcastApiError(f"{name} must be a positive finite number")
+    return parsed
+
+
+def _numbers_close(value: Any, expected: float) -> bool:
+    return (
+        not isinstance(value, bool)
+        and isinstance(value, (int, float))
+        and math.isfinite(float(value))
+        and math.isclose(float(value), expected, rel_tol=0.0, abs_tol=1e-9)
+    )
+
+
+def _canonical_sha256(value: Any) -> str:
+    return hashlib.sha256(
+        json.dumps(
+            value,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+    ).hexdigest()
 
 
 def _required_mapping(value: Any, name: str) -> dict[str, Any]:

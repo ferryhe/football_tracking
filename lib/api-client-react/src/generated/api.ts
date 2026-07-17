@@ -42,6 +42,7 @@ import type {
   BroadcastReviewEvidenceRevokeResponse,
   BroadcastReviewEvidenceStateResponse,
   BroadcastReviewWindowsResponse,
+  BroadcastTerminalTailReviewRequest,
   BroadcastTrajectoryRecomputeRequest,
   CameraPathResponse,
   ConfigDetail,
@@ -58,6 +59,7 @@ import type {
   FieldSuggestionRequest,
   FieldSuggestionResponse,
   FollowCamRenderRequest,
+  GetArtifactParams,
   GetCameraPathParams,
   HTTPValidationError,
   HealthResponse,
@@ -66,6 +68,7 @@ import type {
   InputCatalogResponse,
   InputQualityRequest,
   InputQualityResponse,
+  ListArtifactsParams,
   PlayerTracksReport,
   RevokeBroadcastReviewEvidenceParams,
   RunRecord,
@@ -2034,29 +2037,49 @@ export function useGetAiReviewTriggersReport<
 /**
  * @summary List Artifacts
  */
-export const getListArtifactsUrl = (runId: string) => {
-  return `/api/runs/${encodePathSegmented(runId)}/artifacts`;
+export const getListArtifactsUrl = (
+  runId: string,
+  params?: ListArtifactsParams,
+) => {
+  const normalizedParams = new URLSearchParams();
+
+  Object.entries(params || {}).forEach(([key, value]) => {
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? "null" : value.toString());
+    }
+  });
+
+  const stringifiedParams = normalizedParams.toString();
+
+  return stringifiedParams.length > 0
+    ? `/api/runs/${encodePathSegmented(runId)}/artifacts?${stringifiedParams}`
+    : `/api/runs/${encodePathSegmented(runId)}/artifacts`;
 };
 
 export const listArtifacts = async (
   runId: string,
+  params?: ListArtifactsParams,
   options?: RequestInit,
 ): Promise<ArtifactSummary[]> => {
-  return customFetch<ArtifactSummary[]>(getListArtifactsUrl(runId), {
+  return customFetch<ArtifactSummary[]>(getListArtifactsUrl(runId, params), {
     ...options,
     method: "GET",
   });
 };
 
-export const getListArtifactsQueryKey = (runId: string) => {
-  return [`/api/runs/${encodePathSegmented(runId)}/artifacts`] as const;
+export const getListArtifactsQueryKey = (
+  runId: string,
+  params?: ListArtifactsParams,
+) => {
+  return [`/api/runs/${encodePathSegmented(runId)}/artifacts`, ...(params ? [params] : [])] as const;
 };
 
 export const getListArtifactsQueryOptions = <
   TData = Awaited<ReturnType<typeof listArtifacts>>,
-  TError = ErrorType<HTTPValidationError>,
+  TError = ErrorType<ApiErrorResponse | HTTPValidationError>,
 >(
   runId: string,
+  params?: ListArtifactsParams,
   options?: {
     query?: UseQueryOptions<
       Awaited<ReturnType<typeof listArtifacts>>,
@@ -2068,11 +2091,12 @@ export const getListArtifactsQueryOptions = <
 ) => {
   const { query: queryOptions, request: requestOptions } = options ?? {};
 
-  const queryKey = queryOptions?.queryKey ?? getListArtifactsQueryKey(runId);
+  const queryKey =
+    queryOptions?.queryKey ?? getListArtifactsQueryKey(runId, params);
 
   const queryFn: QueryFunction<Awaited<ReturnType<typeof listArtifacts>>> = ({
     signal,
-  }) => listArtifacts(runId, { signal, ...requestOptions });
+  }) => listArtifacts(runId, params, { signal, ...requestOptions });
 
   return {
     queryKey,
@@ -2089,7 +2113,9 @@ export const getListArtifactsQueryOptions = <
 export type ListArtifactsQueryResult = NonNullable<
   Awaited<ReturnType<typeof listArtifacts>>
 >;
-export type ListArtifactsQueryError = ErrorType<HTTPValidationError>;
+export type ListArtifactsQueryError = ErrorType<
+  ApiErrorResponse | HTTPValidationError
+>;
 
 /**
  * @summary List Artifacts
@@ -2097,9 +2123,10 @@ export type ListArtifactsQueryError = ErrorType<HTTPValidationError>;
 
 export function useListArtifacts<
   TData = Awaited<ReturnType<typeof listArtifacts>>,
-  TError = ErrorType<HTTPValidationError>,
+  TError = ErrorType<ApiErrorResponse | HTTPValidationError>,
 >(
   runId: string,
+  params?: ListArtifactsParams,
   options?: {
     query?: UseQueryOptions<
       Awaited<ReturnType<typeof listArtifacts>>,
@@ -2109,7 +2136,7 @@ export function useListArtifacts<
     request?: SecondParameter<typeof customFetch>;
   },
 ): UseQueryResult<TData, TError> & { queryKey: QueryKey } {
-  const queryOptions = getListArtifactsQueryOptions(runId, options);
+  const queryOptions = getListArtifactsQueryOptions(runId, params, options);
 
   const query = useQuery(queryOptions) as UseQueryResult<TData, TError> & {
     queryKey: QueryKey;
@@ -2121,31 +2148,56 @@ export function useListArtifacts<
 /**
  * @summary Get Artifact
  */
-export const getGetArtifactUrl = (runId: string, artifactName: string) => {
-  return `/api/runs/${encodePathSegmented(runId)}/artifacts/${encodePathSegmented(artifactName)}`;
+export const getGetArtifactUrl = (
+  runId: string,
+  artifactName: string,
+  params?: GetArtifactParams,
+) => {
+  const normalizedParams = new URLSearchParams();
+
+  Object.entries(params || {}).forEach(([key, value]) => {
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? "null" : value.toString());
+    }
+  });
+
+  const stringifiedParams = normalizedParams.toString();
+
+  return stringifiedParams.length > 0
+    ? `/api/runs/${encodePathSegmented(runId)}/artifacts/${encodePathSegmented(artifactName)}?${stringifiedParams}`
+    : `/api/runs/${encodePathSegmented(runId)}/artifacts/${encodePathSegmented(artifactName)}`;
 };
 
 export const getArtifact = async (
   runId: string,
   artifactName: string,
+  params?: GetArtifactParams,
   options?: RequestInit,
 ): Promise<unknown> => {
-  return customFetch<unknown>(getGetArtifactUrl(runId, artifactName), {
+  return customFetch<unknown>(getGetArtifactUrl(runId, artifactName, params), {
     ...options,
     method: "GET",
   });
 };
 
-export const getGetArtifactQueryKey = (runId: string, artifactName: string) => {
-  return [`/api/runs/${encodePathSegmented(runId)}/artifacts/${encodePathSegmented(artifactName)}`] as const;
+export const getGetArtifactQueryKey = (
+  runId: string,
+  artifactName: string,
+  params?: GetArtifactParams,
+) => {
+  return [
+    `/api/runs/${encodePathSegmented(runId)}/artifacts/${encodePathSegmented(artifactName)}`,
+    ...(params ? [params] : []),
+  ] as const;
 };
 
 export const getGetArtifactQueryOptions = <
   TData = Awaited<ReturnType<typeof getArtifact>>,
-  TError = ErrorType<HTTPValidationError>,
+  TError = ErrorType<ApiErrorResponse | HTTPValidationError>,
 >(
   runId: string,
   artifactName: string,
+  params?: GetArtifactParams,
   options?: {
     query?: UseQueryOptions<
       Awaited<ReturnType<typeof getArtifact>>,
@@ -2158,11 +2210,12 @@ export const getGetArtifactQueryOptions = <
   const { query: queryOptions, request: requestOptions } = options ?? {};
 
   const queryKey =
-    queryOptions?.queryKey ?? getGetArtifactQueryKey(runId, artifactName);
+    queryOptions?.queryKey ??
+    getGetArtifactQueryKey(runId, artifactName, params);
 
   const queryFn: QueryFunction<Awaited<ReturnType<typeof getArtifact>>> = ({
     signal,
-  }) => getArtifact(runId, artifactName, { signal, ...requestOptions });
+  }) => getArtifact(runId, artifactName, params, { signal, ...requestOptions });
 
   return {
     queryKey,
@@ -2179,7 +2232,9 @@ export const getGetArtifactQueryOptions = <
 export type GetArtifactQueryResult = NonNullable<
   Awaited<ReturnType<typeof getArtifact>>
 >;
-export type GetArtifactQueryError = ErrorType<HTTPValidationError>;
+export type GetArtifactQueryError = ErrorType<
+  ApiErrorResponse | HTTPValidationError
+>;
 
 /**
  * @summary Get Artifact
@@ -2187,10 +2242,11 @@ export type GetArtifactQueryError = ErrorType<HTTPValidationError>;
 
 export function useGetArtifact<
   TData = Awaited<ReturnType<typeof getArtifact>>,
-  TError = ErrorType<HTTPValidationError>,
+  TError = ErrorType<ApiErrorResponse | HTTPValidationError>,
 >(
   runId: string,
   artifactName: string,
+  params?: GetArtifactParams,
   options?: {
     query?: UseQueryOptions<
       Awaited<ReturnType<typeof getArtifact>>,
@@ -2200,7 +2256,12 @@ export function useGetArtifact<
     request?: SecondParameter<typeof customFetch>;
   },
 ): UseQueryResult<TData, TError> & { queryKey: QueryKey } {
-  const queryOptions = getGetArtifactQueryOptions(runId, artifactName, options);
+  const queryOptions = getGetArtifactQueryOptions(
+    runId,
+    artifactName,
+    params,
+    options,
+  );
 
   const query = useQuery(queryOptions) as UseQueryResult<TData, TError> & {
     queryKey: QueryKey;
@@ -3008,6 +3069,100 @@ export function useGetBroadcastReviewWindows<
 
   return { ...query, queryKey: queryOptions.queryKey };
 }
+
+/**
+ * @summary Submit Broadcast Terminal Tail Review
+ */
+export const getSubmitBroadcastTerminalTailReviewUrl = (runId: string) => {
+  return `/api/runs/${encodePathSegmented(runId)}/broadcast/terminal-tail-review`;
+};
+
+export const submitBroadcastTerminalTailReview = async (
+  runId: string,
+  broadcastTerminalTailReviewRequest: BroadcastTerminalTailReviewRequest,
+  options?: RequestInit,
+): Promise<BroadcastOperationResponse> => {
+  return customFetch<BroadcastOperationResponse>(
+    getSubmitBroadcastTerminalTailReviewUrl(runId),
+    {
+      ...options,
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...options?.headers },
+      body: JSON.stringify(broadcastTerminalTailReviewRequest),
+    },
+  );
+};
+
+export const getSubmitBroadcastTerminalTailReviewMutationOptions = <
+  TError = ErrorType<void | HTTPValidationError>,
+  TContext = unknown,
+>(options?: {
+  mutation?: UseMutationOptions<
+    Awaited<ReturnType<typeof submitBroadcastTerminalTailReview>>,
+    TError,
+    { runId: string; data: BodyType<BroadcastTerminalTailReviewRequest> },
+    TContext
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}): UseMutationOptions<
+  Awaited<ReturnType<typeof submitBroadcastTerminalTailReview>>,
+  TError,
+  { runId: string; data: BodyType<BroadcastTerminalTailReviewRequest> },
+  TContext
+> => {
+  const mutationKey = ["submitBroadcastTerminalTailReview"];
+  const { mutation: mutationOptions, request: requestOptions } = options
+    ? options.mutation &&
+      "mutationKey" in options.mutation &&
+      options.mutation.mutationKey
+      ? options
+      : { ...options, mutation: { ...options.mutation, mutationKey } }
+    : { mutation: { mutationKey }, request: undefined };
+
+  const mutationFn: MutationFunction<
+    Awaited<ReturnType<typeof submitBroadcastTerminalTailReview>>,
+    { runId: string; data: BodyType<BroadcastTerminalTailReviewRequest> }
+  > = (props) => {
+    const { runId, data } = props ?? {};
+
+    return submitBroadcastTerminalTailReview(runId, data, requestOptions);
+  };
+
+  return { mutationFn, ...mutationOptions };
+};
+
+export type SubmitBroadcastTerminalTailReviewMutationResult = NonNullable<
+  Awaited<ReturnType<typeof submitBroadcastTerminalTailReview>>
+>;
+export type SubmitBroadcastTerminalTailReviewMutationBody =
+  BodyType<BroadcastTerminalTailReviewRequest>;
+export type SubmitBroadcastTerminalTailReviewMutationError =
+  ErrorType<void | HTTPValidationError>;
+
+/**
+ * @summary Submit Broadcast Terminal Tail Review
+ */
+export const useSubmitBroadcastTerminalTailReview = <
+  TError = ErrorType<void | HTTPValidationError>,
+  TContext = unknown,
+>(options?: {
+  mutation?: UseMutationOptions<
+    Awaited<ReturnType<typeof submitBroadcastTerminalTailReview>>,
+    TError,
+    { runId: string; data: BodyType<BroadcastTerminalTailReviewRequest> },
+    TContext
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}): UseMutationResult<
+  Awaited<ReturnType<typeof submitBroadcastTerminalTailReview>>,
+  TError,
+  { runId: string; data: BodyType<BroadcastTerminalTailReviewRequest> },
+  TContext
+> => {
+  return useMutation(
+    getSubmitBroadcastTerminalTailReviewMutationOptions(options),
+  );
+};
 
 /**
  * @summary Recompute Broadcast Trajectory

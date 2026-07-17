@@ -7,6 +7,7 @@
 
 export interface BroadcastOperationDetails {
   review_decisions_sha256?: string | null;
+  terminal_tail_review_sha256?: string | null;
   message?: string | null;
   [key: string]: unknown;
 }

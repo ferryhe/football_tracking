@@ -95,6 +95,7 @@ function renderPage(storage?: SafeBrowserStorage) {
 }
 
 beforeEach(() => {
+  window.history.replaceState({}, "", "/production");
   createSafeBrowserStorage().removeItem(PRODUCTION_DRAFT_STORAGE_KEY);
   queryResult = {
     data: { root_dir: "data", videos: [source] },
@@ -167,6 +168,18 @@ async function draftWithUnsettledTrial(kind: "pending" | "running") {
 }
 
 describe("ProductionPage", () => {
+  it("fails closed for a run URL without a persisted parent and offers the legacy record", () => {
+    window.history.replaceState({}, "", "/production?run=unknown-run");
+    renderPage();
+    expect(screen.getByTestId("production-full-run-error")).toBeVisible();
+    expect(
+      screen.getByRole("link", { name: /legacy broadcast/i }),
+    ).toHaveAttribute("href", "/broadcast?run=unknown-run");
+    expect(
+      screen.queryByRole("heading", { name: /match production/i }),
+    ).toBeNull();
+  });
+
   it("applies sequential async trial callbacks to the latest persisted draft", () => {
     saveProductionDraft(localStorage, completedCalibrationDraft());
     renderPage();
