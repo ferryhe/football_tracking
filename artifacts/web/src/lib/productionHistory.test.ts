@@ -228,6 +228,321 @@ describe("parseProductionHistoryNote", () => {
 });
 
 describe("buildProductionHistoryGroups", () => {
+  it("normalizes equivalent bound paths into one stable group", () => {
+    const variants = [
+      {
+        alias: "zeta",
+        title: "Zeta title",
+        path: "C:\\videos\\match.mp4",
+        name: "Zeta video",
+        size: 300,
+        modifiedAt: "2026-07-14T09:00:00Z",
+        activityAt: "2026-07-14T10:00:00Z",
+        configPath: "config\\shared.yaml",
+        configCreatedAt: "2026-07-14T09:32:00Z",
+      },
+      {
+        alias: "alpha",
+        title: "Alpha title",
+        path: "C:/videos/match.mp4",
+        name: "Alpha video",
+        size: 100,
+        modifiedAt: "2026-07-14T09:01:00Z",
+        activityAt: "2026-07-14T12:00:00Z",
+        configPath: "config/shared.yaml/",
+        configCreatedAt: "2026-07-14T09:30:00Z",
+      },
+      {
+        alias: "beta",
+        title: "Beta title",
+        path: "C:/videos/match.mp4/",
+        name: "Beta video",
+        size: 200,
+        modifiedAt: "2026-07-14T09:02:00Z",
+        activityAt: "2026-07-14T11:00:00Z",
+        configPath: "config/shared.yaml",
+        configCreatedAt: "2026-07-14T09:31:00Z",
+      },
+      {
+        alias: " ",
+        title: " ",
+        path: "C:/videos/match.mp4",
+        name: "Fallback video",
+        size: 100,
+        modifiedAt: "2026-07-14T09:01:00Z",
+        activityAt: "2026-07-14T08:00:00Z",
+        configPath: "config/shared.yaml",
+        configCreatedAt: "2026-07-14T09:33:00Z",
+      },
+    ];
+    const sources = variants.map((variant) =>
+      group(
+        variant.alias,
+        variant.path,
+        [
+          run("production_full_shared-row", {
+            source: "broadcast_hybrid",
+            input_video: variant.path,
+            config_name: "shared.yaml",
+            config_path: variant.configPath,
+            output_dir: "C:/outputs/production_full_shared-row",
+            parent_run_id: "trial-1",
+            notes: fullNote({ output_id: "shared-row" }),
+            broadcast: { status: "ready" },
+            error: variant.alias,
+          }),
+        ],
+        {
+          title: variant.title,
+          input_video: {
+            name: variant.name,
+            path: variant.path,
+            size_bytes: variant.size,
+            modified_at: variant.modifiedAt,
+          },
+          last_activity_at: variant.activityAt,
+          configs: [
+            {
+              name: "shared.yaml",
+              path: variant.configPath,
+              created_at: variant.configCreatedAt,
+              input_video:
+                variant.alias === "beta" ? "C:/videos/other.mp4" : variant.path,
+              postprocess_enabled: true,
+              follow_cam_enabled: false,
+              exists: {
+                config: true,
+                output: variant.alias !== "beta",
+              },
+            },
+          ],
+        },
+      ),
+    );
+
+    const forward = buildProductionHistoryGroups(sources);
+    const reverse = buildProductionHistoryGroups([...sources].reverse());
+
+    for (const projected of [forward, reverse]) {
+      expect(projected).toHaveLength(1);
+      expect(projected[0]).toMatchObject({
+        key: "input:C:/videos/match.mp4",
+        groupId: "alpha",
+        title: "Alpha title",
+        inputPath: "C:/videos/match.mp4",
+        inputVideo: null,
+        lastActivityAt: "2026-07-14T12:00:00Z",
+        isUnbound: false,
+      });
+      expect(projected[0].timeline.map((item) => item.run.run_id)).toEqual([
+        "production_full_shared-row",
+      ]);
+      expect(projected[0].timeline[0]).toMatchObject({
+        note: null,
+        lineageIssue: "identity_mismatch",
+        run: { notes: null, broadcast: {} },
+      });
+      expect(projected[0].summary.readyCandidateCount).toBe(0);
+      expect(projected[0].configs).toHaveLength(1);
+      expect(projected[0].configs[0]).toMatchObject({
+        name: "shared.yaml",
+        path: "config/shared.yaml",
+        created_at: "2026-07-14T09:30:00Z",
+        input_video: null,
+        exists: { config: true, output: false },
+      });
+    }
+
+    expect(forward).toEqual(reverse);
+  });
+
+  it("preserves Windows drive roots without merging drive-relative paths", () => {
+    const rootSources = ["C:/", "C:\\"].map((path, index) =>
+      group(
+        `root-${index}`,
+        path,
+        [run(`root-row-${index}`, { input_video: path })],
+        {
+          title: "Drive root",
+          input_video: {
+            name: "C drive",
+            path,
+            size_bytes: 100,
+            modified_at: "2026-07-14T09:00:00Z",
+          },
+        },
+      ),
+    );
+    const driveRelative = group("drive-relative", "C:", [
+      run("relative-row", { input_video: "C:" }),
+    ]);
+    const sources = [...rootSources, driveRelative];
+
+    const forward = buildProductionHistoryGroups(sources);
+    const reverse = buildProductionHistoryGroups([...sources].reverse());
+
+    expect(forward).toEqual(reverse);
+    expect(forward).toHaveLength(2);
+    expect(forward.map((item) => item.key).sort()).toEqual([
+      "input:C:",
+      "input:C:/",
+    ]);
+    expect(
+      forward
+        .find((item) => item.key === "input:C:/")
+        ?.timeline.map((item) => item.run.run_id)
+        .sort(),
+    ).toEqual(["root-row-0", "root-row-1"]);
+    expect(
+      forward
+        .find((item) => item.key === "input:C:")
+        ?.timeline.map((item) => item.run.run_id),
+    ).toEqual(["relative-row"]);
+  });
+
+  it("fails closed for empty and slash-only paths in either source order", () => {
+    const invalidSources = [
+      ["slash", "Slash title", "/", "slash-row", "2026-07-14T10:00:00Z"],
+      [
+        "backslash",
+        "Backslash title",
+        "\\",
+        "backslash-row",
+        "2026-07-14T11:00:00Z",
+      ],
+      ["empty", "Empty title", "", "empty-row", "2026-07-14T12:00:00Z"],
+      [
+        "whitespace",
+        "Whitespace title",
+        "  ",
+        "whitespace-row",
+        "2026-07-14T13:00:00Z",
+      ],
+    ].map(([alias, title, path, rowId, activityAt]) =>
+      group(alias, null, [run(rowId)], {
+        title,
+        input_video: {
+          name: `${alias}.mp4`,
+          path,
+          size_bytes: 100,
+          modified_at: "2026-07-14T09:00:00Z",
+        },
+        last_activity_at: activityAt,
+        is_unbound: false,
+        configs: [
+          {
+            name: "orphan.yaml",
+            path: alias === "backslash" ? "\\" : "/",
+            created_at: activityAt,
+            input_video: path,
+            postprocess_enabled: true,
+            follow_cam_enabled: false,
+            exists: {
+              config: alias !== "empty",
+              output: alias === "slash",
+            },
+          },
+        ],
+      }),
+    );
+    const authoritative = group(" ", null, [run("null-row")], {
+      title: " ",
+      last_activity_at: "2026-07-14T09:00:00Z",
+      is_unbound: true,
+      configs: [
+        {
+          name: "orphan.yaml",
+          path: "",
+          created_at: "2026-07-14T08:59:00Z",
+          input_video: null,
+          postprocess_enabled: true,
+          follow_cam_enabled: false,
+          exists: { config: false, output: false },
+        },
+      ],
+    });
+    const sources = [...invalidSources, authoritative];
+
+    const forward = buildProductionHistoryGroups(sources);
+    const reverse = buildProductionHistoryGroups([...sources].reverse());
+
+    for (const projected of [forward, reverse]) {
+      expect(projected).toHaveLength(1);
+      expect(projected[0]).toMatchObject({
+        key: "legacy:unbound",
+        groupId: "unbound-legacy",
+        title: "Unbound / Legacy",
+        inputPath: null,
+        inputVideo: null,
+        lastActivityAt: "2026-07-14T13:00:00Z",
+        isUnbound: true,
+      });
+      expect(
+        projected[0].timeline.map((item) => item.run.run_id).sort(),
+      ).toEqual([
+        "backslash-row",
+        "empty-row",
+        "null-row",
+        "slash-row",
+        "whitespace-row",
+      ]);
+      expect(projected[0].configs).toEqual([
+        expect.objectContaining({
+          name: "orphan.yaml",
+          path: "",
+          input_video: null,
+          exists: { config: false, output: false },
+        }),
+      ]);
+    }
+    expect(forward).toEqual(reverse);
+  });
+
+  it("fails closed when duplicate configs disagree on their bound input", () => {
+    const trial = run("production_trial_trial-output", {
+      input_video: "C:/videos/match.mp4",
+      config_name: "trial.yaml",
+      config_path: "config/trial.yaml",
+      output_dir: "C:/outputs/production_trial_trial-output",
+      notes: trialNote(),
+    });
+    const sources = ["C:\\videos\\match.mp4", "C:/videos/match.mp4"].map(
+      (path, index) =>
+        group(`match-${index}`, path, [trial], {
+          input_video: {
+            name: "match.mp4",
+            path,
+            size_bytes: 100,
+            modified_at: "2026-07-14T09:00:00Z",
+          },
+          configs: [
+            {
+              name: "trial.yaml",
+              path: index === 0 ? "config\\trial.yaml" : "config/trial.yaml",
+              created_at: "2026-07-14T09:30:00Z",
+              input_video: index === 0 ? path : "C:/videos/different-match.mp4",
+              postprocess_enabled: true,
+              follow_cam_enabled: false,
+              exists: { config: true },
+            },
+          ],
+        }),
+    );
+
+    const forward = buildProductionHistoryGroups(sources);
+    const reverse = buildProductionHistoryGroups([...sources].reverse());
+
+    expect(forward).toEqual(reverse);
+    expect(forward).toHaveLength(1);
+    expect(forward[0].configs).toHaveLength(1);
+    expect(forward[0].configs[0].input_video).toBeNull();
+    expect(forward[0].timeline).toHaveLength(1);
+    expect(forward[0].timeline[0]).toMatchObject({
+      note: null,
+      lineageIssue: "identity_mismatch",
+    });
+  });
+
   it("uses input path as identity and collision-checks group aliases", () => {
     const first = run("run-a", { input_video: "C:/one/match.mp4" });
     const second = run("run-b", { input_video: "C:/two/match.mp4" });

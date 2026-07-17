@@ -235,7 +235,12 @@ export function parseProductionHistoryNote(
 
 function normalizedPath(value: string | null | undefined): string | null {
   const text = nonEmptyText(value);
-  return text ? text.replaceAll("\\", "/").replace(/\/+$/, "") : null;
+  if (!text) return null;
+  const normalized = text.replaceAll("\\", "/");
+  if (/^[A-Za-z]:\/+$/u.test(normalized)) {
+    return `${normalized.slice(0, 2)}/`;
+  }
+  return normalized.replace(/\/+$/, "") || null;
 }
 
 function pathBasename(value: string | null | undefined): string | null {
@@ -542,17 +547,133 @@ function summarize(
 interface MutableGroup {
   key: string;
   path: string | null;
-  inputVideo: InputVideoItem | null;
+  inputVideos: Map<string, InputVideoItem>;
   title: string;
   candidateAlias: string;
+  sourceSelectionKey: string | null;
   lastActivityAt: string | null;
   isUnbound: boolean;
-  configs: ConfigListItem[];
+  configs: Map<string, { config: ConfigListItem; selectionKey: string }>;
   runs: RunRecord[];
 }
 
 function groupKey(path: string | null): string {
   return path ? `input:${path}` : "legacy:unbound";
+}
+
+function latestTimestamp(
+  current: string | null,
+  candidate: string | null | undefined,
+): string | null {
+  if (!candidate) return current;
+  const currentNumber = timestampNumber(current);
+  const candidateNumber = timestampNumber(candidate);
+  if (candidateNumber !== currentNumber) {
+    return candidateNumber > currentNumber ? candidate : current;
+  }
+  return !current || candidate < current ? candidate : current;
+}
+
+function canonicalValueKey(value: unknown): string {
+  if (Array.isArray(value)) {
+    return `[${value.map(canonicalValueKey).join(",")}]`;
+  }
+  if (value !== null && typeof value === "object") {
+    return `{${Object.entries(value)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, item]) => `${JSON.stringify(key)}:${canonicalValueKey(item)}`)
+      .join(",")}}`;
+  }
+  return `${JSON.stringify(value)}`;
+}
+
+function groupSourceMetadata(
+  path: string | null,
+  source: AssetGroup | undefined,
+): {
+  inputVideo: InputVideoItem | null;
+  title: string;
+  candidateAlias: string;
+  selectionKey: string;
+} | null {
+  if (!source) return null;
+  const sourceVideo =
+    path &&
+    source.input_video &&
+    normalizedPath(source.input_video.path) === path
+      ? { ...source.input_video, path }
+      : null;
+  const title =
+    nonEmptyText(source.title) ??
+    pathBasename(path) ??
+    (path ? path : "Unbound / Legacy");
+  const candidateAlias =
+    nonEmptyText(source.group_id) ?? (path ? "input-group" : "unbound-legacy");
+  const authoritativeUnbound =
+    path === null &&
+    (source.is_unbound === true || source.input_video === null);
+  // Select one coherent source record by a stable content tuple so API order
+  // cannot change the alias, title, or input-video metadata we expose. For
+  // fail-closed paths, real server-declared unbound metadata wins over a path
+  // that only became unbound after normalization.
+  const selectionKey = canonicalValueKey({
+    authorityRank: authoritativeUnbound ? 0 : 1,
+    candidateAlias,
+    sourceVideo,
+    title,
+  });
+  return { inputVideo: sourceVideo, title, candidateAlias, selectionKey };
+}
+
+function canonicalConfig(config: ConfigListItem): ConfigListItem {
+  return {
+    ...config,
+    path: normalizedPath(config.path) ?? "",
+    input_video: normalizedPath(config.input_video),
+  };
+}
+
+function configIdentity(config: ConfigListItem): string {
+  return JSON.stringify([config.name, config.path]);
+}
+
+function configSelectionKey(config: ConfigListItem): string {
+  return canonicalValueKey(config);
+}
+
+function mergeCanonicalConfigs(
+  current: ConfigListItem,
+  candidate: ConfigListItem,
+  representative: ConfigListItem,
+): ConfigListItem {
+  const existsKeys = [
+    ...new Set([
+      ...Object.keys(current.exists),
+      ...Object.keys(candidate.exists),
+    ]),
+  ].sort();
+  return {
+    ...representative,
+    input_video:
+      current.input_video === candidate.input_video
+        ? current.input_video
+        : null,
+    exists: Object.fromEntries(
+      existsKeys.map((key) => [
+        key,
+        current.exists[key] === true && candidate.exists[key] === true,
+      ]),
+    ),
+  };
+}
+
+function canonicalRun(run: RunRecord): RunRecord {
+  return {
+    ...run,
+    config_path: normalizedPath(run.config_path),
+    input_video: normalizedPath(run.input_video),
+    output_dir: normalizedPath(run.output_dir) ?? "",
+  };
 }
 
 /** Build one canonical client projection even if the server returns duplicate aliases or rows. */
@@ -562,37 +683,72 @@ export function buildProductionHistoryGroups(
   const groupByKey = new Map<string, MutableGroup>();
   const runCandidates = new Map<
     string,
-    { run: RunRecord; paths: Set<string>; hasUnboundSource: boolean }
+    {
+      run: RunRecord;
+      selectionKey: string | null;
+      paths: Set<string>;
+      hasUnboundSource: boolean;
+    }
   >();
 
   const ensureGroup = (
     path: string | null,
     source?: AssetGroup,
   ): MutableGroup => {
-    const key = groupKey(path);
+    const canonicalPath = normalizedPath(path);
+    const key = groupKey(canonicalPath);
+    const sourceMetadata = groupSourceMetadata(canonicalPath, source);
     const existing = groupByKey.get(key);
-    if (existing) return existing;
+    if (existing) {
+      if (sourceMetadata?.inputVideo) {
+        existing.inputVideos.set(
+          canonicalValueKey(sourceMetadata.inputVideo),
+          sourceMetadata.inputVideo,
+        );
+      }
+      if (
+        sourceMetadata &&
+        (existing.sourceSelectionKey === null ||
+          sourceMetadata.selectionKey < existing.sourceSelectionKey)
+      ) {
+        existing.title = sourceMetadata.title;
+        existing.candidateAlias = sourceMetadata.candidateAlias;
+        existing.sourceSelectionKey = sourceMetadata.selectionKey;
+      }
+      if (sourceMetadata) {
+        existing.lastActivityAt = latestTimestamp(
+          existing.lastActivityAt,
+          source?.last_activity_at,
+        );
+      }
+      return existing;
+    }
     const created: MutableGroup = {
       key,
-      path,
-      inputVideo:
-        source?.input_video &&
-        normalizedPath(source.input_video.path) === normalizedPath(path)
-          ? source.input_video
-          : null,
+      path: canonicalPath,
+      inputVideos: new Map(),
       title:
+        sourceMetadata?.title ??
         source?.title ??
-        (path
-          ? path.replaceAll("\\", "/").split("/").at(-1) || path
+        (canonicalPath
+          ? canonicalPath.split("/").at(-1) || canonicalPath
           : "Unbound / Legacy"),
       candidateAlias:
+        sourceMetadata?.candidateAlias ??
         nonEmptyText(source?.group_id) ??
-        (path ? "input-group" : "unbound-legacy"),
+        (canonicalPath ? "input-group" : "unbound-legacy"),
+      sourceSelectionKey: sourceMetadata?.selectionKey ?? null,
       lastActivityAt: source?.last_activity_at ?? null,
-      isUnbound: !path,
-      configs: [],
+      isUnbound: canonicalPath === null,
+      configs: new Map(),
       runs: [],
     };
+    if (sourceMetadata?.inputVideo) {
+      created.inputVideos.set(
+        canonicalValueKey(sourceMetadata.inputVideo),
+        sourceMetadata.inputVideo,
+      );
+    }
     groupByKey.set(key, created);
     return created;
   };
@@ -601,19 +757,48 @@ export function buildProductionHistoryGroups(
     const sourcePath =
       source.is_unbound === true || source.input_video === null
         ? null
-        : nonEmptyText(source.input_video?.path);
+        : normalizedPath(source.input_video?.path);
     ensureGroup(sourcePath, source);
     for (const config of source.configs ?? []) {
-      ensureGroup(sourcePath, source).configs.push(config);
+      const target = ensureGroup(sourcePath, source);
+      const candidate = canonicalConfig(config);
+      const identity = configIdentity(candidate);
+      const selectionKey = configSelectionKey(candidate);
+      const existing = target.configs.get(identity);
+      if (!existing) {
+        target.configs.set(identity, { config: candidate, selectionKey });
+      } else {
+        const useCandidate = selectionKey < existing.selectionKey;
+        target.configs.set(identity, {
+          config: mergeCanonicalConfigs(
+            existing.config,
+            candidate,
+            useCandidate ? candidate : existing.config,
+          ),
+          selectionKey: useCandidate ? selectionKey : existing.selectionKey,
+        });
+      }
     }
     for (const run of source.runs ?? []) {
+      const candidate = canonicalRun(run);
       const existing = runCandidates.get(run.run_id);
       if (existing) {
         if (sourcePath) existing.paths.add(sourcePath);
         else existing.hasUnboundSource = true;
+        const existingSelectionKey =
+          existing.selectionKey ?? canonicalValueKey(existing.run);
+        const candidateSelectionKey = canonicalValueKey(candidate);
+        existing.selectionKey = existingSelectionKey;
+        if (candidateSelectionKey !== existingSelectionKey) {
+          const useCandidate = candidateSelectionKey < existingSelectionKey;
+          const representative = useCandidate ? candidate : existing.run;
+          existing.run = { ...representative, notes: null, broadcast: {} };
+          if (useCandidate) existing.selectionKey = candidateSelectionKey;
+        }
       } else {
         runCandidates.set(run.run_id, {
-          run,
+          run: candidate,
+          selectionKey: null,
           paths: new Set(sourcePath ? [sourcePath] : []),
           hasUnboundSource: sourcePath === null,
         });
@@ -637,14 +822,19 @@ export function buildProductionHistoryGroups(
 
   const prepared = [...groupByKey.values()]
     .filter(
-      (group) => !group.isUnbound || group.runs.length || group.configs.length,
+      (group) => !group.isUnbound || group.runs.length || group.configs.size,
     )
     .map((group) => {
+      const inputVideo =
+        group.inputVideos.size === 1
+          ? ([...group.inputVideos.values()][0] ?? null)
+          : null;
+      const configs = [...group.configs.values()].map(({ config }) => config);
       const timeline = buildTimeline(
         group.runs,
         group.path,
-        group.inputVideo,
-        group.configs,
+        inputVideo,
+        configs,
       );
       const runActivity = timeline[0] ? timestamp(timeline[0].run) : null;
       const lastActivityAt =
@@ -659,11 +849,16 @@ export function buildProductionHistoryGroups(
             : group.candidateAlias,
         title: group.title,
         inputPath: group.path,
-        inputVideo: group.inputVideo,
+        inputVideo,
         lastActivityAt,
         isUnbound: group.isUnbound,
-        configs: [...group.configs].sort((left, right) =>
-          left.name.localeCompare(right.name),
+        configs: configs.sort(
+          (left, right) =>
+            left.name.localeCompare(right.name) ||
+            (normalizedPath(left.path) ?? "").localeCompare(
+              normalizedPath(right.path) ?? "",
+            ) ||
+            configSelectionKey(left).localeCompare(configSelectionKey(right)),
         ),
         timeline,
         summary: summarize(timeline),
