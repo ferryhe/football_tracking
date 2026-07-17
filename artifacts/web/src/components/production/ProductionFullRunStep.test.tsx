@@ -71,7 +71,7 @@ const api = vi.hoisted(() => ({
   createRun: vi.fn(),
   cancelRun: vi.fn(),
   cancelRunPending: false,
-  runsData: [] as RunRecord[],
+  runsData: undefined as RunRecord[] | undefined,
   runData: null as RunRecord | null,
   acceptedTrialRunData: null as RunRecord | null,
   acceptedTrialArtifacts: [] as ArtifactSummary[],
@@ -1223,7 +1223,7 @@ describe("ProductionFullRunStep", () => {
     );
   });
 
-  it("canonicalizes a child URL and blocks an unknown URL without a draft parent", async () => {
+  it("canonicalizes a recognized child URL and blocks an unknown URL without a draft parent", async () => {
     const input = await fixture();
     const existing = await trackingState(input);
     api.runData = existing.run;
@@ -1239,6 +1239,7 @@ describe("ProductionFullRunStep", () => {
     await waitFor(() =>
       expect(child.parentChange).toHaveBeenCalledWith(existing.run.run_id),
     );
+    expect(screen.queryByTestId("production-full-run-error")).toBeNull();
     child.unmount();
 
     api.runData = null;
@@ -1246,9 +1247,161 @@ describe("ProductionFullRunStep", () => {
     renderStep(input, null, "unknown-run");
     expect(screen.getByTestId("production-full-run-error")).toBeVisible();
     expect(
-      screen.getByRole("link", { name: /legacy broadcast/i }),
-    ).toHaveAttribute("href", "/broadcast?run=unknown-run");
+      screen.getByRole("link", { name: /production history/i }),
+    ).toHaveAttribute("href", "/history?run=unknown-run&from=production");
     expect(screen.queryByTestId("production-start-full-run")).toBeNull();
+  });
+
+  it("shows a fail-closed status until a requested child identity is recognized", async () => {
+    const input = await fixture();
+    const existing = await trackingState(input);
+    const childRun = runFor(existing.state.attempts[0].request, {
+      run_id: "child-run",
+      source: "broadcast_hybrid_recompute",
+      parent_run_id: existing.run.run_id,
+    });
+    api.runData = existing.run;
+    api.controller = controllerFor({
+      parent: existing.run,
+      state: "tracking",
+    });
+    api.runsData = undefined;
+    const pending = renderStep(input, existing.state, childRun.run_id);
+
+    const status = screen.getByTestId("production-route-identity-pending");
+    expect(status).toHaveAttribute("role", "status");
+    expect(status).toHaveAttribute("aria-live", "polite");
+    expect(status).toHaveTextContent(/verifying the requested run identity/i);
+    await waitFor(() => expect(api.runsOptions.some(queryEnabled)).toBe(true));
+    expect(api.controllerInputs.every((entry) => !controllerEnabled(entry))).toBe(
+      true,
+    );
+    expect(api.currentRunOptions.every((entry) => !queryEnabled(entry))).toBe(
+      true,
+    );
+    expect(pending.transitions).toHaveLength(0);
+    expect(pending.productChanges).toHaveLength(0);
+    expect(pending.persistCurrent).not.toHaveBeenCalled();
+    expect(pending.parentChange).not.toHaveBeenCalled();
+    expect(api.createRun).not.toHaveBeenCalled();
+    expect(api.cancelRun).not.toHaveBeenCalled();
+    expect(api.refreshWorkflow).not.toHaveBeenCalled();
+    expect(api.cancelWorkflow).not.toHaveBeenCalled();
+    expect(api.submitReview).not.toHaveBeenCalled();
+    expect(api.retryRecompute).not.toHaveBeenCalled();
+    expect(api.renderBroadcast).not.toHaveBeenCalled();
+    expect(screen.queryAllByRole("button")).toHaveLength(0);
+
+    api.runsData = [existing.run, childRun];
+    act(() => pending.refreshHarness());
+
+    await waitFor(() =>
+      expect(pending.parentChange).toHaveBeenCalledWith(existing.run.run_id),
+    );
+    expect(
+      screen.queryByTestId("production-route-identity-pending"),
+    ).toBeNull();
+    expect(screen.queryByTestId("production-full-run-error")).toBeNull();
+    await waitFor(() =>
+      expect(api.controllerInputs.some(controllerEnabled)).toBe(true),
+    );
+    expect(api.currentRunOptions.some(queryEnabled)).toBe(true);
+  });
+
+  it("shows a fail-closed status until an unknown requested identity conflicts", async () => {
+    const input = await fixture();
+    const existing = await trackingState(input);
+    api.runData = existing.run;
+    api.controller = controllerFor({
+      parent: existing.run,
+      state: "tracking",
+    });
+    api.runsData = undefined;
+    const pending = renderStep(input, existing.state, "unknown-run");
+
+    expect(
+      screen.getByTestId("production-route-identity-pending"),
+    ).toHaveTextContent(/verifying the requested run identity/i);
+    await waitFor(() => expect(api.runsOptions.some(queryEnabled)).toBe(true));
+    expect(api.controllerInputs.every((entry) => !controllerEnabled(entry))).toBe(
+      true,
+    );
+    expect(api.currentRunOptions.every((entry) => !queryEnabled(entry))).toBe(
+      true,
+    );
+    expect(pending.transitions).toHaveLength(0);
+    expect(pending.productChanges).toHaveLength(0);
+    expect(pending.persistCurrent).not.toHaveBeenCalled();
+    expect(pending.parentChange).not.toHaveBeenCalled();
+    expect(api.createRun).not.toHaveBeenCalled();
+    expect(api.cancelRun).not.toHaveBeenCalled();
+    expect(api.refreshWorkflow).not.toHaveBeenCalled();
+    expect(api.cancelWorkflow).not.toHaveBeenCalled();
+    expect(api.submitReview).not.toHaveBeenCalled();
+    expect(api.retryRecompute).not.toHaveBeenCalled();
+    expect(api.renderBroadcast).not.toHaveBeenCalled();
+    expect(screen.queryAllByRole("button")).toHaveLength(0);
+
+    api.runsData = [existing.run];
+    act(() => pending.refreshHarness());
+
+    expect(
+      await screen.findByTestId("production-full-run-error"),
+    ).toBeVisible();
+    expect(
+      screen.queryByTestId("production-route-identity-pending"),
+    ).toBeNull();
+    expect(
+      screen.getByRole("link", { name: /production history/i }),
+    ).toHaveAttribute("href", "/history?run=unknown-run&from=production");
+    expect(pending.parentChange).not.toHaveBeenCalled();
+    expect(api.controllerInputs.every((entry) => !controllerEnabled(entry))).toBe(
+      true,
+    );
+    expect(api.currentRunOptions.every((entry) => !queryEnabled(entry))).toBe(
+      true,
+    );
+    expect(screen.queryAllByRole("button")).toHaveLength(0);
+  });
+
+  it("fails closed before remote control for an unrelated requested run", async () => {
+    const input = await fixture();
+    const existing = await trackingState(input);
+    api.runData = existing.run;
+    api.controller = controllerFor({
+      parent: existing.run,
+      state: "tracking",
+    });
+    api.runsData = [
+      existing.run,
+      runFor(existing.state.attempts[0].request, {
+        run_id: "unrelated-run",
+        parent_run_id: "different-parent",
+      }),
+    ];
+    const conflict = renderStep(input, existing.state, "unrelated-run");
+    expect(await screen.findByTestId("production-full-run-error")).toBeVisible();
+    expect(
+      screen.getByRole("link", { name: /production history/i }),
+    ).toHaveAttribute("href", "/history?run=unrelated-run&from=production");
+    await waitFor(() =>
+      expect(
+        api.controllerInputs.every((entry) => !controllerEnabled(entry)),
+      ).toBe(true),
+    );
+    expect(api.runsOptions.some(queryEnabled)).toBe(true);
+    expect(api.currentRunOptions.every((entry) => !queryEnabled(entry))).toBe(
+      true,
+    );
+    expect(conflict.transitions).toHaveLength(0);
+    expect(conflict.productChanges).toHaveLength(0);
+    expect(conflict.parentChange).not.toHaveBeenCalled();
+    expect(api.refreshWorkflow).not.toHaveBeenCalled();
+    expect(api.cancelWorkflow).not.toHaveBeenCalled();
+    expect(api.submitReview).not.toHaveBeenCalled();
+    expect(api.retryRecompute).not.toHaveBeenCalled();
+    expect(api.renderBroadcast).not.toHaveBeenCalled();
+    expect(screen.queryAllByRole("button")).toHaveLength(0);
   });
 
   it("hosts blocked review evidence in Production and refreshes both shared states", async () => {

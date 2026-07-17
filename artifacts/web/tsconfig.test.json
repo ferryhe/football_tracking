@@ -3,6 +3,7 @@
   "include": [
     "src/**/*.tsx",
     "src/**/*.vitest.test.ts",
+    "src/lib/productionCutover.test.ts",
     "src/lib/productionWorkflow.test.ts",
     "vitest.setup.ts"
   ],

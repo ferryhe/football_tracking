@@ -1,4 +1,5 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { Link, useSearch } from "wouter";
 import {
   useMutation,
   useQuery,
@@ -24,8 +25,10 @@ import {
   FolderOpen,
   Loader2,
   Search,
+  Scissors,
   Square,
   Trash2,
+  WandSparkles,
 } from "lucide-react";
 
 import { StatusBadge } from "@/components/StatusBadge";
@@ -528,15 +531,19 @@ function TimelineRow({
   onCancel,
   onDelete,
   pendingTargets,
+  focused,
 }: {
   item: ProductionHistoryTimelineItem;
   groupRuns: readonly RunRecord[];
   onCancel: (runId: string) => Promise<boolean>;
   onDelete: (runId: string) => Promise<boolean>;
   pendingTargets: ReadonlySet<string>;
+  focused: boolean;
 }) {
   const { t } = useLanguage();
-  const [open, setOpen] = useState(false);
+  const [open, setOpen] = useState(focused);
+  const routeOwnedOpenRef = useRef(focused);
+  const toggleRef = useRef<HTMLButtonElement>(null);
   const [cancelDialogOpen, setCancelDialogOpen] = useState(false);
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
   const cancellationTarget = productionHistoryCancellationTarget(
@@ -551,6 +558,32 @@ function TimelineRow({
     ? Number(deletionBlocker.slice("children:".length))
     : 0;
   const lineage = lineageLabel(item);
+  const supportsAiReview =
+    item.run.status === "completed" || item.run.status === "failed";
+  const supportsHighlightTools =
+    item.run.status === "completed" &&
+    item.run.source !== "highlight_render" &&
+    (item.run.artifacts ?? []).some(
+      (artifact) => artifact.exists && artifact.name === "event_candidates.json",
+    );
+
+  useEffect(() => {
+    if (focused) {
+      routeOwnedOpenRef.current = true;
+      setOpen(true);
+      toggleRef.current?.focus();
+      return;
+    }
+    if (routeOwnedOpenRef.current) {
+      routeOwnedOpenRef.current = false;
+      setOpen(false);
+    }
+  }, [focused]);
+
+  // A route-owned row closes immediately when focus moves to another run. This
+  // keeps its evidence queries unmounted during the transition, while rows the
+  // operator opened manually retain their independent state.
+  const displayedOpen = routeOwnedOpenRef.current ? focused : open;
 
   return (
     <div
@@ -558,13 +591,17 @@ function TimelineRow({
       data-testid={`timeline-run-${item.run.run_id}`}
     >
       <button
+        ref={toggleRef}
         type="button"
         className="flex w-full items-start gap-3 p-3 text-left hover:bg-muted/40"
-        onClick={() => setOpen((current) => !current)}
-        aria-expanded={open}
+        onClick={() => {
+          routeOwnedOpenRef.current = false;
+          setOpen(!displayedOpen);
+        }}
+        aria-expanded={displayedOpen}
         data-testid={`timeline-toggle-${item.run.run_id}`}
       >
-        {open ? (
+        {displayedOpen ? (
           <ChevronDown className="mt-0.5 h-4 w-4" />
         ) : (
           <ChevronRight className="mt-0.5 h-4 w-4" />
@@ -588,7 +625,7 @@ function TimelineRow({
         <StatusBadge status={item.run.status} />
       </button>
 
-      {open && (
+      {displayedOpen && (
         <div className="space-y-4 border-t bg-muted/10 p-4">
           <div className="grid gap-2 text-xs sm:grid-cols-2">
             <p>
@@ -650,6 +687,24 @@ function TimelineRow({
           )}
 
           <div className="flex flex-wrap items-start gap-2">
+            {supportsAiReview && (
+              <Button asChild variant="outline" size="sm">
+                <Link href={`/ai?run=${encodeURIComponent(item.run.run_id)}`}>
+                  <WandSparkles className="mr-1.5 h-3.5 w-3.5" aria-hidden="true" />
+                  {t.history.openAiReview}
+                </Link>
+              </Button>
+            )}
+            {supportsHighlightTools && (
+              <Button asChild variant="outline" size="sm">
+                <Link
+                  href={`/deliverable?run=${encodeURIComponent(item.run.run_id)}`}
+                >
+                  <Scissors className="mr-1.5 h-3.5 w-3.5" aria-hidden="true" />
+                  {t.history.openHighlightTools}
+                </Link>
+              </Button>
+            )}
             {cancellationTarget && (
               <AlertDialog
                 open={cancelDialogOpen}
@@ -798,11 +853,13 @@ function GroupDetail({
   onCancel,
   onDelete,
   pendingTargets,
+  focusedRunId,
 }: {
   group: ProductionHistoryGroup;
   onCancel: (runId: string) => Promise<boolean>;
   onDelete: (runId: string) => Promise<boolean>;
   pendingTargets: ReadonlySet<string>;
+  focusedRunId: string | null;
 }) {
   const { t } = useLanguage();
   const runs = group.timeline.map((item) => item.run);
@@ -901,6 +958,7 @@ function GroupDetail({
           onCancel={onCancel}
           onDelete={onDelete}
           pendingTargets={pendingTargets}
+          focused={focusedRunId === item.run.run_id}
         />
       ))}
     </div>
@@ -911,10 +969,15 @@ export function GroupedProductionHistory() {
   const { t } = useLanguage();
   const { toast } = useToast();
   const queryClient = useQueryClient();
+  const routeSearch = useSearch();
+  const routeParams = new URLSearchParams(routeSearch);
+  const requestedRunId = routeParams.get("run")?.trim() || null;
+  const migratedFrom = routeParams.get("from")?.trim() || null;
   const productCacheRevision = useProductCacheRevision(queryClient);
   const [filter, setFilter] = useState<ProductionHistoryFilter>("all");
   const [search, setSearch] = useState("");
   const [openGroupKey, setOpenGroupKey] = useState<string | null>(null);
+  const routeStateOwnedRef = useRef(false);
   const pendingTargets = usePendingTargets(queryClient);
 
   const assetGroups = useQuery({
@@ -931,6 +994,30 @@ export function GroupedProductionHistory() {
     () => buildProductionHistoryGroups(assetGroups.data ?? []),
     [assetGroups.data],
   );
+  const requestedGroup = useMemo(
+    () =>
+      requestedRunId
+        ? groups.find((group) =>
+            group.timeline.some((item) => item.run.run_id === requestedRunId),
+          ) ?? null
+        : null,
+    [groups, requestedRunId],
+  );
+
+  useEffect(() => {
+    if (requestedRunId) {
+      routeStateOwnedRef.current = true;
+      setFilter("all");
+      setSearch(requestedGroup ? requestedRunId : "");
+      setOpenGroupKey(requestedGroup?.key ?? null);
+      return;
+    }
+    if (!routeStateOwnedRef.current) return;
+    routeStateOwnedRef.current = false;
+    setFilter("all");
+    setSearch("");
+    setOpenGroupKey(null);
+  }, [requestedGroup, requestedRunId]);
   const filtered = useMemo(
     () => filterProductionHistoryGroups(groups, search, filter),
     [filter, groups, search],
@@ -1016,6 +1103,27 @@ export function GroupedProductionHistory() {
           {t.history.groupedSubtitle}
         </p>
       </div>
+
+      {requestedRunId && requestedGroup && (
+        <Alert role="status" aria-live="polite">
+          <AlertDescription>
+            {migratedFrom === "broadcast"
+              ? t.history.broadcastMigrated(requestedRunId)
+              : t.history.focusedRun(requestedRunId)}
+          </AlertDescription>
+        </Alert>
+      )}
+      {requestedRunId &&
+        !assetGroups.isPending &&
+        !assetGroups.isError &&
+        !requestedGroup && (
+          <Alert variant="destructive" role="alert">
+            <AlertCircle className="h-4 w-4" aria-hidden="true" />
+            <AlertDescription>
+              {t.history.runNotFound(requestedRunId)}
+            </AlertDescription>
+          </Alert>
+        )}
 
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5">
         {filters.map((item) => (
@@ -1175,6 +1283,7 @@ export function GroupedProductionHistory() {
                         )
                       }
                       pendingTargets={pendingTargets}
+                      focusedRunId={requestedRunId}
                     />
                   )}
                 </div>

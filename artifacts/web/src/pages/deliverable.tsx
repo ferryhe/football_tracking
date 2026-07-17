@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useLocation } from "wouter";
+import { useLocation, useSearch } from "wouter";
 import { api } from "@/lib/api";
 import {
   buildLifecycleCandidateIndex,
@@ -103,6 +103,9 @@ export default function DeliverablePage() {
   const { toast } = useToast();
   const queryClient = useQueryClient();
   const [, setLocation] = useLocation();
+  const routeSearch = useSearch();
+  const requestedRunId =
+    new URLSearchParams(routeSearch).get("run")?.trim() || null;
 
   const [selectedInput, setSelectedInput] = useState("");
   const [selectedConfig, setSelectedConfig] = useState("");
@@ -140,6 +143,9 @@ export default function DeliverablePage() {
   const selectedVideo = inputCatalog?.videos.find((video) => video.path === selectedInput) ?? null;
   const selectedCfg = configs?.find((config) => config.name === selectedConfig) ?? null;
   const selectedHighlightRun = highlightSourceRuns.find((run) => run.run_id === selectedHighlightRunId) ?? null;
+  const requestedRunAvailable = requestedRunId
+    ? highlightSourceRuns.some((run) => run.run_id === requestedRunId)
+    : false;
   const selectedHighlightLifecycle = useMemo(() => getRunLifecycle(selectedHighlightRun), [selectedHighlightRun]);
   const selectedHighlightLifecycleIndex = useMemo(
     () => buildLifecycleCandidateIndex(selectedHighlightLifecycle),
@@ -170,6 +176,11 @@ export default function DeliverablePage() {
   }, [configs, selectedConfig, selectedInput]);
 
   useEffect(() => {
+    if (requestedRunId) {
+      if (runs === undefined) return;
+      setSelectedHighlightRunId(requestedRunAvailable ? requestedRunId : "");
+      return;
+    }
     if (!highlightSourceRuns.length) {
       if (selectedHighlightRunId) setSelectedHighlightRunId("");
       return;
@@ -177,7 +188,13 @@ export default function DeliverablePage() {
     if (!selectedHighlightRunId || !highlightSourceRuns.some((run) => run.run_id === selectedHighlightRunId)) {
       setSelectedHighlightRunId(highlightSourceRuns[0].run_id);
     }
-  }, [highlightSourceRuns, selectedHighlightRunId]);
+  }, [
+    highlightSourceRuns,
+    requestedRunAvailable,
+    requestedRunId,
+    runs,
+    selectedHighlightRunId,
+  ]);
 
   const createFullDeliverable = useMutation({
     mutationFn: () => {
@@ -234,6 +251,15 @@ export default function DeliverablePage() {
         <h1 className="text-2xl font-bold">{t.deliverable.title}</h1>
         <p className="text-muted-foreground mt-1">{t.deliverable.subtitle}</p>
       </div>
+
+      {requestedRunId && runs !== undefined && !requestedRunAvailable && (
+        <Alert variant="destructive" role="alert">
+          <AlertCircle className="h-4 w-4" aria-hidden="true" />
+          <AlertDescription>
+            {t.deliverable.requestedRunNotFound(requestedRunId)}
+          </AlertDescription>
+        </Alert>
+      )}
 
       <div className="grid gap-4 md:grid-cols-2">
         <Card>

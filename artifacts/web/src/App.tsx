@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { lazy, Suspense, useEffect, useRef, useState } from "react";
 import {
   Switch,
   Route,
@@ -14,26 +14,28 @@ import { cn } from "@/lib/utils";
 import { ThemeProvider, useTheme } from "@/contexts/ThemeContext";
 import { LanguageProvider, useLanguage } from "@/contexts/LanguageContext";
 import NotFound from "@/pages/not-found";
-import DashboardPage from "@/pages/dashboard";
-import BaselinePage from "@/pages/baseline";
-import AIAnalysisPage from "@/pages/ai-analysis";
-import DeliverablePage from "@/pages/deliverable";
-import { GroupedProductionHistory as HistoryPage } from "@/components/history/GroupedProductionHistory";
-import BroadcastPage from "@/pages/broadcast";
-import ProductionPage from "@/pages/production";
 import {
-  LayoutDashboard,
-  Play,
-  SlidersHorizontal,
-  Film,
+  LegacyProductionRedirect,
+  ProductionEntryRedirect,
+} from "@/pages/production-cutover";
+import {
+  ClipboardCheck,
   Clock,
   Menu,
   X,
   Goal,
   Sun,
   Moon,
-  RadioTower,
 } from "lucide-react";
+
+const ProductionPage = lazy(() => import("@/pages/production"));
+const HistoryPage = lazy(() =>
+  import("@/components/history/GroupedProductionHistory").then((module) => ({
+    default: module.GroupedProductionHistory,
+  })),
+);
+const AIAnalysisPage = lazy(() => import("@/pages/ai-analysis"));
+const DeliverablePage = lazy(() => import("@/pages/deliverable"));
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -44,12 +46,8 @@ const queryClient = new QueryClient({
 function NavItems() {
   const { t } = useLanguage();
   return [
-    { path: "/", label: t.nav.dashboard, icon: LayoutDashboard },
-    { path: "/baseline", label: t.nav.baseline, icon: Play },
-    { path: "/broadcast", label: t.nav.broadcast, icon: RadioTower },
-    { path: "/ai", label: t.nav.aiAnalysis, icon: SlidersHorizontal },
-    { path: "/deliverable", label: t.nav.deliverable, icon: Film },
-    { path: "/history", label: t.nav.history, icon: Clock },
+    { path: "/production", label: t.nav.production, icon: ClipboardCheck },
+    { path: "/history", label: t.nav.productionHistory, icon: Clock },
   ];
 }
 
@@ -57,13 +55,15 @@ function NavLink({
   path,
   label,
   icon: Icon,
+  onNavigate,
 }: {
   path: string;
   label: string;
   icon: React.ElementType;
+  onNavigate?: () => void;
 }) {
   const [location] = useLocation();
-  const isActive = path === "/" ? location === "/" : location.startsWith(path);
+  const isActive = location.startsWith(path);
 
   return (
     <Link
@@ -75,6 +75,8 @@ function NavLink({
           : "text-sidebar-foreground hover:bg-sidebar-accent hover:text-sidebar-accent-foreground",
       )}
       data-testid={`nav-link-${label}`}
+      aria-current={isActive ? "page" : undefined}
+      onClick={onNavigate}
     >
       <Icon className="h-4 w-4 shrink-0" />
       {label}
@@ -84,6 +86,8 @@ function NavLink({
 
 function ThemeToggle() {
   const { theme, toggleTheme } = useTheme();
+  const { t } = useLanguage();
+  const label = theme === "dark" ? t.nav.switchLight : t.nav.switchDark;
   return (
     <Button
       variant="ghost"
@@ -91,7 +95,8 @@ function ThemeToggle() {
       onClick={toggleTheme}
       className="h-8 w-8"
       data-testid="button-toggle-theme"
-      title={theme === "dark" ? "Switch to light mode" : "Switch to dark mode"}
+      title={label}
+      aria-label={label}
     >
       {theme === "dark" ? (
         <Sun className="h-4 w-4" />
@@ -117,7 +122,15 @@ function LanguageToggle() {
   );
 }
 
-function Sidebar({ onClose }: { onClose?: () => void }) {
+function Sidebar({
+  onClose,
+  onNavigate,
+  closeButtonRef,
+}: {
+  onClose?: () => void;
+  onNavigate?: () => void;
+  closeButtonRef?: React.Ref<HTMLButtonElement>;
+}) {
   const { t } = useLanguage();
   const navItems = NavItems();
 
@@ -134,11 +147,13 @@ function Sidebar({ onClose }: { onClose?: () => void }) {
         </div>
         {onClose && (
           <Button
+            ref={closeButtonRef}
             variant="ghost"
             size="icon"
             onClick={onClose}
             className="ml-auto h-7 w-7 shrink-0"
             data-testid="button-close-sidebar"
+            aria-label={t.nav.closeMenu}
           >
             <X className="h-4 w-4" />
           </Button>
@@ -146,9 +161,9 @@ function Sidebar({ onClose }: { onClose?: () => void }) {
       </div>
 
       {/* Nav */}
-      <nav className="flex-1 px-3 py-4 space-y-1">
+      <nav className="flex-1 px-3 py-4 space-y-1" aria-label={t.nav.primaryNav}>
         {navItems.map((item) => (
-          <NavLink key={item.path} {...item} />
+          <NavLink key={item.path} {...item} onNavigate={onNavigate} />
         ))}
       </nav>
 
@@ -167,6 +182,58 @@ function Sidebar({ onClose }: { onClose?: () => void }) {
 function Layout() {
   const [mobileOpen, setMobileOpen] = useState(false);
   const { t } = useLanguage();
+  const openButtonRef = useRef<HTMLButtonElement>(null);
+  const closeButtonRef = useRef<HTMLButtonElement>(null);
+  const mobileDialogRef = useRef<HTMLElement>(null);
+  const mainRef = useRef<HTMLElement>(null);
+  const [location] = useLocation();
+  const previousLocationRef = useRef(location);
+
+  function closeMobileAndRestoreFocus() {
+    setMobileOpen(false);
+    openButtonRef.current?.focus();
+  }
+
+  function closeMobileAndFocusMain() {
+    setMobileOpen(false);
+    mainRef.current?.focus();
+  }
+
+  useEffect(() => {
+    if (!mobileOpen) return;
+    closeButtonRef.current?.focus();
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        closeMobileAndRestoreFocus();
+        return;
+      }
+      if (event.key !== "Tab") return;
+      const focusable = Array.from(
+        mobileDialogRef.current?.querySelectorAll<HTMLElement>(
+          'a[href], button:not([disabled]), [tabindex]:not([tabindex="-1"])',
+        ) ?? [],
+      );
+      if (focusable.length === 0) return;
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [mobileOpen]);
+
+  useEffect(() => {
+    if (previousLocationRef.current === location) return;
+    previousLocationRef.current = location;
+    setMobileOpen(false);
+    mainRef.current?.focus();
+  }, [location]);
 
   return (
     <div className="flex h-screen overflow-hidden bg-background">
@@ -180,10 +247,20 @@ function Layout() {
         <div className="fixed inset-0 z-50 md:hidden">
           <div
             className="absolute inset-0 bg-black/40"
-            onClick={() => setMobileOpen(false)}
+            onClick={closeMobileAndRestoreFocus}
           />
-          <aside className="relative z-10 flex flex-col w-56 h-full bg-sidebar border-r border-sidebar-border">
-            <Sidebar onClose={() => setMobileOpen(false)} />
+          <aside
+            ref={mobileDialogRef}
+            role="dialog"
+            aria-modal="true"
+            className="relative z-10 flex flex-col w-56 h-full bg-sidebar border-r border-sidebar-border"
+            aria-label={t.nav.primaryNav}
+          >
+            <Sidebar
+              onClose={closeMobileAndRestoreFocus}
+              onNavigate={closeMobileAndFocusMain}
+              closeButtonRef={closeButtonRef}
+            />
           </aside>
         </div>
       )}
@@ -193,10 +270,12 @@ function Layout() {
         {/* Mobile header */}
         <header className="flex md:hidden items-center gap-3 px-4 py-3 border-b border-border bg-background">
           <Button
+            ref={openButtonRef}
             variant="ghost"
             size="icon"
             onClick={() => setMobileOpen(true)}
             data-testid="button-open-sidebar"
+            aria-label={t.nav.openMenu}
           >
             <Menu className="h-5 w-5" />
           </Button>
@@ -211,17 +290,34 @@ function Layout() {
         </header>
 
         {/* Page content */}
-        <main className="flex-1 overflow-y-auto p-4 sm:p-6">
-          <Switch>
-            <Route path="/" component={DashboardPage} />
-            <Route path="/baseline" component={BaselinePage} />
-            <Route path="/broadcast" component={BroadcastPage} />
-            <Route path="/ai" component={AIAnalysisPage} />
-            <Route path="/deliverable" component={DeliverablePage} />
-            <Route path="/history" component={HistoryPage} />
-            <Route path="/production" component={ProductionPage} />
-            <Route component={NotFound} />
-          </Switch>
+        <main
+          ref={mainRef}
+          tabIndex={-1}
+          className="flex-1 overflow-y-auto p-4 sm:p-6"
+        >
+          <Suspense
+            fallback={
+              <p role="status" aria-live="polite">
+                {t.common.loading}
+              </p>
+            }
+          >
+            <Switch>
+              <Route path="/" component={ProductionEntryRedirect} />
+              <Route path="/dashboard" component={ProductionEntryRedirect} />
+              <Route path="/baseline">
+                <LegacyProductionRedirect route="baseline" />
+              </Route>
+              <Route path="/broadcast">
+                <LegacyProductionRedirect route="broadcast" />
+              </Route>
+              <Route path="/ai" component={AIAnalysisPage} />
+              <Route path="/deliverable" component={DeliverablePage} />
+              <Route path="/history" component={HistoryPage} />
+              <Route path="/production" component={ProductionPage} />
+              <Route component={NotFound} />
+            </Switch>
+          </Suspense>
         </main>
       </div>
     </div>

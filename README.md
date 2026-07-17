@@ -51,16 +51,14 @@ Browser
 
 ### Frontend pages (artifacts/web)
 
-| Path          | Page         | Purpose                                                                                                  |
-| ------------- | ------------ | -------------------------------------------------------------------------------------------------------- |
-| `/`           | Dashboard    | System status (backend / configs / runs), recent runs, available configs                                 |
-| `/baseline`   | Baseline     | Pick video + config, **preview field & accept AI field setup**, set frame range, launch baseline run     |
-| `/ai`         | AI Analysis  | For any finished run (completed or failed), request AI tracking improvement suggestions with overlays    |
-| `/broadcast`  | Broadcast    | Run the P3 full-match setup, evidence review, trajectory recompute, render, and verified delivery flow    |
-| `/deliverable`| Deliverable  | Render a follow-cam 16:9 deliverable and create short highlight clips from event candidates              |
-| `/history`    | History      | Filter & search past runs, including baseline, deliverable, highlight, failed, and stopped jobs          |
+| Path | Page | Purpose |
+| --- | --- | --- |
+| `/` or `/production` | Production | Sequential original-video, three-frame calibration, trial/tuning, full tracking/review, and verified-product workspace |
+| `/history` | Production History | Grouped source history with exact-run/product deep links and contextual advanced actions |
 
-Highlights of the new Baseline page:
+`/baseline` and `/broadcast` migrate into the appropriate Production/History step. `/ai` and `/deliverable` remain unlisted compatibility routes for one release. See the [cutover operator guide](./docs/operations/production-workflow-cutover.md) and the fail-closed [release validation template](./docs/operations/production-workflow-release-validation.md).
+
+Production trial and calibration highlights:
 
 - **Field Setup card** — captures a sample frame from the chosen video, requests an AI suggestion that marks the playing field, and forwards the accepted `config_patch` to the run. Suggestion is auto-invalidated when the source video or config changes.
 - **Frame Range** — optional `start_frame` and `max_frames` inputs let you do quick partial-clip tests (leave both empty to process the full video).
@@ -122,7 +120,7 @@ These are stored as Replit Secrets. **Do not** create `.env` files for them.
 
 1. Put one or more `.mp4` videos under `python_backend/data/`.
 2. Make sure a YOLO detector checkpoint is available at `python_backend/weights/football_ball_yolo.pt` (or update `detector.model_path` in your YAML).
-3. Run `pnpm start`, open the printed URL, and use **Broadcast** for the P3 full-match delivery flow.
+3. Run `pnpm start`, open the printed URL, and use **Production** for the full-match delivery flow.
 4. Confirm three real frames and the field, review every candidate (or explicitly continue a zero-candidate queue), then recompute and render.
 5. After the UI reports `ready`, run `pnpm validate:full-video -- --run-dir <run-directory> --resume`; `ready` proves immutable lineage, while this separate gate proves media integrity and records the declared audio limitation.
 
@@ -130,7 +128,7 @@ These are stored as Replit Secrets. **Do not** create `.env` files for them.
 
 - The original React/Vite UI in `python_backend/frontend/` has been **replaced** by `artifacts/web/`; the archived copy was removed to keep this repo layout minimal.
 - A Node.js Express **reverse proxy** sits in front of FastAPI to fit Replit's path-routed proxy and to simplify local dev URLs.
-- The frontend gained: 5 pages with sidebar nav, Dashboard overview, dark/light mode, EN/中文 i18n, mobile responsive layout.
+- The frontend now has two primary destinations: the sequential Production workspace and grouped Production History, with dark/light mode, EN/中文 i18n, and mobile responsive navigation.
 - Frame-range partial-clip runs (`start_frame` / `max_frames`) were added to the baseline UI; the backend already accepted these fields.
 - The backend now writes review artifacts (`ball_audit.json`, `ai_review_triggers.json`, `camera_motion_audit.json`, `event_candidates.json`, and player artifacts such as `player_tracks.json` when available) and supports child render jobs for follow-cam deliverables and highlight clips.
 
@@ -223,16 +221,14 @@ python python_backend/scripts/render_hybrid_camera_path.py `
 
 ### 前端页面（artifacts/web）
 
-| 路径           | 页面     | 用途                                                                                |
-| -------------- | -------- | ----------------------------------------------------------------------------------- |
-| `/`            | 概览     | 系统状态（后端 / 配置 / 任务）、近期任务、可用配置                                  |
-| `/baseline`    | 跑基线   | 选视频 + 配置，**预览球场并接受 AI 球场设置**，设置帧范围，启动基线任务             |
-| `/ai`          | AI 分析  | 针对任意已结束（完成或失败）的任务，向 AI 请求改进建议，并叠加可视化标注           |
-| `/broadcast`   | 广播成片 | P3 全场设置、证据复核、轨迹重算、成片渲染和可验证交付的一体化三步流程              |
-| `/deliverable` | 成品任务 | 渲染 16:9 跟随裁剪视频，并基于事件候选生成集锦短片                                  |
-| `/history`     | 历史     | 过滤 / 搜索基线、成品、集锦、失败、已停止任务，删除输出                             |
+| 路径 | 页面 | 用途 |
+| --- | --- | --- |
+| `/` 或 `/production` | 比赛制作 | 按原片、三帧校准、试跑调参、全量追踪复核、已验证成品依次推进 |
+| `/history` | 成品历史 | 按原片分组并通过精确任务链接查看任务、成品证据和上下文高级操作 |
 
-新版「跑基线」页要点：
+`/baseline` 与 `/broadcast` 会迁移到比赛制作或精确成品历史；`/ai` 与 `/deliverable` 作为不展示在主导航中的兼容入口保留一个版本。操作说明见[切换指南](./docs/operations/production-workflow-cutover.md)，发布前必须填写[发布验证模板](./docs/operations/production-workflow-release-validation.md)。
+
+「比赛制作」中的试跑与校准要点：
 
 - **球场设置卡片** —— 抽取一帧预览，让 AI 自动识别球场区域；接受后建议的 `config_patch` 会随任务提交。源视频或配置变更时建议自动失效。
 - **帧范围** —— 可选 `start_frame` / `max_frames`，便于快速试跑一小段（留空则处理整段）。
@@ -293,7 +289,7 @@ pnpm test
 
 1. 把你的 `.mp4` 视频放进 `python_backend/data/`。
 2. 确认 `python_backend/weights/football_ball_yolo.pt` 存在（或在 YAML 里改 `detector.model_path`）。
-3. 运行 `pnpm start`，打开命令打印的地址，P3 全场交付统一进入「广播成片」。
+3. 运行 `pnpm start`，打开命令打印的地址，全场交付统一进入「比赛制作」。
 4. 确认三个真实帧和球场区域；逐个复核候选（零候选时也要明确确认继续），再重算并渲染。
 5. 页面进入 `ready` 后运行 `pnpm validate:full-video -- --run-dir <run 目录> --resume`。`ready` 证明不可变血缘完整，独立验收才证明媒体可解码、时长一致并记录音频限制。
 
@@ -301,7 +297,7 @@ pnpm test
 
 - 上游 `python_backend/frontend/` 的旧 UI 已被 `artifacts/web/` 取代；归档副本已移除，以保持仓库目录精简。
 - 在 FastAPI 前面加了一个 Node.js Express **反向代理**，匹配 Replit 的路径路由模型，也方便本地调用。
-- 前端新增了：6 个页面 + 侧边栏、P3 广播三步流、暗黑/明亮主题、中英切换、移动端响应式布局。
+- 前端主导航整合为「比赛制作」与「成品历史」，并保留暗黑/明亮主题、中英切换和移动端响应式导航。
 - 「跑基线」UI 增加了 `start_frame` / `max_frames` 帧范围（后端早已支持，只是 UI 没暴露）。
 - 后端新增审核产物（`ball_audit.json`、`ai_review_triggers.json`、`camera_motion_audit.json`、`event_candidates.json`，以及可用时的 `player_tracks.json` 等球员产物），并支持跟随镜头成品和集锦短片两类子渲染任务。
 

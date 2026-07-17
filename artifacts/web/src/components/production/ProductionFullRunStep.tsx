@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { Link } from "wouter";
 import {
   getGetConfigQueryKey,
   getGetArtifactUrl,
@@ -316,7 +317,6 @@ export function ProductionFullRunStep({
     };
   }, [fullRunIdentityScope, requiresFullRunHashValidation]);
 
-  const remoteFullRunEnabled = Boolean(currentRunId) && fullRunHashValid;
   const runs = useListRuns({
     query: {
       queryKey: getListRunsQueryKey(),
@@ -326,6 +326,32 @@ export function ProductionFullRunStep({
     },
     request: NO_STORE_REQUEST,
   });
+  const requestedNeedsIdentityLookup = Boolean(
+    requestedRunId && requestedRunId !== currentRunId,
+  );
+  const requestedRecord = requestedRunId
+    ? ((runs.data ?? []).find((run) => run.run_id === requestedRunId) ?? null)
+    : null;
+  const requestedChildRecognized = Boolean(
+    requestedNeedsIdentityLookup &&
+    currentRunId &&
+    requestedRecord?.parent_run_id === currentRunId,
+  );
+  const requestedIdentitySettled =
+    runs.data !== undefined || Boolean(runs.isError);
+  const routeIdentityPending = Boolean(
+    requestedNeedsIdentityLookup && !requestedIdentitySettled,
+  );
+  const urlConflict = Boolean(
+    requestedNeedsIdentityLookup &&
+    requestedIdentitySettled &&
+    !requestedChildRecognized,
+  );
+  const routeIdentityAccepted =
+    !requestedNeedsIdentityLookup || requestedChildRecognized;
+  const remoteFullRunEnabled = Boolean(
+    currentRunId && fullRunHashValid && routeIdentityAccepted,
+  );
   const controller = useBroadcastWorkflowController({
     parentRunId: currentRunId || null,
     enabled: remoteFullRunEnabled,
@@ -508,18 +534,14 @@ export function ProductionFullRunStep({
     }
   }, [attempt?.last_observed.workflow_state, focusRequest]);
 
-  const requestedRecord = requestedRunId
-    ? ((runs.data ?? []).find((run) => run.run_id === requestedRunId) ?? null)
-    : null;
-  const urlConflict = Boolean(
-    requestedRunId &&
-    (!currentRunId ||
-      (requestedRunId !== currentRunId &&
-        requestedRecord?.parent_run_id !== currentRunId)),
-  );
-
   useEffect(() => {
-    if (!fullRunHashValid || !currentRunId || urlConflict) return;
+    if (
+      !fullRunHashValid ||
+      !currentRunId ||
+      !routeIdentityAccepted ||
+      urlConflict
+    )
+      return;
     if (!requestedRunId || requestedRunId !== currentRunId) {
       onParentRunIdChange(currentRunId);
     }
@@ -528,6 +550,7 @@ export function ProductionFullRunStep({
     fullRunHashValid,
     onParentRunIdChange,
     requestedRunId,
+    routeIdentityAccepted,
     urlConflict,
   ]);
 
@@ -535,7 +558,13 @@ export function ProductionFullRunStep({
     let cancelled = false;
     void (async () => {
       const current = latestFullRunRef.current;
-      if (!fullRunHashValid || !current?.pending_submission || !runs.data)
+      if (
+        !routeIdentityAccepted ||
+        urlConflict ||
+        !fullRunHashValid ||
+        !current?.pending_submission ||
+        !runs.data
+      )
         return;
       const reconciled = await reconcilePendingProductionFullRun(current, {
         runs: runs.data,
@@ -553,7 +582,14 @@ export function ProductionFullRunStep({
     return () => {
       cancelled = true;
     };
-  }, [fullRunHashValid, onFullRunChange, onParentRunIdChange, runs.data]);
+  }, [
+    fullRunHashValid,
+    onFullRunChange,
+    onParentRunIdChange,
+    routeIdentityAccepted,
+    urlConflict,
+    runs.data,
+  ]);
 
   useEffect(() => {
     let cancelled = false;
@@ -561,6 +597,8 @@ export function ProductionFullRunStep({
       const current = latestFullRunRef.current;
       const run = runQuery.data;
       if (
+        !routeIdentityAccepted ||
+        urlConflict ||
         !fullRunHashValid ||
         !current ||
         !run ||
@@ -584,6 +622,8 @@ export function ProductionFullRunStep({
     controller.parent?.run_id,
     fullRunHashValid,
     onFullRunChange,
+    routeIdentityAccepted,
+    urlConflict,
     runQuery.data,
   ]);
 
@@ -593,6 +633,8 @@ export function ProductionFullRunStep({
       const current = latestFullRunRef.current;
       const parent = controller.parent;
       if (
+        !routeIdentityAccepted ||
+        urlConflict ||
         !fullRunHashValid ||
         !current ||
         !parent ||
@@ -623,6 +665,8 @@ export function ProductionFullRunStep({
     controller.recovery.state,
     fullRunHashValid,
     onFullRunChange,
+    routeIdentityAccepted,
+    urlConflict,
   ]);
 
   function scopeIsCurrent(scope: string): boolean {
@@ -948,6 +992,7 @@ export function ProductionFullRunStep({
 
   const controllerOwnsCurrent = Boolean(
     fullRunHashValid &&
+    remoteFullRunEnabled &&
     currentRunId &&
     controller.parent?.run_id === currentRunId,
   );
@@ -1269,18 +1314,31 @@ export function ProductionFullRunStep({
         </Badge>
       </div>
 
+      {routeIdentityPending && (
+        <div
+          className="flex items-center gap-2 text-sm text-muted-foreground"
+          data-testid="production-route-identity-pending"
+          role="status"
+          aria-live="polite"
+          aria-atomic="true"
+        >
+          <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />
+          <span>{t.production.fullRouteIdentityPending}</span>
+        </div>
+      )}
+
       {urlConflict && (
         <Alert variant="destructive" data-testid="production-full-run-error">
           <AlertTitle>{t.production.fullUrlConflictTitle}</AlertTitle>
           <AlertDescription className="space-y-2">
             <p>{t.production.fullUrlConflict}</p>
-            {requestedRunId && !currentRunId && (
-              <a
+            {requestedRunId && (
+              <Link
                 className="font-medium underline"
-                href={`/broadcast?run=${encodeURIComponent(requestedRunId)}`}
+                href={`/history?run=${encodeURIComponent(requestedRunId)}&from=production`}
               >
-                {t.production.fullOpenLegacy}
-              </a>
+                {t.production.fullOpenHistory}
+              </Link>
             )}
           </AlertDescription>
         </Alert>
@@ -1317,12 +1375,12 @@ export function ProductionFullRunStep({
       )}
 
       {conflictRunId && (
-        <a
+        <Link
           className="text-sm font-medium underline"
-          href={`/broadcast?run=${encodeURIComponent(conflictRunId)}`}
+          href={`/history?run=${encodeURIComponent(conflictRunId)}&from=production`}
         >
-          {t.production.fullOpenLegacy}
-        </a>
+          {t.production.fullOpenHistory}
+        </Link>
       )}
 
       {controllerOwnsCurrent && controller.workflowMessages.length > 0 && (
@@ -1347,7 +1405,7 @@ export function ProductionFullRunStep({
           </Alert>
         )}
 
-      {!urlConflict && !fullRun && (
+      {routeIdentityAccepted && !urlConflict && !fullRun && (
         <Button
           type="button"
           data-testid="production-start-full-run"
@@ -1363,7 +1421,11 @@ export function ProductionFullRunStep({
         </Button>
       )}
 
-      {fullRunHashValid && fullRun?.pending_submission && !attempt && (
+      {routeIdentityAccepted &&
+        !urlConflict &&
+        fullRunHashValid &&
+        fullRun?.pending_submission &&
+        !attempt && (
         <Alert>
           <AlertDescription className="space-y-3">
             <p>{t.production.fullSubmissionUncertain}</p>
@@ -1380,7 +1442,7 @@ export function ProductionFullRunStep({
         </Alert>
       )}
 
-      {active && attempt && (
+      {routeIdentityAccepted && !urlConflict && active && attempt && (
         <Card>
           <CardHeader>
             <CardTitle className="text-base">
@@ -1411,7 +1473,7 @@ export function ProductionFullRunStep({
         </Card>
       )}
 
-      {retryable && (
+      {routeIdentityAccepted && !urlConflict && retryable && (
         <Card>
           <CardHeader>
             <CardTitle className="text-base">

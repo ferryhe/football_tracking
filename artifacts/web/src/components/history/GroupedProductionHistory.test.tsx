@@ -114,6 +114,16 @@ function run(runId: string, overrides: Partial<RunRecord> = {}): RunRecord {
 
 const ready = run("product-ready", {
   source: "broadcast_hybrid",
+  artifacts: [
+    {
+      name: "event_candidates.json",
+      path: "C:/outputs/product-ready/event_candidates.json",
+      kind: "report",
+      exists: true,
+      size_bytes: 100,
+      content_type: "application/json",
+    },
+  ],
   broadcast: {
     status: "ready",
     status_generation: GENERATION,
@@ -273,6 +283,7 @@ function deferred<T>() {
 
 describe("GroupedProductionHistory", () => {
   beforeEach(() => {
+    window.history.replaceState({}, "", "/history");
     localStorage.clear();
     vi.clearAllMocks();
     mocks.listAssetGroups.mockResolvedValue([assetGroup]);
@@ -300,6 +311,176 @@ describe("GroupedProductionHistory", () => {
       run(runId, { status: "cancelled" }),
     );
     mocks.deleteRunOutput.mockResolvedValue({ deleted: true });
+  });
+
+  it("opens an exact run deep link and exposes contextual advanced actions", async () => {
+    window.history.replaceState(
+      {},
+      "",
+      "/history?run=product-ready&from=broadcast",
+    );
+    renderHistory();
+
+    expect(await screen.findByTestId("group-detail-match")).toBeVisible();
+    expect(screen.getByTestId("timeline-toggle-product-ready")).toHaveAttribute(
+      "aria-expanded",
+      "true",
+    );
+    expect(
+      screen.getByText(/broadcast link.*production history/i),
+    ).toBeVisible();
+    expect(screen.getByRole("link", { name: /open ai review/i })).toHaveAttribute(
+      "href",
+      "/ai?run=product-ready",
+    );
+    expect(
+      screen.getByRole("link", { name: /open highlight tools/i }),
+    ).toHaveAttribute("href", "/deliverable?run=product-ready");
+    await screen.findByTestId("verified-product-product-ready");
+    expect(mocks.listAssetGroups).toHaveBeenCalledTimes(1);
+    expect(mocks.listRunArtifacts).toHaveBeenCalledTimes(1);
+  });
+
+  it("fails closed when an exact run deep link is absent", async () => {
+    window.history.replaceState({}, "", "/history?run=missing-run");
+    renderHistory();
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      /missing-run.*not found/i,
+    );
+    expect(mocks.listRunArtifacts).not.toHaveBeenCalled();
+  });
+
+  it("clears route-owned search, open, and focus state as the run query changes", async () => {
+    window.history.replaceState({}, "", "/history?run=product-ready");
+    renderHistory();
+    expect(await screen.findByTestId("group-detail-match")).toBeVisible();
+    expect(screen.getByTestId("group-search")).toHaveValue("product-ready");
+    expect(screen.getByRole("link", { name: /open ai review/i })).toBeVisible();
+
+    act(() => {
+      window.history.pushState({}, "", "/history?run=missing-next");
+      window.dispatchEvent(new PopStateEvent("popstate"));
+    });
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      /missing-next.*not found/i,
+    );
+    await waitFor(() =>
+      expect(screen.queryByTestId("group-detail-match")).toBeNull(),
+    );
+    expect(screen.getByTestId("group-search")).toHaveValue("");
+    expect(screen.queryByRole("link", { name: /open ai review/i })).toBeNull();
+
+    act(() => {
+      window.history.pushState({}, "", "/history");
+      window.dispatchEvent(new PopStateEvent("popstate"));
+    });
+    await waitFor(() => expect(screen.queryByRole("alert")).toBeNull());
+    expect(screen.getByTestId("group-search")).toHaveValue("");
+    expect(screen.getByTestId("asset-group-toggle-match")).toHaveAttribute(
+      "aria-expanded",
+      "false",
+    );
+  });
+
+  it("transfers exact-route row ownership without closing manually opened rows", async () => {
+    const user = userEvent.setup();
+    const readyB = run("product-ready-b", {
+      source: "broadcast_hybrid",
+      broadcast: {
+        status: "ready",
+        status_generation: GENERATION_B,
+        limitations: [],
+      },
+    });
+    mocks.listAssetGroups.mockResolvedValue([
+      {
+        ...assetGroup,
+        runs: [
+          ready,
+          readyB,
+          ...(assetGroup.runs ?? []).filter(
+            (candidate) => candidate.run_id !== ready.run_id,
+          ),
+        ],
+      },
+    ]);
+    mocks.listRunArtifacts.mockImplementation(async (runId: string) => [
+      {
+        name: "broadcast.mp4",
+        path: `C:/outputs/${runId}/broadcast.mp4`,
+        kind: "video",
+        exists: true,
+        size_bytes: 1_000,
+        content_type: "video/mp4",
+      },
+      {
+        name: "broadcast_quality_report.json",
+        path: `C:/outputs/${runId}/broadcast_quality_report.json`,
+        kind: "report",
+        exists: true,
+        size_bytes: 100,
+        content_type: "application/json",
+      },
+    ]);
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
+    });
+    window.history.replaceState({}, "", "/history?run=product-ready");
+    renderHistory(queryClient);
+
+    await screen.findByTestId("verified-product-product-ready");
+    await user.click(screen.getByTestId("timeline-toggle-leaf-output"));
+    expect(screen.getByTestId("timeline-toggle-leaf-output")).toHaveAttribute(
+      "aria-expanded",
+      "true",
+    );
+
+    act(() => {
+      queryClient.removeQueries({
+        queryKey: ["production-history", "product"],
+      });
+      queryClient.removeQueries({
+        queryKey: ["production-history", "artifact"],
+      });
+      mocks.listRunArtifacts.mockClear();
+      mocks.getRunArtifactJson.mockClear();
+      window.history.pushState({}, "", "/history?run=product-ready-b");
+      window.dispatchEvent(new PopStateEvent("popstate"));
+    });
+
+    expect(
+      await screen.findByTestId("verified-product-product-ready-b"),
+    ).toBeVisible();
+    expect(screen.getByTestId("timeline-toggle-product-ready")).toHaveAttribute(
+      "aria-expanded",
+      "false",
+    );
+    expect(
+      screen.getByTestId("timeline-toggle-product-ready-b"),
+    ).toHaveAttribute("aria-expanded", "true");
+    expect(screen.getByTestId("timeline-toggle-leaf-output")).toHaveAttribute(
+      "aria-expanded",
+      "true",
+    );
+    expect(mocks.listRunArtifacts.mock.calls.map(([runId]) => runId)).toEqual([
+      "product-ready-b",
+    ]);
+    expect(
+      mocks.getRunArtifactJson.mock.calls.map(([runId]) => runId),
+    ).toEqual(["product-ready-b"]);
+  });
+
+  it("hides unsupported advanced actions for an active row", async () => {
+    const user = userEvent.setup();
+    renderHistory();
+    await screen.findByTestId("asset-group-match");
+    await user.click(screen.getByTestId("asset-group-toggle-match"));
+    await user.click(screen.getByTestId("timeline-toggle-render-active"));
+    const row = screen.getByTestId("timeline-run-render-active");
+    expect(within(row).queryByRole("link", { name: /ai review/i })).toBeNull();
+    expect(
+      within(row).queryByRole("link", { name: /highlight tools/i }),
+    ).toBeNull();
   });
 
   it("does not verify products on the list and verifies lazily in detail", async () => {

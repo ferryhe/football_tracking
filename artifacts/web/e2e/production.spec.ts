@@ -3430,10 +3430,14 @@ test("restores the session draft after save and exit when storage is read-only",
     page.getByText(/changes are kept only for this browser session/i),
   ).toBeVisible();
   await page.getByRole("button", { name: "Save and exit" }).click();
-  await expect(page).toHaveURL(/\/$/);
+  await expect(page).toHaveURL(/\/history$/);
 
   await page.goBack();
   await expect(page).toHaveURL(/\/production$/);
+  await expect(page.getByLabel("Original video")).toHaveValue(
+    "data/match-a.mp4",
+  );
+  await page.getByRole("button", { name: "Next" }).click();
   await expect(
     page.getByRole("heading", { name: "Field calibration" }),
   ).toBeVisible();
