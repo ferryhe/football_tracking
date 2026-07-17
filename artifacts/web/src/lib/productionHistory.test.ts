@@ -13,6 +13,7 @@ import {
   isReadyProductCandidate,
   parseProductionHistoryNote,
   productionArtifactUrl,
+  productionGroupProductCounts,
   productionHistoryCancellationTarget,
   productionHistoryDeletionBlocker,
   productionProductVerificationKey,
@@ -57,7 +58,7 @@ function fullNote(overrides: Record<string, unknown> = {}): string {
     source_signature: {
       path: "C:/videos/match.mp4",
       size_bytes: 100,
-      modified_at: "2026-07-14T10:00:00Z",
+      modified_at: "2026-07-14T09:00:00Z",
     },
     ...overrides,
   });
@@ -110,7 +111,26 @@ function group(
     config_count: 0,
     output_count: runs.length,
     runs,
-    configs: [],
+    configs: Array.from(
+      new Map(
+        runs
+          .filter(
+            (item) => item.config_name && item.config_path && item.input_video,
+          )
+          .map((item) => [
+            item.config_name!,
+            {
+              name: item.config_name!,
+              path: item.config_path!,
+              created_at: "2026-07-14T09:30:00Z",
+              input_video: item.input_video!,
+              postprocess_enabled: true,
+              follow_cam_enabled: false,
+              exists: {},
+            },
+          ]),
+      ).values(),
+    ),
     outputs: runs,
     is_unbound: !path,
     ...overrides,
@@ -223,31 +243,35 @@ describe("buildProductionHistoryGroups", () => {
   });
 
   it("builds explicit trial/full/operation lineage without time guessing", () => {
-    const trial = run("trial-1", { notes: trialNote() });
+    const trialId = "production_trial_trial-output";
+    const fullId = "production_full_full-output";
+    const trial = run(trialId, { notes: trialNote() });
     const unrelated = run("nearby", {
       created_at: "2026-07-14T10:02:00.001Z",
       notes: trialNote({ workflow_id: "other", output_id: "other" }),
     });
-    const full = run("full-1", {
+    const full = run(fullId, {
       source: "broadcast_hybrid",
-      parent_run_id: "trial-1",
-      notes: fullNote(),
+      parent_run_id: trialId,
+      config_name: "confirmed.yaml",
+      config_path: "config/confirmed.yaml",
+      notes: fullNote({ accepted_trial_run_id: trialId }),
       broadcast: { status: "ready", status_generation: HASH_A },
     });
     const render = run("render-1", {
       source: "broadcast_operation",
-      parent_run_id: "full-1",
+      parent_run_id: fullId,
       broadcast: {
-        parent_run_id: "full-1",
+        parent_run_id: fullId,
         operation: "render",
         operation_status: "completed",
       },
     });
     const recompute = run("recompute-1", {
       source: "broadcast_operation",
-      parent_run_id: "full-1",
+      parent_run_id: fullId,
       broadcast: {
-        parent_run_id: "full-1",
+        parent_run_id: fullId,
         operation: "recompute",
         operation_status: "completed",
       },
@@ -265,17 +289,17 @@ describe("buildProductionHistoryGroups", () => {
       projected.timeline.map((item) => [item.run.run_id, item]),
     );
 
-    expect(byId.get("trial-1")?.kind).toBe("trial");
+    expect(byId.get(trialId)?.kind).toBe("trial");
     expect(byId.get("nearby")?.parentRunId).toBeNull();
-    expect(byId.get("full-1")?.parentRunId).toBe("trial-1");
+    expect(byId.get(fullId)?.parentRunId).toBe(trialId);
     expect(byId.get("render-1")).toMatchObject({
       kind: "render",
-      parentRunId: "full-1",
+      parentRunId: fullId,
       lineageIssue: null,
     });
     expect(byId.get("recompute-1")?.kind).toBe("recompute");
     expect(projected.summary).toEqual({
-      trialCount: 2,
+      trialCount: 1,
       activeCount: 0,
       fullRunCount: 1,
       latestFullStatus: "ready",
@@ -316,9 +340,9 @@ describe("buildProductionHistoryGroups", () => {
       parentRunId: null,
     });
     expect(byId.get("conflicting")).toMatchObject({
-      parentRunId: null,
+      parentRunId: "parent",
       externalParentRunId: null,
-      lineageIssue: "ambiguous_parent",
+      lineageIssue: "identity_mismatch",
     });
     expect(byId.get("missing")).toMatchObject({
       parentRunId: null,
@@ -332,25 +356,30 @@ describe("buildProductionHistoryGroups", () => {
   });
 
   it("preserves an accepted middle trial with multiple full product versions", () => {
-    const firstTrial = run("trial-1", {
+    const firstTrialId = "production_trial_trial-1";
+    const acceptedTrialId = "production_trial_trial-2";
+    const laterTrialId = "production_trial_trial-3";
+    const firstTrial = run(firstTrialId, {
       notes: trialNote({ output_id: "trial-1", generation: 1 }),
     });
-    const acceptedTrial = run("trial-2", {
-      parent_run_id: "trial-1",
+    const acceptedTrial = run(acceptedTrialId, {
+      parent_run_id: firstTrialId,
       notes: trialNote({ output_id: "trial-2", generation: 2 }),
     });
-    const laterTrial = run("trial-3", {
-      parent_run_id: "trial-2",
+    const laterTrial = run(laterTrialId, {
+      parent_run_id: acceptedTrialId,
       notes: trialNote({ output_id: "trial-3", generation: 3 }),
     });
     const products = [1, 2].map((generation) =>
-      run(`full-${generation}`, {
+      run(`production_full_full-${generation}`, {
         source: "broadcast_hybrid",
-        parent_run_id: "trial-2",
+        parent_run_id: acceptedTrialId,
+        config_name: "confirmed.yaml",
+        config_path: "config/confirmed.yaml",
         notes: fullNote({
           output_id: `full-${generation}`,
           generation,
-          accepted_trial_run_id: "trial-2",
+          accepted_trial_run_id: acceptedTrialId,
         }),
         broadcast: { status: "ready", status_generation: HASH_A },
       }),
@@ -368,7 +397,7 @@ describe("buildProductionHistoryGroups", () => {
       projected.timeline
         .filter((item) => item.kind === "full")
         .map((item) => item.parentRunId),
-    ).toEqual(["trial-2", "trial-2"]);
+    ).toEqual([acceptedTrialId, acceptedTrialId]);
     expect(projected.summary).toMatchObject({
       trialCount: 3,
       fullRunCount: 2,
@@ -419,6 +448,136 @@ describe("buildProductionHistoryGroups", () => {
         .find((item) => item.groupId === "config")
         ?.configs.map((item) => item.name),
     ).toEqual(["a.yaml", "z.yaml"]);
+  });
+
+  it("binds machine notes to visible run, group, source, output, parent, and config identity", () => {
+    const validTrialId = "production_trial_valid";
+    const validTrial = run(validTrialId, {
+      notes: trialNote({ output_id: "valid" }),
+    });
+    const invalid = [
+      run("production_trial_free", { notes: "production trial, trust me" }),
+      run("production_trial_malformed", { notes: "{" }),
+      run("spoofed-id", { notes: trialNote({ output_id: "spoofed" }) }),
+      run("production_trial_wrong-output", {
+        output_dir: "C:/outputs/not-the-run-id",
+        notes: trialNote({ output_id: "wrong-output" }),
+      }),
+      run("production_trial_wrong-source", {
+        source: "scan",
+        notes: trialNote({ output_id: "wrong-source" }),
+      }),
+      run("production_trial_wrong-input", {
+        input_video: "C:/videos/other.mp4",
+        notes: trialNote({ output_id: "wrong-input" }),
+      }),
+      run("production_trial_wrong-config", {
+        config_name: "other.yaml",
+        config_path: "config/other.yaml",
+        notes: trialNote({ output_id: "wrong-config" }),
+      }),
+      run("production_full_wrong-parent", {
+        source: "broadcast_hybrid",
+        parent_run_id: "different-trial",
+        config_name: "confirmed.yaml",
+        config_path: "config/confirmed.yaml",
+        notes: fullNote({
+          output_id: "wrong-parent",
+          accepted_trial_run_id: validTrialId,
+        }),
+      }),
+      run("production_full_wrong-source", {
+        source: "api",
+        parent_run_id: validTrialId,
+        config_name: "confirmed.yaml",
+        config_path: "config/confirmed.yaml",
+        notes: fullNote({
+          output_id: "wrong-source",
+          accepted_trial_run_id: validTrialId,
+        }),
+      }),
+      run("production_full_wrong-source-size", {
+        source: "broadcast_hybrid",
+        parent_run_id: validTrialId,
+        config_name: "confirmed.yaml",
+        config_path: "config/confirmed.yaml",
+        notes: fullNote({
+          output_id: "wrong-source-size",
+          accepted_trial_run_id: validTrialId,
+          source_signature: {
+            path: "C:/videos/match.mp4",
+            size_bytes: 101,
+            modified_at: "2026-07-14T09:00:00Z",
+          },
+        }),
+      }),
+      run("production_full_wrong-source-time", {
+        source: "broadcast_hybrid",
+        parent_run_id: validTrialId,
+        config_name: "confirmed.yaml",
+        config_path: "config/confirmed.yaml",
+        notes: fullNote({
+          output_id: "wrong-source-time",
+          accepted_trial_run_id: validTrialId,
+          source_signature: {
+            path: "C:/videos/match.mp4",
+            size_bytes: 100,
+            modified_at: "2026-07-14T09:00:01Z",
+          },
+        }),
+      }),
+    ];
+    const trustedConfig = {
+      name: "default.yaml",
+      path: "config/default.yaml",
+      created_at: "2026-07-14T09:30:00Z",
+      input_video: "C:/videos/match.mp4",
+      postprocess_enabled: true,
+      follow_cam_enabled: false,
+      exists: {},
+    };
+    const trustedFullConfig = {
+      ...trustedConfig,
+      name: "confirmed.yaml",
+      path: "config/confirmed.yaml",
+    };
+    const projected = buildProductionHistoryGroups([
+      group("match", "C:/videos/match.mp4", [validTrial, ...invalid], {
+        configs: [trustedConfig, trustedFullConfig],
+      }),
+    ]);
+    const items = projected.flatMap((item) => item.timeline);
+    expect(items.find((item) => item.run.run_id === validTrialId)?.kind).toBe(
+      "trial",
+    );
+    for (const item of items.filter(
+      (entry) => entry.run.run_id !== validTrialId,
+    )) {
+      expect(item.note, item.run.run_id).toBeNull();
+      expect(item.kind, item.run.run_id).toBe("legacy");
+      expect(item.lineageIssue, item.run.run_id).toBe("identity_mismatch");
+    }
+  });
+
+  it("globally disambiguates colliding hash suffixes deterministically", () => {
+    const firstPath = "C:/video/svql0r61wzqd.mp4";
+    const secondPath = "C:/video/wbelcve14ve9.mp4";
+    const sources = [group("match", firstPath), group("match", secondPath)];
+    const forward = buildProductionHistoryGroups(sources);
+    const reverse = buildProductionHistoryGroups([...sources].reverse());
+    const forwardByPath = new Map(
+      forward.map((item) => [item.inputPath, item.groupId]),
+    );
+    const reverseByPath = new Map(
+      reverse.map((item) => [item.inputPath, item.groupId]),
+    );
+
+    expect(new Set(forward.map((item) => item.groupId)).size).toBe(2);
+    expect(forwardByPath).toEqual(reverseByPath);
+    expect([...forwardByPath.values()].sort()).toEqual([
+      "match--q3f3lv",
+      "match--q3f3lv--1",
+    ]);
   });
 });
 
@@ -528,6 +687,56 @@ describe("history filtering and product classification", () => {
       `/api/runs/run%20one/artifacts/nested/report%20%231.json?status_generation=${HASH_A}`,
     );
   });
+
+  it("derives product summary transitions only from generation-bound cache state", () => {
+    const invalid = {
+      ...ready,
+      run_id: "invalid-generation",
+      broadcast: { status: "ready", status_generation: "invalid" },
+    };
+    const projected = buildProductionHistoryGroups([
+      group("match", "C:/videos/match.mp4", [ready, invalid]),
+    ])[0];
+    expect(productionGroupProductCounts(projected, () => undefined)).toEqual({
+      unverified: 1,
+      verified: 0,
+      unavailable: 1,
+    });
+    expect(
+      productionGroupProductCounts(projected, () => ({
+        status: "success",
+        artifacts: [artifact("broadcast.mp4")],
+      })),
+    ).toEqual({ unverified: 0, verified: 1, unavailable: 1 });
+    expect(
+      productionGroupProductCounts(projected, () => ({
+        status: "success",
+        artifacts: [],
+      })),
+    ).toEqual({ unverified: 0, verified: 0, unavailable: 2 });
+    expect(
+      productionGroupProductCounts(projected, () => ({ status: "error" })),
+    ).toEqual({ unverified: 0, verified: 0, unavailable: 2 });
+    expect(
+      productionGroupProductCounts(projected, () => ({ status: "pending" })),
+    ).toEqual({ unverified: 1, verified: 0, unavailable: 1 });
+
+    const changed = buildProductionHistoryGroups([
+      group("match", "C:/videos/match.mp4", [
+        {
+          ...ready,
+          broadcast: { status: "ready", status_generation: HASH_B },
+        },
+      ]),
+    ])[0];
+    expect(
+      productionGroupProductCounts(changed, (key) =>
+        key[3] === HASH_A
+          ? { status: "success", artifacts: [artifact("broadcast.mp4")] }
+          : undefined,
+      ),
+    ).toEqual({ unverified: 1, verified: 0, unavailable: 0 });
+  });
 });
 
 describe("safe history actions", () => {
@@ -569,6 +778,42 @@ describe("safe history actions", () => {
       ),
     ).toBe("trial");
     expect(productionHistoryCancellationTarget(run("done"), [])).toBeNull();
+  });
+
+  it("safely falls back to an active review-evidence import child", () => {
+    const parent = run("full", {
+      source: "broadcast_hybrid",
+      broadcast: { status: "needs_review" },
+    });
+    const child = run("review-import", {
+      source: "broadcast_review_evidence_import",
+      status: "running",
+      completed_at: null,
+      parent_run_id: "full",
+      broadcast: {
+        parent_run_id: "full",
+        operation: "review_evidence_import",
+        operation_status: "validating",
+      },
+    });
+    expect(productionHistoryCancellationTarget(child, [parent, child])).toBe(
+      "review-import",
+    );
+    expect(
+      productionHistoryCancellationTarget({ ...child, status: "completed" }, [
+        parent,
+        child,
+      ]),
+    ).toBeNull();
+    expect(
+      productionHistoryCancellationTarget(
+        {
+          ...child,
+          parent_run_id: "other",
+        },
+        [parent, child],
+      ),
+    ).toBeNull();
   });
 
   it("requires child-first deletion and blocks active work", () => {

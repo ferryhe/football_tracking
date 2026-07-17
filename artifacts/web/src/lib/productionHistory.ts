@@ -2,6 +2,7 @@ import type {
   ArtifactSummary,
   AssetGroup,
   ConfigListItem,
+  InputVideoItem,
   RunRecord,
 } from "@workspace/api-client-react";
 
@@ -19,6 +20,7 @@ const ACTIVE_OPERATION_STATUSES = new Set([
   "copying",
   "validating",
 ]);
+const TERMINAL_RUN_STATUSES = new Set(["completed", "failed", "cancelled"]);
 const SHA256 = /^[0-9a-f]{64}$/;
 
 export type ProductionHistoryKind =
@@ -50,7 +52,11 @@ export interface ProductionHistoryTimelineItem {
   kind: ProductionHistoryKind;
   parentRunId: string | null;
   externalParentRunId: string | null;
-  lineageIssue: "ambiguous_parent" | "missing_parent" | null;
+  lineageIssue:
+    | "ambiguous_parent"
+    | "missing_parent"
+    | "identity_mismatch"
+    | null;
   note: ProductionHistoryNote | null;
 }
 
@@ -69,6 +75,7 @@ export interface ProductionHistoryGroup {
   groupId: string;
   title: string;
   inputPath: string | null;
+  inputVideo: InputVideoItem | null;
   lastActivityAt: string | null;
   isUnbound: boolean;
   configs: ConfigListItem[];
@@ -89,6 +96,17 @@ export type ProductionProductClassification =
       downloads: ArtifactSummary[];
     };
 
+export interface ProductionProductCacheSnapshot {
+  status: "pending" | "error" | "success";
+  artifacts?: readonly ArtifactSummary[];
+}
+
+export interface ProductionProductCounts {
+  unverified: number;
+  verified: number;
+  unavailable: number;
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value && typeof value === "object" && !Array.isArray(value));
 }
@@ -105,11 +123,7 @@ function positiveInteger(value: unknown): value is number {
   return Number.isInteger(value) && Number(value) > 0;
 }
 
-/**
- * Only server-produced production notes are accepted. The API validates these
- * notes against metadata.production_workflow before a production full run can
- * start; malformed/free-form notes stay untrusted and create no lineage edge.
- */
+/** Parse the machine-note schema only; callers must bind it to visible server context. */
 export function parseProductionHistoryNote(
   notes: string | null | undefined,
 ): ProductionHistoryNote | null {
@@ -183,6 +197,95 @@ export function parseProductionHistoryNote(
   return null;
 }
 
+function normalizedPath(value: string | null | undefined): string | null {
+  const text = nonEmptyText(value);
+  return text ? text.replaceAll("\\", "/").replace(/\/+$/, "") : null;
+}
+
+function pathBasename(value: string | null | undefined): string | null {
+  return normalizedPath(value)?.split("/").at(-1) ?? null;
+}
+
+function configMatchesRun(
+  run: RunRecord,
+  groupPath: string,
+  configs: readonly ConfigListItem[],
+): boolean {
+  const configName = nonEmptyText(run.config_name);
+  const configPath = normalizedPath(run.config_path);
+  if (!configName || !configPath) return false;
+  return configs.some(
+    (config) =>
+      config.name === configName &&
+      normalizedPath(config.path) === configPath &&
+      normalizedPath(config.input_video) === groupPath,
+  );
+}
+
+function claimsProductionIdentity(run: RunRecord): boolean {
+  return (
+    run.run_id.startsWith("production_trial_") ||
+    run.run_id.startsWith("production_full_") ||
+    run.source === "broadcast_hybrid"
+  );
+}
+
+/**
+ * Full-run creation is server-preflighted against metadata.production_workflow.
+ * Trial notes have no equivalent public proof, so both note kinds remain
+ * untrusted until every visible run/group/config identity below agrees.
+ */
+function bindProductionHistoryNote(
+  run: RunRecord,
+  groupPath: string | null,
+  inputVideo: InputVideoItem | null,
+  configs: readonly ConfigListItem[],
+): { note: ProductionHistoryNote | null; identityMismatch: boolean } {
+  const note = parseProductionHistoryNote(run.notes);
+  if (!note) {
+    return { note: null, identityMismatch: claimsProductionIdentity(run) };
+  }
+  const inputPath = normalizedPath(run.input_video);
+  const canonicalGroupPath = normalizedPath(groupPath);
+  const parsed = JSON.parse(run.notes!) as Record<string, unknown>;
+  const outputId = nonEmptyText(parsed.output_id)!;
+  const expectedRunId = `${
+    note.purpose === "production_trial"
+      ? "production_trial_"
+      : "production_full_"
+  }${outputId}`;
+  const commonMatches =
+    run.run_id === expectedRunId &&
+    pathBasename(run.output_dir) === expectedRunId &&
+    inputPath !== null &&
+    inputPath === canonicalGroupPath &&
+    configMatchesRun(run, inputPath, configs);
+  if (!commonMatches) return { note: null, identityMismatch: true };
+
+  if (note.purpose === "production_trial") {
+    return run.source === "api"
+      ? { note, identityMismatch: false }
+      : { note: null, identityMismatch: true };
+  }
+
+  const sourceSignature = parsed.source_signature as Record<string, unknown>;
+  const sourceMatches =
+    inputVideo !== null &&
+    normalizedPath(inputVideo.path) === inputPath &&
+    Number(sourceSignature.size_bytes) === inputVideo.size_bytes &&
+    nonEmptyText(sourceSignature.modified_at) === inputVideo.modified_at;
+  const fullMatches =
+    run.source === "broadcast_hybrid" &&
+    nonEmptyText(run.parent_run_id) === note.acceptedTrialRunId &&
+    normalizedPath(String(sourceSignature.path)) === inputPath &&
+    sourceMatches &&
+    nonEmptyText(run.config_name) ===
+      nonEmptyText(parsed.confirmed_config_name);
+  return fullMatches
+    ? { note, identityMismatch: false }
+    : { note: null, identityMismatch: true };
+}
+
 function timestamp(run: RunRecord): string | null {
   return run.completed_at ?? run.started_at ?? run.created_at ?? null;
 }
@@ -210,13 +313,15 @@ function historyKind(
   if (run.status === "cancelled") return "cancelled";
   if (run.broadcast?.operation === "recompute") return "recompute";
   if (run.broadcast?.operation === "render") return "render";
-  if (run.source === "broadcast_hybrid" || note?.purpose === "production_full")
-    return "full";
+  if (note?.purpose === "production_full") return "full";
   if (note?.purpose === "production_trial") return "trial";
   return "legacy";
 }
 
-function explicitLineageParent(run: RunRecord): {
+function explicitLineageParent(
+  run: RunRecord,
+  note: ProductionHistoryNote | null,
+): {
   parentRunId: string | null;
   ambiguous: boolean;
 } {
@@ -225,7 +330,6 @@ function explicitLineageParent(run: RunRecord): {
   const broadcastParent = nonEmptyText(run.broadcast?.parent_run_id);
   if (direct) candidates.add(direct);
   if (broadcastParent) candidates.add(broadcastParent);
-  const note = parseProductionHistoryNote(run.notes);
   if (note?.purpose === "production_full" && note.acceptedTrialRunId) {
     candidates.add(note.acceptedTrialRunId);
   }
@@ -237,12 +341,22 @@ function explicitLineageParent(run: RunRecord): {
 
 function buildTimeline(
   runs: readonly RunRecord[],
+  groupPath: string | null,
+  inputVideo: InputVideoItem | null,
+  configs: readonly ConfigListItem[],
 ): ProductionHistoryTimelineItem[] {
   const ids = new Set(runs.map((run) => run.run_id));
   return runs
     .map((run) => {
-      const note = parseProductionHistoryNote(run.notes);
-      const lineage = explicitLineageParent(run);
+      const operation = run.broadcast?.operation;
+      const binding =
+        operation === "recompute" ||
+        operation === "render" ||
+        operation === "review_evidence_import"
+          ? { note: null, identityMismatch: false }
+          : bindProductionHistoryNote(run, groupPath, inputVideo, configs);
+      const note = binding.note;
+      const lineage = explicitLineageParent(run, note);
       const parentExists = lineage.parentRunId
         ? ids.has(lineage.parentRunId)
         : false;
@@ -252,11 +366,13 @@ function buildTimeline(
         parentRunId: parentExists ? lineage.parentRunId : null,
         externalParentRunId:
           lineage.parentRunId && !parentExists ? lineage.parentRunId : null,
-        lineageIssue: lineage.ambiguous
-          ? "ambiguous_parent"
-          : lineage.parentRunId && !parentExists
-            ? "missing_parent"
-            : null,
+        lineageIssue: binding.identityMismatch
+          ? "identity_mismatch"
+          : lineage.ambiguous
+            ? "ambiguous_parent"
+            : lineage.parentRunId && !parentExists
+              ? "missing_parent"
+              : null,
         note,
       } satisfies ProductionHistoryTimelineItem;
     })
@@ -280,9 +396,7 @@ function summarize(
   timeline: readonly ProductionHistoryTimelineItem[],
 ): ProductionHistorySummary {
   const fullRuns = timeline.filter(
-    (item) =>
-      item.run.source === "broadcast_hybrid" ||
-      item.note?.purpose === "production_full",
+    (item) => item.note?.purpose === "production_full",
   );
   return {
     trialCount: timeline.filter(
@@ -306,6 +420,7 @@ function summarize(
 interface MutableGroup {
   key: string;
   path: string | null;
+  inputVideo: InputVideoItem | null;
   title: string;
   candidateAlias: string;
   lastActivityAt: string | null;
@@ -338,6 +453,11 @@ export function buildProductionHistoryGroups(
     const created: MutableGroup = {
       key,
       path,
+      inputVideo:
+        source?.input_video &&
+        normalizedPath(source.input_video.path) === normalizedPath(path)
+          ? source.input_video
+          : null,
       title:
         source?.title ??
         (path
@@ -392,12 +512,17 @@ export function buildProductionHistoryGroups(
     );
   }
 
-  return [...groupByKey.values()]
+  const prepared = [...groupByKey.values()]
     .filter(
       (group) => !group.isUnbound || group.runs.length || group.configs.length,
     )
     .map((group) => {
-      const timeline = buildTimeline(group.runs);
+      const timeline = buildTimeline(
+        group.runs,
+        group.path,
+        group.inputVideo,
+        group.configs,
+      );
       const runActivity = timeline[0] ? timestamp(timeline[0].run) : null;
       const lastActivityAt =
         timestampNumber(runActivity) > timestampNumber(group.lastActivityAt)
@@ -411,6 +536,7 @@ export function buildProductionHistoryGroups(
             : group.candidateAlias,
         title: group.title,
         inputPath: group.path,
+        inputVideo: group.inputVideo,
         lastActivityAt,
         isUnbound: group.isUnbound,
         configs: [...group.configs].sort((left, right) =>
@@ -419,15 +545,31 @@ export function buildProductionHistoryGroups(
         timeline,
         summary: summarize(timeline),
       } satisfies ProductionHistoryGroup;
-    })
-    .sort((left, right) => {
-      if (left.isUnbound !== right.isUnbound) return left.isUnbound ? 1 : -1;
-      return (
-        timestampNumber(right.lastActivityAt) -
-          timestampNumber(left.lastActivityAt) ||
-        left.key.localeCompare(right.key)
-      );
     });
+
+  const usedAliases = new Set<string>();
+  const unique = [...prepared]
+    .sort((left, right) => left.key.localeCompare(right.key))
+    .map((group) => {
+      const base = group.groupId;
+      let groupId = base;
+      let suffix = 1;
+      while (usedAliases.has(groupId)) {
+        groupId = `${base}--${suffix}`;
+        suffix += 1;
+      }
+      usedAliases.add(groupId);
+      return { ...group, groupId };
+    });
+
+  return unique.sort((left, right) => {
+    if (left.isUnbound !== right.isUnbound) return left.isUnbound ? 1 : -1;
+    return (
+      timestampNumber(right.lastActivityAt) -
+        timestampNumber(left.lastActivityAt) ||
+      left.key.localeCompare(right.key)
+    );
+  });
 }
 
 export function filterProductionHistoryGroups(
@@ -487,6 +629,43 @@ export function classifyProductionProduct(
   };
 }
 
+export function productionGroupProductCounts(
+  group: ProductionHistoryGroup,
+  lookup: (
+    key: readonly [string, string, string, string],
+  ) => ProductionProductCacheSnapshot | undefined,
+): ProductionProductCounts {
+  const counts: ProductionProductCounts = {
+    unverified: 0,
+    verified: 0,
+    unavailable: 0,
+  };
+  for (const item of group.timeline) {
+    if (!isReadyProductCandidate(item.run)) continue;
+    const key = productionProductVerificationKey(item.run);
+    if (!key) {
+      counts.unavailable += 1;
+      continue;
+    }
+    const cached = lookup(key);
+    if (!cached || cached.status === "pending") {
+      counts.unverified += 1;
+      continue;
+    }
+    if (cached.status === "error") {
+      counts.unavailable += 1;
+      continue;
+    }
+    const classification = classifyProductionProduct(
+      item.run,
+      cached.artifacts ?? [],
+    );
+    if (classification.status === "verified") counts.verified += 1;
+    else counts.unavailable += 1;
+  }
+  return counts;
+}
+
 export function productionProductVerificationKey(
   run: RunRecord,
 ): readonly [string, string, string, string] | null {
@@ -505,9 +684,22 @@ export function productionHistoryCancellationTarget(
     Boolean(run.broadcast?.operation) ||
     Boolean(run.broadcast?.parent_run_id);
   if (isBroadcast) {
-    return broadcastCancellationTarget(
+    const target = broadcastCancellationTarget(
       recoverBroadcastWorkflowRun(run, groupRuns),
     );
+    if (target) return target;
+    const lineage = explicitLineageParent(run, null);
+    if (
+      run.source === "broadcast_review_evidence_import" &&
+      run.broadcast?.operation === "review_evidence_import" &&
+      !lineage.ambiguous &&
+      !TERMINAL_RUN_STATUSES.has(run.status) &&
+      (ACTIVE_RUN_STATUSES.has(run.status) ||
+        ACTIVE_OPERATION_STATUSES.has(run.broadcast.operation_status ?? ""))
+    ) {
+      return run.run_id;
+    }
+    return null;
   }
   return ACTIVE_RUN_STATUSES.has(run.status) ? run.run_id : null;
 }
@@ -523,7 +715,7 @@ export function productionHistoryDeletionBlocker(
     return "active_run";
   }
   const children = groupRuns.filter((candidate) => {
-    const lineage = explicitLineageParent(candidate);
+    const lineage = explicitLineageParent(candidate, null);
     return !lineage.ambiguous && lineage.parentRunId === run.run_id;
   });
   return children.length ? `children:${children.length}` : null;

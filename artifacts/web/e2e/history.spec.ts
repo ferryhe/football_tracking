@@ -1,4 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
+import AxeBuilder from "@axe-core/playwright";
 
 const GENERATION_A = "a".repeat(64);
 const GENERATION_B = "b".repeat(64);
@@ -65,6 +66,11 @@ function assetGroups(firstGeneration: string) {
       operation: "render",
       operation_status: "running",
     },
+    progress: {
+      stage: "render",
+      percent: 42,
+      elapsed_seconds: 12,
+    },
   });
   return [
     {
@@ -78,7 +84,7 @@ function assetGroups(firstGeneration: string) {
       },
       last_activity_at: "2026-07-14T10:02:00Z",
       run_count: 5,
-      config_count: 0,
+      config_count: 1,
       output_count: 5,
       runs: [
         readyProduct("product-one", firstGeneration),
@@ -87,7 +93,19 @@ function assetGroups(firstGeneration: string) {
         child,
         run("leaf-output"),
       ],
-      configs: [],
+      configs: [
+        {
+          name: "default.yaml",
+          path: "config/default.yaml",
+          created_at: "2026-07-14T09:30:00Z",
+          input_video: "C:/videos/match.mp4",
+          output_dir: "C:/outputs/default",
+          detector_model_path: "models/ball.pt",
+          postprocess_enabled: true,
+          follow_cam_enabled: true,
+          exists: { config: true, input_video: true },
+        },
+      ],
       outputs: [],
       is_unbound: false,
     },
@@ -113,6 +131,36 @@ function assetGroups(firstGeneration: string) {
       configs: [],
       outputs: [],
       is_unbound: true,
+    },
+    {
+      group_id: "config-only",
+      title: "config-only.mp4",
+      input_video: {
+        name: "config-only.mp4",
+        path: "C:/videos/config-only.mp4",
+        size_bytes: 2_000,
+        modified_at: "2026-07-12T09:00:00Z",
+      },
+      last_activity_at: "2026-07-12T09:30:00Z",
+      run_count: 0,
+      config_count: 1,
+      output_count: 0,
+      runs: [],
+      configs: [
+        {
+          name: "config-only.yaml",
+          path: "config/config-only.yaml",
+          created_at: "2026-07-12T09:30:00Z",
+          input_video: "C:/videos/config-only.mp4",
+          output_dir: "C:/outputs/config-only",
+          detector_model_path: "models/ball.pt",
+          postprocess_enabled: true,
+          follow_cam_enabled: false,
+          exists: { config: true, input_video: true },
+        },
+      ],
+      outputs: [],
+      is_unbound: false,
     },
   ];
 }
@@ -226,8 +274,16 @@ test("grouped history lazily verifies versioned products and keeps actions safe"
   await page.goto("/history");
   await expect(page.getByTestId("asset-group-match")).toBeVisible();
   await expect(page.getByTestId("asset-group-unbound-legacy")).toBeVisible();
+  await expect(page.getByTestId("asset-group-config-only")).toBeVisible();
   expect(artifactReads).toEqual([]);
   expect(qualityReads).toEqual([]);
+
+  await page.getByTestId("asset-group-toggle-config-only").click();
+  await expect(
+    page.getByTestId("group-config-snapshots-config-only"),
+  ).toContainText("config/config-only.yaml");
+  expect(artifactReads).toEqual([]);
+  await page.getByTestId("asset-group-toggle-config-only").click();
 
   await page.getByTestId("asset-group-toggle-unbound-legacy").click();
   await expect(page.getByTestId("timeline-run-legacy-failed")).toBeVisible();
@@ -235,8 +291,17 @@ test("grouped history lazily verifies versioned products and keeps actions safe"
   await page.getByTestId("asset-group-toggle-unbound-legacy").click();
 
   await page.getByTestId("asset-group-toggle-match").click();
+  await expect(page.getByTestId("group-source-metadata-match")).toContainText(
+    "match.mp4",
+  );
+  await expect(page.getByTestId("group-config-snapshots-match")).toContainText(
+    "config/default.yaml",
+  );
+  expect(artifactReads).toEqual([]);
+  expect(qualityReads).toEqual([]);
+
+  await page.getByTestId("timeline-toggle-product-one").click();
   await expect(page.getByTestId("verified-product-product-one")).toBeVisible();
-  await expect(page.getByTestId("verified-product-product-two")).toBeVisible();
   await expect(page.getByTestId("product-preview-product-one")).toBeVisible();
   await expect(page.getByTestId("product-quality-product-one")).toContainText(
     "pass",
@@ -247,6 +312,16 @@ test("grouped history lazily verifies versioned products and keeps actions safe"
   await expect(
     page.getByText(/artifact verification is not release approval/i).first(),
   ).toBeVisible();
+  expect(artifactReads).toEqual([`product-one:${GENERATION_A}`]);
+  await expect(page.getByTestId("group-products-verified-match")).toContainText(
+    "1",
+  );
+  await expect(
+    page.getByTestId("group-products-unverified-match"),
+  ).toContainText("1");
+
+  await page.getByTestId("timeline-toggle-product-two").click();
+  await expect(page.getByTestId("verified-product-product-two")).toBeVisible();
   expect(artifactReads.sort()).toEqual(
     [`product-one:${GENERATION_A}`, `product-two:${GENERATION_B}`].sort(),
   );
@@ -254,19 +329,39 @@ test("grouped history lazily verifies versioned products and keeps actions safe"
   const readsBeforeReopen = artifactReads.length;
   await page.getByTestId("asset-group-toggle-match").click();
   await page.getByTestId("asset-group-toggle-match").click();
+  expect(artifactReads).toHaveLength(readsBeforeReopen);
+  await page.getByTestId("timeline-toggle-product-one").click();
   await expect(page.getByTestId("verified-product-product-one")).toBeVisible();
   expect(artifactReads).toHaveLength(readsBeforeReopen);
+  await page.getByTestId("timeline-toggle-product-one").click();
 
   await page.getByTestId("timeline-toggle-full-active").click();
   await expect(page.getByTestId("group-delete-full-active")).toBeDisabled();
   await expect(
     page.getByTestId("group-delete-blocker-full-active"),
   ).toContainText(/child output/i);
+  const accessibility = await new AxeBuilder({ page })
+    .include('[data-testid="group-detail-match"]')
+    .analyze();
+  expect(
+    accessibility.violations.filter(
+      (violation) =>
+        violation.id === "aria-progressbar-name" &&
+        ["serious", "critical"].includes(violation.impact ?? ""),
+    ),
+  ).toEqual([]);
 
   firstGeneration = GENERATION_C;
   await page.getByTestId("group-cancel-full-active").click();
   await page.getByTestId("group-confirm-cancel-full-active").click();
   await expect.poll(() => cancelled).toEqual(["render-active"]);
+  await expect(
+    page.getByTestId("group-products-unverified-match"),
+  ).toContainText("1");
+  expect(
+    artifactReads.filter((read) => read === `product-one:${GENERATION_C}`),
+  ).toEqual([]);
+  await page.getByTestId("timeline-toggle-product-one").click();
   await expect
     .poll(
       () =>
@@ -281,4 +376,75 @@ test("grouped history lazily verifies versioned products and keeps actions safe"
   await expect.poll(() => deleted).toEqual(["leaf-output"]);
 
   expect(failures).toEqual([]);
+});
+
+test("a 1,000-product group fetches only the explicitly expanded row", async ({
+  page,
+}) => {
+  const artifactReads: string[] = [];
+  await page.route("**/api/**", async (route) => {
+    const requestUrl = new URL(route.request().url());
+    if (requestUrl.pathname === "/api/runs/asset-groups") {
+      await route.fulfill({
+        status: 200,
+        json: [
+          {
+            group_id: "large-match",
+            title: "large-match.mp4",
+            input_video: {
+              name: "large-match.mp4",
+              path: "C:/videos/large-match.mp4",
+              size_bytes: 2_000,
+              modified_at: "2026-07-14T09:00:00Z",
+            },
+            last_activity_at: "2026-07-14T10:02:00Z",
+            runs: Array.from({ length: 1_000 }, (_, index) =>
+              readyProduct(`large-product-${index}`, GENERATION_A),
+            ).map((candidate) => ({
+              ...candidate,
+              input_video: "C:/videos/large-match.mp4",
+            })),
+            configs: [],
+            outputs: [],
+            is_unbound: false,
+          },
+        ],
+      });
+      return;
+    }
+    const match = requestUrl.pathname.match(
+      /^\/api\/runs\/([^/]+)\/artifacts$/,
+    );
+    if (match) {
+      const runId = decodeURIComponent(match[1]);
+      artifactReads.push(runId);
+      await route.fulfill({
+        status: 200,
+        json: [
+          {
+            name: "broadcast.mp4",
+            path: `C:/outputs/${runId}/broadcast.mp4`,
+            kind: "video",
+            exists: true,
+            size_bytes: 1_000,
+            content_type: "video/mp4",
+          },
+        ],
+      });
+      return;
+    }
+    await route.fulfill({
+      status: 404,
+      json: { detail: "Unhandled test route" },
+    });
+  });
+
+  await page.goto("/history");
+  await page.getByTestId("asset-group-toggle-large-match").click();
+  expect(artifactReads).toEqual([]);
+  await page.getByTestId("timeline-toggle-large-product-999").click();
+  await expect(
+    page.getByTestId("verified-product-large-product-999"),
+  ).toBeVisible();
+  expect(artifactReads).toEqual(["large-product-999"]);
 });

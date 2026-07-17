@@ -1,11 +1,18 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   useMutation,
   useQuery,
   useQueryClient,
   type QueryClient,
 } from "@tanstack/react-query";
-import type { RunRecord } from "@workspace/api-client-react";
+import {
+  getGetRunQueryKey,
+  getListArtifactsQueryKey,
+  getListAssetGroupsQueryKey,
+  getListRunsQueryKey,
+  type ArtifactSummary,
+  type RunRecord,
+} from "@workspace/api-client-react";
 import {
   AlertCircle,
   CheckCircle2,
@@ -49,25 +56,62 @@ import {
   productionArtifactUrl,
   productionHistoryCancellationTarget,
   productionHistoryDeletionBlocker,
+  productionGroupProductCounts,
   productionProductVerificationKey,
   type ProductionHistoryFilter,
   type ProductionHistoryGroup,
   type ProductionHistoryTimelineItem,
 } from "@/lib/productionHistory";
-import { cn, formatDateTime, formatDuration } from "@/lib/utils";
+import { cn, formatBytes, formatDateTime, formatDuration } from "@/lib/utils";
 
 export async function invalidateProductionHistoryCaches(
   queryClient: QueryClient,
+  affectedRunIds: readonly string[] = [],
 ): Promise<void> {
+  const runIds = [...new Set(affectedRunIds.filter(Boolean))];
+  const generatedKeys = [
+    getListAssetGroupsQueryKey(),
+    getListRunsQueryKey(),
+    ...runIds.flatMap((runId) => [
+      getGetRunQueryKey(runId),
+      getListArtifactsQueryKey(runId),
+    ]),
+  ];
+  const legacyAndHistoryKeys = [
+    ["asset-groups"],
+    ["runs"],
+    ...runIds.flatMap((runId) => [
+      ["run", runId],
+      ["artifacts", runId],
+    ]),
+    ["production-history", "artifact"],
+    ["production-history", "product"],
+  ];
+  const isGeneratedRunQuery = (query: {
+    queryKey: readonly unknown[];
+  }): boolean => {
+    const root = query.queryKey[0];
+    return (
+      typeof root === "string" &&
+      (root === "/api/runs" || root.startsWith("/api/runs/"))
+    );
+  };
+
   await Promise.all([
-    queryClient.invalidateQueries({ queryKey: ["asset-groups"] }),
-    queryClient.invalidateQueries({ queryKey: ["runs"] }),
-    queryClient.invalidateQueries({
-      queryKey: ["production-history", "artifact"],
-    }),
-    queryClient.invalidateQueries({
-      queryKey: ["production-history", "product"],
-    }),
+    ...generatedKeys.map((queryKey) => queryClient.cancelQueries({ queryKey })),
+    ...legacyAndHistoryKeys.map((queryKey) =>
+      queryClient.cancelQueries({ queryKey }),
+    ),
+    queryClient.cancelQueries({ predicate: isGeneratedRunQuery }),
+  ]);
+  await Promise.all([
+    ...generatedKeys.map((queryKey) =>
+      queryClient.invalidateQueries({ queryKey }),
+    ),
+    ...legacyAndHistoryKeys.map((queryKey) =>
+      queryClient.invalidateQueries({ queryKey }),
+    ),
+    queryClient.invalidateQueries({ predicate: isGeneratedRunQuery }),
   ]);
 }
 
@@ -82,6 +126,8 @@ function GroupRunProgress({ run }: { run: RunRecord }) {
   return (
     <div
       className="mt-2 space-y-1.5"
+      role="status"
+      aria-live="polite"
       data-testid={`group-run-progress-${run.run_id}`}
     >
       <div className="flex items-center justify-between text-xs text-muted-foreground">
@@ -90,7 +136,14 @@ function GroupRunProgress({ run }: { run: RunRecord }) {
           {Math.round(percent)}%
         </span>
       </div>
-      <Progress value={percent} />
+      <Progress
+        value={percent}
+        aria-label={t.history.runProgressName(
+          run.run_id,
+          t.history.progressStage(run.progress.stage),
+        )}
+        aria-valuetext={`${Math.round(percent)}%`}
+      />
       <p className="text-xs text-muted-foreground">
         {run.progress.eta_seconds != null
           ? `${t.history.etaLabel} ${formatDuration(run.progress.eta_seconds)}`
@@ -109,6 +162,46 @@ function qualityText(value: unknown): string {
   return typeof summary === "string"
     ? summary
     : JSON.stringify(summary ?? value, null, 2).slice(0, 1_200);
+}
+
+function useProductCacheRevision(queryClient: QueryClient): number {
+  const [revision, setRevision] = useState(0);
+  useEffect(() => {
+    let mounted = true;
+    let scheduled = false;
+    const unsubscribe = queryClient.getQueryCache().subscribe((event) => {
+      const key = event.query.queryKey;
+      if (
+        (event.type === "added" ||
+          event.type === "removed" ||
+          event.type === "updated") &&
+        key[0] === "production-history" &&
+        key[1] === "product" &&
+        !scheduled
+      ) {
+        scheduled = true;
+        queueMicrotask(() => {
+          scheduled = false;
+          if (mounted) setRevision((current) => current + 1);
+        });
+      }
+    });
+    return () => {
+      mounted = false;
+      unsubscribe();
+    };
+  }, [queryClient]);
+  return revision;
+}
+
+function groupProductCountsFromCache(
+  queryClient: QueryClient,
+  group: ProductionHistoryGroup,
+) {
+  return productionGroupProductCounts(group, (key) => {
+    const state = queryClient.getQueryState<ArtifactSummary[]>(key);
+    return state ? { status: state.status, artifacts: state.data } : undefined;
+  });
 }
 
 function ProductEvidence({ run }: { run: RunRecord }) {
@@ -297,18 +390,25 @@ function TimelineRow({
   groupRuns,
   onCancel,
   onDelete,
+  pendingTargets,
 }: {
   item: ProductionHistoryTimelineItem;
   groupRuns: readonly RunRecord[];
-  onCancel: (runId: string) => void;
-  onDelete: (runId: string) => void;
+  onCancel: (runId: string) => Promise<boolean>;
+  onDelete: (runId: string) => Promise<boolean>;
+  pendingTargets: ReadonlySet<string>;
 }) {
   const { t } = useLanguage();
-  const [open, setOpen] = useState(isReadyProductCandidate(item.run));
+  const [open, setOpen] = useState(false);
+  const [cancelDialogOpen, setCancelDialogOpen] = useState(false);
+  const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
   const cancellationTarget = productionHistoryCancellationTarget(
     item.run,
     groupRuns,
   );
+  const cancellationPending =
+    cancellationTarget !== null && pendingTargets.has(cancellationTarget);
+  const deletionPending = pendingTargets.has(item.run.run_id);
   const deletionBlocker = productionHistoryDeletionBlocker(item.run, groupRuns);
   const childCount = deletionBlocker?.startsWith("children:")
     ? Number(deletionBlocker.slice("children:".length))
@@ -390,7 +490,9 @@ function TimelineRow({
               <AlertDescription>
                 {item.lineageIssue === "ambiguous_parent"
                   ? t.history.ambiguousLineage
-                  : t.history.missingLineage}
+                  : item.lineageIssue === "identity_mismatch"
+                    ? t.history.identityMismatchLineage
+                    : t.history.missingLineage}
               </AlertDescription>
             </Alert>
           )}
@@ -408,15 +510,27 @@ function TimelineRow({
 
           <div className="flex flex-wrap items-start gap-2">
             {cancellationTarget && (
-              <AlertDialog>
+              <AlertDialog
+                open={cancelDialogOpen}
+                onOpenChange={(nextOpen) => {
+                  if (!cancellationPending) setCancelDialogOpen(nextOpen);
+                }}
+              >
                 <AlertDialogTrigger asChild>
                   <Button
                     variant="destructive"
                     size="sm"
+                    disabled={cancellationPending}
                     data-testid={`group-cancel-${item.run.run_id}`}
                   >
-                    <Square className="mr-1.5 h-3.5 w-3.5" />
-                    {t.history.cancelRun}
+                    {cancellationPending ? (
+                      <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
+                    ) : (
+                      <Square className="mr-1.5 h-3.5 w-3.5" />
+                    )}
+                    {cancellationPending
+                      ? t.history.actionPending
+                      : t.history.cancelRun}
                   </Button>
                 </AlertDialogTrigger>
                 <AlertDialogContent>
@@ -432,29 +546,54 @@ function TimelineRow({
                     </AlertDialogDescription>
                   </AlertDialogHeader>
                   <AlertDialogFooter>
-                    <AlertDialogCancel>{t.common.cancel}</AlertDialogCancel>
+                    <AlertDialogCancel disabled={cancellationPending}>
+                      {t.common.cancel}
+                    </AlertDialogCancel>
                     <AlertDialogAction
                       className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
-                      onClick={() => onCancel(cancellationTarget)}
+                      disabled={cancellationPending}
+                      onClick={async (event) => {
+                        event.preventDefault();
+                        if (cancellationPending) return;
+                        if (await onCancel(cancellationTarget)) {
+                          setCancelDialogOpen(false);
+                        }
+                      }}
                       data-testid={`group-confirm-cancel-${item.run.run_id}`}
                     >
-                      {t.history.cancelRunConfirm}
+                      {cancellationPending && (
+                        <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
+                      )}
+                      {cancellationPending
+                        ? t.history.actionPending
+                        : t.history.cancelRunConfirm}
                     </AlertDialogAction>
                   </AlertDialogFooter>
                 </AlertDialogContent>
               </AlertDialog>
             )}
 
-            <AlertDialog>
+            <AlertDialog
+              open={deleteDialogOpen}
+              onOpenChange={(nextOpen) => {
+                if (!deletionPending) setDeleteDialogOpen(nextOpen);
+              }}
+            >
               <AlertDialogTrigger asChild>
                 <Button
                   variant="destructive"
                   size="sm"
-                  disabled={deletionBlocker !== null}
+                  disabled={deletionBlocker !== null || deletionPending}
                   data-testid={`group-delete-${item.run.run_id}`}
                 >
-                  <Trash2 className="mr-1.5 h-3.5 w-3.5" />
-                  {t.history.deleteOutput}
+                  {deletionPending ? (
+                    <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
+                  ) : (
+                    <Trash2 className="mr-1.5 h-3.5 w-3.5" />
+                  )}
+                  {deletionPending
+                    ? t.history.actionPending
+                    : t.history.deleteOutput}
                 </Button>
               </AlertDialogTrigger>
               <AlertDialogContent>
@@ -470,13 +609,27 @@ function TimelineRow({
                   </AlertDialogDescription>
                 </AlertDialogHeader>
                 <AlertDialogFooter>
-                  <AlertDialogCancel>{t.common.cancel}</AlertDialogCancel>
+                  <AlertDialogCancel disabled={deletionPending}>
+                    {t.common.cancel}
+                  </AlertDialogCancel>
                   <AlertDialogAction
                     className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
-                    onClick={() => onDelete(item.run.run_id)}
+                    disabled={deletionPending}
+                    onClick={async (event) => {
+                      event.preventDefault();
+                      if (deletionPending) return;
+                      if (await onDelete(item.run.run_id)) {
+                        setDeleteDialogOpen(false);
+                      }
+                    }}
                     data-testid={`group-confirm-delete-${item.run.run_id}`}
                   >
-                    {t.history.deleteRunConfirm}
+                    {deletionPending && (
+                      <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
+                    )}
+                    {deletionPending
+                      ? t.history.actionPending
+                      : t.history.deleteRunConfirm}
                   </AlertDialogAction>
                 </AlertDialogFooter>
               </AlertDialogContent>
@@ -503,10 +656,12 @@ function GroupDetail({
   group,
   onCancel,
   onDelete,
+  pendingTargets,
 }: {
   group: ProductionHistoryGroup;
-  onCancel: (runId: string) => void;
-  onDelete: (runId: string) => void;
+  onCancel: (runId: string) => Promise<boolean>;
+  onDelete: (runId: string) => Promise<boolean>;
+  pendingTargets: ReadonlySet<string>;
 }) {
   const { t } = useLanguage();
   const runs = group.timeline.map((item) => item.run);
@@ -521,6 +676,79 @@ function GroupDetail({
           {group.inputPath ?? t.history.unbound}
         </p>
       </div>
+      {group.inputVideo && (
+        <section
+          className="grid gap-2 rounded-lg border bg-muted/10 p-3 text-xs sm:grid-cols-2"
+          data-testid={`group-source-metadata-${group.groupId}`}
+        >
+          <h4 className="font-medium sm:col-span-2">
+            {t.history.originalMetadata}
+          </h4>
+          <p>
+            <span className="text-muted-foreground">
+              {t.history.fileName}:{" "}
+            </span>
+            {group.inputVideo.name}
+          </p>
+          <p>
+            <span className="text-muted-foreground">
+              {t.history.fileSize}:{" "}
+            </span>
+            {formatBytes(group.inputVideo.size_bytes)}
+          </p>
+          <p className="break-all sm:col-span-2">
+            <span className="text-muted-foreground">
+              {t.history.inputLabel}:{" "}
+            </span>
+            {group.inputVideo.path}
+          </p>
+          <p>
+            <span className="text-muted-foreground">
+              {t.history.modifiedAt}:{" "}
+            </span>
+            {formatDateTime(group.inputVideo.modified_at)}
+          </p>
+        </section>
+      )}
+      {group.configs.length > 0 && (
+        <section
+          className="space-y-2 rounded-lg border bg-muted/10 p-3"
+          data-testid={`group-config-snapshots-${group.groupId}`}
+        >
+          <h4 className="text-sm font-medium">{t.history.configSnapshots}</h4>
+          {group.configs.map((config) => (
+            <div
+              key={`${config.path}:${config.name}`}
+              className="grid gap-1 border-t pt-2 text-xs first:border-t-0 first:pt-0 sm:grid-cols-2"
+            >
+              <p>
+                <span className="text-muted-foreground">
+                  {t.history.configIdentity}:{" "}
+                </span>
+                {config.name}
+              </p>
+              <p className="break-all">
+                <span className="text-muted-foreground">
+                  {t.history.configPath}:{" "}
+                </span>
+                {config.path}
+              </p>
+              <p className="break-all">
+                <span className="text-muted-foreground">
+                  {t.history.inputLabel}:{" "}
+                </span>
+                {config.input_video ?? t.common.notAvailable}
+              </p>
+              <p>
+                <span className="text-muted-foreground">
+                  {t.history.createdLabel}:{" "}
+                </span>
+                {formatDateTime(config.created_at)}
+              </p>
+            </div>
+          ))}
+        </section>
+      )}
       {group.timeline.map((item) => (
         <TimelineRow
           key={item.run.run_id}
@@ -528,6 +756,7 @@ function GroupDetail({
           groupRuns={runs}
           onCancel={onCancel}
           onDelete={onDelete}
+          pendingTargets={pendingTargets}
         />
       ))}
     </div>
@@ -538,9 +767,14 @@ export function GroupedProductionHistory() {
   const { t } = useLanguage();
   const { toast } = useToast();
   const queryClient = useQueryClient();
+  const productCacheRevision = useProductCacheRevision(queryClient);
   const [filter, setFilter] = useState<ProductionHistoryFilter>("all");
   const [search, setSearch] = useState("");
   const [openGroupKey, setOpenGroupKey] = useState<string | null>(null);
+  const inFlightTargets = useRef(new Set<string>());
+  const [pendingTargets, setPendingTargets] = useState<ReadonlySet<string>>(
+    new Set(),
+  );
 
   const assetGroups = useQuery({
     queryKey: ["asset-groups"],
@@ -560,11 +794,24 @@ export function GroupedProductionHistory() {
     () => filterProductionHistoryGroups(groups, search, filter),
     [filter, groups, search],
   );
+  const productCountsByGroup = useMemo(
+    () =>
+      new Map(
+        groups.map((group) => [
+          group.key,
+          groupProductCountsFromCache(queryClient, group),
+        ]),
+      ),
+    [groups, productCacheRevision, queryClient],
+  );
 
   const cancelRun = useMutation({
     mutationFn: (runId: string) => api.cancelRun(runId),
     onSuccess: async (cancelled, requestedId) => {
-      await invalidateProductionHistoryCaches(queryClient);
+      await invalidateProductionHistoryCaches(queryClient, [
+        requestedId,
+        cancelled.run_id,
+      ]);
       toast({
         title: t.history.cancelRunSuccess,
         description: cancelled.run_id,
@@ -580,7 +827,7 @@ export function GroupedProductionHistory() {
   const deleteRun = useMutation({
     mutationFn: (runId: string) => api.deleteRunOutput(runId),
     onSuccess: async (_, runId) => {
-      await invalidateProductionHistoryCaches(queryClient);
+      await invalidateProductionHistoryCaches(queryClient, [runId]);
       toast({ title: t.history.deleteSuccess, description: runId });
     },
     onError: (error: Error) =>
@@ -590,6 +837,24 @@ export function GroupedProductionHistory() {
         variant: "destructive",
       }),
   });
+
+  const runTargetAction = async (
+    target: string,
+    action: () => Promise<unknown>,
+  ): Promise<boolean> => {
+    if (inFlightTargets.current.has(target)) return false;
+    inFlightTargets.current.add(target);
+    setPendingTargets(new Set(inFlightTargets.current));
+    try {
+      await action();
+    } catch {
+      // useMutation owns the user-facing error toast.
+    } finally {
+      inFlightTargets.current.delete(target);
+      setPendingTargets(new Set(inFlightTargets.current));
+    }
+    return true;
+  };
 
   const filters: {
     value: ProductionHistoryFilter;
@@ -687,6 +952,11 @@ export function GroupedProductionHistory() {
           ) : (
             filtered.map((group) => {
               const open = openGroupKey === group.key;
+              const productCounts = productCountsByGroup.get(group.key) ?? {
+                unverified: 0,
+                verified: 0,
+                unavailable: 0,
+              };
               return (
                 <div
                   key={group.key}
@@ -740,6 +1010,23 @@ export function GroupedProductionHistory() {
                           {t.history.productCandidates}:{" "}
                           {group.summary.readyCandidateCount}
                         </span>
+                        <span
+                          data-testid={`group-products-unverified-${group.groupId}`}
+                        >
+                          {t.history.unverifiedProducts}:{" "}
+                          {productCounts.unverified}
+                        </span>
+                        <span
+                          data-testid={`group-products-verified-${group.groupId}`}
+                        >
+                          {t.history.verifiedProducts}: {productCounts.verified}
+                        </span>
+                        <span
+                          data-testid={`group-products-unavailable-${group.groupId}`}
+                        >
+                          {t.history.unavailableProducts}:{" "}
+                          {productCounts.unavailable}
+                        </span>
                         <span>
                           {t.history.failed}: {group.summary.failedCount}
                         </span>
@@ -752,8 +1039,17 @@ export function GroupedProductionHistory() {
                   {open && (
                     <GroupDetail
                       group={group}
-                      onCancel={(runId) => cancelRun.mutate(runId)}
-                      onDelete={(runId) => deleteRun.mutate(runId)}
+                      onCancel={(runId) =>
+                        runTargetAction(runId, () =>
+                          cancelRun.mutateAsync(runId),
+                        )
+                      }
+                      onDelete={(runId) =>
+                        runTargetAction(runId, () =>
+                          deleteRun.mutateAsync(runId),
+                        )
+                      }
+                      pendingTargets={pendingTargets}
                     />
                   )}
                 </div>

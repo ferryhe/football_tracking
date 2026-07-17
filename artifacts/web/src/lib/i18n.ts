@@ -1089,6 +1089,8 @@ export const translations = {
           failed: "Failed",
           cancelled: "Stopped",
         })[stage] ?? stage,
+      runProgressName: (runId: string, stage: string) =>
+        `${runId} ${stage} progress`,
       errorLabel: "Error",
       notesLabel: "Notes",
       cancelRun: "Stop run",
@@ -1111,6 +1113,9 @@ export const translations = {
       fullRuns: "Full runs",
       latestFullStatus: "Latest full status",
       productCandidates: "Unverified candidates",
+      unverifiedProducts: "Unverified",
+      verifiedProducts: "Verified products",
+      unavailableProducts: "Unavailable",
       viewDetail: "View group",
       closeDetail: "Close group",
       unbound: "Unbound / Legacy",
@@ -1120,6 +1125,8 @@ export const translations = {
       ambiguousLineage: "Conflicting lineage metadata; no parent was inferred.",
       missingLineage:
         "The declared parent is not present in this history snapshot.",
+      identityMismatchLineage:
+        "Machine-note identity does not match this visible run, source, input, configuration, or parent; the note was ignored.",
       verifyingProduct: "Verifying product artifacts…",
       verifiedProduct: "Artifact-verified product",
       unavailableProduct: "Not a product",
@@ -1136,6 +1143,13 @@ export const translations = {
       statusGeneration: "Status generation",
       operationalReleaseGate:
         "Artifact verification is not release approval. Real evidence and an independent visual review are still required before publishing.",
+      originalMetadata: "Original media metadata",
+      fileName: "File name",
+      fileSize: "File size",
+      modifiedAt: "Modified",
+      configSnapshots: "Configuration snapshots",
+      configPath: "Configuration path",
+      actionPending: "Working…",
       deleteRunTitle: "Delete this output?",
       deleteRunDesc:
         "Deletion is permanent. Parent output stays locked until every child output is deleted first.",
@@ -2174,6 +2188,8 @@ export const translations = {
           failed: "失败",
           cancelled: "已停止",
         })[stage] ?? stage,
+      runProgressName: (runId: string, stage: string) =>
+        `${runId} ${stage}进度`,
       errorLabel: "错误",
       notesLabel: "备注",
       cancelRun: "停止任务",
@@ -2195,6 +2211,9 @@ export const translations = {
       fullRuns: "全量任务",
       latestFullStatus: "最近全量状态",
       productCandidates: "未验证候选",
+      unverifiedProducts: "未验证",
+      verifiedProducts: "已验证成品",
+      unavailableProducts: "不可用",
       viewDetail: "查看分组",
       closeDetail: "收起分组",
       unbound: "未绑定 / 旧记录",
@@ -2203,12 +2222,15 @@ export const translations = {
       lineage: "血缘关系",
       ambiguousLineage: "血缘元数据存在冲突，未推断父任务。",
       missingLineage: "当前历史快照中没有声明的父任务。",
+      identityMismatchLineage:
+        "机器备注与当前可见任务、来源、原片、配置或父任务身份不一致，已忽略该备注。",
       verifyingProduct: "正在验证成品产物…",
       verifiedProduct: "产物已验证的成品",
       unavailableProduct: "不是成品",
       productVerificationFailed: "成品验证失败",
       missingProduct: "状态虽为就绪，但没有通过验证的 broadcast.mp4。",
-      invalidProductGeneration: "就绪状态缺少有效的状态版本，因此无法验证产物。",
+      invalidProductGeneration:
+        "就绪状态缺少有效的状态版本，因此无法验证产物。",
       productCreated: "成品创建时间",
       qualitySummary: "质量摘要",
       qualityUnavailable: "质量报告不可用",
@@ -2218,6 +2240,13 @@ export const translations = {
       statusGeneration: "状态版本",
       operationalReleaseGate:
         "产物验证不等于发布批准；上线前仍必须具备真实证据并完成独立视觉审核。",
+      originalMetadata: "原片元数据",
+      fileName: "文件名",
+      fileSize: "文件大小",
+      modifiedAt: "修改时间",
+      configSnapshots: "配置快照",
+      configPath: "配置路径",
+      actionPending: "处理中…",
       deleteRunTitle: "删除这个输出？",
       deleteRunDesc:
         "删除后不可恢复；父任务必须在所有子任务输出删除后才能删除。",

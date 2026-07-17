@@ -1,9 +1,22 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { act, render, screen, waitFor } from "@testing-library/react";
+import {
+  act,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { AssetGroup, RunRecord } from "@workspace/api-client-react";
+import {
+  getGetRunQueryKey,
+  getListArtifactsQueryKey,
+  getListAssetGroupsQueryKey,
+  getListRunsQueryKey,
+  type AssetGroup,
+  type RunRecord,
+} from "@workspace/api-client-react";
 
 import { LanguageProvider } from "@/contexts/LanguageContext";
 
@@ -78,6 +91,11 @@ const activeChild = run("render-active", {
     operation: "render",
     operation_status: "running",
   },
+  progress: {
+    stage: "render",
+    percent: 42,
+    elapsed_seconds: 12,
+  },
 });
 const leaf = run("leaf-output");
 
@@ -92,7 +110,19 @@ const assetGroup: AssetGroup = {
   },
   last_activity_at: "2026-07-14T10:02:00Z",
   runs: [ready, activeParent, activeChild, leaf],
-  configs: [],
+  configs: [
+    {
+      name: "default.yaml",
+      path: "config/default.yaml",
+      created_at: "2026-07-14T09:30:00Z",
+      input_video: "C:/videos/match.mp4",
+      output_dir: "C:/outputs/default",
+      detector_model_path: "models/ball.pt",
+      postprocess_enabled: true,
+      follow_cam_enabled: true,
+      exists: { config: true, input_video: true },
+    },
+  ],
   outputs: [],
   is_unbound: false,
 };
@@ -109,6 +139,14 @@ function renderHistory() {
     </QueryClientProvider>,
   );
   return { ...rendered, queryClient };
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((next) => {
+    resolve = next;
+  });
+  return { promise, resolve };
 }
 
 describe("GroupedProductionHistory", () => {
@@ -151,6 +189,12 @@ describe("GroupedProductionHistory", () => {
 
     await user.click(screen.getByTestId("asset-group-toggle-match"));
 
+    expect(mocks.listRunArtifacts).not.toHaveBeenCalled();
+    expect(
+      screen.getByTestId("group-products-unverified-match"),
+    ).toHaveTextContent("1");
+    await user.click(screen.getByTestId("timeline-toggle-product-ready"));
+
     expect(
       await screen.findByTestId("verified-product-product-ready"),
     ).toBeInTheDocument();
@@ -172,9 +216,16 @@ describe("GroupedProductionHistory", () => {
       await screen.findByTestId("product-quality-product-ready"),
     ).toHaveTextContent("pass");
     expect(screen.getByText(/sparse-ball windows/i)).toBeInTheDocument();
+    expect(
+      screen.getByTestId("group-products-verified-match"),
+    ).toHaveTextContent("1");
+    expect(
+      screen.getByTestId("group-products-unverified-match"),
+    ).toHaveTextContent("0");
 
     await user.click(screen.getByTestId("asset-group-toggle-match"));
     await user.click(screen.getByTestId("asset-group-toggle-match"));
+    await user.click(screen.getByTestId("timeline-toggle-product-ready"));
     await screen.findByTestId("verified-product-product-ready");
     expect(mocks.listRunArtifacts).toHaveBeenCalledTimes(1);
   });
@@ -184,12 +235,19 @@ describe("GroupedProductionHistory", () => {
     const user = userEvent.setup();
     renderHistory();
     await user.click(await screen.findByTestId("asset-group-toggle-match"));
+    await user.click(screen.getByTestId("timeline-toggle-product-ready"));
     expect(
       await screen.findByTestId("product-missing-product-ready"),
     ).toHaveTextContent(/no verified broadcast\.mp4/i);
     expect(
       screen.queryByTestId("product-preview-product-ready"),
     ).not.toBeInTheDocument();
+    expect(
+      screen.getByTestId("group-products-unavailable-match"),
+    ).toHaveTextContent("1");
+    expect(
+      screen.getByTestId("group-products-unverified-match"),
+    ).toHaveTextContent("0");
   });
 
   it("fails closed without a valid status generation", async () => {
@@ -207,9 +265,105 @@ describe("GroupedProductionHistory", () => {
     const user = userEvent.setup();
     renderHistory();
     await user.click(await screen.findByTestId("asset-group-toggle-match"));
+    await user.click(screen.getByTestId("timeline-toggle-product-ready"));
     expect(
       await screen.findByTestId("product-generation-invalid-product-ready"),
     ).toHaveTextContent(/no valid status generation/i);
+    expect(mocks.listRunArtifacts).not.toHaveBeenCalled();
+  });
+
+  it("resets cached product counts when the status generation changes", async () => {
+    const user = userEvent.setup();
+    const { queryClient } = renderHistory();
+    await user.click(await screen.findByTestId("asset-group-toggle-match"));
+    await user.click(screen.getByTestId("timeline-toggle-product-ready"));
+    await screen.findByTestId("verified-product-product-ready");
+    expect(
+      screen.getByTestId("group-products-verified-match"),
+    ).toHaveTextContent("1");
+    await user.click(screen.getByTestId("timeline-toggle-product-ready"));
+
+    const nextGeneration = "b".repeat(64);
+    act(() => {
+      queryClient.setQueryData(
+        ["asset-groups"],
+        [
+          {
+            ...assetGroup,
+            runs: assetGroup.runs?.map((candidate) =>
+              candidate.run_id === ready.run_id
+                ? {
+                    ...candidate,
+                    broadcast: {
+                      ...candidate.broadcast,
+                      status_generation: nextGeneration,
+                    },
+                  }
+                : candidate,
+            ),
+          },
+        ],
+      );
+    });
+
+    await waitFor(() =>
+      expect(
+        screen.getByTestId("group-products-unverified-match"),
+      ).toHaveTextContent("1"),
+    );
+    expect(
+      screen.getByTestId("group-products-verified-match"),
+    ).toHaveTextContent("0");
+    expect(mocks.listRunArtifacts).toHaveBeenCalledTimes(1);
+    await user.click(screen.getByTestId("timeline-toggle-product-ready"));
+    await waitFor(() =>
+      expect(mocks.listRunArtifacts).toHaveBeenCalledTimes(2),
+    );
+    expect(mocks.listRunArtifacts).toHaveBeenLastCalledWith(
+      "product-ready",
+      nextGeneration,
+    );
+  });
+
+  it("shows original metadata, configuration snapshots, and named live progress", async () => {
+    const user = userEvent.setup();
+    renderHistory();
+    await user.click(await screen.findByTestId("asset-group-toggle-match"));
+
+    expect(screen.getByTestId("group-source-metadata-match")).toHaveTextContent(
+      "match.mp4",
+    );
+    expect(screen.getByTestId("group-source-metadata-match")).toHaveTextContent(
+      "1000 B",
+    );
+    expect(
+      screen.getByTestId("group-config-snapshots-match"),
+    ).toHaveTextContent("config/default.yaml");
+    expect(
+      screen.getByRole("progressbar", {
+        name: /render-active rendering progress/i,
+      }),
+    ).toHaveAttribute("aria-valuetext", "42%");
+    expect(
+      screen.getByTestId("group-run-progress-render-active"),
+    ).toHaveAttribute("aria-live", "polite");
+  });
+
+  it("keeps a config-only source group useful without artifact requests", async () => {
+    mocks.listAssetGroups.mockResolvedValue([
+      { ...assetGroup, runs: [], outputs: [] },
+    ]);
+    const user = userEvent.setup();
+    renderHistory();
+    await user.click(await screen.findByTestId("asset-group-toggle-match"));
+
+    expect(screen.getByTestId("group-source-metadata-match")).toHaveTextContent(
+      "C:/videos/match.mp4",
+    );
+    expect(
+      screen.getByTestId("group-config-snapshots-match"),
+    ).toHaveTextContent("default.yaml");
+    expect(screen.queryByTestId(/timeline-run-/)).not.toBeInTheDocument();
     expect(mocks.listRunArtifacts).not.toHaveBeenCalled();
   });
 
@@ -240,27 +394,87 @@ describe("GroupedProductionHistory", () => {
     );
   });
 
+  it("deduplicates repeated and parent-child cancellation attempts by target", async () => {
+    const pending = deferred<RunRecord>();
+    mocks.cancelRun.mockReturnValueOnce(pending.promise);
+    const user = userEvent.setup();
+    renderHistory();
+    await user.click(await screen.findByTestId("asset-group-toggle-match"));
+    await user.click(screen.getByTestId("timeline-toggle-full-active"));
+    await user.click(screen.getByTestId("timeline-toggle-render-active"));
+    await user.click(screen.getByTestId("group-cancel-full-active"));
+    const confirm = screen.getByTestId("group-confirm-cancel-full-active");
+
+    act(() => {
+      confirm.click();
+      confirm.click();
+    });
+
+    await waitFor(() => expect(mocks.cancelRun).toHaveBeenCalledTimes(1));
+    expect(mocks.cancelRun).toHaveBeenCalledWith("render-active");
+    expect(confirm).toBeDisabled();
+    expect(screen.getByTestId("group-cancel-render-active")).toBeDisabled();
+    fireEvent.click(screen.getByTestId("group-cancel-render-active"));
+    fireEvent.click(screen.getByTestId("group-cancel-full-active"));
+    expect(mocks.cancelRun).toHaveBeenCalledTimes(1);
+
+    pending.resolve(run("render-active", { status: "cancelled" }));
+    await waitFor(() =>
+      expect(
+        screen.getByTestId("group-cancel-render-active"),
+      ).not.toBeDisabled(),
+    );
+  });
+
+  it("deduplicates repeated deletion confirms while the target is pending", async () => {
+    const pending = deferred<{ deleted: boolean }>();
+    mocks.deleteRunOutput.mockReturnValueOnce(pending.promise);
+    const user = userEvent.setup();
+    renderHistory();
+    await user.click(await screen.findByTestId("asset-group-toggle-match"));
+    await user.click(screen.getByTestId("timeline-toggle-leaf-output"));
+    await user.click(screen.getByTestId("group-delete-leaf-output"));
+    const confirm = screen.getByTestId("group-confirm-delete-leaf-output");
+
+    act(() => {
+      confirm.click();
+      confirm.click();
+    });
+
+    await waitFor(() => expect(mocks.deleteRunOutput).toHaveBeenCalledTimes(1));
+    expect(confirm).toBeDisabled();
+    fireEvent.click(screen.getByTestId("group-delete-leaf-output"));
+    expect(mocks.deleteRunOutput).toHaveBeenCalledTimes(1);
+
+    pending.resolve({ deleted: true });
+    await waitFor(() =>
+      expect(screen.getByTestId("group-delete-leaf-output")).not.toBeDisabled(),
+    );
+  });
+
   it("invalidates group, run, artifact, and product verification caches", async () => {
     const queryClient = new QueryClient();
-    queryClient.setQueryData(["asset-groups"], [assetGroup]);
-    queryClient.setQueryData(["runs"], assetGroup.runs);
-    queryClient.setQueryData(
-      ["production-history", "artifact", "run-a", GENERATION, "quality"],
-      {},
-    );
-    queryClient.setQueryData(
-      ["production-history", "product", "run-a", GENERATION],
-      [],
-    );
-
-    await act(() => invalidateProductionHistoryCaches(queryClient));
-
-    for (const key of [
+    const keys = [
       ["asset-groups"],
       ["runs"],
+      ["run", "run-a"],
+      ["artifacts", "run-a"],
+      getListAssetGroupsQueryKey(),
+      getListRunsQueryKey(),
+      getGetRunQueryKey("run-a"),
+      getListArtifactsQueryKey("run-a"),
+      getListArtifactsQueryKey("run-a", {
+        status_generation: GENERATION,
+      }),
+      ["/api/runs/run-a/future-variant", { generation: GENERATION }],
       ["production-history", "artifact", "run-a", GENERATION, "quality"],
       ["production-history", "product", "run-a", GENERATION],
-    ]) {
+    ] as const;
+    for (const key of keys) queryClient.setQueryData(key, {});
+
+    await act(() => invalidateProductionHistoryCaches(queryClient, ["run-a"]));
+
+    for (const key of keys) {
       expect(queryClient.getQueryState(key)?.isInvalidated).toBe(true);
     }
   });
@@ -278,12 +492,15 @@ describe("GroupedProductionHistory", () => {
     expect(screen.getByText("No runs found")).toBeInTheDocument();
   });
 
-  it("keeps a 1,000-run group searchable without list-page artifact requests", async () => {
+  it("opens 1,000 ready candidates without N+1 requests and fetches one explicit row", async () => {
     mocks.listAssetGroups.mockResolvedValue([
       {
         ...assetGroup,
         runs: Array.from({ length: 1_000 }, (_, index) =>
-          run(`fixture-run-${index}`),
+          run(`fixture-run-${index}`, {
+            source: "broadcast_hybrid",
+            broadcast: { status: "ready", status_generation: GENERATION },
+          }),
         ),
       },
     ]);
@@ -293,6 +510,14 @@ describe("GroupedProductionHistory", () => {
     await screen.findByTestId("asset-group-match");
     await user.type(screen.getByTestId("group-search"), "fixture-run-999");
     expect(screen.getByTestId("asset-group-match")).toBeInTheDocument();
+    await user.click(screen.getByTestId("asset-group-toggle-match"));
     expect(mocks.listRunArtifacts).not.toHaveBeenCalled();
+    await user.click(screen.getByTestId("timeline-toggle-fixture-run-999"));
+    await screen.findByTestId("verified-product-fixture-run-999");
+    expect(mocks.listRunArtifacts).toHaveBeenCalledTimes(1);
+    expect(mocks.listRunArtifacts).toHaveBeenCalledWith(
+      "fixture-run-999",
+      GENERATION,
+    );
   });
 });
