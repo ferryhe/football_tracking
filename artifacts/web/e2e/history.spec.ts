@@ -4,6 +4,47 @@ import AxeBuilder from "@axe-core/playwright";
 const GENERATION_A = "a".repeat(64);
 const GENERATION_B = "b".repeat(64);
 const GENERATION_C = "c".repeat(64);
+const CONFIG_DIGEST =
+  "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824";
+
+function trialMachineNote(): string {
+  return JSON.stringify({
+    schema_version: "1.0",
+    purpose: "production_trial",
+    workflow_id: "workflow-a",
+    submission_id: "submission-trial",
+    output_id: "accepted",
+    generation: 1,
+    calibration_digest: GENERATION_A,
+    intent_sha256: GENERATION_B,
+    start_frame: 10,
+    max_frames: 300,
+    enable_postprocess: true,
+    enable_follow_cam: false,
+  });
+}
+
+function fullMachineNote(): string {
+  return JSON.stringify({
+    schema_version: "1.0",
+    purpose: "production_full",
+    workflow_id: "workflow-a",
+    submission_id: "submission-historical",
+    output_id: "historical",
+    generation: 1,
+    accepted_trial_run_id: "production_trial_accepted",
+    accepted_trial_request_sha256: GENERATION_A,
+    confirmed_config_name: "confirmed.yaml",
+    expected_config_sha256: CONFIG_DIGEST,
+    config_patch_sha256: GENERATION_B,
+    calibration_digest: GENERATION_A,
+    source_signature: {
+      path: "C:/videos/match.mp4",
+      size_bytes: 1_000,
+      modified_at: "2026-07-14T09:00:00Z",
+    },
+  });
+}
 
 function run(
   runId: string,
@@ -45,6 +86,17 @@ function readyProduct(runId: string, generation: string) {
 }
 
 function assetGroups(firstGeneration: string) {
+  const acceptedTrial = run("production_trial_accepted", {
+    notes: trialMachineNote(),
+  });
+  const historicalFull = run("production_full_historical", {
+    source: "broadcast_hybrid",
+    parent_run_id: acceptedTrial.run_id,
+    config_name: "confirmed.yaml",
+    config_path: "config/confirmed.yaml",
+    notes: fullMachineNote(),
+    broadcast: { status: "trajectory_ready" },
+  });
   const parent = run("full-active", {
     source: "broadcast_hybrid",
     broadcast: {
@@ -83,12 +135,14 @@ function assetGroups(firstGeneration: string) {
         modified_at: "2026-07-14T09:00:00Z",
       },
       last_activity_at: "2026-07-14T10:02:00Z",
-      run_count: 5,
-      config_count: 1,
-      output_count: 5,
+      run_count: 7,
+      config_count: 2,
+      output_count: 7,
       runs: [
         readyProduct("product-one", firstGeneration),
         readyProduct("product-two", GENERATION_B),
+        acceptedTrial,
+        historicalFull,
         parent,
         child,
         run("leaf-output"),
@@ -103,6 +157,17 @@ function assetGroups(firstGeneration: string) {
           detector_model_path: "models/ball.pt",
           postprocess_enabled: true,
           follow_cam_enabled: true,
+          exists: { config: true, input_video: true },
+        },
+        {
+          name: "confirmed.yaml",
+          path: "config/confirmed.yaml",
+          created_at: "2026-07-14T09:40:00Z",
+          input_video: "C:/videos/match.mp4",
+          output_dir: "C:/outputs/confirmed",
+          detector_model_path: "models/ball.pt",
+          postprocess_enabled: true,
+          follow_cam_enabled: false,
           exists: { config: true, input_video: true },
         },
       ],
@@ -181,6 +246,7 @@ test("grouped history lazily verifies versioned products and keeps actions safe"
   let firstGeneration = GENERATION_A;
   const artifactReads: string[] = [];
   const qualityReads: string[] = [];
+  const configReads: string[] = [];
   const cancelled: string[] = [];
   const deleted: string[] = [];
 
@@ -192,6 +258,45 @@ test("grouped history lazily verifies versioned products and keeps actions safe"
     );
     if (url.pathname === "/api/runs/asset-groups") {
       await route.fulfill({ status: 200, json: assetGroups(firstGeneration) });
+      return;
+    }
+    if (url.pathname === "/api/configs/confirmed.yaml") {
+      configReads.push("confirmed.yaml");
+      await route.fulfill({
+        status: 200,
+        json: {
+          name: "confirmed.yaml",
+          path: "config/confirmed.yaml",
+          text: "hello",
+          raw: {
+            metadata: {
+              production_workflow: {
+                schema_version: "1.0",
+                workflow_id: "workflow-a",
+                accepted_trial_run_id: "production_trial_accepted",
+                calibration_digest: GENERATION_A,
+                source_signature: {
+                  path: "C:/videos/match.mp4",
+                  size_bytes: 1_000,
+                  modified_at: "2026-07-14T09:00:00Z",
+                },
+                trial_request_sha256: GENERATION_A,
+                trial_intent_sha256: GENERATION_B,
+                patch_sha256: GENERATION_B,
+              },
+            },
+          },
+          resolved: {},
+          summary: {
+            name: "confirmed.yaml",
+            path: "config/confirmed.yaml",
+            input_video: "C:/videos/match.mp4",
+            postprocess_enabled: true,
+            follow_cam_enabled: false,
+            exists: { config: true, input_video: true },
+          },
+        },
+      });
       return;
     }
     if (artifactMatch) {
@@ -277,12 +382,14 @@ test("grouped history lazily verifies versioned products and keeps actions safe"
   await expect(page.getByTestId("asset-group-config-only")).toBeVisible();
   expect(artifactReads).toEqual([]);
   expect(qualityReads).toEqual([]);
+  expect(configReads).toEqual([]);
 
   await page.getByTestId("asset-group-toggle-config-only").click();
   await expect(
     page.getByTestId("group-config-snapshots-config-only"),
   ).toContainText("config/config-only.yaml");
   expect(artifactReads).toEqual([]);
+  expect(configReads).toEqual([]);
   await page.getByTestId("asset-group-toggle-config-only").click();
 
   await page.getByTestId("asset-group-toggle-unbound-legacy").click();
@@ -299,6 +406,14 @@ test("grouped history lazily verifies versioned products and keeps actions safe"
   );
   expect(artifactReads).toEqual([]);
   expect(qualityReads).toEqual([]);
+  expect(configReads).toEqual([]);
+
+  await page.getByTestId("timeline-toggle-production_full_historical").click();
+  await expect(
+    page.getByTestId("current-config-status-production_full_historical"),
+  ).toContainText("Current saved configuration verified");
+  expect(configReads).toEqual(["confirmed.yaml"]);
+  await page.getByTestId("timeline-toggle-production_full_historical").click();
 
   await page.getByTestId("timeline-toggle-product-one").click();
   await expect(page.getByTestId("verified-product-product-one")).toBeVisible();
@@ -316,9 +431,15 @@ test("grouped history lazily verifies versioned products and keeps actions safe"
   await expect(page.getByTestId("group-products-verified-match")).toContainText(
     "1",
   );
+  await expect(page.getByTestId("group-products-ready-match")).toContainText(
+    "Ready candidates: 2",
+  );
   await expect(
     page.getByTestId("group-products-unverified-match"),
   ).toContainText("1");
+  await expect(
+    page.getByTestId("group-products-unavailable-match"),
+  ).toContainText("0");
 
   await page.getByTestId("timeline-toggle-product-two").click();
   await expect(page.getByTestId("verified-product-product-two")).toBeVisible();
@@ -382,8 +503,17 @@ test("a 1,000-product group fetches only the explicitly expanded row", async ({
   page,
 }) => {
   const artifactReads: string[] = [];
+  const configReads: string[] = [];
   await page.route("**/api/**", async (route) => {
     const requestUrl = new URL(route.request().url());
+    if (requestUrl.pathname.startsWith("/api/configs/")) {
+      configReads.push(requestUrl.pathname);
+      await route.fulfill({
+        status: 500,
+        json: { detail: "Unexpected config read" },
+      });
+      return;
+    }
     if (requestUrl.pathname === "/api/runs/asset-groups") {
       await route.fulfill({
         status: 200,
@@ -442,9 +572,11 @@ test("a 1,000-product group fetches only the explicitly expanded row", async ({
   await page.goto("/history");
   await page.getByTestId("asset-group-toggle-large-match").click();
   expect(artifactReads).toEqual([]);
+  expect(configReads).toEqual([]);
   await page.getByTestId("timeline-toggle-large-product-999").click();
   await expect(
     page.getByTestId("verified-product-large-product-999"),
   ).toBeVisible();
   expect(artifactReads).toEqual(["large-product-999"]);
+  expect(configReads).toEqual([]);
 });

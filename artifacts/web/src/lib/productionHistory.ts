@@ -1,6 +1,7 @@
 import type {
   ArtifactSummary,
   AssetGroup,
+  ConfigDetail,
   ConfigListItem,
   InputVideoItem,
   RunRecord,
@@ -10,6 +11,7 @@ import {
   broadcastCancellationTarget,
   recoverBroadcastWorkflowRun,
 } from "./broadcastWorkflow";
+import { sha256Text } from "./productionTrial";
 
 const ACTIVE_RUN_STATUSES = new Set(["queued", "running"]);
 const ACTIVE_OPERATION_STATUSES = new Set([
@@ -44,8 +46,26 @@ export interface ProductionHistoryNote {
   workflowId: string;
   generation: number;
   configIdentity: string | null;
+  configName: string | null;
+  expectedConfigSha256: string | null;
   acceptedTrialRunId: string | null;
+  acceptedTrialRequestSha256: string | null;
+  configPatchSha256: string | null;
+  calibrationDigest: string;
+  sourceSignature: {
+    path: string;
+    size_bytes: number;
+    modified_at: string;
+  } | null;
 }
+
+export type ProductionCurrentConfigVerification =
+  | { status: "not_reverified"; reason: "summary_only" }
+  | { status: "verified_current"; sha256: string }
+  | { status: "modified"; actualSha256: string }
+  | { status: "lineage_mismatch" }
+  | { status: "missing" }
+  | { status: "error"; message: string };
 
 export interface ProductionHistoryTimelineItem {
   run: RunRecord;
@@ -163,7 +183,13 @@ export function parseProductionHistoryNote(
       workflowId,
       generation: parsed.generation,
       configIdentity: null,
+      configName: null,
+      expectedConfigSha256: null,
       acceptedTrialRunId: null,
+      acceptedTrialRequestSha256: null,
+      configPatchSha256: null,
+      calibrationDigest: String(parsed.calibration_digest),
+      sourceSignature: null,
     };
   }
 
@@ -191,7 +217,17 @@ export function parseProductionHistoryNote(
       workflowId,
       generation: parsed.generation,
       configIdentity: `${configName}@${parsed.expected_config_sha256}`,
+      configName,
+      expectedConfigSha256: String(parsed.expected_config_sha256),
       acceptedTrialRunId,
+      acceptedTrialRequestSha256: String(parsed.accepted_trial_request_sha256),
+      configPatchSha256: String(parsed.config_patch_sha256),
+      calibrationDigest: String(parsed.calibration_digest),
+      sourceSignature: {
+        path: String(parsed.source_signature.path),
+        size_bytes: Number(parsed.source_signature.size_bytes),
+        modified_at: String(parsed.source_signature.modified_at),
+      },
     };
   }
   return null;
@@ -258,12 +294,11 @@ function bindProductionHistoryNote(
     run.run_id === expectedRunId &&
     pathBasename(run.output_dir) === expectedRunId &&
     inputPath !== null &&
-    inputPath === canonicalGroupPath &&
-    configMatchesRun(run, inputPath, configs);
+    inputPath === canonicalGroupPath;
   if (!commonMatches) return { note: null, identityMismatch: true };
 
   if (note.purpose === "production_trial") {
-    return run.source === "api"
+    return run.source === "api" && configMatchesRun(run, inputPath, configs)
       ? { note, identityMismatch: false }
       : { note: null, identityMismatch: true };
   }
@@ -279,11 +314,88 @@ function bindProductionHistoryNote(
     nonEmptyText(run.parent_run_id) === note.acceptedTrialRunId &&
     normalizedPath(String(sourceSignature.path)) === inputPath &&
     sourceMatches &&
-    nonEmptyText(run.config_name) ===
-      nonEmptyText(parsed.confirmed_config_name);
+    nonEmptyText(run.config_name) === note.configName &&
+    pathBasename(run.config_path) === pathBasename(note.configName);
   return fullMatches
     ? { note, identityMismatch: false }
     : { note: null, identityMismatch: true };
+}
+
+export function productionCurrentConfigVerificationKey(
+  note: ProductionHistoryNote | null,
+  config: ConfigListItem | null,
+): readonly [string, string, string, string, string, string, string] | null {
+  if (
+    note?.purpose !== "production_full" ||
+    !note.configName ||
+    !note.expectedConfigSha256 ||
+    !note.acceptedTrialRunId ||
+    !config
+  ) {
+    return null;
+  }
+  return [
+    "production-history",
+    "config",
+    note.configName,
+    config.path,
+    note.expectedConfigSha256,
+    note.workflowId,
+    note.acceptedTrialRunId,
+  ];
+}
+
+export async function verifyProductionCurrentConfig(
+  note: ProductionHistoryNote,
+  run: RunRecord,
+  detail: ConfigDetail | null,
+): Promise<ProductionCurrentConfigVerification> {
+  if (!detail) return { status: "missing" };
+  if (
+    note.purpose !== "production_full" ||
+    !note.configName ||
+    !note.expectedConfigSha256 ||
+    !note.acceptedTrialRunId ||
+    !note.acceptedTrialRequestSha256 ||
+    !note.configPatchSha256 ||
+    !note.sourceSignature
+  ) {
+    return { status: "lineage_mismatch" };
+  }
+  const actualSha256 = await sha256Text(detail.text);
+  if (actualSha256 !== note.expectedConfigSha256) {
+    return { status: "modified", actualSha256 };
+  }
+  const metadataRoot = isRecord(detail.raw.metadata)
+    ? detail.raw.metadata
+    : null;
+  const metadata =
+    metadataRoot && isRecord(metadataRoot.production_workflow)
+      ? metadataRoot.production_workflow
+      : null;
+  const signature =
+    metadata && isRecord(metadata.source_signature)
+      ? metadata.source_signature
+      : null;
+  const identityMatches =
+    detail.name === note.configName &&
+    normalizedPath(detail.path) === normalizedPath(run.config_path) &&
+    normalizedPath(detail.summary.input_video) ===
+      normalizedPath(note.sourceSignature.path) &&
+    metadata?.schema_version === "1.0" &&
+    metadata.workflow_id === note.workflowId &&
+    metadata.accepted_trial_run_id === note.acceptedTrialRunId &&
+    metadata.calibration_digest === note.calibrationDigest &&
+    metadata.trial_request_sha256 === note.acceptedTrialRequestSha256 &&
+    metadata.patch_sha256 === note.configPatchSha256 &&
+    sha256(metadata.trial_intent_sha256) &&
+    normalizedPath(String(signature?.path)) ===
+      normalizedPath(note.sourceSignature.path) &&
+    Number(signature?.size_bytes) === note.sourceSignature.size_bytes &&
+    nonEmptyText(signature?.modified_at) === note.sourceSignature.modified_at;
+  return identityMatches
+    ? { status: "verified_current", sha256: actualSha256 }
+    : { status: "lineage_mismatch" };
 }
 
 function timestamp(run: RunRecord): string | null {
@@ -440,7 +552,7 @@ export function buildProductionHistoryGroups(
   const groupByKey = new Map<string, MutableGroup>();
   const runCandidates = new Map<
     string,
-    { run: RunRecord; paths: Set<string> }
+    { run: RunRecord; paths: Set<string>; hasUnboundSource: boolean }
   >();
 
   const ensureGroup = (
@@ -476,31 +588,32 @@ export function buildProductionHistoryGroups(
   };
 
   for (const source of sourceGroups) {
-    const sourcePath = nonEmptyText(source.input_video?.path);
-    if (sourcePath) ensureGroup(sourcePath, source);
+    const sourcePath =
+      source.is_unbound === true || source.input_video === null
+        ? null
+        : nonEmptyText(source.input_video?.path);
+    ensureGroup(sourcePath, source);
     for (const config of source.configs ?? []) {
-      const configPath = nonEmptyText(config.input_video) ?? sourcePath;
-      ensureGroup(
-        configPath,
-        configPath === sourcePath ? source : undefined,
-      ).configs.push(config);
+      ensureGroup(sourcePath, source).configs.push(config);
     }
     for (const run of source.runs ?? []) {
-      const runPath = nonEmptyText(run.input_video) ?? sourcePath;
       const existing = runCandidates.get(run.run_id);
       if (existing) {
-        if (runPath) existing.paths.add(runPath);
+        if (sourcePath) existing.paths.add(sourcePath);
+        else existing.hasUnboundSource = true;
       } else {
         runCandidates.set(run.run_id, {
           run,
-          paths: new Set(runPath ? [runPath] : []),
+          paths: new Set(sourcePath ? [sourcePath] : []),
+          hasUnboundSource: sourcePath === null,
         });
       }
     }
   }
 
-  for (const { run, paths } of runCandidates.values()) {
-    const canonicalPath = paths.size === 1 ? [...paths][0] : null;
+  for (const { run, paths, hasUnboundSource } of runCandidates.values()) {
+    const canonicalPath =
+      !hasUnboundSource && paths.size === 1 ? [...paths][0] : null;
     ensureGroup(canonicalPath).runs.push(run);
   }
 

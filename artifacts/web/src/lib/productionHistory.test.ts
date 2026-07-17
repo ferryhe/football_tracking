@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import type {
   ArtifactSummary,
   AssetGroup,
+  ConfigDetail,
   RunRecord,
 } from "@workspace/api-client-react";
 
@@ -13,11 +14,14 @@ import {
   isReadyProductCandidate,
   parseProductionHistoryNote,
   productionArtifactUrl,
+  productionCurrentConfigVerificationKey,
   productionGroupProductCounts,
   productionHistoryCancellationTarget,
   productionHistoryDeletionBlocker,
   productionProductVerificationKey,
+  verifyProductionCurrentConfig,
 } from "./productionHistory";
+import { sha256Text } from "./productionTrial";
 
 const HASH_A = "a".repeat(64);
 const HASH_B = "b".repeat(64);
@@ -155,7 +159,13 @@ describe("parseProductionHistoryNote", () => {
       workflowId: "workflow-a",
       generation: 1,
       configIdentity: null,
+      configName: null,
+      expectedConfigSha256: null,
       acceptedTrialRunId: null,
+      acceptedTrialRequestSha256: null,
+      configPatchSha256: null,
+      calibrationDigest: HASH_A,
+      sourceSignature: null,
     });
     for (const note of [
       null,
@@ -188,7 +198,17 @@ describe("parseProductionHistoryNote", () => {
       workflowId: "workflow-a",
       generation: 1,
       configIdentity: `confirmed.yaml@${HASH_B}`,
+      configName: "confirmed.yaml",
+      expectedConfigSha256: HASH_B,
       acceptedTrialRunId: "trial-1",
+      acceptedTrialRequestSha256: HASH_A,
+      configPatchSha256: HASH_C,
+      calibrationDigest: HASH_A,
+      sourceSignature: {
+        path: "C:/videos/match.mp4",
+        size_bytes: 100,
+        modified_at: "2026-07-14T09:00:00Z",
+      },
     });
     for (const override of [
       { accepted_trial_run_id: "" },
@@ -239,7 +259,81 @@ describe("buildProductionHistoryGroups", () => {
     );
     expect(allIds.filter((id) => id === "shared")).toHaveLength(1);
     expect(allIds.filter((id) => id === "conflict")).toHaveLength(1);
-    expect(projected.find((item) => item.isUnbound)?.timeline).toHaveLength(1);
+    expect(projected.find((item) => item.isUnbound)?.timeline).toHaveLength(2);
+  });
+
+  it("keeps stale run and config paths in authoritative unbound groups", () => {
+    const staleRun = run("stale-run", {
+      input_video: "C:/stale/only-copy.mp4",
+    });
+    const staleConfig = {
+      name: "stale.yaml",
+      path: "config/stale.yaml",
+      input_video: "C:/stale/only-copy.mp4",
+      postprocess_enabled: true,
+      follow_cam_enabled: false,
+      exists: {},
+    };
+    const projected = buildProductionHistoryGroups([
+      group("server-unbound", "C:/server/claimed.mp4", [staleRun], {
+        is_unbound: true,
+        configs: [staleConfig],
+      }),
+      group(
+        "null-source",
+        null,
+        [
+          run("null-source-run", {
+            input_video: "C:/stale/other.mp4",
+          }),
+        ],
+        {
+          configs: [{ ...staleConfig, name: "other.yaml" }],
+        },
+      ),
+    ]);
+
+    expect(projected).toHaveLength(1);
+    expect(projected[0]).toMatchObject({
+      key: "legacy:unbound",
+      inputPath: null,
+      isUnbound: true,
+    });
+    expect(projected[0].timeline.map((item) => item.run.run_id).sort()).toEqual(
+      ["null-source-run", "stale-run"],
+    );
+    expect(projected[0].configs.map((config) => config.name).sort()).toEqual([
+      "other.yaml",
+      "stale.yaml",
+    ]);
+    expect(projected.some((item) => item.key.includes("stale"))).toBe(false);
+  });
+
+  it("uses the bound asset-group source instead of stale child paths", () => {
+    const projected = buildProductionHistoryGroups([
+      group(
+        "bound",
+        "C:/videos/canonical.mp4",
+        [run("stale-child", { input_video: "C:/stale/child.mp4" })],
+        {
+          configs: [
+            {
+              name: "stale.yaml",
+              path: "config/stale.yaml",
+              input_video: "C:/stale/child.mp4",
+              postprocess_enabled: true,
+              follow_cam_enabled: false,
+              exists: {},
+            },
+          ],
+        },
+      ),
+    ]);
+
+    expect(projected).toHaveLength(1);
+    expect(projected[0].key).toBe("input:C:/videos/canonical.mp4");
+    expect(projected[0].timeline[0].run.run_id).toBe("stale-child");
+    expect(projected[0].configs[0].name).toBe("stale.yaml");
   });
 
   it("builds explicit trial/full/operation lineage without time guessing", () => {
@@ -307,6 +401,44 @@ describe("buildProductionHistoryGroups", () => {
       failedCount: 0,
       cancelledCount: 0,
     });
+  });
+
+  it("preserves server-bound full identity when the current config summary is missing", () => {
+    const trialId = "production_trial_trial-output";
+    const fullId = "production_full_full-output";
+    const projected = buildProductionHistoryGroups([
+      group(
+        "match",
+        "C:/videos/match.mp4",
+        [
+          run(trialId, { notes: trialNote() }),
+          run(fullId, {
+            source: "broadcast_hybrid",
+            parent_run_id: trialId,
+            config_name: "confirmed.yaml",
+            config_path: "config/confirmed.yaml",
+            notes: fullNote({ accepted_trial_run_id: trialId }),
+          }),
+        ],
+        {
+          configs: [
+            {
+              name: "default.yaml",
+              path: "config/default.yaml",
+              input_video: "C:/videos/match.mp4",
+              postprocess_enabled: true,
+              follow_cam_enabled: false,
+              exists: {},
+            },
+          ],
+        },
+      ),
+    ])[0];
+
+    expect(
+      projected.timeline.find((item) => item.run.run_id === fullId),
+    ).toMatchObject({ kind: "full", lineageIssue: null });
+    expect(projected.summary.fullRunCount).toBe(1);
   });
 
   it("fails closed on malformed, conflicting, and missing lineage", () => {
@@ -578,6 +710,92 @@ describe("buildProductionHistoryGroups", () => {
       "match--q3f3lv",
       "match--q3f3lv--1",
     ]);
+  });
+});
+
+describe("current production configuration verification", () => {
+  it("distinguishes current verified, modified, lineage-mismatched, and missing config", async () => {
+    const text = "verified production config\n";
+    const digest = await sha256Text(text);
+    const acceptedTrialRunId = "production_trial_trial-output";
+    const note = parseProductionHistoryNote(
+      fullNote({
+        expected_config_sha256: digest,
+        accepted_trial_run_id: acceptedTrialRunId,
+      }),
+    )!;
+    const fullRun = run("production_full_full-output", {
+      source: "broadcast_hybrid",
+      parent_run_id: acceptedTrialRunId,
+      config_name: "confirmed.yaml",
+      config_path: "config/confirmed.yaml",
+      notes: fullNote({
+        expected_config_sha256: digest,
+        accepted_trial_run_id: acceptedTrialRunId,
+      }),
+    });
+    const metadata = {
+      schema_version: "1.0",
+      workflow_id: note.workflowId,
+      accepted_trial_run_id: acceptedTrialRunId,
+      calibration_digest: note.calibrationDigest,
+      source_signature: note.sourceSignature,
+      trial_request_sha256: note.acceptedTrialRequestSha256,
+      trial_intent_sha256: HASH_B,
+      patch_sha256: note.configPatchSha256,
+    };
+    const detail: ConfigDetail = {
+      name: "confirmed.yaml",
+      path: "config/confirmed.yaml",
+      text,
+      raw: { metadata: { production_workflow: metadata } },
+      resolved: {},
+      summary: {
+        name: "confirmed.yaml",
+        path: "config/confirmed.yaml",
+        input_video: "C:/videos/match.mp4",
+        postprocess_enabled: true,
+        follow_cam_enabled: false,
+        exists: {},
+      },
+    };
+
+    expect(
+      productionCurrentConfigVerificationKey(note, detail.summary),
+    ).toEqual([
+      "production-history",
+      "config",
+      "confirmed.yaml",
+      "config/confirmed.yaml",
+      digest,
+      "workflow-a",
+      acceptedTrialRunId,
+    ]);
+    await expect(
+      verifyProductionCurrentConfig(note, fullRun, detail),
+    ).resolves.toEqual({ status: "verified_current", sha256: digest });
+    await expect(
+      verifyProductionCurrentConfig(note, fullRun, {
+        ...detail,
+        text: "locally modified\n",
+      }),
+    ).resolves.toMatchObject({ status: "modified" });
+    await expect(
+      verifyProductionCurrentConfig(note, fullRun, {
+        ...detail,
+        raw: {
+          metadata: {
+            production_workflow: {
+              ...metadata,
+              accepted_trial_run_id: "wrong-trial",
+            },
+          },
+        },
+      }),
+    ).resolves.toEqual({ status: "lineage_mismatch" });
+    await expect(
+      verifyProductionCurrentConfig(note, fullRun, null),
+    ).resolves.toEqual({ status: "missing" });
   });
 });
 

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   useMutation,
   useQuery,
@@ -7,10 +7,12 @@ import {
 } from "@tanstack/react-query";
 import {
   getGetRunQueryKey,
+  getGetHealthQueryKey,
   getListArtifactsQueryKey,
   getListAssetGroupsQueryKey,
   getListRunsQueryKey,
   type ArtifactSummary,
+  type ConfigListItem,
   type RunRecord,
 } from "@workspace/api-client-react";
 import {
@@ -54,10 +56,12 @@ import {
   filterProductionHistoryGroups,
   isReadyProductCandidate,
   productionArtifactUrl,
+  productionCurrentConfigVerificationKey,
   productionHistoryCancellationTarget,
   productionHistoryDeletionBlocker,
   productionGroupProductCounts,
   productionProductVerificationKey,
+  verifyProductionCurrentConfig,
   type ProductionHistoryFilter,
   type ProductionHistoryGroup,
   type ProductionHistoryTimelineItem,
@@ -70,6 +74,7 @@ export async function invalidateProductionHistoryCaches(
 ): Promise<void> {
   const runIds = [...new Set(affectedRunIds.filter(Boolean))];
   const generatedKeys = [
+    getGetHealthQueryKey(),
     getListAssetGroupsQueryKey(),
     getListRunsQueryKey(),
     ...runIds.flatMap((runId) => [
@@ -79,10 +84,14 @@ export async function invalidateProductionHistoryCaches(
   ];
   const legacyAndHistoryKeys = [
     ["asset-groups"],
+    ["health"],
     ["runs"],
     ...runIds.flatMap((runId) => [
       ["run", runId],
       ["artifacts", runId],
+      ["artifact-json", runId],
+      ["ai-improvement-status", runId],
+      ["event-candidates", runId],
     ]),
     ["production-history", "artifact"],
     ["production-history", "product"],
@@ -192,6 +201,64 @@ function useProductCacheRevision(queryClient: QueryClient): number {
     };
   }, [queryClient]);
   return revision;
+}
+
+interface TargetActionRegistry {
+  targets: Set<string>;
+  listeners: Set<() => void>;
+}
+
+const targetActionRegistries = new WeakMap<QueryClient, TargetActionRegistry>();
+
+function targetActionRegistry(queryClient: QueryClient): TargetActionRegistry {
+  const existing = targetActionRegistries.get(queryClient);
+  if (existing) return existing;
+  const created = {
+    targets: new Set<string>(),
+    listeners: new Set<() => void>(),
+  };
+  targetActionRegistries.set(queryClient, created);
+  return created;
+}
+
+function notifyTargetActionRegistry(registry: TargetActionRegistry): void {
+  for (const listener of registry.listeners) listener();
+}
+
+function usePendingTargets(queryClient: QueryClient): ReadonlySet<string> {
+  const [pending, setPending] = useState<ReadonlySet<string>>(
+    () => new Set(targetActionRegistry(queryClient).targets),
+  );
+  useEffect(() => {
+    const registry = targetActionRegistry(queryClient);
+    const update = () => setPending(new Set(registry.targets));
+    registry.listeners.add(update);
+    update();
+    return () => {
+      registry.listeners.delete(update);
+    };
+  }, [queryClient]);
+  return pending;
+}
+
+async function runQueryClientTargetAction(
+  queryClient: QueryClient,
+  target: string,
+  action: () => Promise<unknown>,
+): Promise<boolean> {
+  const registry = targetActionRegistry(queryClient);
+  if (registry.targets.has(target)) return false;
+  registry.targets.add(target);
+  notifyTargetActionRegistry(registry);
+  try {
+    await action();
+  } catch {
+    // useMutation owns the user-facing error toast.
+  } finally {
+    registry.targets.delete(target);
+    notifyTargetActionRegistry(registry);
+  }
+  return true;
 }
 
 function groupProductCountsFromCache(
@@ -381,6 +448,88 @@ function ProductEvidence({ run }: { run: RunRecord }) {
   );
 }
 
+function CurrentConfigEvidence({
+  item,
+  configs,
+}: {
+  item: ProductionHistoryTimelineItem;
+  configs: readonly ConfigListItem[];
+}) {
+  const { t } = useLanguage();
+  const note = item.note!;
+  const currentSummary =
+    configs.find(
+      (config) =>
+        config.name === note.configName &&
+        config.path.replaceAll("\\", "/") ===
+          item.run.config_path?.replaceAll("\\", "/") &&
+        config.input_video?.replaceAll("\\", "/") ===
+          item.run.input_video?.replaceAll("\\", "/"),
+    ) ?? null;
+  const verificationKey = productionCurrentConfigVerificationKey(
+    note,
+    currentSummary,
+  );
+  const verification = useQuery({
+    queryKey: verificationKey ?? [
+      "production-history",
+      "config",
+      item.run.run_id,
+      "missing-summary",
+    ],
+    queryFn: async () =>
+      verifyProductionCurrentConfig(
+        note,
+        item.run,
+        await api.getConfig(note.configName!),
+      ),
+    enabled: verificationKey !== null,
+    staleTime: Number.POSITIVE_INFINITY,
+    retry: false,
+  });
+  const status =
+    currentSummary === null
+      ? ({ status: "missing" } as const)
+      : verification.isPending
+        ? ({ status: "not_reverified", reason: "summary_only" } as const)
+        : verification.isError
+          ? /^404\b/.test(verification.error.message)
+            ? ({ status: "missing" } as const)
+            : ({
+                status: "error",
+                message: verification.error.message,
+              } as const)
+          : verification.data;
+  const label =
+    status?.status === "verified_current"
+      ? t.history.currentConfigVerified
+      : status?.status === "modified"
+        ? t.history.currentConfigModified
+        : status?.status === "lineage_mismatch"
+          ? t.history.currentConfigLineageMismatch
+          : status?.status === "missing"
+            ? t.history.currentConfigMissing
+            : status?.status === "error"
+              ? t.history.currentConfigError
+              : t.history.currentConfigVerifying;
+
+  return (
+    <section
+      className="space-y-2 rounded-lg border p-3 text-sm"
+      data-testid={`current-config-status-${item.run.run_id}`}
+    >
+      <h4 className="font-medium">{t.history.currentSavedConfig}</h4>
+      <p>{label}</p>
+      <p className="text-xs text-muted-foreground">
+        {t.history.historicalConfigIdentity}: {note.configIdentity}
+      </p>
+      {status?.status === "error" && (
+        <p className="text-xs text-destructive">{status.message}</p>
+      )}
+    </section>
+  );
+}
+
 function lineageLabel(item: ProductionHistoryTimelineItem): string | null {
   return item.parentRunId ?? item.externalParentRunId;
 }
@@ -388,12 +537,14 @@ function lineageLabel(item: ProductionHistoryTimelineItem): string | null {
 function TimelineRow({
   item,
   groupRuns,
+  groupConfigs,
   onCancel,
   onDelete,
   pendingTargets,
 }: {
   item: ProductionHistoryTimelineItem;
   groupRuns: readonly RunRecord[];
+  groupConfigs: readonly ConfigListItem[];
   onCancel: (runId: string) => Promise<boolean>;
   onDelete: (runId: string) => Promise<boolean>;
   pendingTargets: ReadonlySet<string>;
@@ -468,7 +619,7 @@ function TimelineRow({
             </p>
             <p>
               <span className="text-muted-foreground">
-                {t.history.configIdentity}:{" "}
+                {t.history.historicalConfigIdentity}:{" "}
               </span>
               {item.note?.configIdentity ??
                 item.run.config_name ??
@@ -506,6 +657,10 @@ function TimelineRow({
 
           {isReadyProductCandidate(item.run) && (
             <ProductEvidence run={item.run} />
+          )}
+
+          {item.note?.purpose === "production_full" && (
+            <CurrentConfigEvidence item={item} configs={groupConfigs} />
           )}
 
           <div className="flex flex-wrap items-start gap-2">
@@ -716,6 +871,9 @@ function GroupDetail({
           data-testid={`group-config-snapshots-${group.groupId}`}
         >
           <h4 className="text-sm font-medium">{t.history.configSnapshots}</h4>
+          <p className="text-xs text-muted-foreground">
+            {t.history.configSnapshotsSummaryOnly}
+          </p>
           {group.configs.map((config) => (
             <div
               key={`${config.path}:${config.name}`}
@@ -754,6 +912,7 @@ function GroupDetail({
           key={item.run.run_id}
           item={item}
           groupRuns={runs}
+          groupConfigs={group.configs}
           onCancel={onCancel}
           onDelete={onDelete}
           pendingTargets={pendingTargets}
@@ -771,10 +930,7 @@ export function GroupedProductionHistory() {
   const [filter, setFilter] = useState<ProductionHistoryFilter>("all");
   const [search, setSearch] = useState("");
   const [openGroupKey, setOpenGroupKey] = useState<string | null>(null);
-  const inFlightTargets = useRef(new Set<string>());
-  const [pendingTargets, setPendingTargets] = useState<ReadonlySet<string>>(
-    new Set(),
-  );
+  const pendingTargets = usePendingTargets(queryClient);
 
   const assetGroups = useQuery({
     queryKey: ["asset-groups"],
@@ -837,24 +993,6 @@ export function GroupedProductionHistory() {
         variant: "destructive",
       }),
   });
-
-  const runTargetAction = async (
-    target: string,
-    action: () => Promise<unknown>,
-  ): Promise<boolean> => {
-    if (inFlightTargets.current.has(target)) return false;
-    inFlightTargets.current.add(target);
-    setPendingTargets(new Set(inFlightTargets.current));
-    try {
-      await action();
-    } catch {
-      // useMutation owns the user-facing error toast.
-    } finally {
-      inFlightTargets.current.delete(target);
-      setPendingTargets(new Set(inFlightTargets.current));
-    }
-    return true;
-  };
 
   const filters: {
     value: ProductionHistoryFilter;
@@ -1006,7 +1144,9 @@ export function GroupedProductionHistory() {
                         <span>
                           {t.history.active}: {group.summary.activeCount}
                         </span>
-                        <span>
+                        <span
+                          data-testid={`group-products-ready-${group.groupId}`}
+                        >
                           {t.history.productCandidates}:{" "}
                           {group.summary.readyCandidateCount}
                         </span>
@@ -1040,12 +1180,12 @@ export function GroupedProductionHistory() {
                     <GroupDetail
                       group={group}
                       onCancel={(runId) =>
-                        runTargetAction(runId, () =>
+                        runQueryClientTargetAction(queryClient, runId, () =>
                           cancelRun.mutateAsync(runId),
                         )
                       }
                       onDelete={(runId) =>
-                        runTargetAction(runId, () =>
+                        runQueryClientTargetAction(queryClient, runId, () =>
                           deleteRun.mutateAsync(runId),
                         )
                       }

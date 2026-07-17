@@ -5,16 +5,19 @@ import {
   render,
   screen,
   waitFor,
+  within,
 } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   getGetRunQueryKey,
+  getGetHealthQueryKey,
   getListArtifactsQueryKey,
   getListAssetGroupsQueryKey,
   getListRunsQueryKey,
   type AssetGroup,
+  type ConfigDetail,
   type RunRecord,
 } from "@workspace/api-client-react";
 
@@ -24,6 +27,7 @@ const mocks = vi.hoisted(() => ({
   listAssetGroups: vi.fn(),
   listRunArtifacts: vi.fn(),
   getRunArtifactJson: vi.fn(),
+  getConfig: vi.fn(),
   cancelRun: vi.fn(),
   deleteRunOutput: vi.fn(),
 }));
@@ -36,6 +40,48 @@ import {
 } from "./GroupedProductionHistory";
 
 const GENERATION = "a".repeat(64);
+const GENERATION_B = "b".repeat(64);
+const CONFIG_DIGEST =
+  "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824";
+
+function trialMachineNote(): string {
+  return JSON.stringify({
+    schema_version: "1.0",
+    purpose: "production_trial",
+    workflow_id: "workflow-a",
+    submission_id: "submission-trial",
+    output_id: "accepted",
+    generation: 1,
+    calibration_digest: GENERATION,
+    intent_sha256: GENERATION_B,
+    start_frame: 10,
+    max_frames: 300,
+    enable_postprocess: true,
+    enable_follow_cam: false,
+  });
+}
+
+function fullMachineNote(outputId: string): string {
+  return JSON.stringify({
+    schema_version: "1.0",
+    purpose: "production_full",
+    workflow_id: "workflow-a",
+    submission_id: `submission-${outputId}`,
+    output_id: outputId,
+    generation: 1,
+    accepted_trial_run_id: "production_trial_accepted",
+    accepted_trial_request_sha256: GENERATION,
+    confirmed_config_name: "confirmed.yaml",
+    expected_config_sha256: CONFIG_DIGEST,
+    config_patch_sha256: GENERATION_B,
+    calibration_digest: GENERATION,
+    source_signature: {
+      path: "C:/videos/match.mp4",
+      size_bytes: 1_000,
+      modified_at: "2026-07-14T09:00:00Z",
+    },
+  });
+}
 
 function run(runId: string, overrides: Partial<RunRecord> = {}): RunRecord {
   return {
@@ -69,6 +115,25 @@ const ready = run("product-ready", {
     status_generation: GENERATION,
     limitations: ["Review sparse-ball windows before external release."],
   },
+});
+const acceptedTrial = run("production_trial_accepted", {
+  notes: trialMachineNote(),
+});
+const historicalFull = run("production_full_historical", {
+  source: "broadcast_hybrid",
+  parent_run_id: acceptedTrial.run_id,
+  config_name: "confirmed.yaml",
+  config_path: "config/confirmed.yaml",
+  notes: fullMachineNote("historical"),
+  broadcast: { status: "ready", status_generation: GENERATION_B },
+});
+const historicalFullSibling = run("production_full_historical-sibling", {
+  source: "broadcast_hybrid",
+  parent_run_id: acceptedTrial.run_id,
+  config_name: "confirmed.yaml",
+  config_path: "config/confirmed.yaml",
+  notes: fullMachineNote("historical-sibling"),
+  broadcast: { status: "trajectory_ready" },
 });
 const activeParent = run("full-active", {
   source: "broadcast_hybrid",
@@ -109,7 +174,15 @@ const assetGroup: AssetGroup = {
     modified_at: "2026-07-14T09:00:00Z",
   },
   last_activity_at: "2026-07-14T10:02:00Z",
-  runs: [ready, activeParent, activeChild, leaf],
+  runs: [
+    ready,
+    acceptedTrial,
+    historicalFull,
+    historicalFullSibling,
+    activeParent,
+    activeChild,
+    leaf,
+  ],
   configs: [
     {
       name: "default.yaml",
@@ -122,15 +195,27 @@ const assetGroup: AssetGroup = {
       follow_cam_enabled: true,
       exists: { config: true, input_video: true },
     },
+    {
+      name: "confirmed.yaml",
+      path: "config/confirmed.yaml",
+      created_at: "2026-07-14T09:40:00Z",
+      input_video: "C:/videos/match.mp4",
+      output_dir: "C:/outputs/confirmed",
+      detector_model_path: "models/ball.pt",
+      postprocess_enabled: true,
+      follow_cam_enabled: false,
+      exists: { config: true, input_video: true },
+    },
   ],
   outputs: [],
   is_unbound: false,
 };
 
-function renderHistory() {
-  const queryClient = new QueryClient({
+function renderHistory(
+  queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
-  });
+  }),
+) {
   const rendered = render(
     <QueryClientProvider client={queryClient}>
       <LanguageProvider>
@@ -139,6 +224,37 @@ function renderHistory() {
     </QueryClientProvider>,
   );
   return { ...rendered, queryClient };
+}
+
+function currentConfigDetail(
+  overrides: Partial<ConfigDetail> = {},
+): ConfigDetail {
+  return {
+    name: "confirmed.yaml",
+    path: "config/confirmed.yaml",
+    text: "hello",
+    raw: {
+      metadata: {
+        production_workflow: {
+          schema_version: "1.0",
+          workflow_id: "workflow-a",
+          accepted_trial_run_id: acceptedTrial.run_id,
+          calibration_digest: GENERATION,
+          source_signature: {
+            path: "C:/videos/match.mp4",
+            size_bytes: 1_000,
+            modified_at: "2026-07-14T09:00:00Z",
+          },
+          trial_request_sha256: GENERATION,
+          trial_intent_sha256: GENERATION_B,
+          patch_sha256: GENERATION_B,
+        },
+      },
+    },
+    resolved: {},
+    summary: assetGroup.configs![1],
+    ...overrides,
+  };
 }
 
 function deferred<T>() {
@@ -173,6 +289,7 @@ describe("GroupedProductionHistory", () => {
       },
     ]);
     mocks.getRunArtifactJson.mockResolvedValue({ overall_status: "pass" });
+    mocks.getConfig.mockResolvedValue(currentConfigDetail());
     mocks.cancelRun.mockImplementation(async (runId: string) =>
       run(runId, { status: "cancelled" }),
     );
@@ -186,13 +303,18 @@ describe("GroupedProductionHistory", () => {
     expect(await screen.findByTestId("asset-group-match")).toBeInTheDocument();
     expect(mocks.listRunArtifacts).not.toHaveBeenCalled();
     expect(mocks.getRunArtifactJson).not.toHaveBeenCalled();
+    expect(mocks.getConfig).not.toHaveBeenCalled();
 
     await user.click(screen.getByTestId("asset-group-toggle-match"));
 
     expect(mocks.listRunArtifacts).not.toHaveBeenCalled();
+    expect(mocks.getConfig).not.toHaveBeenCalled();
+    expect(screen.getByTestId("group-products-ready-match")).toHaveTextContent(
+      "Ready candidates: 2",
+    );
     expect(
       screen.getByTestId("group-products-unverified-match"),
-    ).toHaveTextContent("1");
+    ).toHaveTextContent("2");
     await user.click(screen.getByTestId("timeline-toggle-product-ready"));
 
     expect(
@@ -221,7 +343,11 @@ describe("GroupedProductionHistory", () => {
     ).toHaveTextContent("1");
     expect(
       screen.getByTestId("group-products-unverified-match"),
+    ).toHaveTextContent("1");
+    expect(
+      screen.getByTestId("group-products-unavailable-match"),
     ).toHaveTextContent("0");
+    expect(mocks.getConfig).not.toHaveBeenCalled();
 
     await user.click(screen.getByTestId("asset-group-toggle-match"));
     await user.click(screen.getByTestId("asset-group-toggle-match"));
@@ -247,7 +373,7 @@ describe("GroupedProductionHistory", () => {
     ).toHaveTextContent("1");
     expect(
       screen.getByTestId("group-products-unverified-match"),
-    ).toHaveTextContent("0");
+    ).toHaveTextContent("1");
   });
 
   it("fails closed without a valid status generation", async () => {
@@ -309,7 +435,7 @@ describe("GroupedProductionHistory", () => {
     await waitFor(() =>
       expect(
         screen.getByTestId("group-products-unverified-match"),
-      ).toHaveTextContent("1"),
+      ).toHaveTextContent("2"),
     );
     expect(
       screen.getByTestId("group-products-verified-match"),
@@ -323,6 +449,162 @@ describe("GroupedProductionHistory", () => {
       "product-ready",
       nextGeneration,
     );
+  });
+
+  it("reverifies a current full-run config lazily and reuses the cache", async () => {
+    const user = userEvent.setup();
+    renderHistory();
+    await user.click(await screen.findByTestId("asset-group-toggle-match"));
+    expect(mocks.getConfig).not.toHaveBeenCalled();
+
+    await user.click(
+      screen.getByTestId("timeline-toggle-production_full_historical"),
+    );
+    expect(
+      await screen.findByTestId(
+        "current-config-status-production_full_historical",
+      ),
+    ).toHaveTextContent("Current saved configuration verified");
+    expect(mocks.getConfig).toHaveBeenCalledTimes(1);
+    expect(mocks.getConfig).toHaveBeenCalledWith("confirmed.yaml");
+    await user.click(
+      screen.getByTestId("timeline-toggle-production_full_historical"),
+    );
+
+    await user.click(
+      screen.getByTestId("timeline-toggle-production_full_historical-sibling"),
+    );
+    expect(
+      await screen.findByTestId(
+        "current-config-status-production_full_historical-sibling",
+      ),
+    ).toHaveTextContent("Current saved configuration verified");
+    expect(mocks.getConfig).toHaveBeenCalledTimes(1);
+  });
+
+  it("shows summary-only status while current config re-verification is pending", async () => {
+    const pending = deferred<ConfigDetail>();
+    mocks.getConfig.mockReturnValueOnce(pending.promise);
+    const user = userEvent.setup();
+    renderHistory();
+    await user.click(await screen.findByTestId("asset-group-toggle-match"));
+    await user.click(
+      screen.getByTestId("timeline-toggle-production_full_historical"),
+    );
+
+    expect(
+      screen.getByTestId("current-config-status-production_full_historical"),
+    ).toHaveTextContent(/Summary only/i);
+    pending.resolve(currentConfigDetail());
+    await waitFor(() =>
+      expect(
+        screen.getByTestId("current-config-status-production_full_historical"),
+      ).toHaveTextContent("Current saved configuration verified"),
+    );
+  });
+
+  it("keeps historical full identity when current config text was modified", async () => {
+    mocks.getConfig.mockResolvedValue(currentConfigDetail({ text: "changed" }));
+    const user = userEvent.setup();
+    renderHistory();
+    await user.click(await screen.findByTestId("asset-group-toggle-match"));
+    await user.click(
+      screen.getByTestId("timeline-toggle-production_full_historical"),
+    );
+
+    expect(
+      await screen.findByTestId(
+        "current-config-status-production_full_historical",
+      ),
+    ).toHaveTextContent("Current saved configuration was modified");
+    expect(
+      within(
+        screen.getByTestId("timeline-run-production_full_historical"),
+      ).getByText("full"),
+    ).toBeInTheDocument();
+  });
+
+  it("reports current config lineage mismatch without changing historical identity", async () => {
+    const detail = currentConfigDetail();
+    const metadata = (
+      detail.raw.metadata as Record<string, Record<string, unknown>>
+    ).production_workflow;
+    mocks.getConfig.mockResolvedValue(
+      currentConfigDetail({
+        raw: {
+          metadata: {
+            production_workflow: {
+              ...metadata,
+              workflow_id: "wrong-workflow",
+            },
+          },
+        },
+      }),
+    );
+    const user = userEvent.setup();
+    renderHistory();
+    await user.click(await screen.findByTestId("asset-group-toggle-match"));
+    await user.click(
+      screen.getByTestId("timeline-toggle-production_full_historical"),
+    );
+
+    expect(
+      await screen.findByTestId(
+        "current-config-status-production_full_historical",
+      ),
+    ).toHaveTextContent(/lineage does not match/i);
+    expect(
+      within(
+        screen.getByTestId("timeline-run-production_full_historical"),
+      ).getByText("full"),
+    ).toBeInTheDocument();
+  });
+
+  it("keeps a deleted current config as historical full and marks it missing", async () => {
+    mocks.listAssetGroups.mockResolvedValue([
+      {
+        ...assetGroup,
+        configs: assetGroup.configs?.filter(
+          (config) => config.name !== "confirmed.yaml",
+        ),
+      },
+    ]);
+    const user = userEvent.setup();
+    renderHistory();
+    await user.click(await screen.findByTestId("asset-group-toggle-match"));
+    await user.click(
+      screen.getByTestId("timeline-toggle-production_full_historical"),
+    );
+
+    expect(
+      screen.getByTestId("current-config-status-production_full_historical"),
+    ).toHaveTextContent("Current saved configuration is missing");
+    expect(mocks.getConfig).not.toHaveBeenCalled();
+    expect(
+      within(
+        screen.getByTestId("timeline-run-production_full_historical"),
+      ).getByText("full"),
+    ).toBeInTheDocument();
+  });
+
+  it.each([
+    ["404 configuration not found", "Current saved configuration is missing"],
+    ["503 configuration service unavailable", "could not be checked"],
+  ])("maps current config fetch failure %s", async (message, expected) => {
+    mocks.getConfig.mockRejectedValue(new Error(message));
+    const user = userEvent.setup();
+    renderHistory();
+    await user.click(await screen.findByTestId("asset-group-toggle-match"));
+    await user.click(
+      screen.getByTestId("timeline-toggle-production_full_historical"),
+    );
+
+    expect(
+      await screen.findByTestId(
+        "current-config-status-production_full_historical",
+      ),
+    ).toHaveTextContent(expected);
+    expect(mocks.getConfig).toHaveBeenCalledTimes(1);
   });
 
   it("shows original metadata, configuration snapshots, and named live progress", async () => {
@@ -452,13 +734,84 @@ describe("GroupedProductionHistory", () => {
     );
   });
 
+  it("keeps a pending cancellation locked across unmount and remount", async () => {
+    const pending = deferred<RunRecord>();
+    mocks.cancelRun.mockReturnValueOnce(pending.promise);
+    const firstUser = userEvent.setup();
+    const first = renderHistory();
+    await firstUser.click(
+      await screen.findByTestId("asset-group-toggle-match"),
+    );
+    await firstUser.click(screen.getByTestId("timeline-toggle-full-active"));
+    await firstUser.click(screen.getByTestId("group-cancel-full-active"));
+    await firstUser.click(
+      screen.getByTestId("group-confirm-cancel-full-active"),
+    );
+    await waitFor(() => expect(mocks.cancelRun).toHaveBeenCalledTimes(1));
+
+    const queryClient = first.queryClient;
+    first.unmount();
+    const secondUser = userEvent.setup();
+    renderHistory(queryClient);
+    await secondUser.click(
+      await screen.findByTestId("asset-group-toggle-match"),
+    );
+    await secondUser.click(screen.getByTestId("timeline-toggle-full-active"));
+    expect(screen.getByTestId("group-cancel-full-active")).toBeDisabled();
+    fireEvent.click(screen.getByTestId("group-cancel-full-active"));
+    expect(mocks.cancelRun).toHaveBeenCalledTimes(1);
+
+    pending.resolve(run("render-active", { status: "cancelled" }));
+    await waitFor(() =>
+      expect(screen.getByTestId("group-cancel-full-active")).not.toBeDisabled(),
+    );
+  });
+
+  it("keeps a pending deletion locked across unmount and remount", async () => {
+    const pending = deferred<{ deleted: boolean }>();
+    mocks.deleteRunOutput.mockReturnValueOnce(pending.promise);
+    const firstUser = userEvent.setup();
+    const first = renderHistory();
+    await firstUser.click(
+      await screen.findByTestId("asset-group-toggle-match"),
+    );
+    await firstUser.click(screen.getByTestId("timeline-toggle-leaf-output"));
+    await firstUser.click(screen.getByTestId("group-delete-leaf-output"));
+    await firstUser.click(
+      screen.getByTestId("group-confirm-delete-leaf-output"),
+    );
+    await waitFor(() => expect(mocks.deleteRunOutput).toHaveBeenCalledTimes(1));
+
+    const queryClient = first.queryClient;
+    first.unmount();
+    const secondUser = userEvent.setup();
+    renderHistory(queryClient);
+    await secondUser.click(
+      await screen.findByTestId("asset-group-toggle-match"),
+    );
+    await secondUser.click(screen.getByTestId("timeline-toggle-leaf-output"));
+    expect(screen.getByTestId("group-delete-leaf-output")).toBeDisabled();
+    fireEvent.click(screen.getByTestId("group-delete-leaf-output"));
+    expect(mocks.deleteRunOutput).toHaveBeenCalledTimes(1);
+
+    pending.resolve({ deleted: true });
+    await waitFor(() =>
+      expect(screen.getByTestId("group-delete-leaf-output")).not.toBeDisabled(),
+    );
+  });
+
   it("invalidates group, run, artifact, and product verification caches", async () => {
     const queryClient = new QueryClient();
     const keys = [
       ["asset-groups"],
+      ["health"],
       ["runs"],
       ["run", "run-a"],
       ["artifacts", "run-a"],
+      ["artifact-json", "run-a", "report.json"],
+      ["ai-improvement-status", "run-a"],
+      ["event-candidates", "run-a"],
+      getGetHealthQueryKey(),
       getListAssetGroupsQueryKey(),
       getListRunsQueryKey(),
       getGetRunQueryKey("run-a"),
@@ -512,6 +865,7 @@ describe("GroupedProductionHistory", () => {
     expect(screen.getByTestId("asset-group-match")).toBeInTheDocument();
     await user.click(screen.getByTestId("asset-group-toggle-match"));
     expect(mocks.listRunArtifacts).not.toHaveBeenCalled();
+    expect(mocks.getConfig).not.toHaveBeenCalled();
     await user.click(screen.getByTestId("timeline-toggle-fixture-run-999"));
     await screen.findByTestId("verified-product-fixture-run-999");
     expect(mocks.listRunArtifacts).toHaveBeenCalledTimes(1);
@@ -519,5 +873,6 @@ describe("GroupedProductionHistory", () => {
       "fixture-run-999",
       GENERATION,
     );
+    expect(mocks.getConfig).not.toHaveBeenCalled();
   });
 });
