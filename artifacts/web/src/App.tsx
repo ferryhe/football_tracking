@@ -18,7 +18,7 @@ import DashboardPage from "@/pages/dashboard";
 import BaselinePage from "@/pages/baseline";
 import AIAnalysisPage from "@/pages/ai-analysis";
 import DeliverablePage from "@/pages/deliverable";
-import HistoryPage from "@/pages/history";
+import { GroupedProductionHistory as HistoryPage } from "@/components/history/GroupedProductionHistory";
 import BroadcastPage from "@/pages/broadcast";
 import ProductionPage from "@/pages/production";
 import {

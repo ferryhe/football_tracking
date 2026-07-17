@@ -6,7 +6,6 @@ import type {
   AIImproveRequest,
   AIImproveResponse,
   AISuggestion,
-  AssetGroup,
   ConfigDetail,
   ConfigListItem,
   CreateRunRequest,
@@ -21,6 +20,10 @@ import type {
   RunRecord,
   UpdateConfigRequest,
 } from "./types";
+import type {
+  ArtifactSummary as GeneratedArtifactSummary,
+  AssetGroup as GeneratedAssetGroup,
+} from "@workspace/api-client-react";
 
 const BASE = "/api";
 
@@ -51,11 +54,17 @@ export const api = {
   listInputs: () => request<InputCatalogResponse>("/inputs"),
   listRuns: () => request<RunRecord[]>("/runs"),
   getRun: (id: string) => request<RunRecord>(`/runs/${id}`),
-  getRunArtifactJson: <T>(runId: string, artifactName: string) =>
-    request<T>(`/runs/${encodeURIComponent(runId)}/artifacts/${encodePathSegmented(artifactName)}`),
+  getRunArtifactJson: <T>(runId: string, artifactName: string, statusGeneration?: string) => {
+    const suffix = statusGeneration ? `?status_generation=${encodeURIComponent(statusGeneration)}` : "";
+    return request<T>(`/runs/${encodeURIComponent(runId)}/artifacts/${encodePathSegmented(artifactName)}${suffix}`);
+  },
+  listRunArtifacts: (runId: string, statusGeneration?: string) => {
+    const suffix = statusGeneration ? `?status_generation=${encodeURIComponent(statusGeneration)}` : "";
+    return request<GeneratedArtifactSummary[]>(`/runs/${encodeURIComponent(runId)}/artifacts${suffix}`);
+  },
   getAIImprovementStatus: (runId: string) =>
     request<AIImprovementStatusResponse>(`/runs/${encodeURIComponent(runId)}/ai-improvement-status`),
-  listAssetGroups: () => request<AssetGroup[]>("/runs/asset-groups"),
+  listAssetGroups: () => request<GeneratedAssetGroup[]>("/runs/asset-groups"),
   createRun: (body: CreateRunRequest) =>
     request<RunRecord>("/runs", { method: "POST", body: JSON.stringify(body) }),
   createFollowCamRender: (runId: string, body: FollowCamRenderRequest) =>

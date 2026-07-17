@@ -21,7 +21,9 @@ export default defineConfig({
       "src/lib/productionConfigFreeze.test.ts",
       "src/lib/productionBroadcast.test.ts",
       "src/lib/broadcastDelivery.test.ts",
+      "src/lib/productionHistory.test.ts",
       "src/components/production/**/*.test.tsx",
+      "src/components/history/**/*.test.tsx",
       "src/pages/production.test.tsx",
     ],
     coverage: {
@@ -38,6 +40,7 @@ export default defineConfig({
         "src/lib/productionConfigFreeze.ts",
         "src/lib/productionBroadcast.ts",
         "src/lib/broadcastDelivery.ts",
+        "src/lib/productionHistory.ts",
         "src/components/broadcast/BroadcastReviewEvidenceStep.tsx",
         "src/components/broadcast/useBroadcastReviewEvidenceController.ts",
       ],
@@ -53,6 +56,12 @@ export default defineConfig({
           statements: 90,
         },
         "src/components/broadcast/useBroadcastReviewEvidenceController.ts": {
+          branches: 90,
+          functions: 90,
+          lines: 90,
+          statements: 90,
+        },
+        "src/lib/productionHistory.ts": {
           branches: 90,
           functions: 90,
           lines: 90,
