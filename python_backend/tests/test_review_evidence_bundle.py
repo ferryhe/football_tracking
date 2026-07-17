@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import multiprocessing
 import os
 import tempfile
 import threading
@@ -9,6 +10,7 @@ import time
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
+from typing import Callable
 from unittest import mock
 
 import yaml
@@ -2258,6 +2260,53 @@ class ReviewEvidenceBundleTests(unittest.TestCase):
         finally:
             service.close()
 
+    @unittest.skipIf(os.name == "nt", "POSIX config-lineage regression coverage requires fork")
+    def test_review_evidence_state_does_not_reenter_lock_after_crlf_lineage_reconfirmation(self) -> None:
+        draft = self._write_fixture()
+        service, _ = self._create_service_parent(draft)
+        try:
+            self._reconfirm_crlf_config_lineage(service)
+
+            state = self._call_in_forked_process(
+                lambda: service.get_broadcast_review_evidence("run-fixture"),
+                label="review evidence state",
+            )
+
+            self.assertEqual("not_available", state["status"])
+            self.assertEqual("review_evidence_bundle_not_available", state["blocker_code"])
+        finally:
+            service.close()
+
+    @unittest.skipIf(os.name == "nt", "POSIX config-lineage regression coverage requires fork")
+    def test_review_windows_do_not_reenter_lock_after_crlf_lineage_reconfirmation(self) -> None:
+        draft = self._write_fixture()
+        service, _ = self._create_service_parent(draft)
+        try:
+            built = build_review_evidence_bundle(
+                self.source,
+                service.review_evidence_inbox_dir / "pre-lineage-fixture",
+            )
+            queued = service.import_broadcast_review_evidence(
+                "run-fixture",
+                {
+                    "bundle_id": "review-evidence-fixture",
+                    "bundle_manifest_sha256": built.bundle_sha256,
+                },
+            )
+            terminal = self._wait_for_terminal(service, queued["run_id"])
+            self.assertEqual("completed", terminal["status"], terminal.get("error"))
+            self._reconfirm_crlf_config_lineage(service)
+
+            state = self._call_in_forked_process(
+                lambda: service.get_broadcast_review_windows("run-fixture"),
+                label="review windows",
+            )
+
+            self.assertEqual("needs_review", state["status"])
+            self.assertEqual("invalid_or_stale_selective_review_evidence", state["reason"])
+        finally:
+            service.close()
+
     def test_activated_review_consumers_reject_changed_confirmed_config(self) -> None:
         self._assert_activated_review_consumers_reject_target_mutation("config")
 
@@ -3169,6 +3218,106 @@ class ReviewEvidenceBundleTests(unittest.TestCase):
             draft["target"]["root_contract_sha256"], sha256_file(parent_output / "tracking_contract.v2.json")
         )
         return service, parent_output
+
+    def _reconfirm_crlf_config_lineage(self, service: ApiService) -> None:
+        parent = service.get_run("run-fixture")
+        config_path = Path(parent["config_path"])
+        config_path.write_bytes(config_path.read_bytes().replace(b"\r\n", b"\n").replace(b"\n", b"\r\n"))
+        registry = service._read_registry()
+        target = next(item for item in registry["runs"] if item["run_id"] == "run-fixture")
+        target["broadcast"]["submission_id"] = "submission-completed"
+        target["broadcast"]["generation_id"] = "generation-completed"
+        accepted_trial = {
+            **json.loads(json.dumps(target)),
+            "run_id": "trial-accepted",
+            "source": "tracking",
+            "status": "completed",
+            "parent_run_id": None,
+            "output_dir": str(self.root / "trial-accepted"),
+            "notes": json.dumps(
+                {
+                    "purpose": "trial",
+                    "workflow_id": "workflow-1",
+                    "trial_intent_sha256": "2" * 64,
+                    "calibration_digest": "5" * 64,
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            ),
+            "broadcast": {},
+        }
+        failed = {
+            **json.loads(json.dumps(target)),
+            "run_id": "run-failed",
+            "status": "failed",
+            "output_dir": str(self.root / "run-failed"),
+            "broadcast": {
+                **target["broadcast"],
+                "submission_id": "submission-failed",
+                "generation_id": "generation-failed",
+            },
+        }
+        registry["runs"].extend([accepted_trial, failed])
+        service._write_registry(registry)
+
+        current_registry = service._read_registry()
+        current_parent = next(item for item in current_registry["runs"] if item["run_id"] == "run-fixture")
+        challenge = service._broadcast_config_lineage_reconfirmation_challenge(
+            current_parent,
+            registry=current_registry,
+        )
+        response = service.reconfirm_broadcast_config_lineage(
+            "run-fixture",
+            {
+                **challenge,
+                "operator_id": "operator-1",
+                "reviewer_id": "reviewer-1",
+            },
+        )
+        self.assertEqual("reconfirmed", response["status"])
+
+    def _call_in_forked_process(
+        self,
+        callback: Callable[[], object],
+        *,
+        label: str,
+        timeout: float = 5.0,
+    ) -> object:
+        if os.name == "nt":
+            self.skipTest("fork-based deadlock regression coverage requires POSIX")
+        context = multiprocessing.get_context("fork")
+        receiver, sender = context.Pipe(duplex=False)
+
+        def invoke() -> None:
+            try:
+                sender.send(("ok", callback()))
+            except BaseException as exc:
+                sender.send(("error", f"{type(exc).__name__}: {exc}"))
+            finally:
+                sender.close()
+
+        process = context.Process(target=invoke, name=f"review-evidence-{label.replace(' ', '-')}")
+        process.start()
+        sender.close()
+        process.join(timeout)
+        if process.is_alive():
+            process.terminate()
+            process.join(1.0)
+            if process.is_alive():
+                process.kill()
+                process.join(1.0)
+            receiver.close()
+            self.fail(f"{label} did not complete within {timeout:.1f} seconds")
+        try:
+            if not receiver.poll():
+                self.fail(f"{label} exited without returning a result (exit code {process.exitcode})")
+            status, payload = receiver.recv()
+        finally:
+            receiver.close()
+        if status != "ok":
+            self.fail(f"{label} failed in child process: {payload}")
+        self.assertEqual(0, process.exitcode)
+        return payload
 
     def _assert_restart_blocks_committed_import_for_lineage_failure(
         self,

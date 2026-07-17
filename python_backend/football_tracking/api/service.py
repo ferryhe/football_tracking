@@ -5028,13 +5028,19 @@ class ApiService:
                 with self._registry_file_lock():
                     registry = self._read_registry()
                     parent = self._review_evidence_parent_from_registry(registry, run_id, output_dir)
-                    target = self._review_evidence_target(run_id, output_dir, parent=parent)
+                    target = self._review_evidence_target(
+                        run_id,
+                        output_dir,
+                        parent=parent,
+                        registry=registry,
+                    )
                     if queue_path.is_file():
                         queue, queue_sha256 = self._validate_current_review_queue_locked(
                             run_id,
                             output_dir,
                             parent,
                             queue_path,
+                            registry=registry,
                         )
         except _ReviewEvidenceTargetContextError as exc:
             blocker: ConfigLineageError = ConfigLineageError(exc.code, str(exc))
@@ -5487,6 +5493,7 @@ class ApiService:
                             parent_run_id,
                             parent_output,
                             parent=current_parent,
+                            registry=registry,
                         )
                         if current_target != target:
                             raise ReviewEvidenceBundleError(
@@ -5665,6 +5672,7 @@ class ApiService:
         output_dir: Path,
         *,
         parent: dict[str, Any] | None = None,
+        registry: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         contract_path = output_dir / TRACKING_CONTRACT_REPORT_NAME
         try:
@@ -5687,7 +5695,7 @@ class ApiService:
         if not action_binding_path.is_file():
             raise RuntimeError("review evidence target action-signal binding is unavailable")
         action_signal_binding_sha256 = sha256_file(action_binding_path)
-        config_confirmation = self._review_evidence_config_confirmation(parent)
+        config_confirmation = self._review_evidence_config_confirmation(parent, registry=registry)
         confirmed_config_sha256 = config_confirmation["confirmed_text_sha256"]
         candidate_rows = contract.get("candidates")
         if not isinstance(candidate_rows, list) or not candidate_rows:
@@ -5776,17 +5784,29 @@ class ApiService:
         output_dir: Path,
         parent: dict[str, Any],
         queue_path: Path,
+        *,
+        registry: dict[str, Any],
     ) -> tuple[dict[str, Any], str]:
         queue, queue_sha256 = validate_review_queue_activation(output_dir, queue_path)
         if not isinstance(queue.get("activation"), dict):
             return queue, queue_sha256
-        target_before = self._review_evidence_target(run_id, output_dir, parent=parent)
+        target_before = self._review_evidence_target(
+            run_id,
+            output_dir,
+            parent=parent,
+            registry=registry,
+        )
         queue, queue_sha256 = validate_review_queue_activation(
             output_dir,
             queue_path,
             expected_target=target_before,
         )
-        target_after = self._review_evidence_target(run_id, output_dir, parent=parent)
+        target_after = self._review_evidence_target(
+            run_id,
+            output_dir,
+            parent=parent,
+            registry=registry,
+        )
         if target_after != target_before:
             raise BroadcastApiError("review evidence target changed during activation validation")
         return queue, queue_sha256
@@ -5837,7 +5857,12 @@ class ApiService:
     def _review_evidence_confirmed_config_sha256(self, parent: dict[str, Any]) -> str:
         return self._review_evidence_config_confirmation(parent)["confirmed_text_sha256"]
 
-    def _review_evidence_config_confirmation(self, parent: dict[str, Any]) -> dict[str, Any]:
+    def _review_evidence_config_confirmation(
+        self,
+        parent: dict[str, Any],
+        *,
+        registry: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         notes = parent.get("notes")
         try:
             confirmation = json.loads(notes) if isinstance(notes, str) else notes
@@ -5868,7 +5893,13 @@ class ApiService:
                 CONFIG_LINEAGE_MISMATCH,
                 "confirmed config lineage snapshot does not match the confirmed text",
             )
-        child = self._config_lineage_child(str(parent.get("run_id") or ""))
+        if registry is None:
+            with self._lock:
+                registry = self._read_registry()
+        child = self._config_lineage_child_from_registry(
+            registry,
+            str(parent.get("run_id") or ""),
+        )
         if child is None:
             raise _ReviewEvidenceTargetContextError(
                 CONFIG_LINEAGE_REQUIRED,
@@ -5881,18 +5912,16 @@ class ApiService:
                 CONFIG_LINEAGE_MISMATCH,
                 "config lineage operation has no authoritative workflow bindings",
             )
-        with self._lock:
-            registry = self._read_registry()
-            try:
-                authoritative_workflow_bindings = self._derive_config_lineage_workflow_bindings(
-                    parent,
-                    config_path,
-                    registry=registry,
-                )
-                if workflow_bindings != authoritative_workflow_bindings:
-                    raise ValueError("config lineage operation workflow bindings differ from server-derived authority")
-            except (ValueError, RuntimeError, ConfigLineageError) as exc:
-                raise _ReviewEvidenceTargetContextError(CONFIG_LINEAGE_MISMATCH, str(exc)) from exc
+        try:
+            authoritative_workflow_bindings = self._derive_config_lineage_workflow_bindings(
+                parent,
+                config_path,
+                registry=registry,
+            )
+            if workflow_bindings != authoritative_workflow_bindings:
+                raise ValueError("config lineage operation workflow bindings differ from server-derived authority")
+        except (ValueError, RuntimeError, ConfigLineageError) as exc:
+            raise _ReviewEvidenceTargetContextError(CONFIG_LINEAGE_MISMATCH, str(exc)) from exc
         try:
             generation = load_config_lineage_reconfirmation(
                 self._config_lineage_root(),
@@ -5942,13 +5971,20 @@ class ApiService:
     def _config_lineage_child(self, parent_run_id: str) -> dict[str, Any] | None:
         with self._lock:
             registry = self._read_registry()
-            matches = [
-                deepcopy(item)
-                for item in registry["runs"]
-                if item.get("source") == "config_lineage_reconfirmation"
-                and item.get("parent_run_id") == parent_run_id
-                and item.get("status") == "completed"
-            ]
+            return self._config_lineage_child_from_registry(registry, parent_run_id)
+
+    @staticmethod
+    def _config_lineage_child_from_registry(
+        registry: dict[str, Any],
+        parent_run_id: str,
+    ) -> dict[str, Any] | None:
+        matches = [
+            deepcopy(item)
+            for item in registry["runs"]
+            if item.get("source") == "config_lineage_reconfirmation"
+            and item.get("parent_run_id") == parent_run_id
+            and item.get("status") == "completed"
+        ]
         return matches[-1] if matches else None
 
     def _derive_config_lineage_workflow_bindings(
@@ -6332,6 +6368,7 @@ class ApiService:
                                     parent_output,
                                     parent,
                                     queue_path,
+                                    registry=registry,
                                 )
                                 activation = (
                                     queue.get("activation") if isinstance(queue.get("activation"), dict) else {}
@@ -6730,6 +6767,7 @@ class ApiService:
                         output_dir,
                         run,
                         queue_path,
+                        registry=registry,
                     )
                 except (BroadcastApiError, RuntimeError) as exc:
                     return unavailable("invalid_or_stale_selective_review_evidence", message=str(exc))
@@ -6788,6 +6826,7 @@ class ApiService:
                         output_dir,
                         parent,
                         queue_path,
+                        registry=registry,
                     )
                     if current_queue_sha256 != expected_queue_sha256:
                         raise RuntimeError("selective review queue changed after review windows were loaded")
