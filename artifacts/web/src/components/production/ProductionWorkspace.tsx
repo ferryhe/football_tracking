@@ -539,7 +539,7 @@ export function ProductionWorkspace({
       </p>
 
       {notice && (
-        <Alert>
+        <Alert role="status" aria-live="polite">
           <AlertDescription>{notice}</AlertDescription>
         </Alert>
       )}

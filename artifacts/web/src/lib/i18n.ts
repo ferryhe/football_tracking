@@ -9,6 +9,13 @@ export const translations = {
       aiAnalysis: "Tune Config",
       deliverable: "Full Deliverable",
       history: "History",
+      production: "Production",
+      productionHistory: "Production History",
+      primaryNav: "Primary navigation",
+      openMenu: "Open navigation",
+      closeMenu: "Close navigation",
+      switchLight: "Switch to light mode",
+      switchDark: "Switch to dark mode",
       appName: "Football Tracking",
       appSub: "Workspace",
       appFooter: "Ball tracking pipeline UI",
@@ -22,6 +29,11 @@ export const translations = {
       confirm: "Confirm",
       delete: "Delete",
       close: "Close",
+    },
+    cutover: {
+      openingProduction: "Opening Production…",
+      migratingBaseline: "Moving this Baseline link into Production…",
+      migratingBroadcast: "Finding this Broadcast run in Production History…",
     },
     production: {
       title: "Match production",
@@ -334,6 +346,7 @@ export const translations = {
       fullUrlConflict:
         "The URL is unknown or belongs to another parent run. This production was not changed.",
       fullOpenLegacy: "Open the legacy broadcast record",
+      fullOpenHistory: "Open this run in Production History",
       readyDescription:
         "Preview the verified final video and its quality evidence.",
       readyPending: "Final product presentation arrives in a later delivery.",
@@ -345,6 +358,10 @@ export const translations = {
       saveFailed: "The draft could not be saved on this device.",
       restored: "Your unfinished production was restored.",
       migrated: "An older production draft was upgraded and restored.",
+      baselineMigrated:
+        "This Baseline link moved here. Continue from the earliest valid step; the original video and calibration prerequisites are still required.",
+      broadcastMigrated:
+        "This Broadcast link moved here and was matched to the current production run.",
       recoveryTitle: "Production draft needs recovery",
       corruptDraft:
         "The saved production draft is damaged and cannot be opened safely.",
@@ -779,6 +796,8 @@ export const translations = {
       selectRunDesc: "Completed and failed runs are both available",
       loadingRuns: "Loading runs…",
       noRuns: "No finished runs found yet.",
+      requestedRunNotFound: (runId: string) =>
+        `Run ${runId} is not available for AI review. No other run was selected.`,
       selectRunPlaceholder: "Select a finished run…",
       objective: "Objective (optional)",
       objectiveDesc: "Describe what you want to improve",
@@ -1006,6 +1025,8 @@ export const translations = {
       sourceRunDesc: "Pick a completed baseline run to render from",
       loadingRuns: "Loading runs…",
       noRuns: "No completed baseline runs available yet.",
+      requestedRunNotFound: (runId: string) =>
+        `Run ${runId} has no supported highlight evidence. No other run was selected.`,
       selectRunPlaceholder: "Select a baseline run…",
       fullRunOptions: "Full Run Options",
       fullRunOptionsDesc:
@@ -1153,6 +1174,13 @@ export const translations = {
       statusGeneration: "Status generation",
       operationalReleaseGate:
         "Artifact verification is not release approval. Real evidence and an independent visual review are still required before publishing.",
+      focusedRun: (runId: string) => `Opened run ${runId} in Production History.`,
+      broadcastMigrated: (runId: string) =>
+        `The Broadcast link moved to Production History and opened run ${runId}.`,
+      runNotFound: (runId: string) =>
+        `Run ${runId} was not found in the current Production History snapshot.`,
+      openAiReview: "Open AI review",
+      openHighlightTools: "Open highlight tools",
       originalMetadata: "Original media metadata",
       fileName: "File name",
       fileSize: "File size",
@@ -1179,6 +1207,13 @@ export const translations = {
       aiAnalysis: "调配置",
       deliverable: "全量成品",
       history: "历史",
+      production: "比赛制作",
+      productionHistory: "成品历史",
+      primaryNav: "主导航",
+      openMenu: "打开导航",
+      closeMenu: "关闭导航",
+      switchLight: "切换为浅色模式",
+      switchDark: "切换为深色模式",
       appName: "足球追踪",
       appSub: "工作台",
       appFooter: "球追踪流水线 UI",
@@ -1192,6 +1227,11 @@ export const translations = {
       confirm: "确认",
       delete: "删除",
       close: "关闭",
+    },
+    cutover: {
+      openingProduction: "正在打开比赛制作……",
+      migratingBaseline: "正在把基线链接迁移到比赛制作……",
+      migratingBroadcast: "正在成品历史中定位导播任务……",
     },
     production: {
       title: "比赛制作",
@@ -1477,6 +1517,7 @@ export const translations = {
       fullUrlConflictTitle: "任务链接与当前制作不一致",
       fullUrlConflict: "URL 未知或属于其他父任务；当前制作未被修改。",
       fullOpenLegacy: "打开旧版导播记录",
+      fullOpenHistory: "在成品历史中打开此任务",
       readyDescription: "预览已验证的成品视频及质量证据。",
       readyPending: "成品展示将在后续交付中接入。",
       completed: "已完成",
@@ -1487,6 +1528,9 @@ export const translations = {
       saveFailed: "无法在当前设备保存草稿。",
       restored: "已恢复未完成的比赛制作。",
       migrated: "旧版比赛制作草稿已升级并恢复。",
+      baselineMigrated:
+        "该基线链接已迁移到这里，请从最早可用步骤继续；仍必须先选择原片并完成球场校准。",
+      broadcastMigrated: "该导播链接已迁移到这里，并已匹配当前比赛制作任务。",
       recoveryTitle: "比赛制作草稿需要恢复",
       corruptDraft: "已保存的比赛制作草稿已损坏，无法安全打开。",
       unsupportedDraft: (version: number) =>
@@ -1899,6 +1943,8 @@ export const translations = {
       selectRunDesc: "已完成和失败的任务都可分析",
       loadingRuns: "加载任务中…",
       noRuns: "暂无已结束任务。",
+      requestedRunNotFound: (runId: string) =>
+        `任务 ${runId} 不支持 AI 复核，且未自动选择其他任务。`,
       selectRunPlaceholder: "选择已结束任务…",
       objective: "优化目标（可选）",
       objectiveDesc: "描述你想改进的方向",
@@ -2120,6 +2166,8 @@ export const translations = {
       sourceRunDesc: "选择已完成的基线任务",
       loadingRuns: "加载任务中…",
       noRuns: "暂无可用的已完成基线任务。",
+      requestedRunNotFound: (runId: string) =>
+        `任务 ${runId} 没有可用的集锦证据，且未自动选择其他任务。`,
       selectRunPlaceholder: "选择基线任务…",
       fullRunOptions: "全量选项",
       fullRunOptionsDesc: "处理完整视频，并按需渲染最终成品",
@@ -2260,6 +2308,13 @@ export const translations = {
       statusGeneration: "状态版本",
       operationalReleaseGate:
         "产物验证不等于发布批准；上线前仍必须具备真实证据并完成独立视觉审核。",
+      focusedRun: (runId: string) => `已在成品历史中打开任务 ${runId}。`,
+      broadcastMigrated: (runId: string) =>
+        `导播链接已迁移到成品历史，并已打开任务 ${runId}。`,
+      runNotFound: (runId: string) =>
+        `当前成品历史快照中未找到任务 ${runId}。`,
+      openAiReview: "打开 AI 复核",
+      openHighlightTools: "打开集锦工具",
       originalMetadata: "原片元数据",
       fileName: "文件名",
       fileSize: "文件大小",

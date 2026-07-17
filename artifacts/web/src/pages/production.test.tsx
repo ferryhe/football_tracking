@@ -168,16 +168,31 @@ async function draftWithUnsettledTrial(kind: "pending" | "running") {
 }
 
 describe("ProductionPage", () => {
-  it("fails closed for a run URL without a persisted parent and offers the legacy record", () => {
+  it("fails closed for a run URL without a persisted parent and offers focused history", () => {
     window.history.replaceState({}, "", "/production?run=unknown-run");
     renderPage();
     expect(screen.getByTestId("production-full-run-error")).toBeVisible();
     expect(
-      screen.getByRole("link", { name: /legacy broadcast/i }),
-    ).toHaveAttribute("href", "/broadcast?run=unknown-run");
+      screen.getByRole("link", { name: /production history/i }),
+    ).toHaveAttribute("href", "/history?run=unknown-run&from=production");
     expect(
       screen.queryByRole("heading", { name: /match production/i }),
     ).toBeNull();
+  });
+
+  it("explains legacy baseline migration while keeping source prerequisites", () => {
+    window.history.replaceState({}, "", "/production?from=baseline");
+    renderPage();
+    expect(screen.getByRole("status")).toHaveTextContent(
+      /baseline link moved here.*original video/i,
+    );
+    expect(screen.getByRole("heading", { name: /choose the original video/i })).toBeVisible();
+  });
+
+  it("saves and exits to Production History instead of looping to Production", async () => {
+    const view = renderPage();
+    await view.user.click(screen.getByRole("button", { name: "Save and exit" }));
+    expect(`${window.location.pathname}${window.location.search}`).toBe("/history");
   });
 
   it("applies sequential async trial callbacks to the latest persisted draft", () => {

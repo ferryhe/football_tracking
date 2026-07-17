@@ -22,9 +22,11 @@ export default defineConfig({
       "src/lib/productionBroadcast.test.ts",
       "src/lib/broadcastDelivery.test.ts",
       "src/lib/productionHistory.test.ts",
+      "src/lib/productionCutover.test.ts",
       "src/components/production/**/*.test.tsx",
       "src/components/history/**/*.test.tsx",
       "src/pages/production.test.tsx",
+      "src/App.vitest.test.tsx",
     ],
     coverage: {
       provider: "v8",

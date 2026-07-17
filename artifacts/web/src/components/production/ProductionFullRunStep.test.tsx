@@ -1223,7 +1223,7 @@ describe("ProductionFullRunStep", () => {
     );
   });
 
-  it("canonicalizes a child URL and blocks an unknown URL without a draft parent", async () => {
+  it("canonicalizes a recognized child URL and blocks an unknown URL without a draft parent", async () => {
     const input = await fixture();
     const existing = await trackingState(input);
     api.runData = existing.run;
@@ -1239,6 +1239,7 @@ describe("ProductionFullRunStep", () => {
     await waitFor(() =>
       expect(child.parentChange).toHaveBeenCalledWith(existing.run.run_id),
     );
+    expect(screen.queryByTestId("production-full-run-error")).toBeNull();
     child.unmount();
 
     api.runData = null;
@@ -1246,9 +1247,49 @@ describe("ProductionFullRunStep", () => {
     renderStep(input, null, "unknown-run");
     expect(screen.getByTestId("production-full-run-error")).toBeVisible();
     expect(
-      screen.getByRole("link", { name: /legacy broadcast/i }),
-    ).toHaveAttribute("href", "/broadcast?run=unknown-run");
+      screen.getByRole("link", { name: /production history/i }),
+    ).toHaveAttribute("href", "/history?run=unknown-run&from=production");
     expect(screen.queryByTestId("production-start-full-run")).toBeNull();
+  });
+
+  it("fails closed before remote control for an unrelated requested run", async () => {
+    const input = await fixture();
+    const existing = await trackingState(input);
+    api.runData = existing.run;
+    api.controller = controllerFor({
+      parent: existing.run,
+      state: "tracking",
+    });
+    api.runsData = [
+      existing.run,
+      runFor(existing.state.attempts[0].request, {
+        run_id: "unrelated-run",
+        parent_run_id: "different-parent",
+      }),
+    ];
+    const conflict = renderStep(input, existing.state, "unrelated-run");
+    expect(await screen.findByTestId("production-full-run-error")).toBeVisible();
+    expect(
+      screen.getByRole("link", { name: /production history/i }),
+    ).toHaveAttribute("href", "/history?run=unrelated-run&from=production");
+    await waitFor(() =>
+      expect(
+        api.controllerInputs.every((entry) => !controllerEnabled(entry)),
+      ).toBe(true),
+    );
+    expect(api.runsOptions.some(queryEnabled)).toBe(true);
+    expect(api.currentRunOptions.every((entry) => !queryEnabled(entry))).toBe(
+      true,
+    );
+    expect(conflict.transitions).toHaveLength(0);
+    expect(conflict.productChanges).toHaveLength(0);
+    expect(conflict.parentChange).not.toHaveBeenCalled();
+    expect(api.refreshWorkflow).not.toHaveBeenCalled();
+    expect(api.cancelWorkflow).not.toHaveBeenCalled();
+    expect(api.submitReview).not.toHaveBeenCalled();
+    expect(api.retryRecompute).not.toHaveBeenCalled();
+    expect(api.renderBroadcast).not.toHaveBeenCalled();
+    expect(screen.queryAllByRole("button")).toHaveLength(0);
   });
 
   it("hosts blocked review evidence in Production and refreshes both shared states", async () => {

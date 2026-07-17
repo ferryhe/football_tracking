@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { useSearch } from "wouter";
 import { api } from "@/lib/api";
 import {
   buildAIImprovementApprovalRequest,
@@ -1414,6 +1415,9 @@ export default function AIAnalysisPage() {
   const { t, language } = useLanguage();
   const { toast } = useToast();
   const queryClient = useQueryClient();
+  const routeSearch = useSearch();
+  const requestedRunId =
+    new URLSearchParams(routeSearch).get("run")?.trim() || null;
   const [selectedRunId, setSelectedRunId] = useState("");
   const [objective, setObjective] = useState("");
   const [showPatch, setShowPatch] = useState(false);
@@ -1441,6 +1445,9 @@ export default function AIAnalysisPage() {
   });
 
   const analysableRuns = (runs ?? []).filter((r) => r.status === "completed" || r.status === "failed");
+  const requestedRunAvailable = requestedRunId
+    ? analysableRuns.some((run) => run.run_id === requestedRunId)
+    : false;
   const selectedRun = analysableRuns.find((r) => r.run_id === selectedRunId) ?? null;
   const playbackArtifact = selectedRun ? pickPlaybackArtifact(selectedRun.artifacts) : null;
   const playbackUrl = selectedRun && playbackArtifact ? artifactUrl(selectedRun.run_id, playbackArtifact) : null;
@@ -1448,6 +1455,11 @@ export default function AIAnalysisPage() {
   const existingApprovalActionsArtifact = artifactByName(selectedRun, "ai_improvement_approved_actions.json");
   const runLifecycle = useMemo(() => getRunLifecycle(selectedRun), [selectedRun]);
   const lifecycleIndex = useMemo(() => buildLifecycleCandidateIndex(runLifecycle), [runLifecycle]);
+
+  useEffect(() => {
+    if (!requestedRunId || runs === undefined) return;
+    setSelectedRunId(requestedRunAvailable ? requestedRunId : "");
+  }, [requestedRunAvailable, requestedRunId, runs]);
 
   const {
     data: configDetail,
@@ -1827,6 +1839,15 @@ export default function AIAnalysisPage() {
         <h1 className="text-2xl font-bold">{t.aiAnalysis.title}</h1>
         <p className="text-muted-foreground mt-1">{t.aiAnalysis.subtitle}</p>
       </div>
+
+      {requestedRunId && runs !== undefined && !requestedRunAvailable && (
+        <Alert variant="destructive" role="alert">
+          <AlertCircle className="h-4 w-4" aria-hidden="true" />
+          <AlertDescription>
+            {t.aiAnalysis.requestedRunNotFound(requestedRunId)}
+          </AlertDescription>
+        </Alert>
+      )}
 
       <div className="grid gap-4 md:grid-cols-2">
         {/* Run selector */}

@@ -1,6 +1,6 @@
 import { useRef, useState } from "react";
 import { AlertTriangle, RefreshCw } from "lucide-react";
-import { useLocation, useSearch } from "wouter";
+import { Link, useLocation, useSearch } from "wouter";
 import { useListInputVideos } from "@workspace/api-client-react";
 
 import { ProductionWorkspace } from "@/components/production/ProductionWorkspace";
@@ -22,6 +22,7 @@ import {
   createSafeBrowserStorage,
   type SafeBrowserStorage,
 } from "@/lib/browserStorage";
+import { runIdFromSearch } from "@/lib/productionCutover";
 import { productionFullRunRequiresStop } from "@/lib/productionBroadcast";
 import {
   clearProductionDraft,
@@ -87,11 +88,6 @@ interface ProductionPageProps {
   storage?: SafeBrowserStorage;
 }
 
-function runIdFromSearch(search: string): string | null {
-  const value = new URLSearchParams(search).get("run")?.trim();
-  return value || null;
-}
-
 export function ProductionPageContent({
   storage: storageOverride,
 }: ProductionPageProps = {}) {
@@ -99,6 +95,7 @@ export function ProductionPageContent({
   const [, setLocation] = useLocation();
   const search = useSearch();
   const requestedRunId = runIdFromSearch(search);
+  const migratedFrom = new URLSearchParams(search).get("from");
   const [storage] = useState(
     () => storageOverride ?? createSafeBrowserStorage(),
   );
@@ -253,7 +250,7 @@ export function ProductionPageContent({
   }
 
   function handleSaveExit() {
-    if (persist(draftRef.current)) setLocation("/");
+    if (persist(draftRef.current)) setLocation("/history");
   }
 
   function replaceWith(nextDraft: ProductionDraft) {
@@ -374,12 +371,12 @@ export function ProductionPageContent({
           </AlertTitle>
           <AlertDescription className="space-y-3">
             <p>{t.production.fullUrlConflict}</p>
-            <a
+            <Link
               className="font-medium underline"
-              href={`/broadcast?run=${encodeURIComponent(requestedRunId)}`}
+              href={`/history?run=${encodeURIComponent(requestedRunId)}&from=production`}
             >
-              {t.production.fullOpenLegacy}
-            </a>
+              {t.production.fullOpenHistory}
+            </Link>
           </AlertDescription>
         </Alert>
       </section>
@@ -425,7 +422,15 @@ export function ProductionPageContent({
     );
   }
 
-  const noticeText = notice ? t.production[notice] : null;
+  const migrationNotice =
+    migratedFrom === "baseline"
+      ? t.production.baselineMigrated
+      : migratedFrom === "broadcast"
+        ? t.production.broadcastMigrated
+        : null;
+  const noticeText = [migrationNotice, notice ? t.production[notice] : null]
+    .filter(Boolean)
+    .join(" ");
   const errorText = error
     ? `${t.production[error.code]} ${error.detail}`
     : null;

@@ -135,9 +135,9 @@ function assetGroups(firstGeneration: string) {
         modified_at: "2026-07-14T09:00:00Z",
       },
       last_activity_at: "2026-07-14T10:02:00Z",
-      run_count: 7,
+      run_count: 8,
       config_count: 2,
-      output_count: 7,
+      output_count: 8,
       runs: [
         readyProduct("product-one", firstGeneration),
         readyProduct("product-two", GENERATION_B),
@@ -146,6 +146,10 @@ function assetGroups(firstGeneration: string) {
         parent,
         child,
         run("leaf-output"),
+        run("match-failed", {
+          status: "failed",
+          error: "fixture failure",
+        }),
       ],
       configs: [
         {
@@ -241,7 +245,7 @@ function monitorBrowserFailures(page: Page) {
 
 test("grouped history lazily verifies versioned products and keeps actions safe", async ({
   page,
-}) => {
+}, testInfo) => {
   const failures = monitorBrowserFailures(page);
   let firstGeneration = GENERATION_A;
   const artifactReads: string[] = [];
@@ -407,6 +411,13 @@ test("grouped history lazily verifies versioned products and keeps actions safe"
   expect(artifactReads).toEqual([]);
   expect(qualityReads).toEqual([]);
   expect(configReads).toEqual([]);
+  await expect(page.getByTestId("timeline-run-render-active")).toBeVisible();
+  await expect(page.getByTestId("timeline-run-leaf-output")).toBeVisible();
+  await expect(page.getByTestId("timeline-run-match-failed")).toBeVisible();
+  await testInfo.attach("history-state-matrix-active-completed-failed", {
+    body: await page.screenshot({ fullPage: true, animations: "disabled" }),
+    contentType: "image/png",
+  });
 
   await page.getByTestId("timeline-toggle-production_full_historical").click();
   await expect(
@@ -510,9 +521,34 @@ test("grouped history lazily verifies versioned products and keeps actions safe"
   expect(failures).toEqual([]);
 });
 
+test("empty history attaches the rendered no-results state", async ({
+  page,
+}, testInfo) => {
+  const failures = monitorBrowserFailures(page);
+  await page.route("**/api/**", async (route) => {
+    const url = new URL(route.request().url());
+    if (url.pathname === "/api/runs/asset-groups") {
+      await route.fulfill({ status: 200, json: [] });
+      return;
+    }
+    await route.fulfill({
+      status: 404,
+      json: { detail: "Unhandled test route" },
+    });
+  });
+
+  await page.goto("/history");
+  await expect(page.getByText("No runs found")).toBeVisible();
+  await testInfo.attach("history-empty", {
+    body: await page.screenshot({ fullPage: true, animations: "disabled" }),
+    contentType: "image/png",
+  });
+  expect(failures).toEqual([]);
+});
+
 test("a 1,000-product group fetches only the explicitly expanded row", async ({
   page,
-}) => {
+}, testInfo) => {
   const artifactReads: string[] = [];
   const configReads: string[] = [];
   await page.route("**/api/**", async (route) => {
@@ -590,4 +626,8 @@ test("a 1,000-product group fetches only the explicitly expanded row", async ({
   ).toBeVisible();
   expect(artifactReads).toEqual(["large-product-999"]);
   expect(configReads).toEqual([]);
+  await testInfo.attach("history-large-list-1000-runs", {
+    body: await page.screenshot({ animations: "disabled" }),
+    contentType: "image/png",
+  });
 });
