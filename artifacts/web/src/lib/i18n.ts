@@ -342,6 +342,7 @@ export const translations = {
       fullNoLimitations: "No known limitations were reported.",
       fullProductStale:
         "The run changed while the product was being verified. Refresh and verify the current generation again.",
+      fullRouteIdentityPending: "Verifying the requested run identity…",
       fullUrlConflictTitle: "Run link does not match this production",
       fullUrlConflict:
         "The URL is unknown or belongs to another parent run. This production was not changed.",
@@ -1514,6 +1515,7 @@ export const translations = {
       fullQualityVerified: "质量报告已验证",
       fullNoLimitations: "质量报告未列出已知限制。",
       fullProductStale: "验证成品期间任务已变化，请刷新后重新验证当前版本。",
+      fullRouteIdentityPending: "正在核验请求的任务身份……",
       fullUrlConflictTitle: "任务链接与当前制作不一致",
       fullUrlConflict: "URL 未知或属于其他父任务；当前制作未被修改。",
       fullOpenLegacy: "打开旧版导播记录",

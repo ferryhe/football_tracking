@@ -339,6 +339,9 @@ export function ProductionFullRunStep({
   );
   const requestedIdentitySettled =
     runs.data !== undefined || Boolean(runs.isError);
+  const routeIdentityPending = Boolean(
+    requestedNeedsIdentityLookup && !requestedIdentitySettled,
+  );
   const urlConflict = Boolean(
     requestedNeedsIdentityLookup &&
     requestedIdentitySettled &&
@@ -1310,6 +1313,19 @@ export function ProductionFullRunStep({
           {fullRunStatusText}
         </Badge>
       </div>
+
+      {routeIdentityPending && (
+        <div
+          className="flex items-center gap-2 text-sm text-muted-foreground"
+          data-testid="production-route-identity-pending"
+          role="status"
+          aria-live="polite"
+          aria-atomic="true"
+        >
+          <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />
+          <span>{t.production.fullRouteIdentityPending}</span>
+        </div>
+      )}
 
       {urlConflict && (
         <Alert variant="destructive" data-testid="production-full-run-error">
