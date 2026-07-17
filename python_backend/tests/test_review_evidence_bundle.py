@@ -2199,9 +2199,13 @@ class ReviewEvidenceBundleTests(unittest.TestCase):
                         "reviewer_id": "reviewer-1",
                     },
                 )
+            normalized = service.get_broadcast_review_evidence("run-fixture")
+            self.assertNotIn("config_lineage_reconfirmation", normalized)
+
+            config_path.write_bytes(config_path.read_bytes().replace(b"\n", b"\r\n"))
             refreshed = service.get_broadcast_review_evidence("run-fixture")
             challenge = refreshed["config_lineage_reconfirmation"]
-            self.assertNotEqual(
+            self.assertEqual(
                 required["config_lineage_reconfirmation"]["expected_observed_raw_sha256"],
                 challenge["expected_observed_raw_sha256"],
             )

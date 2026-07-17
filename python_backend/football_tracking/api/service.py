@@ -6833,6 +6833,8 @@ class ApiService:
                     envelope = build_review_action_envelope(queue_path, raw_actions, trusted_root=output_dir)
                     decisions_path = output_dir / "review_decisions.json"
                     decisions_sha256 = publish_json_exclusive(decisions_path, envelope, trusted_root=output_dir)
+        except _ReviewEvidenceTargetContextError as exc:
+            raise RuntimeError(f"review evidence target changed from current run context: {exc}") from exc
         except BroadcastApiError as exc:
             raise RuntimeError(f"invalid or stale selective review evidence: {exc}") from exc
         self._refresh_broadcast_facade_state(run_id, output_dir)
