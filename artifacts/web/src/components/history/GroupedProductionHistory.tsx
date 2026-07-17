@@ -476,7 +476,7 @@ function CurrentConfigEvidence({
     refetchOnMount: "always",
     retry: false,
   });
-  const status = verification.isPending
+  const status = verification.isFetching
     ? ({ status: "not_reverified", reason: "summary_only" } as const)
     : verification.isError
       ? /^404\b/.test(verification.error.message)

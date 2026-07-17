@@ -515,7 +515,7 @@ describe("GroupedProductionHistory", () => {
     );
   });
 
-  it("refetches current config after remount instead of keeping stale verification", async () => {
+  it("hides cached verification while current config refetch is pending", async () => {
     const firstUser = userEvent.setup();
     const first = renderHistory();
     await firstUser.click(
@@ -529,7 +529,8 @@ describe("GroupedProductionHistory", () => {
 
     const queryClient = first.queryClient;
     first.unmount();
-    mocks.getConfig.mockResolvedValue(currentConfigDetail({ text: "changed" }));
+    const refetch = deferred<ConfigDetail>();
+    mocks.getConfig.mockReturnValueOnce(refetch.promise);
     const secondUser = userEvent.setup();
     renderHistory(queryClient);
     await secondUser.click(
@@ -538,12 +539,21 @@ describe("GroupedProductionHistory", () => {
     await secondUser.click(
       screen.getByTestId("timeline-toggle-production_full_historical"),
     );
+
+    expect(
+      screen.getByTestId("current-config-status-production_full_historical"),
+    ).toHaveTextContent(/current file is being reverified/i);
+    expect(
+      screen.queryByText("Current saved configuration verified"),
+    ).not.toBeInTheDocument();
+    expect(mocks.getConfig).toHaveBeenCalledTimes(2);
+
+    refetch.resolve(currentConfigDetail({ text: "changed" }));
     await waitFor(() =>
       expect(
         screen.getByTestId("current-config-status-production_full_historical"),
       ).toHaveTextContent("Current saved configuration was modified"),
     );
-    expect(mocks.getConfig).toHaveBeenCalledTimes(2);
   });
 
   it("keeps historical full identity when current config text was modified", async () => {
