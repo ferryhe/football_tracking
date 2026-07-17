@@ -12,7 +12,6 @@ import {
   getListAssetGroupsQueryKey,
   getListRunsQueryKey,
   type ArtifactSummary,
-  type ConfigListItem,
   type RunRecord,
 } from "@workspace/api-client-react";
 import {
@@ -450,25 +449,14 @@ function ProductEvidence({ run }: { run: RunRecord }) {
 
 function CurrentConfigEvidence({
   item,
-  configs,
 }: {
   item: ProductionHistoryTimelineItem;
-  configs: readonly ConfigListItem[];
 }) {
   const { t } = useLanguage();
   const note = item.note!;
-  const currentSummary =
-    configs.find(
-      (config) =>
-        config.name === note.configName &&
-        config.path.replaceAll("\\", "/") ===
-          item.run.config_path?.replaceAll("\\", "/") &&
-        config.input_video?.replaceAll("\\", "/") ===
-          item.run.input_video?.replaceAll("\\", "/"),
-    ) ?? null;
   const verificationKey = productionCurrentConfigVerificationKey(
     note,
-    currentSummary,
+    item.run,
   );
   const verification = useQuery({
     queryKey: verificationKey ?? [
@@ -484,22 +472,20 @@ function CurrentConfigEvidence({
         await api.getConfig(note.configName!),
       ),
     enabled: verificationKey !== null,
-    staleTime: Number.POSITIVE_INFINITY,
+    staleTime: 0,
+    refetchOnMount: "always",
     retry: false,
   });
-  const status =
-    currentSummary === null
-      ? ({ status: "missing" } as const)
-      : verification.isPending
-        ? ({ status: "not_reverified", reason: "summary_only" } as const)
-        : verification.isError
-          ? /^404\b/.test(verification.error.message)
-            ? ({ status: "missing" } as const)
-            : ({
-                status: "error",
-                message: verification.error.message,
-              } as const)
-          : verification.data;
+  const status = verification.isPending
+    ? ({ status: "not_reverified", reason: "summary_only" } as const)
+    : verification.isError
+      ? /^404\b/.test(verification.error.message)
+        ? ({ status: "missing" } as const)
+        : ({
+            status: "error",
+            message: verification.error.message,
+          } as const)
+      : verification.data;
   const label =
     status?.status === "verified_current"
       ? t.history.currentConfigVerified
@@ -516,6 +502,8 @@ function CurrentConfigEvidence({
   return (
     <section
       className="space-y-2 rounded-lg border p-3 text-sm"
+      role={status?.status === "error" ? "alert" : "status"}
+      aria-live={status?.status === "error" ? "assertive" : "polite"}
       data-testid={`current-config-status-${item.run.run_id}`}
     >
       <h4 className="font-medium">{t.history.currentSavedConfig}</h4>
@@ -537,14 +525,12 @@ function lineageLabel(item: ProductionHistoryTimelineItem): string | null {
 function TimelineRow({
   item,
   groupRuns,
-  groupConfigs,
   onCancel,
   onDelete,
   pendingTargets,
 }: {
   item: ProductionHistoryTimelineItem;
   groupRuns: readonly RunRecord[];
-  groupConfigs: readonly ConfigListItem[];
   onCancel: (runId: string) => Promise<boolean>;
   onDelete: (runId: string) => Promise<boolean>;
   pendingTargets: ReadonlySet<string>;
@@ -660,7 +646,7 @@ function TimelineRow({
           )}
 
           {item.note?.purpose === "production_full" && (
-            <CurrentConfigEvidence item={item} configs={groupConfigs} />
+            <CurrentConfigEvidence item={item} />
           )}
 
           <div className="flex flex-wrap items-start gap-2">
@@ -912,7 +898,6 @@ function GroupDetail({
           key={item.run.run_id}
           item={item}
           groupRuns={runs}
-          groupConfigs={group.configs}
           onCancel={onCancel}
           onDelete={onDelete}
           pendingTargets={pendingTargets}

@@ -1653,6 +1653,7 @@ export default function AIAnalysisPage() {
       setConfigText(detail.text);
       void queryClient.invalidateQueries({ queryKey: ["configs"] });
       void queryClient.invalidateQueries({ queryKey: ["config", detail.name] });
+      void queryClient.invalidateQueries({ queryKey: ["production-history", "config", detail.name] });
       void queryClient.invalidateQueries({ queryKey: ["health"] });
       toast({ title: t.aiAnalysis.configFileSaved, description: detail.name });
     },

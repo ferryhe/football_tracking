@@ -100,6 +100,7 @@ export default function DashboardPage() {
     mutationFn: api.deleteConfig,
     onSuccess: (result) => {
       toast({ title: t.dashboard.configDeleted, description: result.name });
+      void queryClient.invalidateQueries({ queryKey: ["production-history", "config", result.name] });
       if (viewConfigName === result.name) setViewConfigOpen(false);
       setConfigToDelete(null);
       refreshConfigQueries();

@@ -61,7 +61,10 @@ function trialMachineNote(): string {
   });
 }
 
-function fullMachineNote(outputId: string): string {
+function fullMachineNote(
+  outputId: string,
+  overrides: Record<string, unknown> = {},
+): string {
   return JSON.stringify({
     schema_version: "1.0",
     purpose: "production_full",
@@ -80,6 +83,7 @@ function fullMachineNote(outputId: string): string {
       size_bytes: 1_000,
       modified_at: "2026-07-14T09:00:00Z",
     },
+    ...overrides,
   });
 }
 
@@ -132,7 +136,9 @@ const historicalFullSibling = run("production_full_historical-sibling", {
   parent_run_id: acceptedTrial.run_id,
   config_name: "confirmed.yaml",
   config_path: "config/confirmed.yaml",
-  notes: fullMachineNote("historical-sibling"),
+  notes: fullMachineNote("historical-sibling", {
+    config_patch_sha256: GENERATION,
+  }),
   broadcast: { status: "trajectory_ready" },
 });
 const activeParent = run("full-active", {
@@ -451,7 +457,7 @@ describe("GroupedProductionHistory", () => {
     );
   });
 
-  it("reverifies a current full-run config lazily and reuses the cache", async () => {
+  it("separates sibling config verification when patch lineage differs", async () => {
     const user = userEvent.setup();
     renderHistory();
     await user.click(await screen.findByTestId("asset-group-toggle-match"));
@@ -478,8 +484,8 @@ describe("GroupedProductionHistory", () => {
       await screen.findByTestId(
         "current-config-status-production_full_historical-sibling",
       ),
-    ).toHaveTextContent("Current saved configuration verified");
-    expect(mocks.getConfig).toHaveBeenCalledTimes(1);
+    ).toHaveTextContent(/lineage does not match/i);
+    expect(mocks.getConfig).toHaveBeenCalledTimes(2);
   });
 
   it("shows summary-only status while current config re-verification is pending", async () => {
@@ -495,12 +501,49 @@ describe("GroupedProductionHistory", () => {
     expect(
       screen.getByTestId("current-config-status-production_full_historical"),
     ).toHaveTextContent(/Summary only/i);
+    expect(
+      screen.getByTestId("current-config-status-production_full_historical"),
+    ).toHaveAttribute("role", "status");
+    expect(
+      screen.getByTestId("current-config-status-production_full_historical"),
+    ).toHaveAttribute("aria-live", "polite");
     pending.resolve(currentConfigDetail());
     await waitFor(() =>
       expect(
         screen.getByTestId("current-config-status-production_full_historical"),
       ).toHaveTextContent("Current saved configuration verified"),
     );
+  });
+
+  it("refetches current config after remount instead of keeping stale verification", async () => {
+    const firstUser = userEvent.setup();
+    const first = renderHistory();
+    await firstUser.click(
+      await screen.findByTestId("asset-group-toggle-match"),
+    );
+    await firstUser.click(
+      screen.getByTestId("timeline-toggle-production_full_historical"),
+    );
+    await screen.findByText("Current saved configuration verified");
+    expect(mocks.getConfig).toHaveBeenCalledTimes(1);
+
+    const queryClient = first.queryClient;
+    first.unmount();
+    mocks.getConfig.mockResolvedValue(currentConfigDetail({ text: "changed" }));
+    const secondUser = userEvent.setup();
+    renderHistory(queryClient);
+    await secondUser.click(
+      await screen.findByTestId("asset-group-toggle-match"),
+    );
+    await secondUser.click(
+      screen.getByTestId("timeline-toggle-production_full_historical"),
+    );
+    await waitFor(() =>
+      expect(
+        screen.getByTestId("current-config-status-production_full_historical"),
+      ).toHaveTextContent("Current saved configuration was modified"),
+    );
+    expect(mocks.getConfig).toHaveBeenCalledTimes(2);
   });
 
   it("keeps historical full identity when current config text was modified", async () => {
@@ -560,7 +603,11 @@ describe("GroupedProductionHistory", () => {
     ).toBeInTheDocument();
   });
 
-  it("keeps a deleted current config as historical full and marks it missing", async () => {
+  it("fetches a moved current config and reports lineage mismatch", async () => {
+    const movedConfig = {
+      ...assetGroup.configs![1],
+      input_video: "C:/videos/other.mp4",
+    };
     mocks.listAssetGroups.mockResolvedValue([
       {
         ...assetGroup,
@@ -568,7 +615,24 @@ describe("GroupedProductionHistory", () => {
           (config) => config.name !== "confirmed.yaml",
         ),
       },
+      {
+        group_id: "other",
+        title: "other.mp4",
+        input_video: {
+          name: "other.mp4",
+          path: "C:/videos/other.mp4",
+          size_bytes: 2_000,
+          modified_at: "2026-07-14T09:00:00Z",
+        },
+        runs: [],
+        configs: [movedConfig],
+        outputs: [],
+        is_unbound: false,
+      },
     ]);
+    mocks.getConfig.mockResolvedValue(
+      currentConfigDetail({ summary: movedConfig }),
+    );
     const user = userEvent.setup();
     renderHistory();
     await user.click(await screen.findByTestId("asset-group-toggle-match"));
@@ -577,9 +641,11 @@ describe("GroupedProductionHistory", () => {
     );
 
     expect(
-      screen.getByTestId("current-config-status-production_full_historical"),
-    ).toHaveTextContent("Current saved configuration is missing");
-    expect(mocks.getConfig).not.toHaveBeenCalled();
+      await screen.findByTestId(
+        "current-config-status-production_full_historical",
+      ),
+    ).toHaveTextContent(/lineage does not match/i);
+    expect(mocks.getConfig).toHaveBeenCalledTimes(1);
     expect(
       within(
         screen.getByTestId("timeline-run-production_full_historical"),
@@ -605,6 +671,13 @@ describe("GroupedProductionHistory", () => {
       ),
     ).toHaveTextContent(expected);
     expect(mocks.getConfig).toHaveBeenCalledTimes(1);
+    const container = screen.getByTestId(
+      "current-config-status-production_full_historical",
+    );
+    expect(container).toHaveAttribute(
+      "role",
+      message.startsWith("404") ? "status" : "alert",
+    );
   });
 
   it("shows original metadata, configuration snapshots, and named live progress", async () => {
@@ -843,6 +916,23 @@ describe("GroupedProductionHistory", () => {
     await user.type(screen.getByTestId("group-search"), "not-present");
     expect(screen.queryByTestId("asset-group-match")).not.toBeInTheDocument();
     expect(screen.getByText("No runs found")).toBeInTheDocument();
+  });
+
+  it("uses ready-candidate semantics consistently in Chinese", async () => {
+    localStorage.setItem("app-language", "zh");
+    const user = userEvent.setup();
+    renderHistory();
+    await screen.findByTestId("asset-group-match");
+    expect(screen.getByTestId("group-filter-ready")).toHaveTextContent(
+      "就绪候选",
+    );
+    await user.click(screen.getByTestId("asset-group-toggle-match"));
+    expect(screen.getByTestId("group-products-ready-match")).toHaveTextContent(
+      "就绪候选: 2",
+    );
+    expect(
+      screen.getByTestId("group-products-unverified-match"),
+    ).toHaveTextContent("未验证: 2");
   });
 
   it("opens 1,000 ready candidates without N+1 requests and fetches one explicit row", async () => {

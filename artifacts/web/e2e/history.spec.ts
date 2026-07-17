@@ -461,6 +461,17 @@ test("grouped history lazily verifies versioned products and keeps actions safe"
   await expect(
     page.getByTestId("group-delete-blocker-full-active"),
   ).toContainText(/child output/i);
+  await page.getByTestId("timeline-toggle-production_full_historical").click();
+  await expect(
+    page.getByTestId("current-config-status-production_full_historical"),
+  ).toContainText("Current saved configuration verified");
+  await expect(
+    page.getByTestId("current-config-status-production_full_historical"),
+  ).toHaveAttribute("role", "status");
+  await expect(
+    page.getByTestId("current-config-status-production_full_historical"),
+  ).toHaveAttribute("aria-live", "polite");
+  expect(configReads).toEqual(["confirmed.yaml", "confirmed.yaml"]);
   const accessibility = await new AxeBuilder({ page })
     .include('[data-testid="group-detail-match"]')
     .analyze();

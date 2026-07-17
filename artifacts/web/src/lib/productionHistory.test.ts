@@ -760,16 +760,25 @@ describe("current production configuration verification", () => {
       },
     };
 
-    expect(
-      productionCurrentConfigVerificationKey(note, detail.summary),
-    ).toEqual([
+    expect(productionCurrentConfigVerificationKey(note, fullRun)).toEqual([
       "production-history",
       "config",
       "confirmed.yaml",
-      "config/confirmed.yaml",
-      digest,
-      "workflow-a",
-      acceptedTrialRunId,
+      {
+        run_id: "production_full_full-output",
+        config_path: "config/confirmed.yaml",
+        expected_config_sha256: digest,
+        workflow_id: "workflow-a",
+        accepted_trial_run_id: acceptedTrialRunId,
+        accepted_trial_request_sha256: HASH_A,
+        config_patch_sha256: HASH_C,
+        calibration_digest: HASH_A,
+        source_signature: {
+          path: "C:/videos/match.mp4",
+          size_bytes: 100,
+          modified_at: "2026-07-14T09:00:00Z",
+        },
+      },
     ]);
     await expect(
       verifyProductionCurrentConfig(note, fullRun, detail),
@@ -796,6 +805,25 @@ describe("current production configuration verification", () => {
     await expect(
       verifyProductionCurrentConfig(note, fullRun, null),
     ).resolves.toEqual({ status: "missing" });
+  });
+
+  it("keys every current-config verification input including patch lineage", () => {
+    const first = parseProductionHistoryNote(fullNote())!;
+    const second = parseProductionHistoryNote(
+      fullNote({ config_patch_sha256: HASH_A }),
+    )!;
+    const fullRun = run("production_full_full-output", {
+      config_path: "config/confirmed.yaml",
+    });
+
+    const firstKey = productionCurrentConfigVerificationKey(first, fullRun);
+    const secondKey = productionCurrentConfigVerificationKey(second, fullRun);
+    expect(firstKey?.slice(0, 3)).toEqual([
+      "production-history",
+      "config",
+      "confirmed.yaml",
+    ]);
+    expect(firstKey).not.toEqual(secondKey);
   });
 });
 

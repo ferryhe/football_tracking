@@ -323,14 +323,17 @@ function bindProductionHistoryNote(
 
 export function productionCurrentConfigVerificationKey(
   note: ProductionHistoryNote | null,
-  config: ConfigListItem | null,
-): readonly [string, string, string, string, string, string, string] | null {
+  run: RunRecord,
+): readonly [string, string, string, Record<string, unknown>] | null {
   if (
     note?.purpose !== "production_full" ||
     !note.configName ||
     !note.expectedConfigSha256 ||
     !note.acceptedTrialRunId ||
-    !config
+    !note.acceptedTrialRequestSha256 ||
+    !note.configPatchSha256 ||
+    !note.sourceSignature ||
+    !run.config_path
   ) {
     return null;
   }
@@ -338,10 +341,17 @@ export function productionCurrentConfigVerificationKey(
     "production-history",
     "config",
     note.configName,
-    config.path,
-    note.expectedConfigSha256,
-    note.workflowId,
-    note.acceptedTrialRunId,
+    {
+      run_id: run.run_id,
+      config_path: run.config_path,
+      expected_config_sha256: note.expectedConfigSha256,
+      workflow_id: note.workflowId,
+      accepted_trial_run_id: note.acceptedTrialRunId,
+      accepted_trial_request_sha256: note.acceptedTrialRequestSha256,
+      config_patch_sha256: note.configPatchSha256,
+      calibration_digest: note.calibrationDigest,
+      source_signature: { ...note.sourceSignature },
+    },
   ];
 }
 

@@ -2218,7 +2218,7 @@ export const translations = {
       groupedSubtitle: "按原片分组查看试跑、全量任务与经过产物证据验证的成品。",
       groups: (n: number) => `${n} 组原片`,
       active: "进行中",
-      readyCandidates: "待验证候选",
+      readyCandidates: "就绪候选",
       trials: "试跑",
       fullRuns: "全量任务",
       latestFullStatus: "最近全量状态",
