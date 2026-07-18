@@ -827,6 +827,10 @@ async function installTrialScenario(
     const url = new URL(request.url());
     const method = request.method();
     const path = url.pathname;
+    if (method === "GET" && path === "/api/detector-models") {
+      await route.fulfill({ json: detectorProbeCatalogFixture() });
+      return;
+    }
     if (method === "GET" && path === "/api/configs") {
       await route.fulfill({
         json: [
