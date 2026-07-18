@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -11,6 +11,7 @@ from football_tracking.ai_contracts import (
     AIRecommendedAction,
     AIRootCauseModule,
 )
+from football_tracking.detector_development_common import canonical_sha256
 
 RunStatus = Literal["queued", "running", "completed", "failed", "cancelled"]
 AIResponseLanguage = Literal["en", "zh"]
@@ -829,9 +830,7 @@ class TrialTuningAction(BaseModel):
             "scene_bias.negative_rois",
         ]
     ] = Field(min_length=3, max_length=3)
-    lineage_constraint: Literal[
-        "invalidate_trial_and_downstream_then_create_new_calibration_version"
-    ]
+    lineage_constraint: Literal["invalidate_trial_and_downstream_then_create_new_calibration_version"]
 
     @model_validator(mode="after")
     def validate_affected_paths(self) -> "TrialTuningAction":
@@ -1606,3 +1605,883 @@ class AIImproveApprovalResponse(BaseModel):
     approved_actions: list[AIApprovedAction]
     summary: AIImproveApprovalSummary
     warnings: list[str] = Field(default_factory=list)
+
+
+DetectorAvailabilityStatus = Literal["available", "unavailable", "blocked"]
+DetectorObservationStatus = Literal["pass", "fail", "not_run"]
+DetectorLifecycleState = Literal[
+    "unverified",
+    "feasibility_passed",
+    "development_candidate",
+    "source_segment_qualified",
+    "camera_qualified",
+    "retired",
+]
+DetectorProbeStatus = Literal[
+    "queued",
+    "running",
+    "committing",
+    "ready",
+    "failed",
+    "cancelled",
+    "blocked",
+]
+
+
+class DetectorLicenseMetadata(BaseModel):
+    name: str
+    spdx_id: str
+    url: str
+    reviewed: bool
+    approved_for_local_probe: bool
+
+
+class DetectorLicenseSet(BaseModel):
+    dataset: DetectorLicenseMetadata
+    model: DetectorLicenseMetadata
+    runtime: DetectorLicenseMetadata
+    deployment: DetectorLicenseMetadata
+
+
+class DetectorModelWeights(BaseModel):
+    relative_path: str
+    sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    size_bytes: int = Field(gt=0)
+
+
+class DetectorModelSource(BaseModel):
+    project: str
+    version: str
+    asset_release: str
+    weight_url: str
+    acquisition_method: str
+    access_requirement: str
+
+
+class DetectorModelEgress(BaseModel):
+    frames_leave_local_machine: bool
+    destination: str | None
+    operator_consent: Literal["not_required", "granted", "required_not_granted"]
+
+
+class DetectorModelDescriptorView(BaseModel):
+    schema_version: str
+    artifact_type: Literal["detector_model_descriptor"]
+    model_id: str
+    version: str
+    model_version: str
+    display_name: str
+    architecture_family: str
+    weights: DetectorModelWeights
+    source: DetectorModelSource
+    checkpoint: dict[str, Any] | None = None
+    runtime_contract: dict[str, Any]
+    class_names: list[str]
+    class_map: dict[str, str]
+    expected_input: dict[str, Any]
+    execution: dict[str, Any] | None = None
+    memory_envelope: dict[str, Any] | None = None
+    licenses: DetectorLicenseSet
+    egress: DetectorModelEgress
+    lifecycle_state: DetectorLifecycleState
+    bindings: dict[str, Any]
+    descriptor_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    import_manifest_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+
+
+class DetectorAvailabilityObservation(BaseModel):
+    status: DetectorObservationStatus
+    reason: str
+    installed_runtime: dict[str, str | None] | None = None
+    evidence_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+
+
+class DetectorAvailabilityObservations(BaseModel):
+    file: DetectorAvailabilityObservation
+    digest: DetectorAvailabilityObservation
+    class_map: DetectorAvailabilityObservation
+    license: DetectorAvailabilityObservation
+    runtime_load: DetectorAvailabilityObservation
+
+
+class DetectorModelAvailability(BaseModel):
+    status: DetectorAvailabilityStatus
+    reason_codes: list[str]
+    observations: DetectorAvailabilityObservations
+    observed_weight_path: str | None = None
+
+
+class DetectorQualificationView(BaseModel):
+    trial_eligible: bool
+    source_segment_qualified: bool
+    camera_qualified: bool
+
+
+class DetectorModelRecordView(BaseModel):
+    descriptor: DetectorModelDescriptorView
+    availability: DetectorModelAvailability
+    qualification: DetectorQualificationView
+    selectable_for_probe: bool
+
+
+class DetectorProfileRuntimeView(BaseModel):
+    name: str
+    installed_version: str | None
+    load_smoke: bool
+
+
+class DetectorProfileAvailabilityView(BaseModel):
+    status: DetectorAvailabilityStatus
+    reason_codes: list[str]
+    runtime: DetectorProfileRuntimeView | None = None
+
+
+class DetectorProfileSettingsView(BaseModel):
+    confidence_threshold: float = Field(ge=0, le=1)
+    image_size: int = Field(gt=0)
+    use_half: bool
+    allowed_labels: list[str]
+    top_k: Literal[5]
+    slice_height: int | None = Field(default=None, gt=0)
+    slice_width: int | None = Field(default=None, gt=0)
+    overlap_height_ratio: float | None = Field(default=None, ge=0, lt=1)
+    overlap_width_ratio: float | None = Field(default=None, ge=0, lt=1)
+    perform_standard_pred: bool | None = None
+    postprocess_type: str | None = None
+    postprocess_match_metric: str | None = None
+    postprocess_match_threshold: float | None = Field(default=None, ge=0, le=1)
+
+
+class DetectorProfileView(BaseModel):
+    schema_version: str
+    artifact_type: Literal["detector_profile"]
+    profile_id: str
+    version: str
+    model_id: str
+    model_version: str
+    model_descriptor_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    mode: Literal["direct", "sahi"]
+    settings: DetectorProfileSettingsView
+    profile_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    recommended: bool
+    availability: DetectorProfileAvailabilityView
+    selectable_for_probe: bool
+
+
+class DetectorCatalogFindingLicense(BaseModel):
+    status: Literal["review_required", "unavailable", "unknown"]
+    name: str | None
+    spdx_id: str | None
+    url: str | None
+    approved_for_local_probe: bool
+
+
+class DetectorCatalogFindingLicenseSet(BaseModel):
+    dataset: DetectorCatalogFindingLicense
+    model: DetectorCatalogFindingLicense
+    runtime: DetectorCatalogFindingLicense
+    deployment: DetectorCatalogFindingLicense
+
+
+class DetectorCatalogFindingSource(BaseModel):
+    project: str
+    version: str | None
+    url: str
+
+
+class DetectorCatalogFindingAccess(BaseModel):
+    method: str
+    account_or_plan_required: str
+    local_weights_validated: bool
+
+
+class DetectorCatalogFindingEgress(BaseModel):
+    frames_leave_local_machine: Literal["unknown_until_access_method_selected"]
+    destination: str | None
+    operator_consent: Literal["required_before_external_inference"]
+
+
+class DetectorCatalogFindingAvailability(BaseModel):
+    status: Literal["unavailable"]
+    reason_codes: list[str] = Field(min_length=1)
+
+
+class DetectorCatalogFindingView(BaseModel):
+    finding_id: str
+    display_name: str
+    source: DetectorCatalogFindingSource
+    architecture_family: str
+    access: DetectorCatalogFindingAccess
+    licenses: DetectorCatalogFindingLicenseSet
+    egress: DetectorCatalogFindingEgress
+    selectable: Literal[False]
+    availability: DetectorCatalogFindingAvailability
+
+
+class DetectorModelCatalogResponse(BaseModel):
+    schema_version: str
+    artifact_type: Literal["ball_detector_development_v1"]
+    models: list[DetectorModelRecordView]
+    profiles: list[DetectorProfileView]
+    catalog_findings: list[DetectorCatalogFindingView]
+
+
+class DetectorModelImportRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    package_relative_path: str = Field(min_length=1, max_length=500)
+    manifest_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+class DetectorModelImportResponse(BaseModel):
+    created: bool
+    model: DetectorModelRecordView
+
+
+DetectorSafeId = Annotated[str, Field(pattern=r"^[a-z0-9][a-z0-9._-]{0,119}$")]
+DetectorFrameIndex = Annotated[int, Field(strict=True, ge=0)]
+
+
+class DetectorProbeCreateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    parent_trial_id: DetectorSafeId
+    profile_ids: list[DetectorSafeId] = Field(min_length=2, max_length=6)
+    frame_indices: list[DetectorFrameIndex] | None = Field(default=None, min_length=1, max_length=50)
+    top_k: Literal[5] = 5
+    retry_from_job_id: DetectorSafeId | None = None
+
+    @field_validator("profile_ids")
+    @classmethod
+    def validate_detector_profile_ids(cls, values: list[str]) -> list[str]:
+        if len(set(values)) != len(values) or any(not value or value != value.strip() for value in values):
+            raise ValueError("profile_ids must contain unique exact IDs")
+        return values
+
+    @field_validator("frame_indices")
+    @classmethod
+    def validate_detector_frame_indices(cls, values: list[int] | None) -> list[int] | None:
+        if values is None:
+            return None
+        if len(set(values)) != len(values) or any(value < 0 for value in values):
+            raise ValueError("frame_indices must contain unique nonnegative integers")
+        return sorted(values)
+
+
+class DetectorProbeStrictView(BaseModel):
+    """Exact public evidence contract; response serialization must not drop lineage."""
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class DetectorProbeCreateResponse(DetectorProbeStrictView):
+    job_id: DetectorSafeId
+    request_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    status: DetectorProbeStatus
+    status_url: str
+    cancel_url: str
+    retry_from_job_id: DetectorSafeId | None = None
+
+
+class DetectorProbeProgressView(DetectorProbeStrictView):
+    completed: int = Field(strict=True, ge=0)
+    total: int = Field(strict=True, ge=0)
+    updated_at: str
+
+
+class FrozenDetectorProfileBindingView(DetectorProbeStrictView):
+    profile_id: DetectorSafeId
+    profile_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    model_id: DetectorSafeId
+    model_version: str
+    model_descriptor_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    weights_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    weights_size_bytes: int = Field(strict=True, gt=0)
+
+
+class DetectorProbeTuningPatchBindingView(DetectorProbeStrictView):
+    state: Literal["absent", "versioned"]
+    schema_version: Literal["1.0"]
+    version_id: str | None
+    parent_version_id: str | None
+    values_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+    @model_validator(mode="after")
+    def validate_tuning_patch_state(self) -> DetectorProbeTuningPatchBindingView:
+        if self.state == "absent":
+            if (
+                self.version_id is not None
+                or self.parent_version_id is not None
+                or self.values_sha256 != canonical_sha256({})
+            ):
+                raise ValueError("absent tuning patch cannot have a version identity")
+        elif self.version_id is None or not self.version_id.strip():
+            raise ValueError("versioned tuning patch requires version_id")
+        return self
+
+
+class DetectorProbeExecutionEnvironmentView(DetectorProbeStrictView):
+    device: Literal["cpu", "cuda:0"]
+    precision: Literal["fp32"]
+    cuda_available: bool
+    cuda_device_count: int = Field(strict=True, ge=0)
+    cuda_visible_devices: str | None
+    cuda_compiled_version: str | None
+    cudnn_version: int | None = Field(default=None, strict=True, ge=0)
+    gpu_name: str | None
+    gpu_compute_capability: str | None
+    gpu_total_memory_bytes: int | None = Field(default=None, strict=True, gt=0)
+    cuda_driver_version: int | None = Field(default=None, strict=True, ge=0)
+    python_implementation: str = Field(min_length=1)
+    python_version: str = Field(min_length=1)
+    numpy_version: str = Field(min_length=1)
+    opencv_version: str = Field(min_length=1)
+    pydantic_version: str = Field(min_length=1)
+    pydantic_core_version: str = Field(min_length=1)
+    opencv_build_information_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    opencv_ffmpeg_enabled: bool | None
+    decoder_fingerprint_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+    @model_validator(mode="after")
+    def validate_execution_hardware(self) -> DetectorProbeExecutionEnvironmentView:
+        gpu_identity_values = (
+            self.gpu_name,
+            self.gpu_compute_capability,
+            self.gpu_total_memory_bytes,
+            self.cuda_driver_version,
+        )
+        if self.device == "cpu":
+            if (
+                self.cuda_available
+                or self.cuda_device_count != 0
+                or any(value is not None for value in gpu_identity_values)
+            ):
+                raise ValueError("CPU execution cannot claim CUDA hardware")
+        elif not self.cuda_available or self.cuda_device_count < 1:
+            raise ValueError("CUDA execution requires a visible CUDA device")
+        decoder_fingerprint = {
+            "python_implementation": self.python_implementation,
+            "python_version": self.python_version,
+            "numpy_version": self.numpy_version,
+            "opencv_version": self.opencv_version,
+            "opencv_build_information_sha256": self.opencv_build_information_sha256,
+            "opencv_ffmpeg_enabled": self.opencv_ffmpeg_enabled,
+        }
+        if canonical_sha256(decoder_fingerprint) != self.decoder_fingerprint_sha256:
+            raise ValueError("decoder fingerprint digest does not match")
+        return self
+
+
+class DetectorProbeExecutionBundleView(DetectorProbeStrictView):
+    schema_version: Literal["1.0"]
+    installed_runtime: dict[str, str]
+    runtime_contract: dict[str, str]
+    runtime_contract_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    runtime_observation_evidence_sha256s: dict[DetectorSafeId, Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]]
+    execution_environment: DetectorProbeExecutionEnvironmentView
+    runtime_environment_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    code_bundle_files: dict[str, Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]]
+    code_bundle_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    code_commit: Annotated[str, Field(pattern=r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")] | None
+    code_commit_status: Literal["bound", "unbound", "unavailable"]
+    code_commit_reason: Literal[
+        "code_bundle_differs_from_commit", "repository_commit_unavailable"
+    ] | None
+    code_commit_blob_files: (
+        dict[str, Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]] | None
+    )
+    code_commit_blob_bundle_sha256: (
+        Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")] | None
+    )
+    code_commit_binding_kind: Literal["exact_or_crlf_to_lf_commit_blob"] | None
+    frozen_profiles_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+    @model_validator(mode="after")
+    def validate_execution_bundle(self) -> DetectorProbeExecutionBundleView:
+        runtime_names = {"sahi", "torch", "ultralytics"}
+        if (
+            set(self.installed_runtime) != runtime_names
+            or set(self.runtime_contract) != runtime_names
+            or any(not value for value in self.installed_runtime.values())
+            or any(not value for value in self.runtime_contract.values())
+        ):
+            raise ValueError("execution bundle runtime bindings are incomplete")
+        if canonical_sha256(self.runtime_contract) != self.runtime_contract_sha256:
+            raise ValueError("execution bundle runtime contract digest does not match")
+        if canonical_sha256(self.code_bundle_files) != self.code_bundle_sha256:
+            raise ValueError("execution bundle code digest does not match")
+        runtime_environment = {
+            "installed_runtime": self.installed_runtime,
+            "runtime_observation_evidence_sha256s": (self.runtime_observation_evidence_sha256s),
+            "execution_environment": self.execution_environment.model_dump(mode="json"),
+            "code_bundle_sha256": self.code_bundle_sha256,
+            "code_commit": self.code_commit,
+            "code_commit_status": self.code_commit_status,
+            "code_commit_reason": self.code_commit_reason,
+            "code_commit_blob_bundle_sha256": (
+                self.code_commit_blob_bundle_sha256
+            ),
+            "code_commit_binding_kind": self.code_commit_binding_kind,
+        }
+        if canonical_sha256(runtime_environment) != self.runtime_environment_sha256:
+            raise ValueError("execution bundle environment digest does not match")
+        if self.code_commit_status == "bound":
+            if (
+                self.code_commit is None
+                or self.code_commit_reason is not None
+                or self.code_commit_blob_files is None
+                or self.code_commit_blob_bundle_sha256 is None
+                or self.code_commit_binding_kind
+                != "exact_or_crlf_to_lf_commit_blob"
+            ):
+                raise ValueError("bound code commit evidence is incomplete")
+            if (
+                set(self.code_commit_blob_files) != set(self.code_bundle_files)
+                or canonical_sha256(self.code_commit_blob_files)
+                != self.code_commit_blob_bundle_sha256
+            ):
+                raise ValueError("bound commit blob digest does not match")
+        elif self.code_commit_status == "unbound":
+            if (
+                self.code_commit is not None
+                or self.code_commit_reason != "code_bundle_differs_from_commit"
+                or self.code_commit_blob_files is not None
+                or self.code_commit_blob_bundle_sha256 is not None
+                or self.code_commit_binding_kind is not None
+            ):
+                raise ValueError("unbound code commit evidence is inconsistent")
+        elif (
+            self.code_commit is not None
+            or self.code_commit_reason != "repository_commit_unavailable"
+            or self.code_commit_blob_files is not None
+            or self.code_commit_blob_bundle_sha256 is not None
+            or self.code_commit_binding_kind is not None
+        ):
+            raise ValueError("unavailable code commit evidence is inconsistent")
+        return self
+
+
+class FrozenDetectorProbeRequestView(DetectorProbeStrictView):
+    parent_trial_id: DetectorSafeId
+    source_id: DetectorSafeId
+    source_relative_path: str
+    source_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    source_file_identity_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    source_size_bytes: int = Field(strict=True, gt=0)
+    source_width: int = Field(strict=True, gt=0)
+    source_height: int = Field(strict=True, gt=0)
+    source_frame_count: int = Field(strict=True, gt=0)
+    tracking_contract_relative_path: str
+    tracking_contract_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    base_config_relative_path: str
+    base_config_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    effective_config_relative_path: str
+    effective_config_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    trial_intent_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    tuning_patch_binding: DetectorProbeTuningPatchBindingView
+    tuning_patch_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    profile_ids: list[DetectorSafeId] = Field(min_length=2, max_length=6)
+    frozen_profiles_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    profile_sha256s: dict[DetectorSafeId, Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]]
+    profile_bindings: list[FrozenDetectorProfileBindingView] = Field(min_length=2, max_length=6)
+    execution_bundle: DetectorProbeExecutionBundleView
+    execution_bundle_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    runtime_environment_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    frame_indices: list[DetectorFrameIndex] = Field(min_length=1, max_length=50)
+    top_k: Literal[5]
+    requested_decode_mode: Literal["sequential", "preroll", "direct"]
+    retry_from_job_id: DetectorSafeId | None = None
+
+    @model_validator(mode="after")
+    def validate_frozen_probe_request(self) -> FrozenDetectorProbeRequestView:
+        if self.profile_ids != sorted(self.profile_ids) or len(set(self.profile_ids)) != len(self.profile_ids):
+            raise ValueError("frozen profile_ids must be unique and sorted")
+        if self.frame_indices != sorted(self.frame_indices) or len(set(self.frame_indices)) != len(self.frame_indices):
+            raise ValueError("frozen frame_indices must be unique and sorted")
+        if self.frame_indices[-1] >= self.source_frame_count:
+            raise ValueError("frozen frame_indices exceed the source frame count")
+        binding_ids = [binding.profile_id for binding in self.profile_bindings]
+        if binding_ids != self.profile_ids or set(self.profile_sha256s) != set(self.profile_ids):
+            raise ValueError("frozen profile bindings do not match profile_ids")
+        if any(self.profile_sha256s[binding.profile_id] != binding.profile_sha256 for binding in self.profile_bindings):
+            raise ValueError("frozen profile binding digests do not match")
+        if canonical_sha256(self.tuning_patch_binding.model_dump(mode="json")) != self.tuning_patch_sha256:
+            raise ValueError("frozen tuning-patch digest does not match its exact binding")
+        if (
+            self.execution_bundle.frozen_profiles_sha256 != self.frozen_profiles_sha256
+            or self.execution_bundle.runtime_environment_sha256 != self.runtime_environment_sha256
+            or canonical_sha256(self.execution_bundle.model_dump(mode="json")) != self.execution_bundle_sha256
+            or set(self.execution_bundle.runtime_observation_evidence_sha256s) != set(self.profile_ids)
+        ):
+            raise ValueError("frozen execution bundle does not match request lineage")
+        return self
+
+
+class FrozenDetectorProfileView(DetectorProfileView):
+    model_config = ConfigDict(extra="forbid")
+
+    model_descriptor: DetectorModelDescriptorView
+
+    @model_validator(mode="after")
+    def validate_frozen_profile_lineage(self) -> FrozenDetectorProfileView:
+        if (
+            self.model_id != self.model_descriptor.model_id
+            or self.model_version != self.model_descriptor.version
+            or self.model_descriptor_sha256 != self.model_descriptor.descriptor_sha256
+        ):
+            raise ValueError("frozen detector profile descriptor lineage does not match")
+        return self
+
+
+class DetectorProbeCandidateView(DetectorProbeStrictView):
+    frame_index: DetectorFrameIndex
+    bbox_source_px: tuple[float, float, float, float]
+    confidence: float = Field(ge=0, le=1)
+    class_name: Literal["ball"]
+    checkpoint_class_name: str = Field(min_length=1)
+    source: str = Field(min_length=1)
+    coordinate_reason: Literal["direct_source_coordinates", "sahi_tile_offset_applied"]
+    merge_reason: Literal["retained_top_k"]
+
+    @model_validator(mode="after")
+    def validate_candidate_box(self) -> DetectorProbeCandidateView:
+        left, top, right, bottom = self.bbox_source_px
+        if left < 0 or top < 0 or right <= left or bottom <= top:
+            raise ValueError("detector candidate bbox_source_px is invalid")
+        return self
+
+
+class DetectorProbeProfileEvidenceView(DetectorProbeStrictView):
+    profile_id: DetectorSafeId
+    profile_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    status: Literal["completed", "failed", "blocked"]
+    latency_ms: float | None = Field(default=None, ge=0)
+    candidate_count: int = Field(strict=True, ge=0)
+    top_k: Literal[5]
+    raw_candidates: list[DetectorProbeCandidateView] = Field(max_length=5)
+    display_candidate: DetectorProbeCandidateView | None
+    filter_reasons: dict[str, Annotated[int, Field(strict=True, ge=0)]]
+    failure_code: str | None
+    raw_overlay_artifact_url: str
+    raw_overlay_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    raw_overlay_size_bytes: int = Field(strict=True, gt=0)
+
+    @model_validator(mode="after")
+    def validate_profile_evidence_state(self) -> DetectorProbeProfileEvidenceView:
+        if self.candidate_count < len(self.raw_candidates):
+            raise ValueError("candidate_count cannot be smaller than retained raw candidates")
+        if self.display_candidate is not None and self.display_candidate not in self.raw_candidates:
+            raise ValueError("display_candidate must be one of raw_candidates")
+        if self.status == "completed":
+            if self.latency_ms is None or self.failure_code is not None:
+                raise ValueError("completed profile evidence has invalid completion state")
+        elif self.failure_code is None:
+            raise ValueError("failed or blocked profile evidence requires failure_code")
+        return self
+
+
+class DetectorProbeMediaIntegrityView(DetectorProbeStrictView):
+    path: str | None
+    status: Literal["ok", "unavailable"]
+    width: int = Field(strict=True, ge=0)
+    height: int = Field(strict=True, ge=0)
+    mean_luma: float = Field(ge=0)
+    std_luma: float = Field(ge=0)
+    texture_tile_ratio: float = Field(ge=0, le=1)
+    dominant_color_ratio: float = Field(ge=0, le=1)
+    gray: bool
+    low_information: bool
+    likely_corrupt: bool
+    reasons: list[str]
+
+
+class DetectorProbeFrameEvidenceView(DetectorProbeStrictView):
+    frame_index: DetectorFrameIndex
+    source_width: int = Field(strict=True, gt=0)
+    source_height: int = Field(strict=True, gt=0)
+    requested_decode_mode: Literal["sequential", "preroll", "direct"]
+    effective_decode_mode: Literal["sequential", "preroll_verified", "direct_verified", "sequential_fallback"]
+    decoded_frame_position: DetectorFrameIndex
+    media_integrity: DetectorProbeMediaIntegrityView
+    source_artifact_url: str
+    source_frame_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    source_frame_size_bytes: int = Field(strict=True, gt=0)
+    profile_results: list[DetectorProbeProfileEvidenceView] = Field(min_length=2, max_length=6)
+
+    @model_validator(mode="after")
+    def validate_frame_evidence(self) -> DetectorProbeFrameEvidenceView:
+        if self.decoded_frame_position != self.frame_index:
+            raise ValueError("decoded frame position does not match frame_index")
+        if self.media_integrity.width != self.source_width or self.media_integrity.height != self.source_height:
+            raise ValueError("media integrity dimensions do not match source dimensions")
+        if len({profile.profile_id for profile in self.profile_results}) != len(self.profile_results):
+            raise ValueError("probe frame contains duplicate profiles")
+        for profile in self.profile_results:
+            for candidate in [*profile.raw_candidates, profile.display_candidate]:
+                if candidate is None:
+                    continue
+                left, top, right, bottom = candidate.bbox_source_px
+                if (
+                    candidate.frame_index != self.frame_index
+                    or right > self.source_width
+                    or bottom > self.source_height
+                    or left < 0
+                    or top < 0
+                ):
+                    raise ValueError("probe candidate is outside source-frame coordinates")
+        return self
+
+
+class DetectorProbeSourceBindingView(DetectorProbeStrictView):
+    source_id: DetectorSafeId
+    relative_path: str
+    sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    file_identity_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    size_bytes: int = Field(strict=True, gt=0)
+    width: int = Field(strict=True, gt=0)
+    height: int = Field(strict=True, gt=0)
+    frame_count: int = Field(strict=True, gt=0)
+    tracking_contract_relative_path: str
+    tracking_contract_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+class DetectorProbeLineageView(DetectorProbeStrictView):
+    parent_trial_id: DetectorSafeId
+    base_config_relative_path: str
+    base_config_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    effective_config_relative_path: str
+    effective_config_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    trial_intent_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    tuning_patch_binding: DetectorProbeTuningPatchBindingView
+    tuning_patch_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    profile_sha256s: dict[DetectorSafeId, Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]]
+    frozen_profiles_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    execution_bundle: DetectorProbeExecutionBundleView
+    execution_bundle_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    runtime_environment_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    intent_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    retry_from_job_id: DetectorSafeId | None
+
+
+class DetectorProbeDecodeView(DetectorProbeStrictView):
+    width: int = Field(strict=True, gt=0)
+    height: int = Field(strict=True, gt=0)
+    frame_count: int = Field(strict=True, gt=0)
+    fps: float = Field(gt=0)
+    requested_decode_mode: Literal["sequential", "preroll", "direct"]
+    effective_decode_mode: Literal["sequential", "preroll_verified", "direct_verified", "sequential_fallback"]
+    verified_frame_indices: list[DetectorFrameIndex] = Field(min_length=1, max_length=50)
+    position_verification: Literal["opencv_next_frame_index_with_0.25_tolerance"]
+
+
+class DetectorProbeExecutionView(DetectorProbeStrictView):
+    device: Literal["cpu", "cuda:0"]
+    precision: Literal["fp32"]
+
+
+class DetectorProbeArtifactView(DetectorProbeStrictView):
+    artifact_id: DetectorSafeId
+    relative_path: str
+    media_type: Literal["image/jpeg"]
+    sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    size_bytes: int = Field(strict=True, gt=0)
+    width: int = Field(strict=True, gt=0)
+    height: int = Field(strict=True, gt=0)
+
+
+class DetectorProbeReportView(DetectorProbeStrictView):
+    schema_version: Literal["1.0"]
+    artifact_type: Literal["detector_probe_report"]
+    job_id: DetectorSafeId
+    request_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    source: DetectorProbeSourceBindingView
+    lineage: DetectorProbeLineageView
+    frozen_profiles: list[FrozenDetectorProfileView] = Field(min_length=2, max_length=6)
+    top_k: Literal[5]
+    frames: list[DetectorProbeFrameEvidenceView] = Field(min_length=1, max_length=50)
+    decode: DetectorProbeDecodeView
+    execution: DetectorProbeExecutionView
+    artifacts: list[DetectorProbeArtifactView] = Field(min_length=3, max_length=350)
+    created_at: str
+    report_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+def _detector_probe_artifact_id(url: str, job_id: str) -> str:
+    prefix = f"/api/v1/detector-probes/{job_id}/artifacts/"
+    if not url.startswith(prefix):
+        raise ValueError("detector probe artifact URL is outside the job allowlist")
+    artifact_id = url[len(prefix) :]
+    if not artifact_id or "/" in artifact_id or ".." in artifact_id:
+        raise ValueError("detector probe artifact URL contains an invalid artifact ID")
+    return artifact_id
+
+
+class DetectorProbeJobResponse(DetectorProbeStrictView):
+    schema_version: Literal["1.0"]
+    artifact_type: Literal["detector_probe_job"]
+    job_id: DetectorSafeId
+    idempotency_key: str = Field(pattern=r"^[0-9a-f]{64}$")
+    request_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    intent_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    frozen_profiles_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    status: DetectorProbeStatus
+    stage: str
+    progress: DetectorProbeProgressView
+    frozen_request: FrozenDetectorProbeRequestView
+    frozen_profiles: list[FrozenDetectorProfileView] = Field(min_length=2, max_length=6)
+    retry_from_job_id: DetectorSafeId | None
+    error_code: str | None = None
+    blocker_code: str | None = None
+    recovery_action: str | None = None
+    report: DetectorProbeReportView | None
+    result_manifest_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    created_at: str
+    updated_at: str
+    status_url: str
+    cancel_url: str
+    can_cancel: bool
+
+    @model_validator(mode="after")
+    def validate_probe_job_evidence(self) -> DetectorProbeJobResponse:
+        expected_status_url = f"/api/v1/detector-probes/{self.job_id}"
+        if self.status_url != expected_status_url or self.cancel_url != f"{expected_status_url}/cancel":
+            raise ValueError("detector probe control URLs do not match job_id")
+        if self.idempotency_key != self.request_sha256:
+            raise ValueError("detector probe idempotency key does not match request digest")
+        if self.retry_from_job_id != self.frozen_request.retry_from_job_id:
+            raise ValueError("detector probe retry lineage does not match frozen request")
+        if self.retry_from_job_id == self.job_id:
+            raise ValueError("detector probe retry cannot reference itself")
+        if (
+            self.progress.total != len(self.frozen_request.frame_indices) * len(self.frozen_request.profile_ids)
+            or self.progress.completed > self.progress.total
+        ):
+            raise ValueError("detector probe progress does not match frozen work")
+        if self.can_cancel != (self.status in {"queued", "running"}):
+            raise ValueError("detector probe cancellation state is inconsistent")
+        frozen_by_id = {profile.profile_id: profile for profile in self.frozen_profiles}
+        if list(frozen_by_id) != self.frozen_request.profile_ids:
+            raise ValueError("frozen profiles do not match the frozen request")
+        for binding in self.frozen_request.profile_bindings:
+            profile = frozen_by_id[binding.profile_id]
+            descriptor = profile.model_descriptor
+            if (
+                profile.profile_sha256 != binding.profile_sha256
+                or profile.model_id != binding.model_id
+                or profile.model_version != binding.model_version
+                or profile.model_descriptor_sha256 != binding.model_descriptor_sha256
+                or descriptor.weights.sha256 != binding.weights_sha256
+                or descriptor.weights.size_bytes != binding.weights_size_bytes
+            ):
+                raise ValueError("frozen profile evidence does not match its binding")
+        if self.frozen_profiles_sha256 != self.frozen_request.frozen_profiles_sha256:
+            raise ValueError("frozen profile aggregate digest does not match")
+
+        if self.status == "ready":
+            if (
+                self.report is None
+                or self.result_manifest_sha256 is None
+                or self.progress.completed != self.progress.total
+            ):
+                raise ValueError("ready detector probe is missing complete committed evidence")
+        elif self.report is not None or self.result_manifest_sha256 is not None:
+            raise ValueError("non-ready detector probe cannot publish committed evidence")
+        if self.report is None:
+            return self
+
+        report = self.report
+        frozen = self.frozen_request
+        if (
+            report.job_id != self.job_id
+            or report.request_sha256 != self.request_sha256
+            or report.source.source_id != frozen.source_id
+            or report.source.relative_path != frozen.source_relative_path
+            or report.source.sha256 != frozen.source_sha256
+            or report.source.file_identity_sha256 != frozen.source_file_identity_sha256
+            or report.source.size_bytes != frozen.source_size_bytes
+            or report.source.width != frozen.source_width
+            or report.source.height != frozen.source_height
+            or report.source.frame_count != frozen.source_frame_count
+            or report.source.tracking_contract_relative_path != frozen.tracking_contract_relative_path
+            or report.source.tracking_contract_sha256 != frozen.tracking_contract_sha256
+        ):
+            raise ValueError("detector probe report source lineage does not match frozen request")
+        if (
+            report.lineage.parent_trial_id != frozen.parent_trial_id
+            or report.lineage.base_config_relative_path != frozen.base_config_relative_path
+            or report.lineage.base_config_sha256 != frozen.base_config_sha256
+            or report.lineage.effective_config_relative_path != frozen.effective_config_relative_path
+            or report.lineage.effective_config_sha256 != frozen.effective_config_sha256
+            or report.lineage.trial_intent_sha256 != frozen.trial_intent_sha256
+            or report.lineage.tuning_patch_binding != frozen.tuning_patch_binding
+            or report.lineage.tuning_patch_sha256 != frozen.tuning_patch_sha256
+            or report.lineage.profile_sha256s != frozen.profile_sha256s
+            or report.lineage.frozen_profiles_sha256 != frozen.frozen_profiles_sha256
+            or report.lineage.execution_bundle != frozen.execution_bundle
+            or report.lineage.execution_bundle_sha256 != frozen.execution_bundle_sha256
+            or report.lineage.runtime_environment_sha256 != frozen.runtime_environment_sha256
+            or report.lineage.intent_sha256 != self.intent_sha256
+            or report.lineage.retry_from_job_id != self.retry_from_job_id
+        ):
+            raise ValueError("detector probe report lineage does not match frozen request")
+        report_profile_digests = {profile.profile_id: profile.profile_sha256 for profile in report.frozen_profiles}
+        if report_profile_digests != frozen.profile_sha256s:
+            raise ValueError("report frozen profiles do not match frozen request")
+        if (
+            report.decode.width != frozen.source_width
+            or report.decode.height != frozen.source_height
+            or report.decode.frame_count != frozen.source_frame_count
+            or report.decode.requested_decode_mode != frozen.requested_decode_mode
+            or report.decode.verified_frame_indices != frozen.frame_indices
+        ):
+            raise ValueError("report decode evidence does not match frozen request")
+        if (
+            report.execution.device != frozen.execution_bundle.execution_environment.device
+            or report.execution.precision != frozen.execution_bundle.execution_environment.precision
+        ):
+            raise ValueError("report execution evidence does not match frozen environment")
+        if [frame.frame_index for frame in report.frames] != frozen.frame_indices:
+            raise ValueError("report frame set does not match frozen request")
+        artifacts = {artifact.artifact_id: artifact for artifact in report.artifacts}
+        if len(artifacts) != len(report.artifacts):
+            raise ValueError("detector probe report contains duplicate artifacts")
+        referenced_artifact_ids: set[str] = set()
+        for frame in report.frames:
+            if (
+                frame.source_width != frozen.source_width
+                or frame.source_height != frozen.source_height
+                or frame.requested_decode_mode != frozen.requested_decode_mode
+            ):
+                raise ValueError("probe frame evidence does not match frozen source")
+            frame_profiles = {profile.profile_id: profile for profile in frame.profile_results}
+            if list(frame_profiles) != frozen.profile_ids or any(
+                frame_profiles[profile_id].profile_sha256 != frozen.profile_sha256s[profile_id]
+                for profile_id in frozen.profile_ids
+            ):
+                raise ValueError("probe frame profiles do not match frozen profiles")
+            source_artifact_id = _detector_probe_artifact_id(frame.source_artifact_url, self.job_id)
+            source_artifact = artifacts.get(source_artifact_id)
+            if (
+                source_artifact is None
+                or source_artifact.sha256 != frame.source_frame_sha256
+                or source_artifact.size_bytes != frame.source_frame_size_bytes
+                or source_artifact.width != frame.source_width
+                or source_artifact.height != frame.source_height
+            ):
+                raise ValueError("source-frame artifact evidence does not match artifact manifest")
+            referenced_artifact_ids.add(source_artifact_id)
+            for profile in frame.profile_results:
+                overlay_artifact_id = _detector_probe_artifact_id(profile.raw_overlay_artifact_url, self.job_id)
+                overlay_artifact = artifacts.get(overlay_artifact_id)
+                if (
+                    overlay_artifact is None
+                    or overlay_artifact.sha256 != profile.raw_overlay_sha256
+                    or overlay_artifact.size_bytes != profile.raw_overlay_size_bytes
+                    or overlay_artifact.width != frame.source_width
+                    or overlay_artifact.height != frame.source_height
+                ):
+                    raise ValueError("overlay artifact evidence does not match artifact manifest")
+                referenced_artifact_ids.add(overlay_artifact_id)
+        if referenced_artifact_ids != set(artifacts):
+            raise ValueError("detector probe artifact manifest contains unreferenced evidence")
+        return self

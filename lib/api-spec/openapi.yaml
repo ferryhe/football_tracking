@@ -258,6 +258,152 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/HTTPValidationError'
+  /detector-models:
+    get:
+      tags:
+      - detectors
+      summary: List Detector Models
+      operationId: list_detector_models
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DetectorModelCatalogResponse'
+  /detector-models/import:
+    post:
+      tags:
+      - detectors
+      summary: Import Detector Model
+      operationId: import_detector_model
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DetectorModelImportRequest'
+        required: true
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DetectorModelImportResponse'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /detector-probes:
+    post:
+      tags:
+      - detectors
+      summary: Create Detector Probe
+      operationId: create_detector_probe
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DetectorProbeCreateRequest'
+        required: true
+      responses:
+        '202':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DetectorProbeCreateResponse'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /detector-probes/{job_id}:
+    get:
+      tags:
+      - detectors
+      summary: Get Detector Probe
+      operationId: get_detector_probe
+      parameters:
+      - name: job_id
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Job Id
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DetectorProbeJobResponse'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /detector-probes/{job_id}/artifacts/{artifact_id}:
+    get:
+      tags:
+      - detectors
+      summary: Get Detector Probe Artifact
+      operationId: get_detector_probe_artifact
+      parameters:
+      - name: job_id
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Job Id
+      - name: artifact_id
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Artifact Id
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema: {}
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /detector-probes/{job_id}/cancel:
+    post:
+      tags:
+      - detectors
+      summary: Cancel Detector Probe
+      operationId: cancel_detector_probe
+      parameters:
+      - name: job_id
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Job Id
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DetectorProbeJobResponse'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
   /health:
     get:
       tags:
@@ -4621,6 +4767,1833 @@ components:
       - base_config_name
       - output_name
       title: DeriveConfigRequest
+    DetectorAvailabilityObservation:
+      properties:
+        status:
+          type: string
+          enum:
+          - pass
+          - fail
+          - not_run
+          title: Status
+        reason:
+          type: string
+          title: Reason
+        installed_runtime:
+          anyOf:
+          - additionalProperties:
+              anyOf:
+              - type: string
+              - type: 'null'
+            type: object
+          - type: 'null'
+          title: Installed Runtime
+        evidence_sha256:
+          anyOf:
+          - type: string
+            pattern: ^[0-9a-f]{64}$
+          - type: 'null'
+          title: Evidence Sha256
+      type: object
+      required:
+      - status
+      - reason
+      title: DetectorAvailabilityObservation
+    DetectorAvailabilityObservations:
+      properties:
+        file:
+          $ref: '#/components/schemas/DetectorAvailabilityObservation'
+        digest:
+          $ref: '#/components/schemas/DetectorAvailabilityObservation'
+        class_map:
+          $ref: '#/components/schemas/DetectorAvailabilityObservation'
+        license:
+          $ref: '#/components/schemas/DetectorAvailabilityObservation'
+        runtime_load:
+          $ref: '#/components/schemas/DetectorAvailabilityObservation'
+      type: object
+      required:
+      - file
+      - digest
+      - class_map
+      - license
+      - runtime_load
+      title: DetectorAvailabilityObservations
+    DetectorCatalogFindingAccess:
+      properties:
+        method:
+          type: string
+          title: Method
+        account_or_plan_required:
+          type: string
+          title: Account Or Plan Required
+        local_weights_validated:
+          type: boolean
+          title: Local Weights Validated
+      type: object
+      required:
+      - method
+      - account_or_plan_required
+      - local_weights_validated
+      title: DetectorCatalogFindingAccess
+    DetectorCatalogFindingAvailability:
+      properties:
+        status:
+          type: string
+          const: unavailable
+          title: Status
+        reason_codes:
+          items:
+            type: string
+          type: array
+          minItems: 1
+          title: Reason Codes
+      type: object
+      required:
+      - status
+      - reason_codes
+      title: DetectorCatalogFindingAvailability
+    DetectorCatalogFindingEgress:
+      properties:
+        frames_leave_local_machine:
+          type: string
+          const: unknown_until_access_method_selected
+          title: Frames Leave Local Machine
+        destination:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Destination
+        operator_consent:
+          type: string
+          const: required_before_external_inference
+          title: Operator Consent
+      type: object
+      required:
+      - frames_leave_local_machine
+      - destination
+      - operator_consent
+      title: DetectorCatalogFindingEgress
+    DetectorCatalogFindingLicense:
+      properties:
+        status:
+          type: string
+          enum:
+          - review_required
+          - unavailable
+          - unknown
+          title: Status
+        name:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Name
+        spdx_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Spdx Id
+        url:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Url
+        approved_for_local_probe:
+          type: boolean
+          title: Approved For Local Probe
+      type: object
+      required:
+      - status
+      - name
+      - spdx_id
+      - url
+      - approved_for_local_probe
+      title: DetectorCatalogFindingLicense
+    DetectorCatalogFindingLicenseSet:
+      properties:
+        dataset:
+          $ref: '#/components/schemas/DetectorCatalogFindingLicense'
+        model:
+          $ref: '#/components/schemas/DetectorCatalogFindingLicense'
+        runtime:
+          $ref: '#/components/schemas/DetectorCatalogFindingLicense'
+        deployment:
+          $ref: '#/components/schemas/DetectorCatalogFindingLicense'
+      type: object
+      required:
+      - dataset
+      - model
+      - runtime
+      - deployment
+      title: DetectorCatalogFindingLicenseSet
+    DetectorCatalogFindingSource:
+      properties:
+        project:
+          type: string
+          title: Project
+        version:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Version
+        url:
+          type: string
+          title: Url
+      type: object
+      required:
+      - project
+      - version
+      - url
+      title: DetectorCatalogFindingSource
+    DetectorCatalogFindingView:
+      properties:
+        finding_id:
+          type: string
+          title: Finding Id
+        display_name:
+          type: string
+          title: Display Name
+        source:
+          $ref: '#/components/schemas/DetectorCatalogFindingSource'
+        architecture_family:
+          type: string
+          title: Architecture Family
+        access:
+          $ref: '#/components/schemas/DetectorCatalogFindingAccess'
+        licenses:
+          $ref: '#/components/schemas/DetectorCatalogFindingLicenseSet'
+        egress:
+          $ref: '#/components/schemas/DetectorCatalogFindingEgress'
+        selectable:
+          type: boolean
+          const: false
+          title: Selectable
+        availability:
+          $ref: '#/components/schemas/DetectorCatalogFindingAvailability'
+      type: object
+      required:
+      - finding_id
+      - display_name
+      - source
+      - architecture_family
+      - access
+      - licenses
+      - egress
+      - selectable
+      - availability
+      title: DetectorCatalogFindingView
+    DetectorLicenseMetadata:
+      properties:
+        name:
+          type: string
+          title: Name
+        spdx_id:
+          type: string
+          title: Spdx Id
+        url:
+          type: string
+          title: Url
+        reviewed:
+          type: boolean
+          title: Reviewed
+        approved_for_local_probe:
+          type: boolean
+          title: Approved For Local Probe
+      type: object
+      required:
+      - name
+      - spdx_id
+      - url
+      - reviewed
+      - approved_for_local_probe
+      title: DetectorLicenseMetadata
+    DetectorLicenseSet:
+      properties:
+        dataset:
+          $ref: '#/components/schemas/DetectorLicenseMetadata'
+        model:
+          $ref: '#/components/schemas/DetectorLicenseMetadata'
+        runtime:
+          $ref: '#/components/schemas/DetectorLicenseMetadata'
+        deployment:
+          $ref: '#/components/schemas/DetectorLicenseMetadata'
+      type: object
+      required:
+      - dataset
+      - model
+      - runtime
+      - deployment
+      title: DetectorLicenseSet
+    DetectorModelAvailability:
+      properties:
+        status:
+          type: string
+          enum:
+          - available
+          - unavailable
+          - blocked
+          title: Status
+        reason_codes:
+          items:
+            type: string
+          type: array
+          title: Reason Codes
+        observations:
+          $ref: '#/components/schemas/DetectorAvailabilityObservations'
+        observed_weight_path:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Observed Weight Path
+      type: object
+      required:
+      - status
+      - reason_codes
+      - observations
+      title: DetectorModelAvailability
+    DetectorModelCatalogResponse:
+      properties:
+        schema_version:
+          type: string
+          title: Schema Version
+        artifact_type:
+          type: string
+          const: ball_detector_development_v1
+          title: Artifact Type
+        models:
+          items:
+            $ref: '#/components/schemas/DetectorModelRecordView'
+          type: array
+          title: Models
+        profiles:
+          items:
+            $ref: '#/components/schemas/DetectorProfileView'
+          type: array
+          title: Profiles
+        catalog_findings:
+          items:
+            $ref: '#/components/schemas/DetectorCatalogFindingView'
+          type: array
+          title: Catalog Findings
+      type: object
+      required:
+      - schema_version
+      - artifact_type
+      - models
+      - profiles
+      - catalog_findings
+      title: DetectorModelCatalogResponse
+    DetectorModelDescriptorView:
+      properties:
+        schema_version:
+          type: string
+          title: Schema Version
+        artifact_type:
+          type: string
+          const: detector_model_descriptor
+          title: Artifact Type
+        model_id:
+          type: string
+          title: Model Id
+        version:
+          type: string
+          title: Version
+        model_version:
+          type: string
+          title: Model Version
+        display_name:
+          type: string
+          title: Display Name
+        architecture_family:
+          type: string
+          title: Architecture Family
+        weights:
+          $ref: '#/components/schemas/DetectorModelWeights'
+        source:
+          $ref: '#/components/schemas/DetectorModelSource'
+        checkpoint:
+          anyOf:
+          - additionalProperties: true
+            type: object
+          - type: 'null'
+          title: Checkpoint
+        runtime_contract:
+          additionalProperties: true
+          type: object
+          title: Runtime Contract
+        class_names:
+          items:
+            type: string
+          type: array
+          title: Class Names
+        class_map:
+          additionalProperties:
+            type: string
+          type: object
+          title: Class Map
+        expected_input:
+          additionalProperties: true
+          type: object
+          title: Expected Input
+        execution:
+          anyOf:
+          - additionalProperties: true
+            type: object
+          - type: 'null'
+          title: Execution
+        memory_envelope:
+          anyOf:
+          - additionalProperties: true
+            type: object
+          - type: 'null'
+          title: Memory Envelope
+        licenses:
+          $ref: '#/components/schemas/DetectorLicenseSet'
+        egress:
+          $ref: '#/components/schemas/DetectorModelEgress'
+        lifecycle_state:
+          type: string
+          enum:
+          - unverified
+          - feasibility_passed
+          - development_candidate
+          - source_segment_qualified
+          - camera_qualified
+          - retired
+          title: Lifecycle State
+        bindings:
+          additionalProperties: true
+          type: object
+          title: Bindings
+        descriptor_sha256:
+          type: string
+          pattern: ^[0-9a-f]{64}$
+          title: Descriptor Sha256
+        import_manifest_sha256:
+          anyOf:
+          - type: string
+            pattern: ^[0-9a-f]{64}$
+          - type: 'null'
+          title: Import Manifest Sha256
+      type: object
+      required:
+      - schema_version
+      - artifact_type
+      - model_id
+      - version
+      - model_version
+      - display_name
+      - architecture_family
+      - weights
+      - source
+      - runtime_contract
+      - class_names
+      - class_map
+      - expected_input
+      - licenses
+      - egress
+      - lifecycle_state
+      - bindings
+      - descriptor_sha256
+      title: DetectorModelDescriptorView
+    DetectorModelEgress:
+      properties:
+        frames_leave_local_machine:
+          type: boolean
+          title: Frames Leave Local Machine
+        destination:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Destination
+        operator_consent:
+          type: string
+          enum:
+          - not_required
+          - granted
+          - required_not_granted
+          title: Operator Consent
+      type: object
+      required:
+      - frames_leave_local_machine
+      - destination
+      - operator_consent
+      title: DetectorModelEgress
+    DetectorModelImportRequest:
+      properties:
+        package_relative_path:
+          type: string
+          maxLength: 500
+          minLength: 1
+          title: Package Relative Path
+        manifest_sha256:
+          type: string
+          pattern: ^[0-9a-f]{64}$
+          title: Manifest Sha256
+      additionalProperties: false
+      type: object
+      required:
+      - package_relative_path
+      - manifest_sha256
+      title: DetectorModelImportRequest
+    DetectorModelImportResponse:
+      properties:
+        created:
+          type: boolean
+          title: Created
+        model:
+          $ref: '#/components/schemas/DetectorModelRecordView'
+      type: object
+      required:
+      - created
+      - model
+      title: DetectorModelImportResponse
+    DetectorModelRecordView:
+      properties:
+        descriptor:
+          $ref: '#/components/schemas/DetectorModelDescriptorView'
+        availability:
+          $ref: '#/components/schemas/DetectorModelAvailability'
+        qualification:
+          $ref: '#/components/schemas/DetectorQualificationView'
+        selectable_for_probe:
+          type: boolean
+          title: Selectable For Probe
+      type: object
+      required:
+      - descriptor
+      - availability
+      - qualification
+      - selectable_for_probe
+      title: DetectorModelRecordView
+    DetectorModelSource:
+      properties:
+        project:
+          type: string
+          title: Project
+        version:
+          type: string
+          title: Version
+        asset_release:
+          type: string
+          title: Asset Release
+        weight_url:
+          type: string
+          title: Weight Url
+        acquisition_method:
+          type: string
+          title: Acquisition Method
+        access_requirement:
+          type: string
+          title: Access Requirement
+      type: object
+      required:
+      - project
+      - version
+      - asset_release
+      - weight_url
+      - acquisition_method
+      - access_requirement
+      title: DetectorModelSource
+    DetectorModelWeights:
+      properties:
+        relative_path:
+          type: string
+          title: Relative Path
+        sha256:
+          type: string
+          pattern: ^[0-9a-f]{64}$
+          title: Sha256
+        size_bytes:
+          type: integer
+          exclusiveMinimum: 0.0
+          title: Size Bytes
+      type: object
+      required:
+      - relative_path
+      - sha256
+      - size_bytes
+      title: DetectorModelWeights
+    DetectorProbeArtifactView:
+      properties:
+        artifact_id:
+          type: string
+          pattern: ^[a-z0-9][a-z0-9._-]{0,119}$
+          title: Artifact Id
+        relative_path:
+          type: string
+          title: Relative Path
+        media_type:
+          type: string
+          const: image/jpeg
+          title: Media Type
+        sha256:
+          type: string
+          pattern: ^[0-9a-f]{64}$
+          title: Sha256
+        size_bytes:
+          type: integer
+          exclusiveMinimum: 0.0
+          title: Size Bytes
+        width:
+          type: integer
+          exclusiveMinimum: 0.0
+          title: Width
+        height:
+          type: integer
+          exclusiveMinimum: 0.0
+          title: Height
+      additionalProperties: false
+      type: object
+      required:
+      - artifact_id
+      - relative_path
+      - media_type
+      - sha256
+      - size_bytes
+      - width
+      - height
+      title: DetectorProbeArtifactView
+    DetectorProbeCandidateView:
+      properties:
+        frame_index:
+          type: integer
+          minimum: 0.0
+          title: Frame Index
+        bbox_source_px:
+          prefixItems:
+          - type: number
+          - type: number
+          - type: number
+          - type: number
+          type: array
+          maxItems: 4
+          minItems: 4
+          title: Bbox Source Px
+        confidence:
+          type: number
+          maximum: 1.0
+          minimum: 0.0
+          title: Confidence
+        class_name:
+          type: string
+          const: ball
+          title: Class Name
+        checkpoint_class_name:
+          type: string
+          minLength: 1
+          title: Checkpoint Class Name
+        source:
+          type: string
+          minLength: 1
+          title: Source
+        coordinate_reason:
+          type: string
+          enum:
+          - direct_source_coordinates
+          - sahi_tile_offset_applied
+          title: Coordinate Reason
+        merge_reason:
+          type: string
+          const: retained_top_k
+          title: Merge Reason
+      additionalProperties: false
+      type: object
+      required:
+      - frame_index
+      - bbox_source_px
+      - confidence
+      - class_name
+      - checkpoint_class_name
+      - source
+      - coordinate_reason
+      - merge_reason
+      title: DetectorProbeCandidateView
+    DetectorProbeCreateRequest:
+      properties:
+        parent_trial_id:
+          type: string
+          pattern: ^[a-z0-9][a-z0-9._-]{0,119}$
+          title: Parent Trial Id
+        profile_ids:
+          items:
+            type: string
+            pattern: ^[a-z0-9][a-z0-9._-]{0,119}$
+          type: array
+          maxItems: 6
+          minItems: 2
+          title: Profile Ids
+        frame_indices:
+          anyOf:
+          - items:
+              type: integer
+              minimum: 0.0
+            type: array
+            maxItems: 50
+            minItems: 1
+          - type: 'null'
+          title: Frame Indices
+        top_k:
+          type: integer
+          const: 5
+          title: Top K
+          default: 5
+        retry_from_job_id:
+          anyOf:
+          - type: string
+            pattern: ^[a-z0-9][a-z0-9._-]{0,119}$
+          - type: 'null'
+          title: Retry From Job Id
+      additionalProperties: false
+      type: object
+      required:
+      - parent_trial_id
+      - profile_ids
+      title: DetectorProbeCreateRequest
+    DetectorProbeCreateResponse:
+      properties:
+        job_id:
+          type: string
+          pattern: ^[a-z0-9][a-z0-9._-]{0,119}$
+          title: Job Id
+        request_sha256:
+          type: string
+          pattern: ^[0-9a-f]{64}$
+          title: Request Sha256
+        status:
+          type: string
+          enum:
+          - queued
+          - running
+          - committing
+          - ready
+          - failed
+          - cancelled
+          - blocked
+          title: Status
+        status_url:
+          type: string
+          title: Status Url
+        cancel_url:
+          type: string
+          title: Cancel Url
+        retry_from_job_id:
+          anyOf:
+          - type: string
+            pattern: ^[a-z0-9][a-z0-9._-]{0,119}$
+          - type: 'null'
+          title: Retry From Job Id
+      additionalProperties: false
+      type: object
+      required:
+      - job_id
+      - request_sha256
+      - status
+      - status_url
+      - cancel_url
+      title: DetectorProbeCreateResponse
+    DetectorProbeDecodeView:
+      properties:
+        width:
+          type: integer
+          exclusiveMinimum: 0.0
+          title: Width
+        height:
+          type: integer
+          exclusiveMinimum: 0.0
+          title: Height
+        frame_count:
+          type: integer
+          exclusiveMinimum: 0.0
+          title: Frame Count
+        fps:
+          type: number
+          exclusiveMinimum: 0.0
+          title: Fps
+        requested_decode_mode:
+          type: string
+          enum:
+          - sequential
+          - preroll
+          - direct
+          title: Requested Decode Mode
+        effective_decode_mode:
+          type: string
+          enum:
+          - sequential
+          - preroll_verified
+          - direct_verified
+          - sequential_fallback
+          title: Effective Decode Mode
+        verified_frame_indices:
+          items:
+            type: integer
+            minimum: 0.0
+          type: array
+          maxItems: 50
+          minItems: 1
+          title: Verified Frame Indices
+        position_verification:
+          type: string
+          const: opencv_next_frame_index_with_0.25_tolerance
+          title: Position Verification
+      additionalProperties: false
+      type: object
+      required:
+      - width
+      - height
+      - frame_count
+      - fps
+      - requested_decode_mode
+      - effective_decode_mode
+      - verified_frame_indices
+      - position_verification
+      title: DetectorProbeDecodeView
+    DetectorProbeExecutionBundleView:
+      properties:
+        schema_version:
+          type: string
+          const: '1.0'
+          title: Schema Version
+        installed_runtime:
+          additionalProperties:
+            type: string
+          type: object
+          title: Installed Runtime
+        runtime_contract:
+          additionalProperties:
+            type: string
+          type: object
+          title: Runtime Contract
+        runtime_contract_sha256:
+          type: string
+          pattern: ^[0-9a-f]{64}$
+          title: Runtime Contract Sha256
+        runtime_observation_evidence_sha256s:
+          patternProperties:
+            ^[a-z0-9][a-z0-9._-]{0,119}$:
+              type: string
+              pattern: ^[0-9a-f]{64}$
+          type: object
+          title: Runtime Observation Evidence Sha256S
+        execution_environment:
+          $ref: '#/components/schemas/DetectorProbeExecutionEnvironmentView'
+        runtime_environment_sha256:
+          type: string
+          pattern: ^[0-9a-f]{64}$
+          title: Runtime Environment Sha256
+        code_bundle_files:
+          additionalProperties:
+            type: string
+            pattern: ^[0-9a-f]{64}$
+          type: object
+          title: Code Bundle Files
+        code_bundle_sha256:
+          type: string
+          pattern: ^[0-9a-f]{64}$
+          title: Code Bundle Sha256
+        code_commit:
+          anyOf:
+          - type: string
+            pattern: ^(?:[0-9a-f]{40}|[0-9a-f]{64})$
+          - type: 'null'
+          title: Code Commit
+        code_commit_status:
+          type: string
+          enum:
+          - bound
+          - unbound
+          - unavailable
+          title: Code Commit Status
+        code_commit_reason:
+          anyOf:
+          - type: string
+            enum:
+            - code_bundle_differs_from_commit
+            - repository_commit_unavailable
+          - type: 'null'
+          title: Code Commit Reason
+        code_commit_blob_files:
+          anyOf:
+          - additionalProperties:
+              type: string
+              pattern: ^[0-9a-f]{64}$
+            type: object
+          - type: 'null'
+          title: Code Commit Blob Files
+        code_commit_blob_bundle_sha256:
+          anyOf:
+          - type: string
+            pattern: ^[0-9a-f]{64}$
+          - type: 'null'
+          title: Code Commit Blob Bundle Sha256
+        code_commit_binding_kind:
+          anyOf:
+          - type: string
+            const: exact_or_crlf_to_lf_commit_blob
+          - type: 'null'
+          title: Code Commit Binding Kind
+        frozen_profiles_sha256:
+          type: string
+          pattern: ^[0-9a-f]{64}$
+          title: Frozen Profiles Sha256
+      additionalProperties: false
+      type: object
+      required:
+      - schema_version
+      - installed_runtime
+      - runtime_contract
+      - runtime_contract_sha256
+      - runtime_observation_evidence_sha256s
+      - execution_environment
+      - runtime_environment_sha256
+      - code_bundle_files
+      - code_bundle_sha256
+      - code_commit
+      - code_commit_status
+      - code_commit_reason
+      - code_commit_blob_files
+      - code_commit_blob_bundle_sha256
+      - code_commit_binding_kind
+      - frozen_profiles_sha256
+      title: DetectorProbeExecutionBundleView
+    DetectorProbeExecutionEnvironmentView:
+      properties:
+        device:
+          type: string
+          enum:
+          - cpu
+          - cuda:0
+          title: Device
+        precision:
+          type: string
+          const: fp32
+          title: Precision
+        cuda_available:
+          type: boolean
+          title: Cuda Available
+        cuda_device_count:
+          type: integer
+          minimum: 0.0
+          title: Cuda Device Count
+        cuda_visible_devices:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Cuda Visible Devices
+        cuda_compiled_version:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Cuda Compiled Version
+        cudnn_version:
+          anyOf:
+          - type: integer
+            minimum: 0.0
+          - type: 'null'
+          title: Cudnn Version
+        gpu_name:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Gpu Name
+        gpu_compute_capability:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Gpu Compute Capability
+        gpu_total_memory_bytes:
+          anyOf:
+          - type: integer
+            exclusiveMinimum: 0.0
+          - type: 'null'
+          title: Gpu Total Memory Bytes
+        cuda_driver_version:
+          anyOf:
+          - type: integer
+            minimum: 0.0
+          - type: 'null'
+          title: Cuda Driver Version
+        python_implementation:
+          type: string
+          minLength: 1
+          title: Python Implementation
+        python_version:
+          type: string
+          minLength: 1
+          title: Python Version
+        numpy_version:
+          type: string
+          minLength: 1
+          title: Numpy Version
+        opencv_version:
+          type: string
+          minLength: 1
+          title: Opencv Version
+        pydantic_version:
+          type: string
+          minLength: 1
+          title: Pydantic Version
+        pydantic_core_version:
+          type: string
+          minLength: 1
+          title: Pydantic Core Version
+        opencv_build_information_sha256:
+          type: string
+          pattern: ^[0-9a-f]{64}$
+          title: Opencv Build Information Sha256
+        opencv_ffmpeg_enabled:
+          anyOf:
+          - type: boolean
+          - type: 'null'
+          title: Opencv Ffmpeg Enabled
+        decoder_fingerprint_sha256:
+          type: string
+          pattern: ^[0-9a-f]{64}$
+          title: Decoder Fingerprint Sha256
+      additionalProperties: false
+      type: object
+      required:
+      - device
+      - precision
+      - cuda_available
+      - cuda_device_count
+      - cuda_visible_devices
+      - cuda_compiled_version
+      - gpu_name
+      - gpu_compute_capability
+      - python_implementation
+      - python_version
+      - numpy_version
+      - opencv_version
+      - pydantic_version
+      - pydantic_core_version
+      - opencv_build_information_sha256
+      - opencv_ffmpeg_enabled
+      - decoder_fingerprint_sha256
+      title: DetectorProbeExecutionEnvironmentView
+    DetectorProbeExecutionView:
+      properties:
+        device:
+          type: string
+          enum:
+          - cpu
+          - cuda:0
+          title: Device
+        precision:
+          type: string
+          const: fp32
+          title: Precision
+      additionalProperties: false
+      type: object
+      required:
+      - device
+      - precision
+      title: DetectorProbeExecutionView
+    DetectorProbeFrameEvidenceView:
+      properties:
+        frame_index:
+          type: integer
+          minimum: 0.0
+          title: Frame Index
+        source_width:
+          type: integer
+          exclusiveMinimum: 0.0
+          title: Source Width
+        source_height:
+          type: integer
+          exclusiveMinimum: 0.0
+          title: Source Height
+        requested_decode_mode:
+          type: string
+          enum:
+          - sequential
+          - preroll
+          - direct
+          title: Requested Decode Mode
+        effective_decode_mode:
+          type: string
+          enum:
+          - sequential
+          - preroll_verified
+          - direct_verified
+          - sequential_fallback
+          title: Effective Decode Mode
+        decoded_frame_position:
+          type: integer
+          minimum: 0.0
+          title: Decoded Frame Position
+        media_integrity:
+          $ref: '#/components/schemas/DetectorProbeMediaIntegrityView'
+        source_artifact_url:
+          type: string
+          title: Source Artifact Url
+        source_frame_sha256:
+          type: string
+          pattern: ^[0-9a-f]{64}$
+          title: Source Frame Sha256
+        source_frame_size_bytes:
+          type: integer
+          exclusiveMinimum: 0.0
+          title: Source Frame Size Bytes
+        profile_results:
+          items:
+            $ref: '#/components/schemas/DetectorProbeProfileEvidenceView'
+          type: array
+          maxItems: 6
+          minItems: 2
+          title: Profile Results
+      additionalProperties: false
+      type: object
+      required:
+      - frame_index
+      - source_width
+      - source_height
+      - requested_decode_mode
+      - effective_decode_mode
+      - decoded_frame_position
+      - media_integrity
+      - source_artifact_url
+      - source_frame_sha256
+      - source_frame_size_bytes
+      - profile_results
+      title: DetectorProbeFrameEvidenceView
+    DetectorProbeJobResponse:
+      properties:
+        schema_version:
+          type: string
+          const: '1.0'
+          title: Schema Version
+        artifact_type:
+          type: string
+          const: detector_probe_job
+          title: Artifact Type
+        job_id:
+          type: string
+          pattern: ^[a-z0-9][a-z0-9._-]{0,119}$
+          title: Job Id
+        idempotency_key:
+          type: string
+          pattern: ^[0-9a-f]{64}$
+          title: Idempotency Key
+        request_sha256:
+          type: string
+          pattern: ^[0-9a-f]{64}$
+          title: Request Sha256
+        intent_sha256:
+          type: string
+          pattern: ^[0-9a-f]{64}$
+          title: Intent Sha256
+        frozen_profiles_sha256:
+          type: string
+          pattern: ^[0-9a-f]{64}$
+          title: Frozen Profiles Sha256
+        status:
+          type: string
+          enum:
+          - queued
+          - running
+          - committing
+          - ready
+          - failed
+          - cancelled
+          - blocked
+          title: Status
+        stage:
+          type: string
+          title: Stage
+        progress:
+          $ref: '#/components/schemas/DetectorProbeProgressView'
+        frozen_request:
+          $ref: '#/components/schemas/FrozenDetectorProbeRequestView'
+        frozen_profiles:
+          items:
+            $ref: '#/components/schemas/FrozenDetectorProfileView'
+          type: array
+          maxItems: 6
+          minItems: 2
+          title: Frozen Profiles
+        retry_from_job_id:
+          anyOf:
+          - type: string
+            pattern: ^[a-z0-9][a-z0-9._-]{0,119}$
+          - type: 'null'
+          title: Retry From Job Id
+        error_code:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Error Code
+        blocker_code:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Blocker Code
+        recovery_action:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Recovery Action
+        report:
+          anyOf:
+          - $ref: '#/components/schemas/DetectorProbeReportView'
+          - type: 'null'
+        result_manifest_sha256:
+          anyOf:
+          - type: string
+            pattern: ^[0-9a-f]{64}$
+          - type: 'null'
+          title: Result Manifest Sha256
+        created_at:
+          type: string
+          title: Created At
+        updated_at:
+          type: string
+          title: Updated At
+        status_url:
+          type: string
+          title: Status Url
+        cancel_url:
+          type: string
+          title: Cancel Url
+        can_cancel:
+          type: boolean
+          title: Can Cancel
+      additionalProperties: false
+      type: object
+      required:
+      - schema_version
+      - artifact_type
+      - job_id
+      - idempotency_key
+      - request_sha256
+      - intent_sha256
+      - frozen_profiles_sha256
+      - status
+      - stage
+      - progress
+      - frozen_request
+      - frozen_profiles
+      - retry_from_job_id
+      - report
+      - created_at
+      - updated_at
+      - status_url
+      - cancel_url
+      - can_cancel
+      title: DetectorProbeJobResponse
+    DetectorProbeLineageView:
+      properties:
+        parent_trial_id:
+          type: string
+          pattern: ^[a-z0-9][a-z0-9._-]{0,119}$
+          title: Parent Trial Id
+        base_config_relative_path:
+          type: string
+          title: Base Config Relative Path
+        base_config_sha256:
+          type: string
+          pattern: ^[0-9a-f]{64}$
+          title: Base Config Sha256
+        effective_config_relative_path:
+          type: string
+          title: Effective Config Relative Path
+        effective_config_sha256:
+          type: string
+          pattern: ^[0-9a-f]{64}$
+          title: Effective Config Sha256
+        trial_intent_sha256:
+          type: string
+          pattern: ^[0-9a-f]{64}$
+          title: Trial Intent Sha256
+        tuning_patch_binding:
+          $ref: '#/components/schemas/DetectorProbeTuningPatchBindingView'
+        tuning_patch_sha256:
+          type: string
+          pattern: ^[0-9a-f]{64}$
+          title: Tuning Patch Sha256
+        profile_sha256s:
+          patternProperties:
+            ^[a-z0-9][a-z0-9._-]{0,119}$:
+              type: string
+              pattern: ^[0-9a-f]{64}$
+          type: object
+          title: Profile Sha256S
+        frozen_profiles_sha256:
+          type: string
+          pattern: ^[0-9a-f]{64}$
+          title: Frozen Profiles Sha256
+        execution_bundle:
+          $ref: '#/components/schemas/DetectorProbeExecutionBundleView'
+        execution_bundle_sha256:
+          type: string
+          pattern: ^[0-9a-f]{64}$
+          title: Execution Bundle Sha256
+        runtime_environment_sha256:
+          type: string
+          pattern: ^[0-9a-f]{64}$
+          title: Runtime Environment Sha256
+        intent_sha256:
+          type: string
+          pattern: ^[0-9a-f]{64}$
+          title: Intent Sha256
+        retry_from_job_id:
+          anyOf:
+          - type: string
+            pattern: ^[a-z0-9][a-z0-9._-]{0,119}$
+          - type: 'null'
+          title: Retry From Job Id
+      additionalProperties: false
+      type: object
+      required:
+      - parent_trial_id
+      - base_config_relative_path
+      - base_config_sha256
+      - effective_config_relative_path
+      - effective_config_sha256
+      - trial_intent_sha256
+      - tuning_patch_binding
+      - tuning_patch_sha256
+      - profile_sha256s
+      - frozen_profiles_sha256
+      - execution_bundle
+      - execution_bundle_sha256
+      - runtime_environment_sha256
+      - intent_sha256
+      - retry_from_job_id
+      title: DetectorProbeLineageView
+    DetectorProbeMediaIntegrityView:
+      properties:
+        path:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Path
+        status:
+          type: string
+          enum:
+          - ok
+          - unavailable
+          title: Status
+        width:
+          type: integer
+          minimum: 0.0
+          title: Width
+        height:
+          type: integer
+          minimum: 0.0
+          title: Height
+        mean_luma:
+          type: number
+          minimum: 0.0
+          title: Mean Luma
+        std_luma:
+          type: number
+          minimum: 0.0
+          title: Std Luma
+        texture_tile_ratio:
+          type: number
+          maximum: 1.0
+          minimum: 0.0
+          title: Texture Tile Ratio
+        dominant_color_ratio:
+          type: number
+          maximum: 1.0
+          minimum: 0.0
+          title: Dominant Color Ratio
+        gray:
+          type: boolean
+          title: Gray
+        low_information:
+          type: boolean
+          title: Low Information
+        likely_corrupt:
+          type: boolean
+          title: Likely Corrupt
+        reasons:
+          items:
+            type: string
+          type: array
+          title: Reasons
+      additionalProperties: false
+      type: object
+      required:
+      - path
+      - status
+      - width
+      - height
+      - mean_luma
+      - std_luma
+      - texture_tile_ratio
+      - dominant_color_ratio
+      - gray
+      - low_information
+      - likely_corrupt
+      - reasons
+      title: DetectorProbeMediaIntegrityView
+    DetectorProbeProfileEvidenceView:
+      properties:
+        profile_id:
+          type: string
+          pattern: ^[a-z0-9][a-z0-9._-]{0,119}$
+          title: Profile Id
+        profile_sha256:
+          type: string
+          pattern: ^[0-9a-f]{64}$
+          title: Profile Sha256
+        status:
+          type: string
+          enum:
+          - completed
+          - failed
+          - blocked
+          title: Status
+        latency_ms:
+          anyOf:
+          - type: number
+            minimum: 0.0
+          - type: 'null'
+          title: Latency Ms
+        candidate_count:
+          type: integer
+          minimum: 0.0
+          title: Candidate Count
+        top_k:
+          type: integer
+          const: 5
+          title: Top K
+        raw_candidates:
+          items:
+            $ref: '#/components/schemas/DetectorProbeCandidateView'
+          type: array
+          maxItems: 5
+          title: Raw Candidates
+        display_candidate:
+          anyOf:
+          - $ref: '#/components/schemas/DetectorProbeCandidateView'
+          - type: 'null'
+        filter_reasons:
+          additionalProperties:
+            type: integer
+            minimum: 0.0
+          type: object
+          title: Filter Reasons
+        failure_code:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Failure Code
+        raw_overlay_artifact_url:
+          type: string
+          title: Raw Overlay Artifact Url
+        raw_overlay_sha256:
+          type: string
+          pattern: ^[0-9a-f]{64}$
+          title: Raw Overlay Sha256
+        raw_overlay_size_bytes:
+          type: integer
+          exclusiveMinimum: 0.0
+          title: Raw Overlay Size Bytes
+      additionalProperties: false
+      type: object
+      required:
+      - profile_id
+      - profile_sha256
+      - status
+      - candidate_count
+      - top_k
+      - raw_candidates
+      - display_candidate
+      - filter_reasons
+      - failure_code
+      - raw_overlay_artifact_url
+      - raw_overlay_sha256
+      - raw_overlay_size_bytes
+      title: DetectorProbeProfileEvidenceView
+    DetectorProbeProgressView:
+      properties:
+        completed:
+          type: integer
+          minimum: 0.0
+          title: Completed
+        total:
+          type: integer
+          minimum: 0.0
+          title: Total
+        updated_at:
+          type: string
+          title: Updated At
+      additionalProperties: false
+      type: object
+      required:
+      - completed
+      - total
+      - updated_at
+      title: DetectorProbeProgressView
+    DetectorProbeReportView:
+      properties:
+        schema_version:
+          type: string
+          const: '1.0'
+          title: Schema Version
+        artifact_type:
+          type: string
+          const: detector_probe_report
+          title: Artifact Type
+        job_id:
+          type: string
+          pattern: ^[a-z0-9][a-z0-9._-]{0,119}$
+          title: Job Id
+        request_sha256:
+          type: string
+          pattern: ^[0-9a-f]{64}$
+          title: Request Sha256
+        source:
+          $ref: '#/components/schemas/DetectorProbeSourceBindingView'
+        lineage:
+          $ref: '#/components/schemas/DetectorProbeLineageView'
+        frozen_profiles:
+          items:
+            $ref: '#/components/schemas/FrozenDetectorProfileView'
+          type: array
+          maxItems: 6
+          minItems: 2
+          title: Frozen Profiles
+        top_k:
+          type: integer
+          const: 5
+          title: Top K
+        frames:
+          items:
+            $ref: '#/components/schemas/DetectorProbeFrameEvidenceView'
+          type: array
+          maxItems: 50
+          minItems: 1
+          title: Frames
+        decode:
+          $ref: '#/components/schemas/DetectorProbeDecodeView'
+        execution:
+          $ref: '#/components/schemas/DetectorProbeExecutionView'
+        artifacts:
+          items:
+            $ref: '#/components/schemas/DetectorProbeArtifactView'
+          type: array
+          maxItems: 350
+          minItems: 3
+          title: Artifacts
+        created_at:
+          type: string
+          title: Created At
+        report_sha256:
+          type: string
+          pattern: ^[0-9a-f]{64}$
+          title: Report Sha256
+      additionalProperties: false
+      type: object
+      required:
+      - schema_version
+      - artifact_type
+      - job_id
+      - request_sha256
+      - source
+      - lineage
+      - frozen_profiles
+      - top_k
+      - frames
+      - decode
+      - execution
+      - artifacts
+      - created_at
+      - report_sha256
+      title: DetectorProbeReportView
+    DetectorProbeSourceBindingView:
+      properties:
+        source_id:
+          type: string
+          pattern: ^[a-z0-9][a-z0-9._-]{0,119}$
+          title: Source Id
+        relative_path:
+          type: string
+          title: Relative Path
+        sha256:
+          type: string
+          pattern: ^[0-9a-f]{64}$
+          title: Sha256
+        file_identity_sha256:
+          type: string
+          pattern: ^[0-9a-f]{64}$
+          title: File Identity Sha256
+        size_bytes:
+          type: integer
+          exclusiveMinimum: 0.0
+          title: Size Bytes
+        width:
+          type: integer
+          exclusiveMinimum: 0.0
+          title: Width
+        height:
+          type: integer
+          exclusiveMinimum: 0.0
+          title: Height
+        frame_count:
+          type: integer
+          exclusiveMinimum: 0.0
+          title: Frame Count
+        tracking_contract_relative_path:
+          type: string
+          title: Tracking Contract Relative Path
+        tracking_contract_sha256:
+          type: string
+          pattern: ^[0-9a-f]{64}$
+          title: Tracking Contract Sha256
+      additionalProperties: false
+      type: object
+      required:
+      - source_id
+      - relative_path
+      - sha256
+      - file_identity_sha256
+      - size_bytes
+      - width
+      - height
+      - frame_count
+      - tracking_contract_relative_path
+      - tracking_contract_sha256
+      title: DetectorProbeSourceBindingView
+    DetectorProbeTuningPatchBindingView:
+      properties:
+        state:
+          type: string
+          enum:
+          - absent
+          - versioned
+          title: State
+        schema_version:
+          type: string
+          const: '1.0'
+          title: Schema Version
+        version_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Version Id
+        parent_version_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Parent Version Id
+        values_sha256:
+          type: string
+          pattern: ^[0-9a-f]{64}$
+          title: Values Sha256
+      additionalProperties: false
+      type: object
+      required:
+      - state
+      - schema_version
+      - version_id
+      - parent_version_id
+      - values_sha256
+      title: DetectorProbeTuningPatchBindingView
+    DetectorProfileAvailabilityView:
+      properties:
+        status:
+          type: string
+          enum:
+          - available
+          - unavailable
+          - blocked
+          title: Status
+        reason_codes:
+          items:
+            type: string
+          type: array
+          title: Reason Codes
+        runtime:
+          anyOf:
+          - $ref: '#/components/schemas/DetectorProfileRuntimeView'
+          - type: 'null'
+      type: object
+      required:
+      - status
+      - reason_codes
+      title: DetectorProfileAvailabilityView
+    DetectorProfileRuntimeView:
+      properties:
+        name:
+          type: string
+          title: Name
+        installed_version:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Installed Version
+        load_smoke:
+          type: boolean
+          title: Load Smoke
+      type: object
+      required:
+      - name
+      - installed_version
+      - load_smoke
+      title: DetectorProfileRuntimeView
+    DetectorProfileSettingsView:
+      properties:
+        confidence_threshold:
+          type: number
+          maximum: 1.0
+          minimum: 0.0
+          title: Confidence Threshold
+        image_size:
+          type: integer
+          exclusiveMinimum: 0.0
+          title: Image Size
+        use_half:
+          type: boolean
+          title: Use Half
+        allowed_labels:
+          items:
+            type: string
+          type: array
+          title: Allowed Labels
+        top_k:
+          type: integer
+          const: 5
+          title: Top K
+        slice_height:
+          anyOf:
+          - type: integer
+            exclusiveMinimum: 0.0
+          - type: 'null'
+          title: Slice Height
+        slice_width:
+          anyOf:
+          - type: integer
+            exclusiveMinimum: 0.0
+          - type: 'null'
+          title: Slice Width
+        overlap_height_ratio:
+          anyOf:
+          - type: number
+            exclusiveMaximum: 1.0
+            minimum: 0.0
+          - type: 'null'
+          title: Overlap Height Ratio
+        overlap_width_ratio:
+          anyOf:
+          - type: number
+            exclusiveMaximum: 1.0
+            minimum: 0.0
+          - type: 'null'
+          title: Overlap Width Ratio
+        perform_standard_pred:
+          anyOf:
+          - type: boolean
+          - type: 'null'
+          title: Perform Standard Pred
+        postprocess_type:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Postprocess Type
+        postprocess_match_metric:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Postprocess Match Metric
+        postprocess_match_threshold:
+          anyOf:
+          - type: number
+            maximum: 1.0
+            minimum: 0.0
+          - type: 'null'
+          title: Postprocess Match Threshold
+      type: object
+      required:
+      - confidence_threshold
+      - image_size
+      - use_half
+      - allowed_labels
+      - top_k
+      title: DetectorProfileSettingsView
+    DetectorProfileView:
+      properties:
+        schema_version:
+          type: string
+          title: Schema Version
+        artifact_type:
+          type: string
+          const: detector_profile
+          title: Artifact Type
+        profile_id:
+          type: string
+          title: Profile Id
+        version:
+          type: string
+          title: Version
+        model_id:
+          type: string
+          title: Model Id
+        model_version:
+          type: string
+          title: Model Version
+        model_descriptor_sha256:
+          type: string
+          pattern: ^[0-9a-f]{64}$
+          title: Model Descriptor Sha256
+        mode:
+          type: string
+          enum:
+          - direct
+          - sahi
+          title: Mode
+        settings:
+          $ref: '#/components/schemas/DetectorProfileSettingsView'
+        profile_sha256:
+          type: string
+          pattern: ^[0-9a-f]{64}$
+          title: Profile Sha256
+        recommended:
+          type: boolean
+          title: Recommended
+        availability:
+          $ref: '#/components/schemas/DetectorProfileAvailabilityView'
+        selectable_for_probe:
+          type: boolean
+          title: Selectable For Probe
+      type: object
+      required:
+      - schema_version
+      - artifact_type
+      - profile_id
+      - version
+      - model_id
+      - model_version
+      - model_descriptor_sha256
+      - mode
+      - settings
+      - profile_sha256
+      - recommended
+      - availability
+      - selectable_for_probe
+      title: DetectorProfileView
+    DetectorQualificationView:
+      properties:
+        trial_eligible:
+          type: boolean
+          title: Trial Eligible
+        source_segment_qualified:
+          type: boolean
+          title: Source Segment Qualified
+        camera_qualified:
+          type: boolean
+          title: Camera Qualified
+      type: object
+      required:
+      - trial_eligible
+      - source_segment_qualified
+      - camera_qualified
+      title: DetectorQualificationView
     EventCandidate:
       properties:
         id:
@@ -5167,6 +7140,272 @@ components:
           title: Notes
       type: object
       title: FollowCamRenderRequest
+    FrozenDetectorProbeRequestView:
+      properties:
+        parent_trial_id:
+          type: string
+          pattern: ^[a-z0-9][a-z0-9._-]{0,119}$
+          title: Parent Trial Id
+        source_id:
+          type: string
+          pattern: ^[a-z0-9][a-z0-9._-]{0,119}$
+          title: Source Id
+        source_relative_path:
+          type: string
+          title: Source Relative Path
+        source_sha256:
+          type: string
+          pattern: ^[0-9a-f]{64}$
+          title: Source Sha256
+        source_file_identity_sha256:
+          type: string
+          pattern: ^[0-9a-f]{64}$
+          title: Source File Identity Sha256
+        source_size_bytes:
+          type: integer
+          exclusiveMinimum: 0.0
+          title: Source Size Bytes
+        source_width:
+          type: integer
+          exclusiveMinimum: 0.0
+          title: Source Width
+        source_height:
+          type: integer
+          exclusiveMinimum: 0.0
+          title: Source Height
+        source_frame_count:
+          type: integer
+          exclusiveMinimum: 0.0
+          title: Source Frame Count
+        tracking_contract_relative_path:
+          type: string
+          title: Tracking Contract Relative Path
+        tracking_contract_sha256:
+          type: string
+          pattern: ^[0-9a-f]{64}$
+          title: Tracking Contract Sha256
+        base_config_relative_path:
+          type: string
+          title: Base Config Relative Path
+        base_config_sha256:
+          type: string
+          pattern: ^[0-9a-f]{64}$
+          title: Base Config Sha256
+        effective_config_relative_path:
+          type: string
+          title: Effective Config Relative Path
+        effective_config_sha256:
+          type: string
+          pattern: ^[0-9a-f]{64}$
+          title: Effective Config Sha256
+        trial_intent_sha256:
+          type: string
+          pattern: ^[0-9a-f]{64}$
+          title: Trial Intent Sha256
+        tuning_patch_binding:
+          $ref: '#/components/schemas/DetectorProbeTuningPatchBindingView'
+        tuning_patch_sha256:
+          type: string
+          pattern: ^[0-9a-f]{64}$
+          title: Tuning Patch Sha256
+        profile_ids:
+          items:
+            type: string
+            pattern: ^[a-z0-9][a-z0-9._-]{0,119}$
+          type: array
+          maxItems: 6
+          minItems: 2
+          title: Profile Ids
+        frozen_profiles_sha256:
+          type: string
+          pattern: ^[0-9a-f]{64}$
+          title: Frozen Profiles Sha256
+        profile_sha256s:
+          patternProperties:
+            ^[a-z0-9][a-z0-9._-]{0,119}$:
+              type: string
+              pattern: ^[0-9a-f]{64}$
+          type: object
+          title: Profile Sha256S
+        profile_bindings:
+          items:
+            $ref: '#/components/schemas/FrozenDetectorProfileBindingView'
+          type: array
+          maxItems: 6
+          minItems: 2
+          title: Profile Bindings
+        execution_bundle:
+          $ref: '#/components/schemas/DetectorProbeExecutionBundleView'
+        execution_bundle_sha256:
+          type: string
+          pattern: ^[0-9a-f]{64}$
+          title: Execution Bundle Sha256
+        runtime_environment_sha256:
+          type: string
+          pattern: ^[0-9a-f]{64}$
+          title: Runtime Environment Sha256
+        frame_indices:
+          items:
+            type: integer
+            minimum: 0.0
+          type: array
+          maxItems: 50
+          minItems: 1
+          title: Frame Indices
+        top_k:
+          type: integer
+          const: 5
+          title: Top K
+        requested_decode_mode:
+          type: string
+          enum:
+          - sequential
+          - preroll
+          - direct
+          title: Requested Decode Mode
+        retry_from_job_id:
+          anyOf:
+          - type: string
+            pattern: ^[a-z0-9][a-z0-9._-]{0,119}$
+          - type: 'null'
+          title: Retry From Job Id
+      additionalProperties: false
+      type: object
+      required:
+      - parent_trial_id
+      - source_id
+      - source_relative_path
+      - source_sha256
+      - source_file_identity_sha256
+      - source_size_bytes
+      - source_width
+      - source_height
+      - source_frame_count
+      - tracking_contract_relative_path
+      - tracking_contract_sha256
+      - base_config_relative_path
+      - base_config_sha256
+      - effective_config_relative_path
+      - effective_config_sha256
+      - trial_intent_sha256
+      - tuning_patch_binding
+      - tuning_patch_sha256
+      - profile_ids
+      - frozen_profiles_sha256
+      - profile_sha256s
+      - profile_bindings
+      - execution_bundle
+      - execution_bundle_sha256
+      - runtime_environment_sha256
+      - frame_indices
+      - top_k
+      - requested_decode_mode
+      title: FrozenDetectorProbeRequestView
+    FrozenDetectorProfileBindingView:
+      properties:
+        profile_id:
+          type: string
+          pattern: ^[a-z0-9][a-z0-9._-]{0,119}$
+          title: Profile Id
+        profile_sha256:
+          type: string
+          pattern: ^[0-9a-f]{64}$
+          title: Profile Sha256
+        model_id:
+          type: string
+          pattern: ^[a-z0-9][a-z0-9._-]{0,119}$
+          title: Model Id
+        model_version:
+          type: string
+          title: Model Version
+        model_descriptor_sha256:
+          type: string
+          pattern: ^[0-9a-f]{64}$
+          title: Model Descriptor Sha256
+        weights_sha256:
+          type: string
+          pattern: ^[0-9a-f]{64}$
+          title: Weights Sha256
+        weights_size_bytes:
+          type: integer
+          exclusiveMinimum: 0.0
+          title: Weights Size Bytes
+      additionalProperties: false
+      type: object
+      required:
+      - profile_id
+      - profile_sha256
+      - model_id
+      - model_version
+      - model_descriptor_sha256
+      - weights_sha256
+      - weights_size_bytes
+      title: FrozenDetectorProfileBindingView
+    FrozenDetectorProfileView:
+      properties:
+        schema_version:
+          type: string
+          title: Schema Version
+        artifact_type:
+          type: string
+          const: detector_profile
+          title: Artifact Type
+        profile_id:
+          type: string
+          title: Profile Id
+        version:
+          type: string
+          title: Version
+        model_id:
+          type: string
+          title: Model Id
+        model_version:
+          type: string
+          title: Model Version
+        model_descriptor_sha256:
+          type: string
+          pattern: ^[0-9a-f]{64}$
+          title: Model Descriptor Sha256
+        mode:
+          type: string
+          enum:
+          - direct
+          - sahi
+          title: Mode
+        settings:
+          $ref: '#/components/schemas/DetectorProfileSettingsView'
+        profile_sha256:
+          type: string
+          pattern: ^[0-9a-f]{64}$
+          title: Profile Sha256
+        recommended:
+          type: boolean
+          title: Recommended
+        availability:
+          $ref: '#/components/schemas/DetectorProfileAvailabilityView'
+        selectable_for_probe:
+          type: boolean
+          title: Selectable For Probe
+        model_descriptor:
+          $ref: '#/components/schemas/DetectorModelDescriptorView'
+      additionalProperties: false
+      type: object
+      required:
+      - schema_version
+      - artifact_type
+      - profile_id
+      - version
+      - model_id
+      - model_version
+      - model_descriptor_sha256
+      - mode
+      - settings
+      - profile_sha256
+      - recommended
+      - availability
+      - selectable_for_probe
+      - model_descriptor
+      title: FrozenDetectorProfileView
     HTTPValidationError:
       properties:
         detail:

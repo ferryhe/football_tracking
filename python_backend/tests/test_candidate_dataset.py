@@ -14,17 +14,241 @@ import numpy as np
 
 from football_tracking.candidate_dataset import (
     DATASET_SCHEMA_VERSION,
+    MAX_DECODE_WORK_FRAMES,
     SOURCE_MAP_SCHEMA_VERSION,
     CandidateDatasetError,
     build_candidate_dataset,
+    decode_verified_frames,
     main,
 )
 from football_tracking.detector_candidate_contract import RuntimeTrackingContractWriter, assign_candidate_ids
+from football_tracking.detector_development_common import DetectorDevelopmentError
 from football_tracking.tracking_contracts import TRACKING_CONTRACT_REPORT_NAME, write_tracking_contract
 from football_tracking.types import Candidate, OutputStatus, TrackResult, TrackState
 
 
 class CandidateDatasetTests(unittest.TestCase):
+    def test_verified_bounded_decode_returns_only_exact_source_frames(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            path = Path(temp_name) / "source.bin"
+            path.write_bytes(b"fixture")
+            frames = _solid_frames(8, width=8, height=6)
+            factory = CaptureFactory({str(path.resolve()): CaptureSpec(frames)})
+
+            with patch(
+                "football_tracking.candidate_dataset.cv2.VideoCapture",
+                side_effect=factory,
+            ):
+                decoded, metadata = decode_verified_frames(
+                    path.resolve(),
+                    [6, 2, 6],
+                    requested_decode_mode="sequential",
+                    expected_width=8,
+                    expected_height=6,
+                    expected_frame_count=8,
+                )
+
+        self.assertEqual([2, 6], sorted(decoded))
+        self.assertTrue(np.array_equal(frames[2], decoded[2]))
+        self.assertEqual("sequential", metadata["effective_decode_mode"])
+        self.assertEqual([2, 6], metadata["verified_frame_indices"])
+        self.assertTrue(all(capture.released for capture in factory.instances))
+
+    def test_verified_bounded_decode_records_seek_fallback_without_losing_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            path = Path(temp_name) / "source.bin"
+            path.write_bytes(b"fixture")
+            frames = _solid_frames(8, width=8, height=6)
+            factory = CaptureFactory(
+                {str(path.resolve()): CaptureSpec(frames)},
+                first_seek_succeeds=False,
+            )
+
+            with patch(
+                "football_tracking.candidate_dataset.cv2.VideoCapture",
+                side_effect=factory,
+            ):
+                decoded, metadata = decode_verified_frames(
+                    path.resolve(),
+                    [3, 7],
+                    requested_decode_mode="direct",
+                    expected_width=8,
+                    expected_height=6,
+                    expected_frame_count=8,
+                )
+
+        self.assertEqual([3, 7], sorted(decoded))
+        self.assertEqual("direct", metadata["requested_decode_mode"])
+        self.assertEqual("sequential_fallback", metadata["effective_decode_mode"])
+        self.assertEqual(2, len(factory.instances))
+        self.assertEqual([], factory.instances[1].seek_calls)
+        self.assertEqual(8, factory.instances[1].read_count)
+        self.assertTrue(all(capture.released for capture in factory.instances))
+
+    def test_late_frame_seek_failure_fails_closed_without_linear_scan(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            path = Path(temp_name) / "source.bin"
+            path.write_bytes(b"fixture")
+            frames = _solid_frames(MAX_DECODE_WORK_FRAMES + 100, width=8, height=6)
+            factory = CaptureFactory(
+                {str(path.resolve()): CaptureSpec(frames)},
+                first_seek_succeeds=False,
+                all_seeks_fail=True,
+            )
+
+            with (
+                patch(
+                    "football_tracking.candidate_dataset.cv2.VideoCapture",
+                    side_effect=factory,
+                ),
+                self.assertRaisesRegex(CandidateDatasetError, "bounded fallback"),
+            ):
+                decode_verified_frames(
+                    path.resolve(),
+                    [MAX_DECODE_WORK_FRAMES + 50],
+                    requested_decode_mode="direct",
+                    expected_width=8,
+                    expected_height=6,
+                    expected_frame_count=len(frames),
+                )
+
+        self.assertEqual(1, len(factory.instances))
+        self.assertEqual(0, sum(capture.read_count for capture in factory.instances))
+
+    def test_sequential_decode_rejects_work_beyond_the_hard_bound(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            path = Path(temp_name) / "source.bin"
+            path.write_bytes(b"fixture")
+            frames = _solid_frames(MAX_DECODE_WORK_FRAMES + 2, width=8, height=6)
+            factory = CaptureFactory({str(path.resolve()): CaptureSpec(frames)})
+
+            with (
+                patch(
+                    "football_tracking.candidate_dataset.cv2.VideoCapture",
+                    side_effect=factory,
+                ),
+                self.assertRaisesRegex(CandidateDatasetError, "work limit"),
+            ):
+                decode_verified_frames(
+                    path.resolve(),
+                    [MAX_DECODE_WORK_FRAMES + 1],
+                    requested_decode_mode="sequential",
+                    expected_width=8,
+                    expected_height=6,
+                    expected_frame_count=len(frames),
+                )
+
+        self.assertEqual(0, factory.instances[0].read_count)
+
+    def test_sequential_decode_observes_cancellation_inside_the_linear_loop(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            path = Path(temp_name) / "source.bin"
+            path.write_bytes(b"fixture")
+            frames = _solid_frames(20, width=8, height=6)
+            factory = CaptureFactory({str(path.resolve()): CaptureSpec(frames)})
+
+            with (
+                patch(
+                    "football_tracking.candidate_dataset.cv2.VideoCapture",
+                    side_effect=factory,
+                ),
+                self.assertRaisesRegex(CandidateDatasetError, "cancelled"),
+            ):
+                decode_verified_frames(
+                    path.resolve(),
+                    [19],
+                    requested_decode_mode="sequential",
+                    expected_width=8,
+                    expected_height=6,
+                    expected_frame_count=len(frames),
+                    cancel_callback=lambda: bool(factory.instances)
+                    and factory.instances[0].read_count >= 3,
+                )
+
+        self.assertEqual(3, factory.instances[0].read_count)
+
+    def test_preroll_sparse_late_frames_use_bounded_segments(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            path = Path(temp_name) / "source.bin"
+            path.write_bytes(b"fixture")
+            frames = _solid_frames(10_001, width=8, height=6)
+            factory = CaptureFactory({str(path.resolve()): CaptureSpec(frames)})
+
+            with patch(
+                "football_tracking.candidate_dataset.cv2.VideoCapture",
+                side_effect=factory,
+            ):
+                decoded, metadata = decode_verified_frames(
+                    path.resolve(),
+                    [1_000, 10_000],
+                    requested_decode_mode="preroll",
+                    expected_width=8,
+                    expected_height=6,
+                    expected_frame_count=len(frames),
+                )
+
+        self.assertEqual([1_000, 10_000], sorted(decoded))
+        self.assertEqual("preroll_verified", metadata["effective_decode_mode"])
+        self.assertLessEqual(factory.instances[0].read_count, 26)
+        self.assertEqual([988, 9_988], factory.instances[0].seek_calls)
+
+    def test_direct_and_preroll_decode_check_cancellation_per_frame(self) -> None:
+        for mode, indices in (("direct", [2, 4]), ("preroll", [15])):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as temp_name:
+                path = Path(temp_name) / "source.bin"
+                path.write_bytes(b"fixture")
+                frames = _solid_frames(20, width=8, height=6)
+                factory = CaptureFactory({str(path.resolve()): CaptureSpec(frames)})
+
+                with (
+                    patch(
+                        "football_tracking.candidate_dataset.cv2.VideoCapture",
+                        side_effect=factory,
+                    ),
+                    self.assertRaisesRegex(CandidateDatasetError, "cancelled"),
+                ):
+                    decode_verified_frames(
+                        path.resolve(),
+                        indices,
+                        requested_decode_mode=mode,
+                        expected_width=8,
+                        expected_height=6,
+                        expected_frame_count=len(frames),
+                        cancel_callback=lambda: bool(factory.instances)
+                        and factory.instances[0].read_count >= 1,
+                    )
+
+                self.assertEqual(1, factory.instances[0].read_count)
+
+    def test_decode_preserves_service_shutdown_from_the_cancel_callback(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            path = Path(temp_name) / "source.bin"
+            path.write_bytes(b"fixture")
+            frames = _solid_frames(20, width=8, height=6)
+            factory = CaptureFactory({str(path.resolve()): CaptureSpec(frames)})
+
+            def shutting_down() -> bool:
+                raise DetectorDevelopmentError(
+                    "service_shutting_down", "service is closing"
+                )
+
+            with patch(
+                "football_tracking.candidate_dataset.cv2.VideoCapture",
+                side_effect=factory,
+            ):
+                with self.assertRaises(DetectorDevelopmentError) as raised:
+                    decode_verified_frames(
+                        path.resolve(),
+                        [19],
+                        requested_decode_mode="sequential",
+                        expected_width=8,
+                        expected_height=6,
+                        expected_frame_count=len(frames),
+                        cancel_callback=shutting_down,
+                    )
+
+        self.assertEqual("service_shutting_down", raised.exception.code)
+
     def test_runtime_contract_is_directly_compatible_with_operator_source_map(self) -> None:
         with tempfile.TemporaryDirectory() as temp_name:
             root = Path(temp_name)
@@ -772,13 +996,27 @@ class FakeCapture:
 
 
 class CaptureFactory:
-    def __init__(self, specs: dict[str, CaptureSpec], *, first_seek_succeeds: bool = True) -> None:
+    def __init__(
+        self,
+        specs: dict[str, CaptureSpec],
+        *,
+        first_seek_succeeds: bool = True,
+        all_seeks_fail: bool = False,
+    ) -> None:
         self.specs = specs
         self.first_seek_succeeds = first_seek_succeeds
+        self.all_seeks_fail = all_seeks_fail
         self.instances: list[FakeCapture] = []
 
     def __call__(self, path: str) -> FakeCapture:
-        capture = FakeCapture(self.specs[path], seek_succeeds=self.first_seek_succeeds or bool(self.instances))
+        capture = FakeCapture(
+            self.specs[path],
+            seek_succeeds=(
+                False
+                if self.all_seeks_fail
+                else self.first_seek_succeeds or bool(self.instances)
+            ),
+        )
         self.instances.append(capture)
         return capture
 

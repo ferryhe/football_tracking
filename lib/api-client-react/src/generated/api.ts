@@ -53,6 +53,12 @@ import type {
   DeleteResourceResponse,
   DeleteRunOutputParams,
   DeriveConfigRequest,
+  DetectorModelCatalogResponse,
+  DetectorModelImportRequest,
+  DetectorModelImportResponse,
+  DetectorProbeCreateRequest,
+  DetectorProbeCreateResponse,
+  DetectorProbeJobResponse,
   EventCandidateReport,
   FieldPreviewRequest,
   FieldPreviewResponse,
@@ -951,6 +957,535 @@ export const useUpdateConfig = <
   TContext
 > => {
   return useMutation(getUpdateConfigMutationOptions(options));
+};
+
+/**
+ * @summary List Detector Models
+ */
+export const getListDetectorModelsUrl = () => {
+  return `/api/detector-models`;
+};
+
+export const listDetectorModels = async (
+  options?: RequestInit,
+): Promise<DetectorModelCatalogResponse> => {
+  return customFetch<DetectorModelCatalogResponse>(getListDetectorModelsUrl(), {
+    ...options,
+    method: "GET",
+  });
+};
+
+export const getListDetectorModelsQueryKey = () => {
+  return [`/api/detector-models`] as const;
+};
+
+export const getListDetectorModelsQueryOptions = <
+  TData = Awaited<ReturnType<typeof listDetectorModels>>,
+  TError = ErrorType<unknown>,
+>(options?: {
+  query?: UseQueryOptions<
+    Awaited<ReturnType<typeof listDetectorModels>>,
+    TError,
+    TData
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}) => {
+  const { query: queryOptions, request: requestOptions } = options ?? {};
+
+  const queryKey = queryOptions?.queryKey ?? getListDetectorModelsQueryKey();
+
+  const queryFn: QueryFunction<
+    Awaited<ReturnType<typeof listDetectorModels>>
+  > = ({ signal }) => listDetectorModels({ signal, ...requestOptions });
+
+  return { queryKey, queryFn, ...queryOptions } as UseQueryOptions<
+    Awaited<ReturnType<typeof listDetectorModels>>,
+    TError,
+    TData
+  > & { queryKey: QueryKey };
+};
+
+export type ListDetectorModelsQueryResult = NonNullable<
+  Awaited<ReturnType<typeof listDetectorModels>>
+>;
+export type ListDetectorModelsQueryError = ErrorType<unknown>;
+
+/**
+ * @summary List Detector Models
+ */
+
+export function useListDetectorModels<
+  TData = Awaited<ReturnType<typeof listDetectorModels>>,
+  TError = ErrorType<unknown>,
+>(options?: {
+  query?: UseQueryOptions<
+    Awaited<ReturnType<typeof listDetectorModels>>,
+    TError,
+    TData
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}): UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+  const queryOptions = getListDetectorModelsQueryOptions(options);
+
+  const query = useQuery(queryOptions) as UseQueryResult<TData, TError> & {
+    queryKey: QueryKey;
+  };
+
+  return { ...query, queryKey: queryOptions.queryKey };
+}
+
+/**
+ * @summary Import Detector Model
+ */
+export const getImportDetectorModelUrl = () => {
+  return `/api/detector-models/import`;
+};
+
+export const importDetectorModel = async (
+  detectorModelImportRequest: DetectorModelImportRequest,
+  options?: RequestInit,
+): Promise<DetectorModelImportResponse> => {
+  return customFetch<DetectorModelImportResponse>(getImportDetectorModelUrl(), {
+    ...options,
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...options?.headers },
+    body: JSON.stringify(detectorModelImportRequest),
+  });
+};
+
+export const getImportDetectorModelMutationOptions = <
+  TError = ErrorType<HTTPValidationError>,
+  TContext = unknown,
+>(options?: {
+  mutation?: UseMutationOptions<
+    Awaited<ReturnType<typeof importDetectorModel>>,
+    TError,
+    { data: BodyType<DetectorModelImportRequest> },
+    TContext
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}): UseMutationOptions<
+  Awaited<ReturnType<typeof importDetectorModel>>,
+  TError,
+  { data: BodyType<DetectorModelImportRequest> },
+  TContext
+> => {
+  const mutationKey = ["importDetectorModel"];
+  const { mutation: mutationOptions, request: requestOptions } = options
+    ? options.mutation &&
+      "mutationKey" in options.mutation &&
+      options.mutation.mutationKey
+      ? options
+      : { ...options, mutation: { ...options.mutation, mutationKey } }
+    : { mutation: { mutationKey }, request: undefined };
+
+  const mutationFn: MutationFunction<
+    Awaited<ReturnType<typeof importDetectorModel>>,
+    { data: BodyType<DetectorModelImportRequest> }
+  > = (props) => {
+    const { data } = props ?? {};
+
+    return importDetectorModel(data, requestOptions);
+  };
+
+  return { mutationFn, ...mutationOptions };
+};
+
+export type ImportDetectorModelMutationResult = NonNullable<
+  Awaited<ReturnType<typeof importDetectorModel>>
+>;
+export type ImportDetectorModelMutationBody =
+  BodyType<DetectorModelImportRequest>;
+export type ImportDetectorModelMutationError = ErrorType<HTTPValidationError>;
+
+/**
+ * @summary Import Detector Model
+ */
+export const useImportDetectorModel = <
+  TError = ErrorType<HTTPValidationError>,
+  TContext = unknown,
+>(options?: {
+  mutation?: UseMutationOptions<
+    Awaited<ReturnType<typeof importDetectorModel>>,
+    TError,
+    { data: BodyType<DetectorModelImportRequest> },
+    TContext
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}): UseMutationResult<
+  Awaited<ReturnType<typeof importDetectorModel>>,
+  TError,
+  { data: BodyType<DetectorModelImportRequest> },
+  TContext
+> => {
+  return useMutation(getImportDetectorModelMutationOptions(options));
+};
+
+/**
+ * @summary Create Detector Probe
+ */
+export const getCreateDetectorProbeUrl = () => {
+  return `/api/detector-probes`;
+};
+
+export const createDetectorProbe = async (
+  detectorProbeCreateRequest: DetectorProbeCreateRequest,
+  options?: RequestInit,
+): Promise<DetectorProbeCreateResponse> => {
+  return customFetch<DetectorProbeCreateResponse>(getCreateDetectorProbeUrl(), {
+    ...options,
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...options?.headers },
+    body: JSON.stringify(detectorProbeCreateRequest),
+  });
+};
+
+export const getCreateDetectorProbeMutationOptions = <
+  TError = ErrorType<HTTPValidationError>,
+  TContext = unknown,
+>(options?: {
+  mutation?: UseMutationOptions<
+    Awaited<ReturnType<typeof createDetectorProbe>>,
+    TError,
+    { data: BodyType<DetectorProbeCreateRequest> },
+    TContext
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}): UseMutationOptions<
+  Awaited<ReturnType<typeof createDetectorProbe>>,
+  TError,
+  { data: BodyType<DetectorProbeCreateRequest> },
+  TContext
+> => {
+  const mutationKey = ["createDetectorProbe"];
+  const { mutation: mutationOptions, request: requestOptions } = options
+    ? options.mutation &&
+      "mutationKey" in options.mutation &&
+      options.mutation.mutationKey
+      ? options
+      : { ...options, mutation: { ...options.mutation, mutationKey } }
+    : { mutation: { mutationKey }, request: undefined };
+
+  const mutationFn: MutationFunction<
+    Awaited<ReturnType<typeof createDetectorProbe>>,
+    { data: BodyType<DetectorProbeCreateRequest> }
+  > = (props) => {
+    const { data } = props ?? {};
+
+    return createDetectorProbe(data, requestOptions);
+  };
+
+  return { mutationFn, ...mutationOptions };
+};
+
+export type CreateDetectorProbeMutationResult = NonNullable<
+  Awaited<ReturnType<typeof createDetectorProbe>>
+>;
+export type CreateDetectorProbeMutationBody =
+  BodyType<DetectorProbeCreateRequest>;
+export type CreateDetectorProbeMutationError = ErrorType<HTTPValidationError>;
+
+/**
+ * @summary Create Detector Probe
+ */
+export const useCreateDetectorProbe = <
+  TError = ErrorType<HTTPValidationError>,
+  TContext = unknown,
+>(options?: {
+  mutation?: UseMutationOptions<
+    Awaited<ReturnType<typeof createDetectorProbe>>,
+    TError,
+    { data: BodyType<DetectorProbeCreateRequest> },
+    TContext
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}): UseMutationResult<
+  Awaited<ReturnType<typeof createDetectorProbe>>,
+  TError,
+  { data: BodyType<DetectorProbeCreateRequest> },
+  TContext
+> => {
+  return useMutation(getCreateDetectorProbeMutationOptions(options));
+};
+
+/**
+ * @summary Get Detector Probe
+ */
+export const getGetDetectorProbeUrl = (jobId: string) => {
+  return `/api/detector-probes/${encodePathSegmented(jobId)}`;
+};
+
+export const getDetectorProbe = async (
+  jobId: string,
+  options?: RequestInit,
+): Promise<DetectorProbeJobResponse> => {
+  return customFetch<DetectorProbeJobResponse>(getGetDetectorProbeUrl(jobId), {
+    ...options,
+    method: "GET",
+  });
+};
+
+export const getGetDetectorProbeQueryKey = (jobId: string) => {
+  return [`/api/detector-probes/${encodePathSegmented(jobId)}`] as const;
+};
+
+export const getGetDetectorProbeQueryOptions = <
+  TData = Awaited<ReturnType<typeof getDetectorProbe>>,
+  TError = ErrorType<HTTPValidationError>,
+>(
+  jobId: string,
+  options?: {
+    query?: UseQueryOptions<
+      Awaited<ReturnType<typeof getDetectorProbe>>,
+      TError,
+      TData
+    >;
+    request?: SecondParameter<typeof customFetch>;
+  },
+) => {
+  const { query: queryOptions, request: requestOptions } = options ?? {};
+
+  const queryKey = queryOptions?.queryKey ?? getGetDetectorProbeQueryKey(jobId);
+
+  const queryFn: QueryFunction<
+    Awaited<ReturnType<typeof getDetectorProbe>>
+  > = ({ signal }) => getDetectorProbe(jobId, { signal, ...requestOptions });
+
+  return {
+    queryKey,
+    queryFn,
+    enabled: !!jobId,
+    ...queryOptions,
+  } as UseQueryOptions<
+    Awaited<ReturnType<typeof getDetectorProbe>>,
+    TError,
+    TData
+  > & { queryKey: QueryKey };
+};
+
+export type GetDetectorProbeQueryResult = NonNullable<
+  Awaited<ReturnType<typeof getDetectorProbe>>
+>;
+export type GetDetectorProbeQueryError = ErrorType<HTTPValidationError>;
+
+/**
+ * @summary Get Detector Probe
+ */
+
+export function useGetDetectorProbe<
+  TData = Awaited<ReturnType<typeof getDetectorProbe>>,
+  TError = ErrorType<HTTPValidationError>,
+>(
+  jobId: string,
+  options?: {
+    query?: UseQueryOptions<
+      Awaited<ReturnType<typeof getDetectorProbe>>,
+      TError,
+      TData
+    >;
+    request?: SecondParameter<typeof customFetch>;
+  },
+): UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+  const queryOptions = getGetDetectorProbeQueryOptions(jobId, options);
+
+  const query = useQuery(queryOptions) as UseQueryResult<TData, TError> & {
+    queryKey: QueryKey;
+  };
+
+  return { ...query, queryKey: queryOptions.queryKey };
+}
+
+/**
+ * @summary Get Detector Probe Artifact
+ */
+export const getGetDetectorProbeArtifactUrl = (
+  jobId: string,
+  artifactId: string,
+) => {
+  return `/api/detector-probes/${encodePathSegmented(jobId)}/artifacts/${encodePathSegmented(artifactId)}`;
+};
+
+export const getDetectorProbeArtifact = async (
+  jobId: string,
+  artifactId: string,
+  options?: RequestInit,
+): Promise<unknown> => {
+  return customFetch<unknown>(
+    getGetDetectorProbeArtifactUrl(jobId, artifactId),
+    {
+      ...options,
+      method: "GET",
+    },
+  );
+};
+
+export const getGetDetectorProbeArtifactQueryKey = (
+  jobId: string,
+  artifactId: string,
+) => {
+  return [`/api/detector-probes/${encodePathSegmented(jobId)}/artifacts/${encodePathSegmented(artifactId)}`] as const;
+};
+
+export const getGetDetectorProbeArtifactQueryOptions = <
+  TData = Awaited<ReturnType<typeof getDetectorProbeArtifact>>,
+  TError = ErrorType<HTTPValidationError>,
+>(
+  jobId: string,
+  artifactId: string,
+  options?: {
+    query?: UseQueryOptions<
+      Awaited<ReturnType<typeof getDetectorProbeArtifact>>,
+      TError,
+      TData
+    >;
+    request?: SecondParameter<typeof customFetch>;
+  },
+) => {
+  const { query: queryOptions, request: requestOptions } = options ?? {};
+
+  const queryKey =
+    queryOptions?.queryKey ??
+    getGetDetectorProbeArtifactQueryKey(jobId, artifactId);
+
+  const queryFn: QueryFunction<
+    Awaited<ReturnType<typeof getDetectorProbeArtifact>>
+  > = ({ signal }) =>
+    getDetectorProbeArtifact(jobId, artifactId, { signal, ...requestOptions });
+
+  return {
+    queryKey,
+    queryFn,
+    enabled: !!(jobId && artifactId),
+    ...queryOptions,
+  } as UseQueryOptions<
+    Awaited<ReturnType<typeof getDetectorProbeArtifact>>,
+    TError,
+    TData
+  > & { queryKey: QueryKey };
+};
+
+export type GetDetectorProbeArtifactQueryResult = NonNullable<
+  Awaited<ReturnType<typeof getDetectorProbeArtifact>>
+>;
+export type GetDetectorProbeArtifactQueryError = ErrorType<HTTPValidationError>;
+
+/**
+ * @summary Get Detector Probe Artifact
+ */
+
+export function useGetDetectorProbeArtifact<
+  TData = Awaited<ReturnType<typeof getDetectorProbeArtifact>>,
+  TError = ErrorType<HTTPValidationError>,
+>(
+  jobId: string,
+  artifactId: string,
+  options?: {
+    query?: UseQueryOptions<
+      Awaited<ReturnType<typeof getDetectorProbeArtifact>>,
+      TError,
+      TData
+    >;
+    request?: SecondParameter<typeof customFetch>;
+  },
+): UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+  const queryOptions = getGetDetectorProbeArtifactQueryOptions(
+    jobId,
+    artifactId,
+    options,
+  );
+
+  const query = useQuery(queryOptions) as UseQueryResult<TData, TError> & {
+    queryKey: QueryKey;
+  };
+
+  return { ...query, queryKey: queryOptions.queryKey };
+}
+
+/**
+ * @summary Cancel Detector Probe
+ */
+export const getCancelDetectorProbeUrl = (jobId: string) => {
+  return `/api/detector-probes/${encodePathSegmented(jobId)}/cancel`;
+};
+
+export const cancelDetectorProbe = async (
+  jobId: string,
+  options?: RequestInit,
+): Promise<DetectorProbeJobResponse> => {
+  return customFetch<DetectorProbeJobResponse>(
+    getCancelDetectorProbeUrl(jobId),
+    {
+      ...options,
+      method: "POST",
+    },
+  );
+};
+
+export const getCancelDetectorProbeMutationOptions = <
+  TError = ErrorType<HTTPValidationError>,
+  TContext = unknown,
+>(options?: {
+  mutation?: UseMutationOptions<
+    Awaited<ReturnType<typeof cancelDetectorProbe>>,
+    TError,
+    { jobId: string },
+    TContext
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}): UseMutationOptions<
+  Awaited<ReturnType<typeof cancelDetectorProbe>>,
+  TError,
+  { jobId: string },
+  TContext
+> => {
+  const mutationKey = ["cancelDetectorProbe"];
+  const { mutation: mutationOptions, request: requestOptions } = options
+    ? options.mutation &&
+      "mutationKey" in options.mutation &&
+      options.mutation.mutationKey
+      ? options
+      : { ...options, mutation: { ...options.mutation, mutationKey } }
+    : { mutation: { mutationKey }, request: undefined };
+
+  const mutationFn: MutationFunction<
+    Awaited<ReturnType<typeof cancelDetectorProbe>>,
+    { jobId: string }
+  > = (props) => {
+    const { jobId } = props ?? {};
+
+    return cancelDetectorProbe(jobId, requestOptions);
+  };
+
+  return { mutationFn, ...mutationOptions };
+};
+
+export type CancelDetectorProbeMutationResult = NonNullable<
+  Awaited<ReturnType<typeof cancelDetectorProbe>>
+>;
+
+export type CancelDetectorProbeMutationError = ErrorType<HTTPValidationError>;
+
+/**
+ * @summary Cancel Detector Probe
+ */
+export const useCancelDetectorProbe = <
+  TError = ErrorType<HTTPValidationError>,
+  TContext = unknown,
+>(options?: {
+  mutation?: UseMutationOptions<
+    Awaited<ReturnType<typeof cancelDetectorProbe>>,
+    TError,
+    { jobId: string },
+    TContext
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}): UseMutationResult<
+  Awaited<ReturnType<typeof cancelDetectorProbe>>,
+  TError,
+  { jobId: string },
+  TContext
+> => {
+  return useMutation(getCancelDetectorProbeMutationOptions(options));
 };
 
 /**

@@ -27,6 +27,11 @@ import {
 } from "../src/lib/productionConfigFreeze";
 import type { ProductionCalibrationDraft } from "../src/lib/productionCalibration";
 import {
+  DETECTOR_PROBE_PROFILE_IDS,
+  detectorProbeCatalogFixture as strictDetectorProbeCatalogFixture,
+  detectorProbeJobFixture as strictDetectorProbeJobFixture,
+} from "../src/test/detectorProbeFixtures";
+import {
   acceptProductionTrial,
   appendProductionTrialAttempt,
   buildProductionTrialSubmission,
@@ -822,6 +827,10 @@ async function installTrialScenario(
     const url = new URL(request.url());
     const method = request.method();
     const path = url.pathname;
+    if (method === "GET" && path === "/api/detector-models") {
+      await route.fulfill({ json: detectorProbeCatalogFixture() });
+      return;
+    }
     if (method === "GET" && path === "/api/configs") {
       await route.fulfill({
         json: [
@@ -1176,6 +1185,90 @@ async function installTrialScenario(
       releaseDeriveGate?.();
     },
   };
+}
+
+const detectorProbeProfileIds = DETECTOR_PROBE_PROFILE_IDS;
+
+function detectorProbeCatalogFixture() {
+  const catalog = strictDetectorProbeCatalogFixture();
+  catalog.models[0].descriptor.display_name = "Official YOLO11n";
+  catalog.models[1].descriptor.display_name = "Official YOLO11s";
+  return catalog;
+}
+
+function readyAllZeroDetectorProbe(
+  jobId: string,
+  parentTrialId: string,
+  frameIndices: number[],
+) {
+  const job = strictDetectorProbeJobFixture(jobId, "ready", null, {
+    frameIndices,
+  });
+  job.frozen_request.parent_trial_id = parentTrialId;
+  if (job.report) job.report.lineage.parent_trial_id = parentTrialId;
+  return job;
+}
+
+async function installDetectorProbeScenario(page: Page) {
+  const createBodies: Array<Record<string, unknown>> = [];
+  const artifactReads: string[] = [];
+  const jobId = "probe-e2e-ready";
+  let job: ReturnType<typeof readyAllZeroDetectorProbe> | null = null;
+
+  await page.route("**/api/**", async (route) => {
+    const request = route.request();
+    const url = new URL(request.url());
+    const method = request.method();
+    if (method === "GET" && url.pathname === "/api/detector-models") {
+      await route.fulfill({ json: detectorProbeCatalogFixture() });
+      return;
+    }
+    if (method === "POST" && url.pathname === "/api/detector-probes") {
+      const body = request.postDataJSON() as Record<string, unknown>;
+      createBodies.push(body);
+      job = readyAllZeroDetectorProbe(
+        jobId,
+        String(body.parent_trial_id),
+        Array.isArray(body.frame_indices)
+          ? [...(body.frame_indices as number[])]
+          : [10, 20, 30, 40, 50, 60],
+      );
+      await route.fulfill({
+        status: 202,
+        json: {
+          job_id: jobId,
+          request_sha256: "e".repeat(64),
+          status: "queued",
+          status_url: `/api/v1/detector-probes/${jobId}`,
+          cancel_url: `/api/v1/detector-probes/${jobId}/cancel`,
+          retry_from_job_id: null,
+        },
+      });
+      return;
+    }
+    if (
+      method === "GET" &&
+      url.pathname === `/api/detector-probes/${jobId}` &&
+      job
+    ) {
+      await route.fulfill({ json: job });
+      return;
+    }
+    if (
+      method === "GET" &&
+      url.pathname.startsWith(`/api/detector-probes/${jobId}/artifacts/`)
+    ) {
+      artifactReads.push(url.pathname);
+      await route.fulfill({
+        contentType: "image/svg+xml",
+        body: squarePreviewSvg,
+      });
+      return;
+    }
+    await route.fallback();
+  });
+
+  return { artifactReads, createBodies };
 }
 
 function draftWithCompletedCalibration() {
@@ -4538,6 +4631,7 @@ test("blocks acceptance and exposes bounded tuning when every trial frame is los
   page,
 }) => {
   const scenario = await installTrialScenario(page, { allLost: true });
+  const detectorScenario = await installDetectorProbeScenario(page);
   await openTrialFromDraft(page);
 
   await page.getByRole("button", { name: "Start bounded trial" }).click();
@@ -4585,6 +4679,95 @@ test("blocks acceptance and exposes bounded tuning when every trial frame is los
   await expect(
     page.getByRole("button", { name: "Save and rerun" }),
   ).toBeEnabled();
+
+  const detectorProbe = page.getByTestId("production-detector-probe-panel");
+  await expect(detectorProbe).toBeVisible();
+  await expect(
+    detectorProbe.getByText("Official YOLO11n", { exact: true }),
+  ).toBeVisible();
+  await expect(
+    detectorProbe.getByText("Official YOLO11s", { exact: true }),
+  ).toBeVisible();
+  await detectorProbe
+    .getByRole("button", { name: "Run bounded comparison" })
+    .click();
+  await expect.poll(() => detectorScenario.createBodies.length).toBe(1);
+  expect(detectorScenario.createBodies[0]).toEqual({
+    parent_trial_id: runId,
+    profile_ids: [...detectorProbeProfileIds],
+    top_k: 5,
+  });
+  expect(JSON.stringify(detectorScenario.createBodies[0])).not.toContain(
+    "model_path",
+  );
+  await expect(
+    detectorProbe.getByText(
+      "No selected profile produced retained candidate boxes in this bounded comparison.",
+    ),
+  ).toBeVisible();
+  await expect(
+    detectorProbe.getByText(/Next, start the 20–50-frame feasibility check/),
+  ).toBeVisible();
+  await expect(
+    detectorProbe.getByRole("img", { name: "Source frame 10" }),
+  ).toBeVisible();
+  await expect(
+    detectorProbe.getByRole("img", {
+      name: `Raw detector overlay for ${detectorProbeProfileIds[0]} on frame 10`,
+    }),
+  ).toBeVisible();
+  const frameArtifactPaths = (frameIndex: number) => [
+    `/api/detector-probes/probe-e2e-ready/artifacts/source-${frameIndex}`,
+    ...detectorProbeProfileIds.map(
+      (profileId) =>
+        `/api/detector-probes/probe-e2e-ready/artifacts/overlay-${frameIndex}-${profileId}`,
+    ),
+  ];
+  await expect
+    .poll(() => [...detectorScenario.artifactReads].sort())
+    .toEqual(frameArtifactPaths(10).sort());
+  for (const frameIndex of [20, 30, 40, 50, 60]) {
+    await expect(
+      detectorProbe.getByRole("img", { name: `Source frame ${frameIndex}` }),
+    ).toHaveCount(0);
+    expect(
+      detectorScenario.artifactReads.some((path) =>
+        path.includes(`-${frameIndex}`),
+      ),
+    ).toBe(false);
+  }
+
+  await detectorProbe.getByRole("button", { name: "Next frame" }).click();
+  await expect(
+    detectorProbe.getByRole("img", { name: "Source frame 20" }),
+  ).toBeVisible();
+  await expect
+    .poll(() => [...detectorScenario.artifactReads].sort())
+    .toEqual([...frameArtifactPaths(10), ...frameArtifactPaths(20)].sort());
+  await expect(
+    detectorProbe.getByRole("img", { name: "Source frame 10" }),
+  ).toHaveCount(0);
+  for (const frameIndex of [30, 40, 50, 60]) {
+    await expect(
+      detectorProbe.getByRole("img", { name: `Source frame ${frameIndex}` }),
+    ).toHaveCount(0);
+    expect(
+      detectorScenario.artifactReads.some((path) =>
+        path.includes(`-${frameIndex}`),
+      ),
+    ).toBe(false);
+  }
+  await expect(
+    page.getByRole("button", { name: "Accept this trial" }),
+  ).toHaveCount(0);
+
+  await page.setViewportSize({ width: 375, height: 812 });
+  await expect(detectorProbe).toBeVisible();
+  const probeWidth = await detectorProbe.evaluate((element) => ({
+    client: element.clientWidth,
+    scroll: element.scrollWidth,
+  }));
+  expect(probeWidth.scroll).toBeLessThanOrEqual(probeWidth.client);
 
   await expectNoSeriousAccessibilityFindings(page);
   expect(runtimeErrors.get(page) ?? []).toEqual([]);

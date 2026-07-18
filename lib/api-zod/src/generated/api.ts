@@ -836,6 +836,4108 @@ export const UpdateConfigResponse = zod.object({
 });
 
 /**
+ * @summary List Detector Models
+ */
+export const listDetectorModelsResponseModelsItemDescriptorWeightsSha256RegExp =
+  new RegExp("^[0-9a-f]{64}$");
+export const listDetectorModelsResponseModelsItemDescriptorWeightsSizeBytesExclusiveMin = 0;
+
+export const listDetectorModelsResponseModelsItemDescriptorDescriptorSha256RegExp =
+  new RegExp("^[0-9a-f]{64}$");
+export const listDetectorModelsResponseModelsItemDescriptorImportManifestSha256OneRegExp =
+  new RegExp("^[0-9a-f]{64}$");
+export const listDetectorModelsResponseModelsItemAvailabilityObservationsFileEvidenceSha256OneRegExp =
+  new RegExp("^[0-9a-f]{64}$");
+export const listDetectorModelsResponseModelsItemAvailabilityObservationsDigestEvidenceSha256OneRegExp =
+  new RegExp("^[0-9a-f]{64}$");
+export const listDetectorModelsResponseModelsItemAvailabilityObservationsClassMapEvidenceSha256OneRegExp =
+  new RegExp("^[0-9a-f]{64}$");
+export const listDetectorModelsResponseModelsItemAvailabilityObservationsLicenseEvidenceSha256OneRegExp =
+  new RegExp("^[0-9a-f]{64}$");
+export const listDetectorModelsResponseModelsItemAvailabilityObservationsRuntimeLoadEvidenceSha256OneRegExp =
+  new RegExp("^[0-9a-f]{64}$");
+export const listDetectorModelsResponseProfilesItemModelDescriptorSha256RegExp =
+  new RegExp("^[0-9a-f]{64}$");
+export const listDetectorModelsResponseProfilesItemSettingsConfidenceThresholdMin = 0;
+export const listDetectorModelsResponseProfilesItemSettingsConfidenceThresholdMax = 1;
+
+export const listDetectorModelsResponseProfilesItemSettingsImageSizeExclusiveMin = 0;
+
+export const listDetectorModelsResponseProfilesItemSettingsSliceHeightOneExclusiveMin = 0;
+
+export const listDetectorModelsResponseProfilesItemSettingsSliceWidthOneExclusiveMin = 0;
+
+export const listDetectorModelsResponseProfilesItemSettingsOverlapHeightRatioOneMin = 0;
+export const listDetectorModelsResponseProfilesItemSettingsOverlapHeightRatioOneExclusiveMax = 1;
+
+export const listDetectorModelsResponseProfilesItemSettingsOverlapWidthRatioOneMin = 0;
+export const listDetectorModelsResponseProfilesItemSettingsOverlapWidthRatioOneExclusiveMax = 1;
+
+export const listDetectorModelsResponseProfilesItemSettingsPostprocessMatchThresholdOneMin = 0;
+export const listDetectorModelsResponseProfilesItemSettingsPostprocessMatchThresholdOneMax = 1;
+
+export const listDetectorModelsResponseProfilesItemProfileSha256RegExp =
+  new RegExp("^[0-9a-f]{64}$");
+
+export const ListDetectorModelsResponse = zod.object({
+  schema_version: zod.string(),
+  artifact_type: zod.literal("ball_detector_development_v1"),
+  models: zod.array(
+    zod.object({
+      descriptor: zod.object({
+        schema_version: zod.string(),
+        artifact_type: zod.literal("detector_model_descriptor"),
+        model_id: zod.string(),
+        version: zod.string(),
+        model_version: zod.string(),
+        display_name: zod.string(),
+        architecture_family: zod.string(),
+        weights: zod.object({
+          relative_path: zod.string(),
+          sha256: zod
+            .string()
+            .regex(
+              listDetectorModelsResponseModelsItemDescriptorWeightsSha256RegExp,
+            ),
+          size_bytes: zod
+            .number()
+            .gt(
+              listDetectorModelsResponseModelsItemDescriptorWeightsSizeBytesExclusiveMin,
+            ),
+        }),
+        source: zod.object({
+          project: zod.string(),
+          version: zod.string(),
+          asset_release: zod.string(),
+          weight_url: zod.string(),
+          acquisition_method: zod.string(),
+          access_requirement: zod.string(),
+        }),
+        checkpoint: zod
+          .union([zod.record(zod.string(), zod.unknown()), zod.null()])
+          .optional(),
+        runtime_contract: zod.record(zod.string(), zod.unknown()),
+        class_names: zod.array(zod.string()),
+        class_map: zod.record(zod.string(), zod.string()),
+        expected_input: zod.record(zod.string(), zod.unknown()),
+        execution: zod
+          .union([zod.record(zod.string(), zod.unknown()), zod.null()])
+          .optional(),
+        memory_envelope: zod
+          .union([zod.record(zod.string(), zod.unknown()), zod.null()])
+          .optional(),
+        licenses: zod.object({
+          dataset: zod.object({
+            name: zod.string(),
+            spdx_id: zod.string(),
+            url: zod.string(),
+            reviewed: zod.boolean(),
+            approved_for_local_probe: zod.boolean(),
+          }),
+          model: zod.object({
+            name: zod.string(),
+            spdx_id: zod.string(),
+            url: zod.string(),
+            reviewed: zod.boolean(),
+            approved_for_local_probe: zod.boolean(),
+          }),
+          runtime: zod.object({
+            name: zod.string(),
+            spdx_id: zod.string(),
+            url: zod.string(),
+            reviewed: zod.boolean(),
+            approved_for_local_probe: zod.boolean(),
+          }),
+          deployment: zod.object({
+            name: zod.string(),
+            spdx_id: zod.string(),
+            url: zod.string(),
+            reviewed: zod.boolean(),
+            approved_for_local_probe: zod.boolean(),
+          }),
+        }),
+        egress: zod.object({
+          frames_leave_local_machine: zod.boolean(),
+          destination: zod.union([zod.string(), zod.null()]),
+          operator_consent: zod.enum([
+            "not_required",
+            "granted",
+            "required_not_granted",
+          ]),
+        }),
+        lifecycle_state: zod.enum([
+          "unverified",
+          "feasibility_passed",
+          "development_candidate",
+          "source_segment_qualified",
+          "camera_qualified",
+          "retired",
+        ]),
+        bindings: zod.record(zod.string(), zod.unknown()),
+        descriptor_sha256: zod
+          .string()
+          .regex(
+            listDetectorModelsResponseModelsItemDescriptorDescriptorSha256RegExp,
+          ),
+        import_manifest_sha256: zod
+          .union([
+            zod
+              .string()
+              .regex(
+                listDetectorModelsResponseModelsItemDescriptorImportManifestSha256OneRegExp,
+              ),
+            zod.null(),
+          ])
+          .optional(),
+      }),
+      availability: zod.object({
+        status: zod.enum(["available", "unavailable", "blocked"]),
+        reason_codes: zod.array(zod.string()),
+        observations: zod.object({
+          file: zod.object({
+            status: zod.enum(["pass", "fail", "not_run"]),
+            reason: zod.string(),
+            installed_runtime: zod
+              .union([
+                zod.record(zod.string(), zod.union([zod.string(), zod.null()])),
+                zod.null(),
+              ])
+              .optional(),
+            evidence_sha256: zod
+              .union([
+                zod
+                  .string()
+                  .regex(
+                    listDetectorModelsResponseModelsItemAvailabilityObservationsFileEvidenceSha256OneRegExp,
+                  ),
+                zod.null(),
+              ])
+              .optional(),
+          }),
+          digest: zod.object({
+            status: zod.enum(["pass", "fail", "not_run"]),
+            reason: zod.string(),
+            installed_runtime: zod
+              .union([
+                zod.record(zod.string(), zod.union([zod.string(), zod.null()])),
+                zod.null(),
+              ])
+              .optional(),
+            evidence_sha256: zod
+              .union([
+                zod
+                  .string()
+                  .regex(
+                    listDetectorModelsResponseModelsItemAvailabilityObservationsDigestEvidenceSha256OneRegExp,
+                  ),
+                zod.null(),
+              ])
+              .optional(),
+          }),
+          class_map: zod.object({
+            status: zod.enum(["pass", "fail", "not_run"]),
+            reason: zod.string(),
+            installed_runtime: zod
+              .union([
+                zod.record(zod.string(), zod.union([zod.string(), zod.null()])),
+                zod.null(),
+              ])
+              .optional(),
+            evidence_sha256: zod
+              .union([
+                zod
+                  .string()
+                  .regex(
+                    listDetectorModelsResponseModelsItemAvailabilityObservationsClassMapEvidenceSha256OneRegExp,
+                  ),
+                zod.null(),
+              ])
+              .optional(),
+          }),
+          license: zod.object({
+            status: zod.enum(["pass", "fail", "not_run"]),
+            reason: zod.string(),
+            installed_runtime: zod
+              .union([
+                zod.record(zod.string(), zod.union([zod.string(), zod.null()])),
+                zod.null(),
+              ])
+              .optional(),
+            evidence_sha256: zod
+              .union([
+                zod
+                  .string()
+                  .regex(
+                    listDetectorModelsResponseModelsItemAvailabilityObservationsLicenseEvidenceSha256OneRegExp,
+                  ),
+                zod.null(),
+              ])
+              .optional(),
+          }),
+          runtime_load: zod.object({
+            status: zod.enum(["pass", "fail", "not_run"]),
+            reason: zod.string(),
+            installed_runtime: zod
+              .union([
+                zod.record(zod.string(), zod.union([zod.string(), zod.null()])),
+                zod.null(),
+              ])
+              .optional(),
+            evidence_sha256: zod
+              .union([
+                zod
+                  .string()
+                  .regex(
+                    listDetectorModelsResponseModelsItemAvailabilityObservationsRuntimeLoadEvidenceSha256OneRegExp,
+                  ),
+                zod.null(),
+              ])
+              .optional(),
+          }),
+        }),
+        observed_weight_path: zod.union([zod.string(), zod.null()]).optional(),
+      }),
+      qualification: zod.object({
+        trial_eligible: zod.boolean(),
+        source_segment_qualified: zod.boolean(),
+        camera_qualified: zod.boolean(),
+      }),
+      selectable_for_probe: zod.boolean(),
+    }),
+  ),
+  profiles: zod.array(
+    zod.object({
+      schema_version: zod.string(),
+      artifact_type: zod.literal("detector_profile"),
+      profile_id: zod.string(),
+      version: zod.string(),
+      model_id: zod.string(),
+      model_version: zod.string(),
+      model_descriptor_sha256: zod
+        .string()
+        .regex(
+          listDetectorModelsResponseProfilesItemModelDescriptorSha256RegExp,
+        ),
+      mode: zod.enum(["direct", "sahi"]),
+      settings: zod.object({
+        confidence_threshold: zod
+          .number()
+          .min(
+            listDetectorModelsResponseProfilesItemSettingsConfidenceThresholdMin,
+          )
+          .max(
+            listDetectorModelsResponseProfilesItemSettingsConfidenceThresholdMax,
+          ),
+        image_size: zod
+          .number()
+          .gt(
+            listDetectorModelsResponseProfilesItemSettingsImageSizeExclusiveMin,
+          ),
+        use_half: zod.boolean(),
+        allowed_labels: zod.array(zod.string()),
+        top_k: zod.number(),
+        slice_height: zod
+          .union([
+            zod
+              .number()
+              .gt(
+                listDetectorModelsResponseProfilesItemSettingsSliceHeightOneExclusiveMin,
+              ),
+            zod.null(),
+          ])
+          .optional(),
+        slice_width: zod
+          .union([
+            zod
+              .number()
+              .gt(
+                listDetectorModelsResponseProfilesItemSettingsSliceWidthOneExclusiveMin,
+              ),
+            zod.null(),
+          ])
+          .optional(),
+        overlap_height_ratio: zod
+          .union([
+            zod
+              .number()
+              .min(
+                listDetectorModelsResponseProfilesItemSettingsOverlapHeightRatioOneMin,
+              )
+              .lt(
+                listDetectorModelsResponseProfilesItemSettingsOverlapHeightRatioOneExclusiveMax,
+              ),
+            zod.null(),
+          ])
+          .optional(),
+        overlap_width_ratio: zod
+          .union([
+            zod
+              .number()
+              .min(
+                listDetectorModelsResponseProfilesItemSettingsOverlapWidthRatioOneMin,
+              )
+              .lt(
+                listDetectorModelsResponseProfilesItemSettingsOverlapWidthRatioOneExclusiveMax,
+              ),
+            zod.null(),
+          ])
+          .optional(),
+        perform_standard_pred: zod
+          .union([zod.boolean(), zod.null()])
+          .optional(),
+        postprocess_type: zod.union([zod.string(), zod.null()]).optional(),
+        postprocess_match_metric: zod
+          .union([zod.string(), zod.null()])
+          .optional(),
+        postprocess_match_threshold: zod
+          .union([
+            zod
+              .number()
+              .min(
+                listDetectorModelsResponseProfilesItemSettingsPostprocessMatchThresholdOneMin,
+              )
+              .max(
+                listDetectorModelsResponseProfilesItemSettingsPostprocessMatchThresholdOneMax,
+              ),
+            zod.null(),
+          ])
+          .optional(),
+      }),
+      profile_sha256: zod
+        .string()
+        .regex(listDetectorModelsResponseProfilesItemProfileSha256RegExp),
+      recommended: zod.boolean(),
+      availability: zod.object({
+        status: zod.enum(["available", "unavailable", "blocked"]),
+        reason_codes: zod.array(zod.string()),
+        runtime: zod
+          .union([
+            zod.object({
+              name: zod.string(),
+              installed_version: zod.union([zod.string(), zod.null()]),
+              load_smoke: zod.boolean(),
+            }),
+            zod.null(),
+          ])
+          .optional(),
+      }),
+      selectable_for_probe: zod.boolean(),
+    }),
+  ),
+  catalog_findings: zod.array(
+    zod.object({
+      finding_id: zod.string(),
+      display_name: zod.string(),
+      source: zod.object({
+        project: zod.string(),
+        version: zod.union([zod.string(), zod.null()]),
+        url: zod.string(),
+      }),
+      architecture_family: zod.string(),
+      access: zod.object({
+        method: zod.string(),
+        account_or_plan_required: zod.string(),
+        local_weights_validated: zod.boolean(),
+      }),
+      licenses: zod.object({
+        dataset: zod.object({
+          status: zod.enum(["review_required", "unavailable", "unknown"]),
+          name: zod.union([zod.string(), zod.null()]),
+          spdx_id: zod.union([zod.string(), zod.null()]),
+          url: zod.union([zod.string(), zod.null()]),
+          approved_for_local_probe: zod.boolean(),
+        }),
+        model: zod.object({
+          status: zod.enum(["review_required", "unavailable", "unknown"]),
+          name: zod.union([zod.string(), zod.null()]),
+          spdx_id: zod.union([zod.string(), zod.null()]),
+          url: zod.union([zod.string(), zod.null()]),
+          approved_for_local_probe: zod.boolean(),
+        }),
+        runtime: zod.object({
+          status: zod.enum(["review_required", "unavailable", "unknown"]),
+          name: zod.union([zod.string(), zod.null()]),
+          spdx_id: zod.union([zod.string(), zod.null()]),
+          url: zod.union([zod.string(), zod.null()]),
+          approved_for_local_probe: zod.boolean(),
+        }),
+        deployment: zod.object({
+          status: zod.enum(["review_required", "unavailable", "unknown"]),
+          name: zod.union([zod.string(), zod.null()]),
+          spdx_id: zod.union([zod.string(), zod.null()]),
+          url: zod.union([zod.string(), zod.null()]),
+          approved_for_local_probe: zod.boolean(),
+        }),
+      }),
+      egress: zod.object({
+        frames_leave_local_machine: zod.literal(
+          "unknown_until_access_method_selected",
+        ),
+        destination: zod.union([zod.string(), zod.null()]),
+        operator_consent: zod.literal("required_before_external_inference"),
+      }),
+      selectable: zod.boolean(),
+      availability: zod.object({
+        status: zod.literal("unavailable"),
+        reason_codes: zod.array(zod.string()).min(1),
+      }),
+    }),
+  ),
+});
+
+/**
+ * @summary Import Detector Model
+ */
+export const importDetectorModelBodyPackageRelativePathMax = 500;
+
+export const importDetectorModelBodyManifestSha256RegExp = new RegExp(
+  "^[0-9a-f]{64}$",
+);
+
+export const ImportDetectorModelBody = zod.object({
+  package_relative_path: zod
+    .string()
+    .min(1)
+    .max(importDetectorModelBodyPackageRelativePathMax),
+  manifest_sha256: zod
+    .string()
+    .regex(importDetectorModelBodyManifestSha256RegExp),
+});
+
+export const importDetectorModelResponseModelDescriptorWeightsSha256RegExp =
+  new RegExp("^[0-9a-f]{64}$");
+export const importDetectorModelResponseModelDescriptorWeightsSizeBytesExclusiveMin = 0;
+
+export const importDetectorModelResponseModelDescriptorDescriptorSha256RegExp =
+  new RegExp("^[0-9a-f]{64}$");
+export const importDetectorModelResponseModelDescriptorImportManifestSha256OneRegExp =
+  new RegExp("^[0-9a-f]{64}$");
+export const importDetectorModelResponseModelAvailabilityObservationsFileEvidenceSha256OneRegExp =
+  new RegExp("^[0-9a-f]{64}$");
+export const importDetectorModelResponseModelAvailabilityObservationsDigestEvidenceSha256OneRegExp =
+  new RegExp("^[0-9a-f]{64}$");
+export const importDetectorModelResponseModelAvailabilityObservationsClassMapEvidenceSha256OneRegExp =
+  new RegExp("^[0-9a-f]{64}$");
+export const importDetectorModelResponseModelAvailabilityObservationsLicenseEvidenceSha256OneRegExp =
+  new RegExp("^[0-9a-f]{64}$");
+export const importDetectorModelResponseModelAvailabilityObservationsRuntimeLoadEvidenceSha256OneRegExp =
+  new RegExp("^[0-9a-f]{64}$");
+
+export const ImportDetectorModelResponse = zod.object({
+  created: zod.boolean(),
+  model: zod.object({
+    descriptor: zod.object({
+      schema_version: zod.string(),
+      artifact_type: zod.literal("detector_model_descriptor"),
+      model_id: zod.string(),
+      version: zod.string(),
+      model_version: zod.string(),
+      display_name: zod.string(),
+      architecture_family: zod.string(),
+      weights: zod.object({
+        relative_path: zod.string(),
+        sha256: zod
+          .string()
+          .regex(importDetectorModelResponseModelDescriptorWeightsSha256RegExp),
+        size_bytes: zod
+          .number()
+          .gt(
+            importDetectorModelResponseModelDescriptorWeightsSizeBytesExclusiveMin,
+          ),
+      }),
+      source: zod.object({
+        project: zod.string(),
+        version: zod.string(),
+        asset_release: zod.string(),
+        weight_url: zod.string(),
+        acquisition_method: zod.string(),
+        access_requirement: zod.string(),
+      }),
+      checkpoint: zod
+        .union([zod.record(zod.string(), zod.unknown()), zod.null()])
+        .optional(),
+      runtime_contract: zod.record(zod.string(), zod.unknown()),
+      class_names: zod.array(zod.string()),
+      class_map: zod.record(zod.string(), zod.string()),
+      expected_input: zod.record(zod.string(), zod.unknown()),
+      execution: zod
+        .union([zod.record(zod.string(), zod.unknown()), zod.null()])
+        .optional(),
+      memory_envelope: zod
+        .union([zod.record(zod.string(), zod.unknown()), zod.null()])
+        .optional(),
+      licenses: zod.object({
+        dataset: zod.object({
+          name: zod.string(),
+          spdx_id: zod.string(),
+          url: zod.string(),
+          reviewed: zod.boolean(),
+          approved_for_local_probe: zod.boolean(),
+        }),
+        model: zod.object({
+          name: zod.string(),
+          spdx_id: zod.string(),
+          url: zod.string(),
+          reviewed: zod.boolean(),
+          approved_for_local_probe: zod.boolean(),
+        }),
+        runtime: zod.object({
+          name: zod.string(),
+          spdx_id: zod.string(),
+          url: zod.string(),
+          reviewed: zod.boolean(),
+          approved_for_local_probe: zod.boolean(),
+        }),
+        deployment: zod.object({
+          name: zod.string(),
+          spdx_id: zod.string(),
+          url: zod.string(),
+          reviewed: zod.boolean(),
+          approved_for_local_probe: zod.boolean(),
+        }),
+      }),
+      egress: zod.object({
+        frames_leave_local_machine: zod.boolean(),
+        destination: zod.union([zod.string(), zod.null()]),
+        operator_consent: zod.enum([
+          "not_required",
+          "granted",
+          "required_not_granted",
+        ]),
+      }),
+      lifecycle_state: zod.enum([
+        "unverified",
+        "feasibility_passed",
+        "development_candidate",
+        "source_segment_qualified",
+        "camera_qualified",
+        "retired",
+      ]),
+      bindings: zod.record(zod.string(), zod.unknown()),
+      descriptor_sha256: zod
+        .string()
+        .regex(
+          importDetectorModelResponseModelDescriptorDescriptorSha256RegExp,
+        ),
+      import_manifest_sha256: zod
+        .union([
+          zod
+            .string()
+            .regex(
+              importDetectorModelResponseModelDescriptorImportManifestSha256OneRegExp,
+            ),
+          zod.null(),
+        ])
+        .optional(),
+    }),
+    availability: zod.object({
+      status: zod.enum(["available", "unavailable", "blocked"]),
+      reason_codes: zod.array(zod.string()),
+      observations: zod.object({
+        file: zod.object({
+          status: zod.enum(["pass", "fail", "not_run"]),
+          reason: zod.string(),
+          installed_runtime: zod
+            .union([
+              zod.record(zod.string(), zod.union([zod.string(), zod.null()])),
+              zod.null(),
+            ])
+            .optional(),
+          evidence_sha256: zod
+            .union([
+              zod
+                .string()
+                .regex(
+                  importDetectorModelResponseModelAvailabilityObservationsFileEvidenceSha256OneRegExp,
+                ),
+              zod.null(),
+            ])
+            .optional(),
+        }),
+        digest: zod.object({
+          status: zod.enum(["pass", "fail", "not_run"]),
+          reason: zod.string(),
+          installed_runtime: zod
+            .union([
+              zod.record(zod.string(), zod.union([zod.string(), zod.null()])),
+              zod.null(),
+            ])
+            .optional(),
+          evidence_sha256: zod
+            .union([
+              zod
+                .string()
+                .regex(
+                  importDetectorModelResponseModelAvailabilityObservationsDigestEvidenceSha256OneRegExp,
+                ),
+              zod.null(),
+            ])
+            .optional(),
+        }),
+        class_map: zod.object({
+          status: zod.enum(["pass", "fail", "not_run"]),
+          reason: zod.string(),
+          installed_runtime: zod
+            .union([
+              zod.record(zod.string(), zod.union([zod.string(), zod.null()])),
+              zod.null(),
+            ])
+            .optional(),
+          evidence_sha256: zod
+            .union([
+              zod
+                .string()
+                .regex(
+                  importDetectorModelResponseModelAvailabilityObservationsClassMapEvidenceSha256OneRegExp,
+                ),
+              zod.null(),
+            ])
+            .optional(),
+        }),
+        license: zod.object({
+          status: zod.enum(["pass", "fail", "not_run"]),
+          reason: zod.string(),
+          installed_runtime: zod
+            .union([
+              zod.record(zod.string(), zod.union([zod.string(), zod.null()])),
+              zod.null(),
+            ])
+            .optional(),
+          evidence_sha256: zod
+            .union([
+              zod
+                .string()
+                .regex(
+                  importDetectorModelResponseModelAvailabilityObservationsLicenseEvidenceSha256OneRegExp,
+                ),
+              zod.null(),
+            ])
+            .optional(),
+        }),
+        runtime_load: zod.object({
+          status: zod.enum(["pass", "fail", "not_run"]),
+          reason: zod.string(),
+          installed_runtime: zod
+            .union([
+              zod.record(zod.string(), zod.union([zod.string(), zod.null()])),
+              zod.null(),
+            ])
+            .optional(),
+          evidence_sha256: zod
+            .union([
+              zod
+                .string()
+                .regex(
+                  importDetectorModelResponseModelAvailabilityObservationsRuntimeLoadEvidenceSha256OneRegExp,
+                ),
+              zod.null(),
+            ])
+            .optional(),
+        }),
+      }),
+      observed_weight_path: zod.union([zod.string(), zod.null()]).optional(),
+    }),
+    qualification: zod.object({
+      trial_eligible: zod.boolean(),
+      source_segment_qualified: zod.boolean(),
+      camera_qualified: zod.boolean(),
+    }),
+    selectable_for_probe: zod.boolean(),
+  }),
+});
+
+/**
+ * @summary Create Detector Probe
+ */
+export const createDetectorProbeBodyParentTrialIdRegExp = new RegExp(
+  "^[a-z0-9][a-z0-9._-]{0,119}$",
+);
+export const createDetectorProbeBodyProfileIdsItemRegExp = new RegExp(
+  "^[a-z0-9][a-z0-9._-]{0,119}$",
+);
+export const createDetectorProbeBodyProfileIdsMin = 2;
+export const createDetectorProbeBodyProfileIdsMax = 6;
+
+export const createDetectorProbeBodyFrameIndicesOneItemMin = 0;
+
+export const createDetectorProbeBodyFrameIndicesOneMax = 50;
+
+export const createDetectorProbeBodyTopKDefault = 5;
+export const createDetectorProbeBodyRetryFromJobIdOneRegExp = new RegExp(
+  "^[a-z0-9][a-z0-9._-]{0,119}$",
+);
+
+export const CreateDetectorProbeBody = zod.object({
+  parent_trial_id: zod
+    .string()
+    .regex(createDetectorProbeBodyParentTrialIdRegExp),
+  profile_ids: zod
+    .array(zod.string().regex(createDetectorProbeBodyProfileIdsItemRegExp))
+    .min(createDetectorProbeBodyProfileIdsMin)
+    .max(createDetectorProbeBodyProfileIdsMax),
+  frame_indices: zod
+    .union([
+      zod
+        .array(zod.number().min(createDetectorProbeBodyFrameIndicesOneItemMin))
+        .min(1)
+        .max(createDetectorProbeBodyFrameIndicesOneMax),
+      zod.null(),
+    ])
+    .optional(),
+  top_k: zod.number().default(createDetectorProbeBodyTopKDefault),
+  retry_from_job_id: zod
+    .union([
+      zod.string().regex(createDetectorProbeBodyRetryFromJobIdOneRegExp),
+      zod.null(),
+    ])
+    .optional(),
+});
+
+/**
+ * @summary Get Detector Probe
+ */
+export const GetDetectorProbeParams = zod.object({
+  job_id: zod.coerce.string(),
+});
+
+export const getDetectorProbeResponseJobIdRegExp = new RegExp(
+  "^[a-z0-9][a-z0-9._-]{0,119}$",
+);
+export const getDetectorProbeResponseIdempotencyKeyRegExp = new RegExp(
+  "^[0-9a-f]{64}$",
+);
+export const getDetectorProbeResponseRequestSha256RegExp = new RegExp(
+  "^[0-9a-f]{64}$",
+);
+export const getDetectorProbeResponseIntentSha256RegExp = new RegExp(
+  "^[0-9a-f]{64}$",
+);
+export const getDetectorProbeResponseFrozenProfilesSha256RegExp = new RegExp(
+  "^[0-9a-f]{64}$",
+);
+export const getDetectorProbeResponseProgressCompletedMin = 0;
+
+export const getDetectorProbeResponseProgressTotalMin = 0;
+
+export const getDetectorProbeResponseFrozenRequestParentTrialIdRegExp =
+  new RegExp("^[a-z0-9][a-z0-9._-]{0,119}$");
+export const getDetectorProbeResponseFrozenRequestSourceIdRegExp = new RegExp(
+  "^[a-z0-9][a-z0-9._-]{0,119}$",
+);
+export const getDetectorProbeResponseFrozenRequestSourceSha256RegExp =
+  new RegExp("^[0-9a-f]{64}$");
+export const getDetectorProbeResponseFrozenRequestSourceFileIdentitySha256RegExp =
+  new RegExp("^[0-9a-f]{64}$");
+export const getDetectorProbeResponseFrozenRequestSourceSizeBytesExclusiveMin = 0;
+
+export const getDetectorProbeResponseFrozenRequestSourceWidthExclusiveMin = 0;
+
+export const getDetectorProbeResponseFrozenRequestSourceHeightExclusiveMin = 0;
+
+export const getDetectorProbeResponseFrozenRequestSourceFrameCountExclusiveMin = 0;
+
+export const getDetectorProbeResponseFrozenRequestTrackingContractSha256RegExp =
+  new RegExp("^[0-9a-f]{64}$");
+export const getDetectorProbeResponseFrozenRequestBaseConfigSha256RegExp =
+  new RegExp("^[0-9a-f]{64}$");
+export const getDetectorProbeResponseFrozenRequestEffectiveConfigSha256RegExp =
+  new RegExp("^[0-9a-f]{64}$");
+export const getDetectorProbeResponseFrozenRequestTrialIntentSha256RegExp =
+  new RegExp("^[0-9a-f]{64}$");
+export const getDetectorProbeResponseFrozenRequestTuningPatchBindingValuesSha256RegExp =
+  new RegExp("^[0-9a-f]{64}$");
+export const getDetectorProbeResponseFrozenRequestTuningPatchSha256RegExp =
+  new RegExp("^[0-9a-f]{64}$");
+export const getDetectorProbeResponseFrozenRequestProfileIdsItemRegExp =
+  new RegExp("^[a-z0-9][a-z0-9._-]{0,119}$");
+export const getDetectorProbeResponseFrozenRequestProfileIdsMin = 2;
+export const getDetectorProbeResponseFrozenRequestProfileIdsMax = 6;
+
+export const getDetectorProbeResponseFrozenRequestFrozenProfilesSha256RegExp =
+  new RegExp("^[0-9a-f]{64}$");
+export const getDetectorProbeResponseFrozenRequestProfileBindingsItemProfileIdRegExp =
+  new RegExp("^[a-z0-9][a-z0-9._-]{0,119}$");
+export const getDetectorProbeResponseFrozenRequestProfileBindingsItemProfileSha256RegExp =
+  new RegExp("^[0-9a-f]{64}$");
+export const getDetectorProbeResponseFrozenRequestProfileBindingsItemModelIdRegExp =
+  new RegExp("^[a-z0-9][a-z0-9._-]{0,119}$");
+export const getDetectorProbeResponseFrozenRequestProfileBindingsItemModelDescriptorSha256RegExp =
+  new RegExp("^[0-9a-f]{64}$");
+export const getDetectorProbeResponseFrozenRequestProfileBindingsItemWeightsSha256RegExp =
+  new RegExp("^[0-9a-f]{64}$");
+export const getDetectorProbeResponseFrozenRequestProfileBindingsItemWeightsSizeBytesExclusiveMin = 0;
+
+export const getDetectorProbeResponseFrozenRequestProfileBindingsMin = 2;
+export const getDetectorProbeResponseFrozenRequestProfileBindingsMax = 6;
+
+export const getDetectorProbeResponseFrozenRequestExecutionBundleRuntimeContractSha256RegExp =
+  new RegExp("^[0-9a-f]{64}$");
+export const getDetectorProbeResponseFrozenRequestExecutionBundleExecutionEnvironmentCudaDeviceCountMin = 0;
+
+export const getDetectorProbeResponseFrozenRequestExecutionBundleExecutionEnvironmentCudnnVersionOneMin = 0;
+
+export const getDetectorProbeResponseFrozenRequestExecutionBundleExecutionEnvironmentGpuTotalMemoryBytesOneExclusiveMin = 0;
+
+export const getDetectorProbeResponseFrozenRequestExecutionBundleExecutionEnvironmentCudaDriverVersionOneMin = 0;
+
+export const getDetectorProbeResponseFrozenRequestExecutionBundleExecutionEnvironmentOpencvBuildInformationSha256RegExp =
+  new RegExp("^[0-9a-f]{64}$");
+export const getDetectorProbeResponseFrozenRequestExecutionBundleExecutionEnvironmentDecoderFingerprintSha256RegExp =
+  new RegExp("^[0-9a-f]{64}$");
+export const getDetectorProbeResponseFrozenRequestExecutionBundleRuntimeEnvironmentSha256RegExp =
+  new RegExp("^[0-9a-f]{64}$");
+export const getDetectorProbeResponseFrozenRequestExecutionBundleCodeBundleFilesRegExpOne =
+  new RegExp("^[0-9a-f]{64}$");
+export const getDetectorProbeResponseFrozenRequestExecutionBundleCodeBundleSha256RegExp =
+  new RegExp("^[0-9a-f]{64}$");
+export const getDetectorProbeResponseFrozenRequestExecutionBundleCodeCommitOneRegExp =
+  new RegExp("^(?:[0-9a-f]{40}|[0-9a-f]{64})$");
+export const getDetectorProbeResponseFrozenRequestExecutionBundleCodeCommitBlobFilesOneRegExpOne =
+  new RegExp("^[0-9a-f]{64}$");
+export const getDetectorProbeResponseFrozenRequestExecutionBundleCodeCommitBlobBundleSha256OneRegExp =
+  new RegExp("^[0-9a-f]{64}$");
+export const getDetectorProbeResponseFrozenRequestExecutionBundleFrozenProfilesSha256RegExp =
+  new RegExp("^[0-9a-f]{64}$");
+export const getDetectorProbeResponseFrozenRequestExecutionBundleSha256RegExp =
+  new RegExp("^[0-9a-f]{64}$");
+export const getDetectorProbeResponseFrozenRequestRuntimeEnvironmentSha256RegExp =
+  new RegExp("^[0-9a-f]{64}$");
+export const getDetectorProbeResponseFrozenRequestFrameIndicesItemMin = 0;
+
+export const getDetectorProbeResponseFrozenRequestFrameIndicesMax = 50;
+
+export const getDetectorProbeResponseFrozenRequestRetryFromJobIdOneRegExp =
+  new RegExp("^[a-z0-9][a-z0-9._-]{0,119}$");
+export const getDetectorProbeResponseFrozenProfilesItemModelDescriptorSha256RegExp =
+  new RegExp("^[0-9a-f]{64}$");
+export const getDetectorProbeResponseFrozenProfilesItemSettingsConfidenceThresholdMin = 0;
+export const getDetectorProbeResponseFrozenProfilesItemSettingsConfidenceThresholdMax = 1;
+
+export const getDetectorProbeResponseFrozenProfilesItemSettingsImageSizeExclusiveMin = 0;
+
+export const getDetectorProbeResponseFrozenProfilesItemSettingsSliceHeightOneExclusiveMin = 0;
+
+export const getDetectorProbeResponseFrozenProfilesItemSettingsSliceWidthOneExclusiveMin = 0;
+
+export const getDetectorProbeResponseFrozenProfilesItemSettingsOverlapHeightRatioOneMin = 0;
+export const getDetectorProbeResponseFrozenProfilesItemSettingsOverlapHeightRatioOneExclusiveMax = 1;
+
+export const getDetectorProbeResponseFrozenProfilesItemSettingsOverlapWidthRatioOneMin = 0;
+export const getDetectorProbeResponseFrozenProfilesItemSettingsOverlapWidthRatioOneExclusiveMax = 1;
+
+export const getDetectorProbeResponseFrozenProfilesItemSettingsPostprocessMatchThresholdOneMin = 0;
+export const getDetectorProbeResponseFrozenProfilesItemSettingsPostprocessMatchThresholdOneMax = 1;
+
+export const getDetectorProbeResponseFrozenProfilesItemProfileSha256RegExp =
+  new RegExp("^[0-9a-f]{64}$");
+export const getDetectorProbeResponseFrozenProfilesItemModelDescriptorWeightsSha256RegExp =
+  new RegExp("^[0-9a-f]{64}$");
+export const getDetectorProbeResponseFrozenProfilesItemModelDescriptorWeightsSizeBytesExclusiveMin = 0;
+
+export const getDetectorProbeResponseFrozenProfilesItemModelDescriptorDescriptorSha256RegExp =
+  new RegExp("^[0-9a-f]{64}$");
+export const getDetectorProbeResponseFrozenProfilesItemModelDescriptorImportManifestSha256OneRegExp =
+  new RegExp("^[0-9a-f]{64}$");
+export const getDetectorProbeResponseFrozenProfilesMin = 2;
+export const getDetectorProbeResponseFrozenProfilesMax = 6;
+
+export const getDetectorProbeResponseRetryFromJobIdOneRegExp = new RegExp(
+  "^[a-z0-9][a-z0-9._-]{0,119}$",
+);
+export const getDetectorProbeResponseReportOneJobIdRegExp = new RegExp(
+  "^[a-z0-9][a-z0-9._-]{0,119}$",
+);
+export const getDetectorProbeResponseReportOneRequestSha256RegExp = new RegExp(
+  "^[0-9a-f]{64}$",
+);
+export const getDetectorProbeResponseReportOneSourceSourceIdRegExp = new RegExp(
+  "^[a-z0-9][a-z0-9._-]{0,119}$",
+);
+export const getDetectorProbeResponseReportOneSourceSha256RegExp = new RegExp(
+  "^[0-9a-f]{64}$",
+);
+export const getDetectorProbeResponseReportOneSourceFileIdentitySha256RegExp =
+  new RegExp("^[0-9a-f]{64}$");
+export const getDetectorProbeResponseReportOneSourceSizeBytesExclusiveMin = 0;
+
+export const getDetectorProbeResponseReportOneSourceWidthExclusiveMin = 0;
+
+export const getDetectorProbeResponseReportOneSourceHeightExclusiveMin = 0;
+
+export const getDetectorProbeResponseReportOneSourceFrameCountExclusiveMin = 0;
+
+export const getDetectorProbeResponseReportOneSourceTrackingContractSha256RegExp =
+  new RegExp("^[0-9a-f]{64}$");
+export const getDetectorProbeResponseReportOneLineageParentTrialIdRegExp =
+  new RegExp("^[a-z0-9][a-z0-9._-]{0,119}$");
+export const getDetectorProbeResponseReportOneLineageBaseConfigSha256RegExp =
+  new RegExp("^[0-9a-f]{64}$");
+export const getDetectorProbeResponseReportOneLineageEffectiveConfigSha256RegExp =
+  new RegExp("^[0-9a-f]{64}$");
+export const getDetectorProbeResponseReportOneLineageTrialIntentSha256RegExp =
+  new RegExp("^[0-9a-f]{64}$");
+export const getDetectorProbeResponseReportOneLineageTuningPatchBindingValuesSha256RegExp =
+  new RegExp("^[0-9a-f]{64}$");
+export const getDetectorProbeResponseReportOneLineageTuningPatchSha256RegExp =
+  new RegExp("^[0-9a-f]{64}$");
+export const getDetectorProbeResponseReportOneLineageFrozenProfilesSha256RegExp =
+  new RegExp("^[0-9a-f]{64}$");
+export const getDetectorProbeResponseReportOneLineageExecutionBundleRuntimeContractSha256RegExp =
+  new RegExp("^[0-9a-f]{64}$");
+export const getDetectorProbeResponseReportOneLineageExecutionBundleExecutionEnvironmentCudaDeviceCountMin = 0;
+
+export const getDetectorProbeResponseReportOneLineageExecutionBundleExecutionEnvironmentCudnnVersionOneMin = 0;
+
+export const getDetectorProbeResponseReportOneLineageExecutionBundleExecutionEnvironmentGpuTotalMemoryBytesOneExclusiveMin = 0;
+
+export const getDetectorProbeResponseReportOneLineageExecutionBundleExecutionEnvironmentCudaDriverVersionOneMin = 0;
+
+export const getDetectorProbeResponseReportOneLineageExecutionBundleExecutionEnvironmentOpencvBuildInformationSha256RegExp =
+  new RegExp("^[0-9a-f]{64}$");
+export const getDetectorProbeResponseReportOneLineageExecutionBundleExecutionEnvironmentDecoderFingerprintSha256RegExp =
+  new RegExp("^[0-9a-f]{64}$");
+export const getDetectorProbeResponseReportOneLineageExecutionBundleRuntimeEnvironmentSha256RegExp =
+  new RegExp("^[0-9a-f]{64}$");
+export const getDetectorProbeResponseReportOneLineageExecutionBundleCodeBundleFilesRegExpOne =
+  new RegExp("^[0-9a-f]{64}$");
+export const getDetectorProbeResponseReportOneLineageExecutionBundleCodeBundleSha256RegExp =
+  new RegExp("^[0-9a-f]{64}$");
+export const getDetectorProbeResponseReportOneLineageExecutionBundleCodeCommitOneRegExp =
+  new RegExp("^(?:[0-9a-f]{40}|[0-9a-f]{64})$");
+export const getDetectorProbeResponseReportOneLineageExecutionBundleCodeCommitBlobFilesOneRegExpOne =
+  new RegExp("^[0-9a-f]{64}$");
+export const getDetectorProbeResponseReportOneLineageExecutionBundleCodeCommitBlobBundleSha256OneRegExp =
+  new RegExp("^[0-9a-f]{64}$");
+export const getDetectorProbeResponseReportOneLineageExecutionBundleFrozenProfilesSha256RegExp =
+  new RegExp("^[0-9a-f]{64}$");
+export const getDetectorProbeResponseReportOneLineageExecutionBundleSha256RegExp =
+  new RegExp("^[0-9a-f]{64}$");
+export const getDetectorProbeResponseReportOneLineageRuntimeEnvironmentSha256RegExp =
+  new RegExp("^[0-9a-f]{64}$");
+export const getDetectorProbeResponseReportOneLineageIntentSha256RegExp =
+  new RegExp("^[0-9a-f]{64}$");
+export const getDetectorProbeResponseReportOneLineageRetryFromJobIdOneRegExp =
+  new RegExp("^[a-z0-9][a-z0-9._-]{0,119}$");
+export const getDetectorProbeResponseReportOneFrozenProfilesItemModelDescriptorSha256RegExp =
+  new RegExp("^[0-9a-f]{64}$");
+export const getDetectorProbeResponseReportOneFrozenProfilesItemSettingsConfidenceThresholdMin = 0;
+export const getDetectorProbeResponseReportOneFrozenProfilesItemSettingsConfidenceThresholdMax = 1;
+
+export const getDetectorProbeResponseReportOneFrozenProfilesItemSettingsImageSizeExclusiveMin = 0;
+
+export const getDetectorProbeResponseReportOneFrozenProfilesItemSettingsSliceHeightOneExclusiveMin = 0;
+
+export const getDetectorProbeResponseReportOneFrozenProfilesItemSettingsSliceWidthOneExclusiveMin = 0;
+
+export const getDetectorProbeResponseReportOneFrozenProfilesItemSettingsOverlapHeightRatioOneMin = 0;
+export const getDetectorProbeResponseReportOneFrozenProfilesItemSettingsOverlapHeightRatioOneExclusiveMax = 1;
+
+export const getDetectorProbeResponseReportOneFrozenProfilesItemSettingsOverlapWidthRatioOneMin = 0;
+export const getDetectorProbeResponseReportOneFrozenProfilesItemSettingsOverlapWidthRatioOneExclusiveMax = 1;
+
+export const getDetectorProbeResponseReportOneFrozenProfilesItemSettingsPostprocessMatchThresholdOneMin = 0;
+export const getDetectorProbeResponseReportOneFrozenProfilesItemSettingsPostprocessMatchThresholdOneMax = 1;
+
+export const getDetectorProbeResponseReportOneFrozenProfilesItemProfileSha256RegExp =
+  new RegExp("^[0-9a-f]{64}$");
+export const getDetectorProbeResponseReportOneFrozenProfilesItemModelDescriptorWeightsSha256RegExp =
+  new RegExp("^[0-9a-f]{64}$");
+export const getDetectorProbeResponseReportOneFrozenProfilesItemModelDescriptorWeightsSizeBytesExclusiveMin = 0;
+
+export const getDetectorProbeResponseReportOneFrozenProfilesItemModelDescriptorDescriptorSha256RegExp =
+  new RegExp("^[0-9a-f]{64}$");
+export const getDetectorProbeResponseReportOneFrozenProfilesItemModelDescriptorImportManifestSha256OneRegExp =
+  new RegExp("^[0-9a-f]{64}$");
+export const getDetectorProbeResponseReportOneFrozenProfilesMin = 2;
+export const getDetectorProbeResponseReportOneFrozenProfilesMax = 6;
+
+export const getDetectorProbeResponseReportOneFramesItemFrameIndexMin = 0;
+
+export const getDetectorProbeResponseReportOneFramesItemSourceWidthExclusiveMin = 0;
+
+export const getDetectorProbeResponseReportOneFramesItemSourceHeightExclusiveMin = 0;
+
+export const getDetectorProbeResponseReportOneFramesItemDecodedFramePositionMin = 0;
+
+export const getDetectorProbeResponseReportOneFramesItemMediaIntegrityWidthMin = 0;
+
+export const getDetectorProbeResponseReportOneFramesItemMediaIntegrityHeightMin = 0;
+
+export const getDetectorProbeResponseReportOneFramesItemMediaIntegrityMeanLumaMin = 0;
+
+export const getDetectorProbeResponseReportOneFramesItemMediaIntegrityStdLumaMin = 0;
+
+export const getDetectorProbeResponseReportOneFramesItemMediaIntegrityTextureTileRatioMin = 0;
+export const getDetectorProbeResponseReportOneFramesItemMediaIntegrityTextureTileRatioMax = 1;
+
+export const getDetectorProbeResponseReportOneFramesItemMediaIntegrityDominantColorRatioMin = 0;
+export const getDetectorProbeResponseReportOneFramesItemMediaIntegrityDominantColorRatioMax = 1;
+
+export const getDetectorProbeResponseReportOneFramesItemSourceFrameSha256RegExp =
+  new RegExp("^[0-9a-f]{64}$");
+export const getDetectorProbeResponseReportOneFramesItemSourceFrameSizeBytesExclusiveMin = 0;
+
+export const getDetectorProbeResponseReportOneFramesItemProfileResultsItemProfileIdRegExp =
+  new RegExp("^[a-z0-9][a-z0-9._-]{0,119}$");
+export const getDetectorProbeResponseReportOneFramesItemProfileResultsItemProfileSha256RegExp =
+  new RegExp("^[0-9a-f]{64}$");
+export const getDetectorProbeResponseReportOneFramesItemProfileResultsItemLatencyMsOneMin = 0;
+
+export const getDetectorProbeResponseReportOneFramesItemProfileResultsItemCandidateCountMin = 0;
+
+export const getDetectorProbeResponseReportOneFramesItemProfileResultsItemRawCandidatesItemFrameIndexMin = 0;
+
+export const getDetectorProbeResponseReportOneFramesItemProfileResultsItemRawCandidatesItemConfidenceMin = 0;
+export const getDetectorProbeResponseReportOneFramesItemProfileResultsItemRawCandidatesItemConfidenceMax = 1;
+
+export const getDetectorProbeResponseReportOneFramesItemProfileResultsItemRawCandidatesMax = 5;
+
+export const getDetectorProbeResponseReportOneFramesItemProfileResultsItemDisplayCandidateOneFrameIndexMin = 0;
+
+export const getDetectorProbeResponseReportOneFramesItemProfileResultsItemDisplayCandidateOneConfidenceMin = 0;
+export const getDetectorProbeResponseReportOneFramesItemProfileResultsItemDisplayCandidateOneConfidenceMax = 1;
+
+export const getDetectorProbeResponseReportOneFramesItemProfileResultsItemFilterReasonsMinOne = 0;
+
+export const getDetectorProbeResponseReportOneFramesItemProfileResultsItemRawOverlaySha256RegExp =
+  new RegExp("^[0-9a-f]{64}$");
+export const getDetectorProbeResponseReportOneFramesItemProfileResultsItemRawOverlaySizeBytesExclusiveMin = 0;
+
+export const getDetectorProbeResponseReportOneFramesItemProfileResultsMin = 2;
+export const getDetectorProbeResponseReportOneFramesItemProfileResultsMax = 6;
+
+export const getDetectorProbeResponseReportOneFramesMax = 50;
+
+export const getDetectorProbeResponseReportOneDecodeWidthExclusiveMin = 0;
+
+export const getDetectorProbeResponseReportOneDecodeHeightExclusiveMin = 0;
+
+export const getDetectorProbeResponseReportOneDecodeFrameCountExclusiveMin = 0;
+
+export const getDetectorProbeResponseReportOneDecodeFpsExclusiveMin = 0;
+
+export const getDetectorProbeResponseReportOneDecodeVerifiedFrameIndicesItemMin = 0;
+
+export const getDetectorProbeResponseReportOneDecodeVerifiedFrameIndicesMax = 50;
+
+export const getDetectorProbeResponseReportOneArtifactsItemArtifactIdRegExp =
+  new RegExp("^[a-z0-9][a-z0-9._-]{0,119}$");
+export const getDetectorProbeResponseReportOneArtifactsItemSha256RegExp =
+  new RegExp("^[0-9a-f]{64}$");
+export const getDetectorProbeResponseReportOneArtifactsItemSizeBytesExclusiveMin = 0;
+
+export const getDetectorProbeResponseReportOneArtifactsItemWidthExclusiveMin = 0;
+
+export const getDetectorProbeResponseReportOneArtifactsItemHeightExclusiveMin = 0;
+
+export const getDetectorProbeResponseReportOneArtifactsMin = 3;
+export const getDetectorProbeResponseReportOneArtifactsMax = 350;
+
+export const getDetectorProbeResponseReportOneReportSha256RegExp = new RegExp(
+  "^[0-9a-f]{64}$",
+);
+export const getDetectorProbeResponseResultManifestSha256OneRegExp = new RegExp(
+  "^[0-9a-f]{64}$",
+);
+
+export const GetDetectorProbeResponse = zod.object({
+  schema_version: zod.literal("1.0"),
+  artifact_type: zod.literal("detector_probe_job"),
+  job_id: zod.string().regex(getDetectorProbeResponseJobIdRegExp),
+  idempotency_key: zod
+    .string()
+    .regex(getDetectorProbeResponseIdempotencyKeyRegExp),
+  request_sha256: zod
+    .string()
+    .regex(getDetectorProbeResponseRequestSha256RegExp),
+  intent_sha256: zod.string().regex(getDetectorProbeResponseIntentSha256RegExp),
+  frozen_profiles_sha256: zod
+    .string()
+    .regex(getDetectorProbeResponseFrozenProfilesSha256RegExp),
+  status: zod.enum([
+    "queued",
+    "running",
+    "committing",
+    "ready",
+    "failed",
+    "cancelled",
+    "blocked",
+  ]),
+  stage: zod.string(),
+  progress: zod.object({
+    completed: zod.number().min(getDetectorProbeResponseProgressCompletedMin),
+    total: zod.number().min(getDetectorProbeResponseProgressTotalMin),
+    updated_at: zod.string(),
+  }),
+  frozen_request: zod.object({
+    parent_trial_id: zod
+      .string()
+      .regex(getDetectorProbeResponseFrozenRequestParentTrialIdRegExp),
+    source_id: zod
+      .string()
+      .regex(getDetectorProbeResponseFrozenRequestSourceIdRegExp),
+    source_relative_path: zod.string(),
+    source_sha256: zod
+      .string()
+      .regex(getDetectorProbeResponseFrozenRequestSourceSha256RegExp),
+    source_file_identity_sha256: zod
+      .string()
+      .regex(
+        getDetectorProbeResponseFrozenRequestSourceFileIdentitySha256RegExp,
+      ),
+    source_size_bytes: zod
+      .number()
+      .gt(getDetectorProbeResponseFrozenRequestSourceSizeBytesExclusiveMin),
+    source_width: zod
+      .number()
+      .gt(getDetectorProbeResponseFrozenRequestSourceWidthExclusiveMin),
+    source_height: zod
+      .number()
+      .gt(getDetectorProbeResponseFrozenRequestSourceHeightExclusiveMin),
+    source_frame_count: zod
+      .number()
+      .gt(getDetectorProbeResponseFrozenRequestSourceFrameCountExclusiveMin),
+    tracking_contract_relative_path: zod.string(),
+    tracking_contract_sha256: zod
+      .string()
+      .regex(getDetectorProbeResponseFrozenRequestTrackingContractSha256RegExp),
+    base_config_relative_path: zod.string(),
+    base_config_sha256: zod
+      .string()
+      .regex(getDetectorProbeResponseFrozenRequestBaseConfigSha256RegExp),
+    effective_config_relative_path: zod.string(),
+    effective_config_sha256: zod
+      .string()
+      .regex(getDetectorProbeResponseFrozenRequestEffectiveConfigSha256RegExp),
+    trial_intent_sha256: zod
+      .string()
+      .regex(getDetectorProbeResponseFrozenRequestTrialIntentSha256RegExp),
+    tuning_patch_binding: zod.object({
+      state: zod.enum(["absent", "versioned"]),
+      schema_version: zod.literal("1.0"),
+      version_id: zod.union([zod.string(), zod.null()]),
+      parent_version_id: zod.union([zod.string(), zod.null()]),
+      values_sha256: zod
+        .string()
+        .regex(
+          getDetectorProbeResponseFrozenRequestTuningPatchBindingValuesSha256RegExp,
+        ),
+    }),
+    tuning_patch_sha256: zod
+      .string()
+      .regex(getDetectorProbeResponseFrozenRequestTuningPatchSha256RegExp),
+    profile_ids: zod
+      .array(
+        zod
+          .string()
+          .regex(getDetectorProbeResponseFrozenRequestProfileIdsItemRegExp),
+      )
+      .min(getDetectorProbeResponseFrozenRequestProfileIdsMin)
+      .max(getDetectorProbeResponseFrozenRequestProfileIdsMax),
+    frozen_profiles_sha256: zod
+      .string()
+      .regex(getDetectorProbeResponseFrozenRequestFrozenProfilesSha256RegExp),
+    profile_sha256s: zod.object({}).passthrough(),
+    profile_bindings: zod
+      .array(
+        zod.object({
+          profile_id: zod
+            .string()
+            .regex(
+              getDetectorProbeResponseFrozenRequestProfileBindingsItemProfileIdRegExp,
+            ),
+          profile_sha256: zod
+            .string()
+            .regex(
+              getDetectorProbeResponseFrozenRequestProfileBindingsItemProfileSha256RegExp,
+            ),
+          model_id: zod
+            .string()
+            .regex(
+              getDetectorProbeResponseFrozenRequestProfileBindingsItemModelIdRegExp,
+            ),
+          model_version: zod.string(),
+          model_descriptor_sha256: zod
+            .string()
+            .regex(
+              getDetectorProbeResponseFrozenRequestProfileBindingsItemModelDescriptorSha256RegExp,
+            ),
+          weights_sha256: zod
+            .string()
+            .regex(
+              getDetectorProbeResponseFrozenRequestProfileBindingsItemWeightsSha256RegExp,
+            ),
+          weights_size_bytes: zod
+            .number()
+            .gt(
+              getDetectorProbeResponseFrozenRequestProfileBindingsItemWeightsSizeBytesExclusiveMin,
+            ),
+        }),
+      )
+      .min(getDetectorProbeResponseFrozenRequestProfileBindingsMin)
+      .max(getDetectorProbeResponseFrozenRequestProfileBindingsMax),
+    execution_bundle: zod.object({
+      schema_version: zod.literal("1.0"),
+      installed_runtime: zod.record(zod.string(), zod.string()),
+      runtime_contract: zod.record(zod.string(), zod.string()),
+      runtime_contract_sha256: zod
+        .string()
+        .regex(
+          getDetectorProbeResponseFrozenRequestExecutionBundleRuntimeContractSha256RegExp,
+        ),
+      runtime_observation_evidence_sha256s: zod.object({}).passthrough(),
+      execution_environment: zod.object({
+        device: zod.enum(["cpu", "cuda:0"]),
+        precision: zod.literal("fp32"),
+        cuda_available: zod.boolean(),
+        cuda_device_count: zod
+          .number()
+          .min(
+            getDetectorProbeResponseFrozenRequestExecutionBundleExecutionEnvironmentCudaDeviceCountMin,
+          ),
+        cuda_visible_devices: zod.union([zod.string(), zod.null()]),
+        cuda_compiled_version: zod.union([zod.string(), zod.null()]),
+        cudnn_version: zod
+          .union([
+            zod
+              .number()
+              .min(
+                getDetectorProbeResponseFrozenRequestExecutionBundleExecutionEnvironmentCudnnVersionOneMin,
+              ),
+            zod.null(),
+          ])
+          .optional(),
+        gpu_name: zod.union([zod.string(), zod.null()]),
+        gpu_compute_capability: zod.union([zod.string(), zod.null()]),
+        gpu_total_memory_bytes: zod
+          .union([
+            zod
+              .number()
+              .gt(
+                getDetectorProbeResponseFrozenRequestExecutionBundleExecutionEnvironmentGpuTotalMemoryBytesOneExclusiveMin,
+              ),
+            zod.null(),
+          ])
+          .optional(),
+        cuda_driver_version: zod
+          .union([
+            zod
+              .number()
+              .min(
+                getDetectorProbeResponseFrozenRequestExecutionBundleExecutionEnvironmentCudaDriverVersionOneMin,
+              ),
+            zod.null(),
+          ])
+          .optional(),
+        python_implementation: zod.string().min(1),
+        python_version: zod.string().min(1),
+        numpy_version: zod.string().min(1),
+        opencv_version: zod.string().min(1),
+        pydantic_version: zod.string().min(1),
+        pydantic_core_version: zod.string().min(1),
+        opencv_build_information_sha256: zod
+          .string()
+          .regex(
+            getDetectorProbeResponseFrozenRequestExecutionBundleExecutionEnvironmentOpencvBuildInformationSha256RegExp,
+          ),
+        opencv_ffmpeg_enabled: zod.union([zod.boolean(), zod.null()]),
+        decoder_fingerprint_sha256: zod
+          .string()
+          .regex(
+            getDetectorProbeResponseFrozenRequestExecutionBundleExecutionEnvironmentDecoderFingerprintSha256RegExp,
+          ),
+      }),
+      runtime_environment_sha256: zod
+        .string()
+        .regex(
+          getDetectorProbeResponseFrozenRequestExecutionBundleRuntimeEnvironmentSha256RegExp,
+        ),
+      code_bundle_files: zod.record(
+        zod.string(),
+        zod
+          .string()
+          .regex(
+            getDetectorProbeResponseFrozenRequestExecutionBundleCodeBundleFilesRegExpOne,
+          ),
+      ),
+      code_bundle_sha256: zod
+        .string()
+        .regex(
+          getDetectorProbeResponseFrozenRequestExecutionBundleCodeBundleSha256RegExp,
+        ),
+      code_commit: zod.union([
+        zod
+          .string()
+          .regex(
+            getDetectorProbeResponseFrozenRequestExecutionBundleCodeCommitOneRegExp,
+          ),
+        zod.null(),
+      ]),
+      code_commit_status: zod.enum(["bound", "unbound", "unavailable"]),
+      code_commit_reason: zod.union([
+        zod.enum([
+          "code_bundle_differs_from_commit",
+          "repository_commit_unavailable",
+        ]),
+        zod.null(),
+      ]),
+      code_commit_blob_files: zod.union([
+        zod.record(
+          zod.string(),
+          zod
+            .string()
+            .regex(
+              getDetectorProbeResponseFrozenRequestExecutionBundleCodeCommitBlobFilesOneRegExpOne,
+            ),
+        ),
+        zod.null(),
+      ]),
+      code_commit_blob_bundle_sha256: zod.union([
+        zod
+          .string()
+          .regex(
+            getDetectorProbeResponseFrozenRequestExecutionBundleCodeCommitBlobBundleSha256OneRegExp,
+          ),
+        zod.null(),
+      ]),
+      code_commit_binding_kind: zod.union([
+        zod.literal("exact_or_crlf_to_lf_commit_blob"),
+        zod.null(),
+      ]),
+      frozen_profiles_sha256: zod
+        .string()
+        .regex(
+          getDetectorProbeResponseFrozenRequestExecutionBundleFrozenProfilesSha256RegExp,
+        ),
+    }),
+    execution_bundle_sha256: zod
+      .string()
+      .regex(getDetectorProbeResponseFrozenRequestExecutionBundleSha256RegExp),
+    runtime_environment_sha256: zod
+      .string()
+      .regex(
+        getDetectorProbeResponseFrozenRequestRuntimeEnvironmentSha256RegExp,
+      ),
+    frame_indices: zod
+      .array(
+        zod
+          .number()
+          .min(getDetectorProbeResponseFrozenRequestFrameIndicesItemMin),
+      )
+      .min(1)
+      .max(getDetectorProbeResponseFrozenRequestFrameIndicesMax),
+    top_k: zod.number(),
+    requested_decode_mode: zod.enum(["sequential", "preroll", "direct"]),
+    retry_from_job_id: zod
+      .union([
+        zod
+          .string()
+          .regex(getDetectorProbeResponseFrozenRequestRetryFromJobIdOneRegExp),
+        zod.null(),
+      ])
+      .optional(),
+  }),
+  frozen_profiles: zod
+    .array(
+      zod.object({
+        schema_version: zod.string(),
+        artifact_type: zod.literal("detector_profile"),
+        profile_id: zod.string(),
+        version: zod.string(),
+        model_id: zod.string(),
+        model_version: zod.string(),
+        model_descriptor_sha256: zod
+          .string()
+          .regex(
+            getDetectorProbeResponseFrozenProfilesItemModelDescriptorSha256RegExp,
+          ),
+        mode: zod.enum(["direct", "sahi"]),
+        settings: zod.object({
+          confidence_threshold: zod
+            .number()
+            .min(
+              getDetectorProbeResponseFrozenProfilesItemSettingsConfidenceThresholdMin,
+            )
+            .max(
+              getDetectorProbeResponseFrozenProfilesItemSettingsConfidenceThresholdMax,
+            ),
+          image_size: zod
+            .number()
+            .gt(
+              getDetectorProbeResponseFrozenProfilesItemSettingsImageSizeExclusiveMin,
+            ),
+          use_half: zod.boolean(),
+          allowed_labels: zod.array(zod.string()),
+          top_k: zod.number(),
+          slice_height: zod
+            .union([
+              zod
+                .number()
+                .gt(
+                  getDetectorProbeResponseFrozenProfilesItemSettingsSliceHeightOneExclusiveMin,
+                ),
+              zod.null(),
+            ])
+            .optional(),
+          slice_width: zod
+            .union([
+              zod
+                .number()
+                .gt(
+                  getDetectorProbeResponseFrozenProfilesItemSettingsSliceWidthOneExclusiveMin,
+                ),
+              zod.null(),
+            ])
+            .optional(),
+          overlap_height_ratio: zod
+            .union([
+              zod
+                .number()
+                .min(
+                  getDetectorProbeResponseFrozenProfilesItemSettingsOverlapHeightRatioOneMin,
+                )
+                .lt(
+                  getDetectorProbeResponseFrozenProfilesItemSettingsOverlapHeightRatioOneExclusiveMax,
+                ),
+              zod.null(),
+            ])
+            .optional(),
+          overlap_width_ratio: zod
+            .union([
+              zod
+                .number()
+                .min(
+                  getDetectorProbeResponseFrozenProfilesItemSettingsOverlapWidthRatioOneMin,
+                )
+                .lt(
+                  getDetectorProbeResponseFrozenProfilesItemSettingsOverlapWidthRatioOneExclusiveMax,
+                ),
+              zod.null(),
+            ])
+            .optional(),
+          perform_standard_pred: zod
+            .union([zod.boolean(), zod.null()])
+            .optional(),
+          postprocess_type: zod.union([zod.string(), zod.null()]).optional(),
+          postprocess_match_metric: zod
+            .union([zod.string(), zod.null()])
+            .optional(),
+          postprocess_match_threshold: zod
+            .union([
+              zod
+                .number()
+                .min(
+                  getDetectorProbeResponseFrozenProfilesItemSettingsPostprocessMatchThresholdOneMin,
+                )
+                .max(
+                  getDetectorProbeResponseFrozenProfilesItemSettingsPostprocessMatchThresholdOneMax,
+                ),
+              zod.null(),
+            ])
+            .optional(),
+        }),
+        profile_sha256: zod
+          .string()
+          .regex(getDetectorProbeResponseFrozenProfilesItemProfileSha256RegExp),
+        recommended: zod.boolean(),
+        availability: zod.object({
+          status: zod.enum(["available", "unavailable", "blocked"]),
+          reason_codes: zod.array(zod.string()),
+          runtime: zod
+            .union([
+              zod.object({
+                name: zod.string(),
+                installed_version: zod.union([zod.string(), zod.null()]),
+                load_smoke: zod.boolean(),
+              }),
+              zod.null(),
+            ])
+            .optional(),
+        }),
+        selectable_for_probe: zod.boolean(),
+        model_descriptor: zod.object({
+          schema_version: zod.string(),
+          artifact_type: zod.literal("detector_model_descriptor"),
+          model_id: zod.string(),
+          version: zod.string(),
+          model_version: zod.string(),
+          display_name: zod.string(),
+          architecture_family: zod.string(),
+          weights: zod.object({
+            relative_path: zod.string(),
+            sha256: zod
+              .string()
+              .regex(
+                getDetectorProbeResponseFrozenProfilesItemModelDescriptorWeightsSha256RegExp,
+              ),
+            size_bytes: zod
+              .number()
+              .gt(
+                getDetectorProbeResponseFrozenProfilesItemModelDescriptorWeightsSizeBytesExclusiveMin,
+              ),
+          }),
+          source: zod.object({
+            project: zod.string(),
+            version: zod.string(),
+            asset_release: zod.string(),
+            weight_url: zod.string(),
+            acquisition_method: zod.string(),
+            access_requirement: zod.string(),
+          }),
+          checkpoint: zod
+            .union([zod.record(zod.string(), zod.unknown()), zod.null()])
+            .optional(),
+          runtime_contract: zod.record(zod.string(), zod.unknown()),
+          class_names: zod.array(zod.string()),
+          class_map: zod.record(zod.string(), zod.string()),
+          expected_input: zod.record(zod.string(), zod.unknown()),
+          execution: zod
+            .union([zod.record(zod.string(), zod.unknown()), zod.null()])
+            .optional(),
+          memory_envelope: zod
+            .union([zod.record(zod.string(), zod.unknown()), zod.null()])
+            .optional(),
+          licenses: zod.object({
+            dataset: zod.object({
+              name: zod.string(),
+              spdx_id: zod.string(),
+              url: zod.string(),
+              reviewed: zod.boolean(),
+              approved_for_local_probe: zod.boolean(),
+            }),
+            model: zod.object({
+              name: zod.string(),
+              spdx_id: zod.string(),
+              url: zod.string(),
+              reviewed: zod.boolean(),
+              approved_for_local_probe: zod.boolean(),
+            }),
+            runtime: zod.object({
+              name: zod.string(),
+              spdx_id: zod.string(),
+              url: zod.string(),
+              reviewed: zod.boolean(),
+              approved_for_local_probe: zod.boolean(),
+            }),
+            deployment: zod.object({
+              name: zod.string(),
+              spdx_id: zod.string(),
+              url: zod.string(),
+              reviewed: zod.boolean(),
+              approved_for_local_probe: zod.boolean(),
+            }),
+          }),
+          egress: zod.object({
+            frames_leave_local_machine: zod.boolean(),
+            destination: zod.union([zod.string(), zod.null()]),
+            operator_consent: zod.enum([
+              "not_required",
+              "granted",
+              "required_not_granted",
+            ]),
+          }),
+          lifecycle_state: zod.enum([
+            "unverified",
+            "feasibility_passed",
+            "development_candidate",
+            "source_segment_qualified",
+            "camera_qualified",
+            "retired",
+          ]),
+          bindings: zod.record(zod.string(), zod.unknown()),
+          descriptor_sha256: zod
+            .string()
+            .regex(
+              getDetectorProbeResponseFrozenProfilesItemModelDescriptorDescriptorSha256RegExp,
+            ),
+          import_manifest_sha256: zod
+            .union([
+              zod
+                .string()
+                .regex(
+                  getDetectorProbeResponseFrozenProfilesItemModelDescriptorImportManifestSha256OneRegExp,
+                ),
+              zod.null(),
+            ])
+            .optional(),
+        }),
+      }),
+    )
+    .min(getDetectorProbeResponseFrozenProfilesMin)
+    .max(getDetectorProbeResponseFrozenProfilesMax),
+  retry_from_job_id: zod.union([
+    zod.string().regex(getDetectorProbeResponseRetryFromJobIdOneRegExp),
+    zod.null(),
+  ]),
+  error_code: zod.union([zod.string(), zod.null()]).optional(),
+  blocker_code: zod.union([zod.string(), zod.null()]).optional(),
+  recovery_action: zod.union([zod.string(), zod.null()]).optional(),
+  report: zod.union([
+    zod.object({
+      schema_version: zod.literal("1.0"),
+      artifact_type: zod.literal("detector_probe_report"),
+      job_id: zod.string().regex(getDetectorProbeResponseReportOneJobIdRegExp),
+      request_sha256: zod
+        .string()
+        .regex(getDetectorProbeResponseReportOneRequestSha256RegExp),
+      source: zod.object({
+        source_id: zod
+          .string()
+          .regex(getDetectorProbeResponseReportOneSourceSourceIdRegExp),
+        relative_path: zod.string(),
+        sha256: zod
+          .string()
+          .regex(getDetectorProbeResponseReportOneSourceSha256RegExp),
+        file_identity_sha256: zod
+          .string()
+          .regex(
+            getDetectorProbeResponseReportOneSourceFileIdentitySha256RegExp,
+          ),
+        size_bytes: zod
+          .number()
+          .gt(getDetectorProbeResponseReportOneSourceSizeBytesExclusiveMin),
+        width: zod
+          .number()
+          .gt(getDetectorProbeResponseReportOneSourceWidthExclusiveMin),
+        height: zod
+          .number()
+          .gt(getDetectorProbeResponseReportOneSourceHeightExclusiveMin),
+        frame_count: zod
+          .number()
+          .gt(getDetectorProbeResponseReportOneSourceFrameCountExclusiveMin),
+        tracking_contract_relative_path: zod.string(),
+        tracking_contract_sha256: zod
+          .string()
+          .regex(
+            getDetectorProbeResponseReportOneSourceTrackingContractSha256RegExp,
+          ),
+      }),
+      lineage: zod.object({
+        parent_trial_id: zod
+          .string()
+          .regex(getDetectorProbeResponseReportOneLineageParentTrialIdRegExp),
+        base_config_relative_path: zod.string(),
+        base_config_sha256: zod
+          .string()
+          .regex(
+            getDetectorProbeResponseReportOneLineageBaseConfigSha256RegExp,
+          ),
+        effective_config_relative_path: zod.string(),
+        effective_config_sha256: zod
+          .string()
+          .regex(
+            getDetectorProbeResponseReportOneLineageEffectiveConfigSha256RegExp,
+          ),
+        trial_intent_sha256: zod
+          .string()
+          .regex(
+            getDetectorProbeResponseReportOneLineageTrialIntentSha256RegExp,
+          ),
+        tuning_patch_binding: zod.object({
+          state: zod.enum(["absent", "versioned"]),
+          schema_version: zod.literal("1.0"),
+          version_id: zod.union([zod.string(), zod.null()]),
+          parent_version_id: zod.union([zod.string(), zod.null()]),
+          values_sha256: zod
+            .string()
+            .regex(
+              getDetectorProbeResponseReportOneLineageTuningPatchBindingValuesSha256RegExp,
+            ),
+        }),
+        tuning_patch_sha256: zod
+          .string()
+          .regex(
+            getDetectorProbeResponseReportOneLineageTuningPatchSha256RegExp,
+          ),
+        profile_sha256s: zod.object({}).passthrough(),
+        frozen_profiles_sha256: zod
+          .string()
+          .regex(
+            getDetectorProbeResponseReportOneLineageFrozenProfilesSha256RegExp,
+          ),
+        execution_bundle: zod.object({
+          schema_version: zod.literal("1.0"),
+          installed_runtime: zod.record(zod.string(), zod.string()),
+          runtime_contract: zod.record(zod.string(), zod.string()),
+          runtime_contract_sha256: zod
+            .string()
+            .regex(
+              getDetectorProbeResponseReportOneLineageExecutionBundleRuntimeContractSha256RegExp,
+            ),
+          runtime_observation_evidence_sha256s: zod.object({}).passthrough(),
+          execution_environment: zod.object({
+            device: zod.enum(["cpu", "cuda:0"]),
+            precision: zod.literal("fp32"),
+            cuda_available: zod.boolean(),
+            cuda_device_count: zod
+              .number()
+              .min(
+                getDetectorProbeResponseReportOneLineageExecutionBundleExecutionEnvironmentCudaDeviceCountMin,
+              ),
+            cuda_visible_devices: zod.union([zod.string(), zod.null()]),
+            cuda_compiled_version: zod.union([zod.string(), zod.null()]),
+            cudnn_version: zod
+              .union([
+                zod
+                  .number()
+                  .min(
+                    getDetectorProbeResponseReportOneLineageExecutionBundleExecutionEnvironmentCudnnVersionOneMin,
+                  ),
+                zod.null(),
+              ])
+              .optional(),
+            gpu_name: zod.union([zod.string(), zod.null()]),
+            gpu_compute_capability: zod.union([zod.string(), zod.null()]),
+            gpu_total_memory_bytes: zod
+              .union([
+                zod
+                  .number()
+                  .gt(
+                    getDetectorProbeResponseReportOneLineageExecutionBundleExecutionEnvironmentGpuTotalMemoryBytesOneExclusiveMin,
+                  ),
+                zod.null(),
+              ])
+              .optional(),
+            cuda_driver_version: zod
+              .union([
+                zod
+                  .number()
+                  .min(
+                    getDetectorProbeResponseReportOneLineageExecutionBundleExecutionEnvironmentCudaDriverVersionOneMin,
+                  ),
+                zod.null(),
+              ])
+              .optional(),
+            python_implementation: zod.string().min(1),
+            python_version: zod.string().min(1),
+            numpy_version: zod.string().min(1),
+            opencv_version: zod.string().min(1),
+            pydantic_version: zod.string().min(1),
+            pydantic_core_version: zod.string().min(1),
+            opencv_build_information_sha256: zod
+              .string()
+              .regex(
+                getDetectorProbeResponseReportOneLineageExecutionBundleExecutionEnvironmentOpencvBuildInformationSha256RegExp,
+              ),
+            opencv_ffmpeg_enabled: zod.union([zod.boolean(), zod.null()]),
+            decoder_fingerprint_sha256: zod
+              .string()
+              .regex(
+                getDetectorProbeResponseReportOneLineageExecutionBundleExecutionEnvironmentDecoderFingerprintSha256RegExp,
+              ),
+          }),
+          runtime_environment_sha256: zod
+            .string()
+            .regex(
+              getDetectorProbeResponseReportOneLineageExecutionBundleRuntimeEnvironmentSha256RegExp,
+            ),
+          code_bundle_files: zod.record(
+            zod.string(),
+            zod
+              .string()
+              .regex(
+                getDetectorProbeResponseReportOneLineageExecutionBundleCodeBundleFilesRegExpOne,
+              ),
+          ),
+          code_bundle_sha256: zod
+            .string()
+            .regex(
+              getDetectorProbeResponseReportOneLineageExecutionBundleCodeBundleSha256RegExp,
+            ),
+          code_commit: zod.union([
+            zod
+              .string()
+              .regex(
+                getDetectorProbeResponseReportOneLineageExecutionBundleCodeCommitOneRegExp,
+              ),
+            zod.null(),
+          ]),
+          code_commit_status: zod.enum(["bound", "unbound", "unavailable"]),
+          code_commit_reason: zod.union([
+            zod.enum([
+              "code_bundle_differs_from_commit",
+              "repository_commit_unavailable",
+            ]),
+            zod.null(),
+          ]),
+          code_commit_blob_files: zod.union([
+            zod.record(
+              zod.string(),
+              zod
+                .string()
+                .regex(
+                  getDetectorProbeResponseReportOneLineageExecutionBundleCodeCommitBlobFilesOneRegExpOne,
+                ),
+            ),
+            zod.null(),
+          ]),
+          code_commit_blob_bundle_sha256: zod.union([
+            zod
+              .string()
+              .regex(
+                getDetectorProbeResponseReportOneLineageExecutionBundleCodeCommitBlobBundleSha256OneRegExp,
+              ),
+            zod.null(),
+          ]),
+          code_commit_binding_kind: zod.union([
+            zod.literal("exact_or_crlf_to_lf_commit_blob"),
+            zod.null(),
+          ]),
+          frozen_profiles_sha256: zod
+            .string()
+            .regex(
+              getDetectorProbeResponseReportOneLineageExecutionBundleFrozenProfilesSha256RegExp,
+            ),
+        }),
+        execution_bundle_sha256: zod
+          .string()
+          .regex(
+            getDetectorProbeResponseReportOneLineageExecutionBundleSha256RegExp,
+          ),
+        runtime_environment_sha256: zod
+          .string()
+          .regex(
+            getDetectorProbeResponseReportOneLineageRuntimeEnvironmentSha256RegExp,
+          ),
+        intent_sha256: zod
+          .string()
+          .regex(getDetectorProbeResponseReportOneLineageIntentSha256RegExp),
+        retry_from_job_id: zod.union([
+          zod
+            .string()
+            .regex(
+              getDetectorProbeResponseReportOneLineageRetryFromJobIdOneRegExp,
+            ),
+          zod.null(),
+        ]),
+      }),
+      frozen_profiles: zod
+        .array(
+          zod.object({
+            schema_version: zod.string(),
+            artifact_type: zod.literal("detector_profile"),
+            profile_id: zod.string(),
+            version: zod.string(),
+            model_id: zod.string(),
+            model_version: zod.string(),
+            model_descriptor_sha256: zod
+              .string()
+              .regex(
+                getDetectorProbeResponseReportOneFrozenProfilesItemModelDescriptorSha256RegExp,
+              ),
+            mode: zod.enum(["direct", "sahi"]),
+            settings: zod.object({
+              confidence_threshold: zod
+                .number()
+                .min(
+                  getDetectorProbeResponseReportOneFrozenProfilesItemSettingsConfidenceThresholdMin,
+                )
+                .max(
+                  getDetectorProbeResponseReportOneFrozenProfilesItemSettingsConfidenceThresholdMax,
+                ),
+              image_size: zod
+                .number()
+                .gt(
+                  getDetectorProbeResponseReportOneFrozenProfilesItemSettingsImageSizeExclusiveMin,
+                ),
+              use_half: zod.boolean(),
+              allowed_labels: zod.array(zod.string()),
+              top_k: zod.number(),
+              slice_height: zod
+                .union([
+                  zod
+                    .number()
+                    .gt(
+                      getDetectorProbeResponseReportOneFrozenProfilesItemSettingsSliceHeightOneExclusiveMin,
+                    ),
+                  zod.null(),
+                ])
+                .optional(),
+              slice_width: zod
+                .union([
+                  zod
+                    .number()
+                    .gt(
+                      getDetectorProbeResponseReportOneFrozenProfilesItemSettingsSliceWidthOneExclusiveMin,
+                    ),
+                  zod.null(),
+                ])
+                .optional(),
+              overlap_height_ratio: zod
+                .union([
+                  zod
+                    .number()
+                    .min(
+                      getDetectorProbeResponseReportOneFrozenProfilesItemSettingsOverlapHeightRatioOneMin,
+                    )
+                    .lt(
+                      getDetectorProbeResponseReportOneFrozenProfilesItemSettingsOverlapHeightRatioOneExclusiveMax,
+                    ),
+                  zod.null(),
+                ])
+                .optional(),
+              overlap_width_ratio: zod
+                .union([
+                  zod
+                    .number()
+                    .min(
+                      getDetectorProbeResponseReportOneFrozenProfilesItemSettingsOverlapWidthRatioOneMin,
+                    )
+                    .lt(
+                      getDetectorProbeResponseReportOneFrozenProfilesItemSettingsOverlapWidthRatioOneExclusiveMax,
+                    ),
+                  zod.null(),
+                ])
+                .optional(),
+              perform_standard_pred: zod
+                .union([zod.boolean(), zod.null()])
+                .optional(),
+              postprocess_type: zod
+                .union([zod.string(), zod.null()])
+                .optional(),
+              postprocess_match_metric: zod
+                .union([zod.string(), zod.null()])
+                .optional(),
+              postprocess_match_threshold: zod
+                .union([
+                  zod
+                    .number()
+                    .min(
+                      getDetectorProbeResponseReportOneFrozenProfilesItemSettingsPostprocessMatchThresholdOneMin,
+                    )
+                    .max(
+                      getDetectorProbeResponseReportOneFrozenProfilesItemSettingsPostprocessMatchThresholdOneMax,
+                    ),
+                  zod.null(),
+                ])
+                .optional(),
+            }),
+            profile_sha256: zod
+              .string()
+              .regex(
+                getDetectorProbeResponseReportOneFrozenProfilesItemProfileSha256RegExp,
+              ),
+            recommended: zod.boolean(),
+            availability: zod.object({
+              status: zod.enum(["available", "unavailable", "blocked"]),
+              reason_codes: zod.array(zod.string()),
+              runtime: zod
+                .union([
+                  zod.object({
+                    name: zod.string(),
+                    installed_version: zod.union([zod.string(), zod.null()]),
+                    load_smoke: zod.boolean(),
+                  }),
+                  zod.null(),
+                ])
+                .optional(),
+            }),
+            selectable_for_probe: zod.boolean(),
+            model_descriptor: zod.object({
+              schema_version: zod.string(),
+              artifact_type: zod.literal("detector_model_descriptor"),
+              model_id: zod.string(),
+              version: zod.string(),
+              model_version: zod.string(),
+              display_name: zod.string(),
+              architecture_family: zod.string(),
+              weights: zod.object({
+                relative_path: zod.string(),
+                sha256: zod
+                  .string()
+                  .regex(
+                    getDetectorProbeResponseReportOneFrozenProfilesItemModelDescriptorWeightsSha256RegExp,
+                  ),
+                size_bytes: zod
+                  .number()
+                  .gt(
+                    getDetectorProbeResponseReportOneFrozenProfilesItemModelDescriptorWeightsSizeBytesExclusiveMin,
+                  ),
+              }),
+              source: zod.object({
+                project: zod.string(),
+                version: zod.string(),
+                asset_release: zod.string(),
+                weight_url: zod.string(),
+                acquisition_method: zod.string(),
+                access_requirement: zod.string(),
+              }),
+              checkpoint: zod
+                .union([zod.record(zod.string(), zod.unknown()), zod.null()])
+                .optional(),
+              runtime_contract: zod.record(zod.string(), zod.unknown()),
+              class_names: zod.array(zod.string()),
+              class_map: zod.record(zod.string(), zod.string()),
+              expected_input: zod.record(zod.string(), zod.unknown()),
+              execution: zod
+                .union([zod.record(zod.string(), zod.unknown()), zod.null()])
+                .optional(),
+              memory_envelope: zod
+                .union([zod.record(zod.string(), zod.unknown()), zod.null()])
+                .optional(),
+              licenses: zod.object({
+                dataset: zod.object({
+                  name: zod.string(),
+                  spdx_id: zod.string(),
+                  url: zod.string(),
+                  reviewed: zod.boolean(),
+                  approved_for_local_probe: zod.boolean(),
+                }),
+                model: zod.object({
+                  name: zod.string(),
+                  spdx_id: zod.string(),
+                  url: zod.string(),
+                  reviewed: zod.boolean(),
+                  approved_for_local_probe: zod.boolean(),
+                }),
+                runtime: zod.object({
+                  name: zod.string(),
+                  spdx_id: zod.string(),
+                  url: zod.string(),
+                  reviewed: zod.boolean(),
+                  approved_for_local_probe: zod.boolean(),
+                }),
+                deployment: zod.object({
+                  name: zod.string(),
+                  spdx_id: zod.string(),
+                  url: zod.string(),
+                  reviewed: zod.boolean(),
+                  approved_for_local_probe: zod.boolean(),
+                }),
+              }),
+              egress: zod.object({
+                frames_leave_local_machine: zod.boolean(),
+                destination: zod.union([zod.string(), zod.null()]),
+                operator_consent: zod.enum([
+                  "not_required",
+                  "granted",
+                  "required_not_granted",
+                ]),
+              }),
+              lifecycle_state: zod.enum([
+                "unverified",
+                "feasibility_passed",
+                "development_candidate",
+                "source_segment_qualified",
+                "camera_qualified",
+                "retired",
+              ]),
+              bindings: zod.record(zod.string(), zod.unknown()),
+              descriptor_sha256: zod
+                .string()
+                .regex(
+                  getDetectorProbeResponseReportOneFrozenProfilesItemModelDescriptorDescriptorSha256RegExp,
+                ),
+              import_manifest_sha256: zod
+                .union([
+                  zod
+                    .string()
+                    .regex(
+                      getDetectorProbeResponseReportOneFrozenProfilesItemModelDescriptorImportManifestSha256OneRegExp,
+                    ),
+                  zod.null(),
+                ])
+                .optional(),
+            }),
+          }),
+        )
+        .min(getDetectorProbeResponseReportOneFrozenProfilesMin)
+        .max(getDetectorProbeResponseReportOneFrozenProfilesMax),
+      top_k: zod.number(),
+      frames: zod
+        .array(
+          zod.object({
+            frame_index: zod
+              .number()
+              .min(getDetectorProbeResponseReportOneFramesItemFrameIndexMin),
+            source_width: zod
+              .number()
+              .gt(
+                getDetectorProbeResponseReportOneFramesItemSourceWidthExclusiveMin,
+              ),
+            source_height: zod
+              .number()
+              .gt(
+                getDetectorProbeResponseReportOneFramesItemSourceHeightExclusiveMin,
+              ),
+            requested_decode_mode: zod.enum([
+              "sequential",
+              "preroll",
+              "direct",
+            ]),
+            effective_decode_mode: zod.enum([
+              "sequential",
+              "preroll_verified",
+              "direct_verified",
+              "sequential_fallback",
+            ]),
+            decoded_frame_position: zod
+              .number()
+              .min(
+                getDetectorProbeResponseReportOneFramesItemDecodedFramePositionMin,
+              ),
+            media_integrity: zod.object({
+              path: zod.union([zod.string(), zod.null()]),
+              status: zod.enum(["ok", "unavailable"]),
+              width: zod
+                .number()
+                .min(
+                  getDetectorProbeResponseReportOneFramesItemMediaIntegrityWidthMin,
+                ),
+              height: zod
+                .number()
+                .min(
+                  getDetectorProbeResponseReportOneFramesItemMediaIntegrityHeightMin,
+                ),
+              mean_luma: zod
+                .number()
+                .min(
+                  getDetectorProbeResponseReportOneFramesItemMediaIntegrityMeanLumaMin,
+                ),
+              std_luma: zod
+                .number()
+                .min(
+                  getDetectorProbeResponseReportOneFramesItemMediaIntegrityStdLumaMin,
+                ),
+              texture_tile_ratio: zod
+                .number()
+                .min(
+                  getDetectorProbeResponseReportOneFramesItemMediaIntegrityTextureTileRatioMin,
+                )
+                .max(
+                  getDetectorProbeResponseReportOneFramesItemMediaIntegrityTextureTileRatioMax,
+                ),
+              dominant_color_ratio: zod
+                .number()
+                .min(
+                  getDetectorProbeResponseReportOneFramesItemMediaIntegrityDominantColorRatioMin,
+                )
+                .max(
+                  getDetectorProbeResponseReportOneFramesItemMediaIntegrityDominantColorRatioMax,
+                ),
+              gray: zod.boolean(),
+              low_information: zod.boolean(),
+              likely_corrupt: zod.boolean(),
+              reasons: zod.array(zod.string()),
+            }),
+            source_artifact_url: zod.string(),
+            source_frame_sha256: zod
+              .string()
+              .regex(
+                getDetectorProbeResponseReportOneFramesItemSourceFrameSha256RegExp,
+              ),
+            source_frame_size_bytes: zod
+              .number()
+              .gt(
+                getDetectorProbeResponseReportOneFramesItemSourceFrameSizeBytesExclusiveMin,
+              ),
+            profile_results: zod
+              .array(
+                zod.object({
+                  profile_id: zod
+                    .string()
+                    .regex(
+                      getDetectorProbeResponseReportOneFramesItemProfileResultsItemProfileIdRegExp,
+                    ),
+                  profile_sha256: zod
+                    .string()
+                    .regex(
+                      getDetectorProbeResponseReportOneFramesItemProfileResultsItemProfileSha256RegExp,
+                    ),
+                  status: zod.enum(["completed", "failed", "blocked"]),
+                  latency_ms: zod
+                    .union([
+                      zod
+                        .number()
+                        .min(
+                          getDetectorProbeResponseReportOneFramesItemProfileResultsItemLatencyMsOneMin,
+                        ),
+                      zod.null(),
+                    ])
+                    .optional(),
+                  candidate_count: zod
+                    .number()
+                    .min(
+                      getDetectorProbeResponseReportOneFramesItemProfileResultsItemCandidateCountMin,
+                    ),
+                  top_k: zod.number(),
+                  raw_candidates: zod
+                    .array(
+                      zod.object({
+                        frame_index: zod
+                          .number()
+                          .min(
+                            getDetectorProbeResponseReportOneFramesItemProfileResultsItemRawCandidatesItemFrameIndexMin,
+                          ),
+                        bbox_source_px: zod.tuple([
+                          zod.number(),
+                          zod.number(),
+                          zod.number(),
+                          zod.number(),
+                        ]),
+                        confidence: zod
+                          .number()
+                          .min(
+                            getDetectorProbeResponseReportOneFramesItemProfileResultsItemRawCandidatesItemConfidenceMin,
+                          )
+                          .max(
+                            getDetectorProbeResponseReportOneFramesItemProfileResultsItemRawCandidatesItemConfidenceMax,
+                          ),
+                        class_name: zod.literal("ball"),
+                        checkpoint_class_name: zod.string().min(1),
+                        source: zod.string().min(1),
+                        coordinate_reason: zod.enum([
+                          "direct_source_coordinates",
+                          "sahi_tile_offset_applied",
+                        ]),
+                        merge_reason: zod.literal("retained_top_k"),
+                      }),
+                    )
+                    .max(
+                      getDetectorProbeResponseReportOneFramesItemProfileResultsItemRawCandidatesMax,
+                    ),
+                  display_candidate: zod.union([
+                    zod.object({
+                      frame_index: zod
+                        .number()
+                        .min(
+                          getDetectorProbeResponseReportOneFramesItemProfileResultsItemDisplayCandidateOneFrameIndexMin,
+                        ),
+                      bbox_source_px: zod.tuple([
+                        zod.number(),
+                        zod.number(),
+                        zod.number(),
+                        zod.number(),
+                      ]),
+                      confidence: zod
+                        .number()
+                        .min(
+                          getDetectorProbeResponseReportOneFramesItemProfileResultsItemDisplayCandidateOneConfidenceMin,
+                        )
+                        .max(
+                          getDetectorProbeResponseReportOneFramesItemProfileResultsItemDisplayCandidateOneConfidenceMax,
+                        ),
+                      class_name: zod.literal("ball"),
+                      checkpoint_class_name: zod.string().min(1),
+                      source: zod.string().min(1),
+                      coordinate_reason: zod.enum([
+                        "direct_source_coordinates",
+                        "sahi_tile_offset_applied",
+                      ]),
+                      merge_reason: zod.literal("retained_top_k"),
+                    }),
+                    zod.null(),
+                  ]),
+                  filter_reasons: zod.record(
+                    zod.string(),
+                    zod
+                      .number()
+                      .min(
+                        getDetectorProbeResponseReportOneFramesItemProfileResultsItemFilterReasonsMinOne,
+                      ),
+                  ),
+                  failure_code: zod.union([zod.string(), zod.null()]),
+                  raw_overlay_artifact_url: zod.string(),
+                  raw_overlay_sha256: zod
+                    .string()
+                    .regex(
+                      getDetectorProbeResponseReportOneFramesItemProfileResultsItemRawOverlaySha256RegExp,
+                    ),
+                  raw_overlay_size_bytes: zod
+                    .number()
+                    .gt(
+                      getDetectorProbeResponseReportOneFramesItemProfileResultsItemRawOverlaySizeBytesExclusiveMin,
+                    ),
+                }),
+              )
+              .min(getDetectorProbeResponseReportOneFramesItemProfileResultsMin)
+              .max(
+                getDetectorProbeResponseReportOneFramesItemProfileResultsMax,
+              ),
+          }),
+        )
+        .min(1)
+        .max(getDetectorProbeResponseReportOneFramesMax),
+      decode: zod.object({
+        width: zod
+          .number()
+          .gt(getDetectorProbeResponseReportOneDecodeWidthExclusiveMin),
+        height: zod
+          .number()
+          .gt(getDetectorProbeResponseReportOneDecodeHeightExclusiveMin),
+        frame_count: zod
+          .number()
+          .gt(getDetectorProbeResponseReportOneDecodeFrameCountExclusiveMin),
+        fps: zod
+          .number()
+          .gt(getDetectorProbeResponseReportOneDecodeFpsExclusiveMin),
+        requested_decode_mode: zod.enum(["sequential", "preroll", "direct"]),
+        effective_decode_mode: zod.enum([
+          "sequential",
+          "preroll_verified",
+          "direct_verified",
+          "sequential_fallback",
+        ]),
+        verified_frame_indices: zod
+          .array(
+            zod
+              .number()
+              .min(
+                getDetectorProbeResponseReportOneDecodeVerifiedFrameIndicesItemMin,
+              ),
+          )
+          .min(1)
+          .max(getDetectorProbeResponseReportOneDecodeVerifiedFrameIndicesMax),
+        position_verification: zod.literal(
+          "opencv_next_frame_index_with_0.25_tolerance",
+        ),
+      }),
+      execution: zod.object({
+        device: zod.enum(["cpu", "cuda:0"]),
+        precision: zod.literal("fp32"),
+      }),
+      artifacts: zod
+        .array(
+          zod.object({
+            artifact_id: zod
+              .string()
+              .regex(
+                getDetectorProbeResponseReportOneArtifactsItemArtifactIdRegExp,
+              ),
+            relative_path: zod.string(),
+            media_type: zod.literal("image/jpeg"),
+            sha256: zod
+              .string()
+              .regex(
+                getDetectorProbeResponseReportOneArtifactsItemSha256RegExp,
+              ),
+            size_bytes: zod
+              .number()
+              .gt(
+                getDetectorProbeResponseReportOneArtifactsItemSizeBytesExclusiveMin,
+              ),
+            width: zod
+              .number()
+              .gt(
+                getDetectorProbeResponseReportOneArtifactsItemWidthExclusiveMin,
+              ),
+            height: zod
+              .number()
+              .gt(
+                getDetectorProbeResponseReportOneArtifactsItemHeightExclusiveMin,
+              ),
+          }),
+        )
+        .min(getDetectorProbeResponseReportOneArtifactsMin)
+        .max(getDetectorProbeResponseReportOneArtifactsMax),
+      created_at: zod.string(),
+      report_sha256: zod
+        .string()
+        .regex(getDetectorProbeResponseReportOneReportSha256RegExp),
+    }),
+    zod.null(),
+  ]),
+  result_manifest_sha256: zod
+    .union([
+      zod.string().regex(getDetectorProbeResponseResultManifestSha256OneRegExp),
+      zod.null(),
+    ])
+    .optional(),
+  created_at: zod.string(),
+  updated_at: zod.string(),
+  status_url: zod.string(),
+  cancel_url: zod.string(),
+  can_cancel: zod.boolean(),
+});
+
+/**
+ * @summary Get Detector Probe Artifact
+ */
+export const GetDetectorProbeArtifactParams = zod.object({
+  job_id: zod.coerce.string(),
+  artifact_id: zod.coerce.string(),
+});
+
+export const GetDetectorProbeArtifactResponse = zod.unknown();
+
+/**
+ * @summary Cancel Detector Probe
+ */
+export const CancelDetectorProbeParams = zod.object({
+  job_id: zod.coerce.string(),
+});
+
+export const cancelDetectorProbeResponseJobIdRegExp = new RegExp(
+  "^[a-z0-9][a-z0-9._-]{0,119}$",
+);
+export const cancelDetectorProbeResponseIdempotencyKeyRegExp = new RegExp(
+  "^[0-9a-f]{64}$",
+);
+export const cancelDetectorProbeResponseRequestSha256RegExp = new RegExp(
+  "^[0-9a-f]{64}$",
+);
+export const cancelDetectorProbeResponseIntentSha256RegExp = new RegExp(
+  "^[0-9a-f]{64}$",
+);
+export const cancelDetectorProbeResponseFrozenProfilesSha256RegExp = new RegExp(
+  "^[0-9a-f]{64}$",
+);
+export const cancelDetectorProbeResponseProgressCompletedMin = 0;
+
+export const cancelDetectorProbeResponseProgressTotalMin = 0;
+
+export const cancelDetectorProbeResponseFrozenRequestParentTrialIdRegExp =
+  new RegExp("^[a-z0-9][a-z0-9._-]{0,119}$");
+export const cancelDetectorProbeResponseFrozenRequestSourceIdRegExp =
+  new RegExp("^[a-z0-9][a-z0-9._-]{0,119}$");
+export const cancelDetectorProbeResponseFrozenRequestSourceSha256RegExp =
+  new RegExp("^[0-9a-f]{64}$");
+export const cancelDetectorProbeResponseFrozenRequestSourceFileIdentitySha256RegExp =
+  new RegExp("^[0-9a-f]{64}$");
+export const cancelDetectorProbeResponseFrozenRequestSourceSizeBytesExclusiveMin = 0;
+
+export const cancelDetectorProbeResponseFrozenRequestSourceWidthExclusiveMin = 0;
+
+export const cancelDetectorProbeResponseFrozenRequestSourceHeightExclusiveMin = 0;
+
+export const cancelDetectorProbeResponseFrozenRequestSourceFrameCountExclusiveMin = 0;
+
+export const cancelDetectorProbeResponseFrozenRequestTrackingContractSha256RegExp =
+  new RegExp("^[0-9a-f]{64}$");
+export const cancelDetectorProbeResponseFrozenRequestBaseConfigSha256RegExp =
+  new RegExp("^[0-9a-f]{64}$");
+export const cancelDetectorProbeResponseFrozenRequestEffectiveConfigSha256RegExp =
+  new RegExp("^[0-9a-f]{64}$");
+export const cancelDetectorProbeResponseFrozenRequestTrialIntentSha256RegExp =
+  new RegExp("^[0-9a-f]{64}$");
+export const cancelDetectorProbeResponseFrozenRequestTuningPatchBindingValuesSha256RegExp =
+  new RegExp("^[0-9a-f]{64}$");
+export const cancelDetectorProbeResponseFrozenRequestTuningPatchSha256RegExp =
+  new RegExp("^[0-9a-f]{64}$");
+export const cancelDetectorProbeResponseFrozenRequestProfileIdsItemRegExp =
+  new RegExp("^[a-z0-9][a-z0-9._-]{0,119}$");
+export const cancelDetectorProbeResponseFrozenRequestProfileIdsMin = 2;
+export const cancelDetectorProbeResponseFrozenRequestProfileIdsMax = 6;
+
+export const cancelDetectorProbeResponseFrozenRequestFrozenProfilesSha256RegExp =
+  new RegExp("^[0-9a-f]{64}$");
+export const cancelDetectorProbeResponseFrozenRequestProfileBindingsItemProfileIdRegExp =
+  new RegExp("^[a-z0-9][a-z0-9._-]{0,119}$");
+export const cancelDetectorProbeResponseFrozenRequestProfileBindingsItemProfileSha256RegExp =
+  new RegExp("^[0-9a-f]{64}$");
+export const cancelDetectorProbeResponseFrozenRequestProfileBindingsItemModelIdRegExp =
+  new RegExp("^[a-z0-9][a-z0-9._-]{0,119}$");
+export const cancelDetectorProbeResponseFrozenRequestProfileBindingsItemModelDescriptorSha256RegExp =
+  new RegExp("^[0-9a-f]{64}$");
+export const cancelDetectorProbeResponseFrozenRequestProfileBindingsItemWeightsSha256RegExp =
+  new RegExp("^[0-9a-f]{64}$");
+export const cancelDetectorProbeResponseFrozenRequestProfileBindingsItemWeightsSizeBytesExclusiveMin = 0;
+
+export const cancelDetectorProbeResponseFrozenRequestProfileBindingsMin = 2;
+export const cancelDetectorProbeResponseFrozenRequestProfileBindingsMax = 6;
+
+export const cancelDetectorProbeResponseFrozenRequestExecutionBundleRuntimeContractSha256RegExp =
+  new RegExp("^[0-9a-f]{64}$");
+export const cancelDetectorProbeResponseFrozenRequestExecutionBundleExecutionEnvironmentCudaDeviceCountMin = 0;
+
+export const cancelDetectorProbeResponseFrozenRequestExecutionBundleExecutionEnvironmentCudnnVersionOneMin = 0;
+
+export const cancelDetectorProbeResponseFrozenRequestExecutionBundleExecutionEnvironmentGpuTotalMemoryBytesOneExclusiveMin = 0;
+
+export const cancelDetectorProbeResponseFrozenRequestExecutionBundleExecutionEnvironmentCudaDriverVersionOneMin = 0;
+
+export const cancelDetectorProbeResponseFrozenRequestExecutionBundleExecutionEnvironmentOpencvBuildInformationSha256RegExp =
+  new RegExp("^[0-9a-f]{64}$");
+export const cancelDetectorProbeResponseFrozenRequestExecutionBundleExecutionEnvironmentDecoderFingerprintSha256RegExp =
+  new RegExp("^[0-9a-f]{64}$");
+export const cancelDetectorProbeResponseFrozenRequestExecutionBundleRuntimeEnvironmentSha256RegExp =
+  new RegExp("^[0-9a-f]{64}$");
+export const cancelDetectorProbeResponseFrozenRequestExecutionBundleCodeBundleFilesRegExpOne =
+  new RegExp("^[0-9a-f]{64}$");
+export const cancelDetectorProbeResponseFrozenRequestExecutionBundleCodeBundleSha256RegExp =
+  new RegExp("^[0-9a-f]{64}$");
+export const cancelDetectorProbeResponseFrozenRequestExecutionBundleCodeCommitOneRegExp =
+  new RegExp("^(?:[0-9a-f]{40}|[0-9a-f]{64})$");
+export const cancelDetectorProbeResponseFrozenRequestExecutionBundleCodeCommitBlobFilesOneRegExpOne =
+  new RegExp("^[0-9a-f]{64}$");
+export const cancelDetectorProbeResponseFrozenRequestExecutionBundleCodeCommitBlobBundleSha256OneRegExp =
+  new RegExp("^[0-9a-f]{64}$");
+export const cancelDetectorProbeResponseFrozenRequestExecutionBundleFrozenProfilesSha256RegExp =
+  new RegExp("^[0-9a-f]{64}$");
+export const cancelDetectorProbeResponseFrozenRequestExecutionBundleSha256RegExp =
+  new RegExp("^[0-9a-f]{64}$");
+export const cancelDetectorProbeResponseFrozenRequestRuntimeEnvironmentSha256RegExp =
+  new RegExp("^[0-9a-f]{64}$");
+export const cancelDetectorProbeResponseFrozenRequestFrameIndicesItemMin = 0;
+
+export const cancelDetectorProbeResponseFrozenRequestFrameIndicesMax = 50;
+
+export const cancelDetectorProbeResponseFrozenRequestRetryFromJobIdOneRegExp =
+  new RegExp("^[a-z0-9][a-z0-9._-]{0,119}$");
+export const cancelDetectorProbeResponseFrozenProfilesItemModelDescriptorSha256RegExp =
+  new RegExp("^[0-9a-f]{64}$");
+export const cancelDetectorProbeResponseFrozenProfilesItemSettingsConfidenceThresholdMin = 0;
+export const cancelDetectorProbeResponseFrozenProfilesItemSettingsConfidenceThresholdMax = 1;
+
+export const cancelDetectorProbeResponseFrozenProfilesItemSettingsImageSizeExclusiveMin = 0;
+
+export const cancelDetectorProbeResponseFrozenProfilesItemSettingsSliceHeightOneExclusiveMin = 0;
+
+export const cancelDetectorProbeResponseFrozenProfilesItemSettingsSliceWidthOneExclusiveMin = 0;
+
+export const cancelDetectorProbeResponseFrozenProfilesItemSettingsOverlapHeightRatioOneMin = 0;
+export const cancelDetectorProbeResponseFrozenProfilesItemSettingsOverlapHeightRatioOneExclusiveMax = 1;
+
+export const cancelDetectorProbeResponseFrozenProfilesItemSettingsOverlapWidthRatioOneMin = 0;
+export const cancelDetectorProbeResponseFrozenProfilesItemSettingsOverlapWidthRatioOneExclusiveMax = 1;
+
+export const cancelDetectorProbeResponseFrozenProfilesItemSettingsPostprocessMatchThresholdOneMin = 0;
+export const cancelDetectorProbeResponseFrozenProfilesItemSettingsPostprocessMatchThresholdOneMax = 1;
+
+export const cancelDetectorProbeResponseFrozenProfilesItemProfileSha256RegExp =
+  new RegExp("^[0-9a-f]{64}$");
+export const cancelDetectorProbeResponseFrozenProfilesItemModelDescriptorWeightsSha256RegExp =
+  new RegExp("^[0-9a-f]{64}$");
+export const cancelDetectorProbeResponseFrozenProfilesItemModelDescriptorWeightsSizeBytesExclusiveMin = 0;
+
+export const cancelDetectorProbeResponseFrozenProfilesItemModelDescriptorDescriptorSha256RegExp =
+  new RegExp("^[0-9a-f]{64}$");
+export const cancelDetectorProbeResponseFrozenProfilesItemModelDescriptorImportManifestSha256OneRegExp =
+  new RegExp("^[0-9a-f]{64}$");
+export const cancelDetectorProbeResponseFrozenProfilesMin = 2;
+export const cancelDetectorProbeResponseFrozenProfilesMax = 6;
+
+export const cancelDetectorProbeResponseRetryFromJobIdOneRegExp = new RegExp(
+  "^[a-z0-9][a-z0-9._-]{0,119}$",
+);
+export const cancelDetectorProbeResponseReportOneJobIdRegExp = new RegExp(
+  "^[a-z0-9][a-z0-9._-]{0,119}$",
+);
+export const cancelDetectorProbeResponseReportOneRequestSha256RegExp =
+  new RegExp("^[0-9a-f]{64}$");
+export const cancelDetectorProbeResponseReportOneSourceSourceIdRegExp =
+  new RegExp("^[a-z0-9][a-z0-9._-]{0,119}$");
+export const cancelDetectorProbeResponseReportOneSourceSha256RegExp =
+  new RegExp("^[0-9a-f]{64}$");
+export const cancelDetectorProbeResponseReportOneSourceFileIdentitySha256RegExp =
+  new RegExp("^[0-9a-f]{64}$");
+export const cancelDetectorProbeResponseReportOneSourceSizeBytesExclusiveMin = 0;
+
+export const cancelDetectorProbeResponseReportOneSourceWidthExclusiveMin = 0;
+
+export const cancelDetectorProbeResponseReportOneSourceHeightExclusiveMin = 0;
+
+export const cancelDetectorProbeResponseReportOneSourceFrameCountExclusiveMin = 0;
+
+export const cancelDetectorProbeResponseReportOneSourceTrackingContractSha256RegExp =
+  new RegExp("^[0-9a-f]{64}$");
+export const cancelDetectorProbeResponseReportOneLineageParentTrialIdRegExp =
+  new RegExp("^[a-z0-9][a-z0-9._-]{0,119}$");
+export const cancelDetectorProbeResponseReportOneLineageBaseConfigSha256RegExp =
+  new RegExp("^[0-9a-f]{64}$");
+export const cancelDetectorProbeResponseReportOneLineageEffectiveConfigSha256RegExp =
+  new RegExp("^[0-9a-f]{64}$");
+export const cancelDetectorProbeResponseReportOneLineageTrialIntentSha256RegExp =
+  new RegExp("^[0-9a-f]{64}$");
+export const cancelDetectorProbeResponseReportOneLineageTuningPatchBindingValuesSha256RegExp =
+  new RegExp("^[0-9a-f]{64}$");
+export const cancelDetectorProbeResponseReportOneLineageTuningPatchSha256RegExp =
+  new RegExp("^[0-9a-f]{64}$");
+export const cancelDetectorProbeResponseReportOneLineageFrozenProfilesSha256RegExp =
+  new RegExp("^[0-9a-f]{64}$");
+export const cancelDetectorProbeResponseReportOneLineageExecutionBundleRuntimeContractSha256RegExp =
+  new RegExp("^[0-9a-f]{64}$");
+export const cancelDetectorProbeResponseReportOneLineageExecutionBundleExecutionEnvironmentCudaDeviceCountMin = 0;
+
+export const cancelDetectorProbeResponseReportOneLineageExecutionBundleExecutionEnvironmentCudnnVersionOneMin = 0;
+
+export const cancelDetectorProbeResponseReportOneLineageExecutionBundleExecutionEnvironmentGpuTotalMemoryBytesOneExclusiveMin = 0;
+
+export const cancelDetectorProbeResponseReportOneLineageExecutionBundleExecutionEnvironmentCudaDriverVersionOneMin = 0;
+
+export const cancelDetectorProbeResponseReportOneLineageExecutionBundleExecutionEnvironmentOpencvBuildInformationSha256RegExp =
+  new RegExp("^[0-9a-f]{64}$");
+export const cancelDetectorProbeResponseReportOneLineageExecutionBundleExecutionEnvironmentDecoderFingerprintSha256RegExp =
+  new RegExp("^[0-9a-f]{64}$");
+export const cancelDetectorProbeResponseReportOneLineageExecutionBundleRuntimeEnvironmentSha256RegExp =
+  new RegExp("^[0-9a-f]{64}$");
+export const cancelDetectorProbeResponseReportOneLineageExecutionBundleCodeBundleFilesRegExpOne =
+  new RegExp("^[0-9a-f]{64}$");
+export const cancelDetectorProbeResponseReportOneLineageExecutionBundleCodeBundleSha256RegExp =
+  new RegExp("^[0-9a-f]{64}$");
+export const cancelDetectorProbeResponseReportOneLineageExecutionBundleCodeCommitOneRegExp =
+  new RegExp("^(?:[0-9a-f]{40}|[0-9a-f]{64})$");
+export const cancelDetectorProbeResponseReportOneLineageExecutionBundleCodeCommitBlobFilesOneRegExpOne =
+  new RegExp("^[0-9a-f]{64}$");
+export const cancelDetectorProbeResponseReportOneLineageExecutionBundleCodeCommitBlobBundleSha256OneRegExp =
+  new RegExp("^[0-9a-f]{64}$");
+export const cancelDetectorProbeResponseReportOneLineageExecutionBundleFrozenProfilesSha256RegExp =
+  new RegExp("^[0-9a-f]{64}$");
+export const cancelDetectorProbeResponseReportOneLineageExecutionBundleSha256RegExp =
+  new RegExp("^[0-9a-f]{64}$");
+export const cancelDetectorProbeResponseReportOneLineageRuntimeEnvironmentSha256RegExp =
+  new RegExp("^[0-9a-f]{64}$");
+export const cancelDetectorProbeResponseReportOneLineageIntentSha256RegExp =
+  new RegExp("^[0-9a-f]{64}$");
+export const cancelDetectorProbeResponseReportOneLineageRetryFromJobIdOneRegExp =
+  new RegExp("^[a-z0-9][a-z0-9._-]{0,119}$");
+export const cancelDetectorProbeResponseReportOneFrozenProfilesItemModelDescriptorSha256RegExp =
+  new RegExp("^[0-9a-f]{64}$");
+export const cancelDetectorProbeResponseReportOneFrozenProfilesItemSettingsConfidenceThresholdMin = 0;
+export const cancelDetectorProbeResponseReportOneFrozenProfilesItemSettingsConfidenceThresholdMax = 1;
+
+export const cancelDetectorProbeResponseReportOneFrozenProfilesItemSettingsImageSizeExclusiveMin = 0;
+
+export const cancelDetectorProbeResponseReportOneFrozenProfilesItemSettingsSliceHeightOneExclusiveMin = 0;
+
+export const cancelDetectorProbeResponseReportOneFrozenProfilesItemSettingsSliceWidthOneExclusiveMin = 0;
+
+export const cancelDetectorProbeResponseReportOneFrozenProfilesItemSettingsOverlapHeightRatioOneMin = 0;
+export const cancelDetectorProbeResponseReportOneFrozenProfilesItemSettingsOverlapHeightRatioOneExclusiveMax = 1;
+
+export const cancelDetectorProbeResponseReportOneFrozenProfilesItemSettingsOverlapWidthRatioOneMin = 0;
+export const cancelDetectorProbeResponseReportOneFrozenProfilesItemSettingsOverlapWidthRatioOneExclusiveMax = 1;
+
+export const cancelDetectorProbeResponseReportOneFrozenProfilesItemSettingsPostprocessMatchThresholdOneMin = 0;
+export const cancelDetectorProbeResponseReportOneFrozenProfilesItemSettingsPostprocessMatchThresholdOneMax = 1;
+
+export const cancelDetectorProbeResponseReportOneFrozenProfilesItemProfileSha256RegExp =
+  new RegExp("^[0-9a-f]{64}$");
+export const cancelDetectorProbeResponseReportOneFrozenProfilesItemModelDescriptorWeightsSha256RegExp =
+  new RegExp("^[0-9a-f]{64}$");
+export const cancelDetectorProbeResponseReportOneFrozenProfilesItemModelDescriptorWeightsSizeBytesExclusiveMin = 0;
+
+export const cancelDetectorProbeResponseReportOneFrozenProfilesItemModelDescriptorDescriptorSha256RegExp =
+  new RegExp("^[0-9a-f]{64}$");
+export const cancelDetectorProbeResponseReportOneFrozenProfilesItemModelDescriptorImportManifestSha256OneRegExp =
+  new RegExp("^[0-9a-f]{64}$");
+export const cancelDetectorProbeResponseReportOneFrozenProfilesMin = 2;
+export const cancelDetectorProbeResponseReportOneFrozenProfilesMax = 6;
+
+export const cancelDetectorProbeResponseReportOneFramesItemFrameIndexMin = 0;
+
+export const cancelDetectorProbeResponseReportOneFramesItemSourceWidthExclusiveMin = 0;
+
+export const cancelDetectorProbeResponseReportOneFramesItemSourceHeightExclusiveMin = 0;
+
+export const cancelDetectorProbeResponseReportOneFramesItemDecodedFramePositionMin = 0;
+
+export const cancelDetectorProbeResponseReportOneFramesItemMediaIntegrityWidthMin = 0;
+
+export const cancelDetectorProbeResponseReportOneFramesItemMediaIntegrityHeightMin = 0;
+
+export const cancelDetectorProbeResponseReportOneFramesItemMediaIntegrityMeanLumaMin = 0;
+
+export const cancelDetectorProbeResponseReportOneFramesItemMediaIntegrityStdLumaMin = 0;
+
+export const cancelDetectorProbeResponseReportOneFramesItemMediaIntegrityTextureTileRatioMin = 0;
+export const cancelDetectorProbeResponseReportOneFramesItemMediaIntegrityTextureTileRatioMax = 1;
+
+export const cancelDetectorProbeResponseReportOneFramesItemMediaIntegrityDominantColorRatioMin = 0;
+export const cancelDetectorProbeResponseReportOneFramesItemMediaIntegrityDominantColorRatioMax = 1;
+
+export const cancelDetectorProbeResponseReportOneFramesItemSourceFrameSha256RegExp =
+  new RegExp("^[0-9a-f]{64}$");
+export const cancelDetectorProbeResponseReportOneFramesItemSourceFrameSizeBytesExclusiveMin = 0;
+
+export const cancelDetectorProbeResponseReportOneFramesItemProfileResultsItemProfileIdRegExp =
+  new RegExp("^[a-z0-9][a-z0-9._-]{0,119}$");
+export const cancelDetectorProbeResponseReportOneFramesItemProfileResultsItemProfileSha256RegExp =
+  new RegExp("^[0-9a-f]{64}$");
+export const cancelDetectorProbeResponseReportOneFramesItemProfileResultsItemLatencyMsOneMin = 0;
+
+export const cancelDetectorProbeResponseReportOneFramesItemProfileResultsItemCandidateCountMin = 0;
+
+export const cancelDetectorProbeResponseReportOneFramesItemProfileResultsItemRawCandidatesItemFrameIndexMin = 0;
+
+export const cancelDetectorProbeResponseReportOneFramesItemProfileResultsItemRawCandidatesItemConfidenceMin = 0;
+export const cancelDetectorProbeResponseReportOneFramesItemProfileResultsItemRawCandidatesItemConfidenceMax = 1;
+
+export const cancelDetectorProbeResponseReportOneFramesItemProfileResultsItemRawCandidatesMax = 5;
+
+export const cancelDetectorProbeResponseReportOneFramesItemProfileResultsItemDisplayCandidateOneFrameIndexMin = 0;
+
+export const cancelDetectorProbeResponseReportOneFramesItemProfileResultsItemDisplayCandidateOneConfidenceMin = 0;
+export const cancelDetectorProbeResponseReportOneFramesItemProfileResultsItemDisplayCandidateOneConfidenceMax = 1;
+
+export const cancelDetectorProbeResponseReportOneFramesItemProfileResultsItemFilterReasonsMinOne = 0;
+
+export const cancelDetectorProbeResponseReportOneFramesItemProfileResultsItemRawOverlaySha256RegExp =
+  new RegExp("^[0-9a-f]{64}$");
+export const cancelDetectorProbeResponseReportOneFramesItemProfileResultsItemRawOverlaySizeBytesExclusiveMin = 0;
+
+export const cancelDetectorProbeResponseReportOneFramesItemProfileResultsMin = 2;
+export const cancelDetectorProbeResponseReportOneFramesItemProfileResultsMax = 6;
+
+export const cancelDetectorProbeResponseReportOneFramesMax = 50;
+
+export const cancelDetectorProbeResponseReportOneDecodeWidthExclusiveMin = 0;
+
+export const cancelDetectorProbeResponseReportOneDecodeHeightExclusiveMin = 0;
+
+export const cancelDetectorProbeResponseReportOneDecodeFrameCountExclusiveMin = 0;
+
+export const cancelDetectorProbeResponseReportOneDecodeFpsExclusiveMin = 0;
+
+export const cancelDetectorProbeResponseReportOneDecodeVerifiedFrameIndicesItemMin = 0;
+
+export const cancelDetectorProbeResponseReportOneDecodeVerifiedFrameIndicesMax = 50;
+
+export const cancelDetectorProbeResponseReportOneArtifactsItemArtifactIdRegExp =
+  new RegExp("^[a-z0-9][a-z0-9._-]{0,119}$");
+export const cancelDetectorProbeResponseReportOneArtifactsItemSha256RegExp =
+  new RegExp("^[0-9a-f]{64}$");
+export const cancelDetectorProbeResponseReportOneArtifactsItemSizeBytesExclusiveMin = 0;
+
+export const cancelDetectorProbeResponseReportOneArtifactsItemWidthExclusiveMin = 0;
+
+export const cancelDetectorProbeResponseReportOneArtifactsItemHeightExclusiveMin = 0;
+
+export const cancelDetectorProbeResponseReportOneArtifactsMin = 3;
+export const cancelDetectorProbeResponseReportOneArtifactsMax = 350;
+
+export const cancelDetectorProbeResponseReportOneReportSha256RegExp =
+  new RegExp("^[0-9a-f]{64}$");
+export const cancelDetectorProbeResponseResultManifestSha256OneRegExp =
+  new RegExp("^[0-9a-f]{64}$");
+
+export const CancelDetectorProbeResponse = zod.object({
+  schema_version: zod.literal("1.0"),
+  artifact_type: zod.literal("detector_probe_job"),
+  job_id: zod.string().regex(cancelDetectorProbeResponseJobIdRegExp),
+  idempotency_key: zod
+    .string()
+    .regex(cancelDetectorProbeResponseIdempotencyKeyRegExp),
+  request_sha256: zod
+    .string()
+    .regex(cancelDetectorProbeResponseRequestSha256RegExp),
+  intent_sha256: zod
+    .string()
+    .regex(cancelDetectorProbeResponseIntentSha256RegExp),
+  frozen_profiles_sha256: zod
+    .string()
+    .regex(cancelDetectorProbeResponseFrozenProfilesSha256RegExp),
+  status: zod.enum([
+    "queued",
+    "running",
+    "committing",
+    "ready",
+    "failed",
+    "cancelled",
+    "blocked",
+  ]),
+  stage: zod.string(),
+  progress: zod.object({
+    completed: zod
+      .number()
+      .min(cancelDetectorProbeResponseProgressCompletedMin),
+    total: zod.number().min(cancelDetectorProbeResponseProgressTotalMin),
+    updated_at: zod.string(),
+  }),
+  frozen_request: zod.object({
+    parent_trial_id: zod
+      .string()
+      .regex(cancelDetectorProbeResponseFrozenRequestParentTrialIdRegExp),
+    source_id: zod
+      .string()
+      .regex(cancelDetectorProbeResponseFrozenRequestSourceIdRegExp),
+    source_relative_path: zod.string(),
+    source_sha256: zod
+      .string()
+      .regex(cancelDetectorProbeResponseFrozenRequestSourceSha256RegExp),
+    source_file_identity_sha256: zod
+      .string()
+      .regex(
+        cancelDetectorProbeResponseFrozenRequestSourceFileIdentitySha256RegExp,
+      ),
+    source_size_bytes: zod
+      .number()
+      .gt(cancelDetectorProbeResponseFrozenRequestSourceSizeBytesExclusiveMin),
+    source_width: zod
+      .number()
+      .gt(cancelDetectorProbeResponseFrozenRequestSourceWidthExclusiveMin),
+    source_height: zod
+      .number()
+      .gt(cancelDetectorProbeResponseFrozenRequestSourceHeightExclusiveMin),
+    source_frame_count: zod
+      .number()
+      .gt(cancelDetectorProbeResponseFrozenRequestSourceFrameCountExclusiveMin),
+    tracking_contract_relative_path: zod.string(),
+    tracking_contract_sha256: zod
+      .string()
+      .regex(
+        cancelDetectorProbeResponseFrozenRequestTrackingContractSha256RegExp,
+      ),
+    base_config_relative_path: zod.string(),
+    base_config_sha256: zod
+      .string()
+      .regex(cancelDetectorProbeResponseFrozenRequestBaseConfigSha256RegExp),
+    effective_config_relative_path: zod.string(),
+    effective_config_sha256: zod
+      .string()
+      .regex(
+        cancelDetectorProbeResponseFrozenRequestEffectiveConfigSha256RegExp,
+      ),
+    trial_intent_sha256: zod
+      .string()
+      .regex(cancelDetectorProbeResponseFrozenRequestTrialIntentSha256RegExp),
+    tuning_patch_binding: zod.object({
+      state: zod.enum(["absent", "versioned"]),
+      schema_version: zod.literal("1.0"),
+      version_id: zod.union([zod.string(), zod.null()]),
+      parent_version_id: zod.union([zod.string(), zod.null()]),
+      values_sha256: zod
+        .string()
+        .regex(
+          cancelDetectorProbeResponseFrozenRequestTuningPatchBindingValuesSha256RegExp,
+        ),
+    }),
+    tuning_patch_sha256: zod
+      .string()
+      .regex(cancelDetectorProbeResponseFrozenRequestTuningPatchSha256RegExp),
+    profile_ids: zod
+      .array(
+        zod
+          .string()
+          .regex(cancelDetectorProbeResponseFrozenRequestProfileIdsItemRegExp),
+      )
+      .min(cancelDetectorProbeResponseFrozenRequestProfileIdsMin)
+      .max(cancelDetectorProbeResponseFrozenRequestProfileIdsMax),
+    frozen_profiles_sha256: zod
+      .string()
+      .regex(
+        cancelDetectorProbeResponseFrozenRequestFrozenProfilesSha256RegExp,
+      ),
+    profile_sha256s: zod.object({}).passthrough(),
+    profile_bindings: zod
+      .array(
+        zod.object({
+          profile_id: zod
+            .string()
+            .regex(
+              cancelDetectorProbeResponseFrozenRequestProfileBindingsItemProfileIdRegExp,
+            ),
+          profile_sha256: zod
+            .string()
+            .regex(
+              cancelDetectorProbeResponseFrozenRequestProfileBindingsItemProfileSha256RegExp,
+            ),
+          model_id: zod
+            .string()
+            .regex(
+              cancelDetectorProbeResponseFrozenRequestProfileBindingsItemModelIdRegExp,
+            ),
+          model_version: zod.string(),
+          model_descriptor_sha256: zod
+            .string()
+            .regex(
+              cancelDetectorProbeResponseFrozenRequestProfileBindingsItemModelDescriptorSha256RegExp,
+            ),
+          weights_sha256: zod
+            .string()
+            .regex(
+              cancelDetectorProbeResponseFrozenRequestProfileBindingsItemWeightsSha256RegExp,
+            ),
+          weights_size_bytes: zod
+            .number()
+            .gt(
+              cancelDetectorProbeResponseFrozenRequestProfileBindingsItemWeightsSizeBytesExclusiveMin,
+            ),
+        }),
+      )
+      .min(cancelDetectorProbeResponseFrozenRequestProfileBindingsMin)
+      .max(cancelDetectorProbeResponseFrozenRequestProfileBindingsMax),
+    execution_bundle: zod.object({
+      schema_version: zod.literal("1.0"),
+      installed_runtime: zod.record(zod.string(), zod.string()),
+      runtime_contract: zod.record(zod.string(), zod.string()),
+      runtime_contract_sha256: zod
+        .string()
+        .regex(
+          cancelDetectorProbeResponseFrozenRequestExecutionBundleRuntimeContractSha256RegExp,
+        ),
+      runtime_observation_evidence_sha256s: zod.object({}).passthrough(),
+      execution_environment: zod.object({
+        device: zod.enum(["cpu", "cuda:0"]),
+        precision: zod.literal("fp32"),
+        cuda_available: zod.boolean(),
+        cuda_device_count: zod
+          .number()
+          .min(
+            cancelDetectorProbeResponseFrozenRequestExecutionBundleExecutionEnvironmentCudaDeviceCountMin,
+          ),
+        cuda_visible_devices: zod.union([zod.string(), zod.null()]),
+        cuda_compiled_version: zod.union([zod.string(), zod.null()]),
+        cudnn_version: zod
+          .union([
+            zod
+              .number()
+              .min(
+                cancelDetectorProbeResponseFrozenRequestExecutionBundleExecutionEnvironmentCudnnVersionOneMin,
+              ),
+            zod.null(),
+          ])
+          .optional(),
+        gpu_name: zod.union([zod.string(), zod.null()]),
+        gpu_compute_capability: zod.union([zod.string(), zod.null()]),
+        gpu_total_memory_bytes: zod
+          .union([
+            zod
+              .number()
+              .gt(
+                cancelDetectorProbeResponseFrozenRequestExecutionBundleExecutionEnvironmentGpuTotalMemoryBytesOneExclusiveMin,
+              ),
+            zod.null(),
+          ])
+          .optional(),
+        cuda_driver_version: zod
+          .union([
+            zod
+              .number()
+              .min(
+                cancelDetectorProbeResponseFrozenRequestExecutionBundleExecutionEnvironmentCudaDriverVersionOneMin,
+              ),
+            zod.null(),
+          ])
+          .optional(),
+        python_implementation: zod.string().min(1),
+        python_version: zod.string().min(1),
+        numpy_version: zod.string().min(1),
+        opencv_version: zod.string().min(1),
+        pydantic_version: zod.string().min(1),
+        pydantic_core_version: zod.string().min(1),
+        opencv_build_information_sha256: zod
+          .string()
+          .regex(
+            cancelDetectorProbeResponseFrozenRequestExecutionBundleExecutionEnvironmentOpencvBuildInformationSha256RegExp,
+          ),
+        opencv_ffmpeg_enabled: zod.union([zod.boolean(), zod.null()]),
+        decoder_fingerprint_sha256: zod
+          .string()
+          .regex(
+            cancelDetectorProbeResponseFrozenRequestExecutionBundleExecutionEnvironmentDecoderFingerprintSha256RegExp,
+          ),
+      }),
+      runtime_environment_sha256: zod
+        .string()
+        .regex(
+          cancelDetectorProbeResponseFrozenRequestExecutionBundleRuntimeEnvironmentSha256RegExp,
+        ),
+      code_bundle_files: zod.record(
+        zod.string(),
+        zod
+          .string()
+          .regex(
+            cancelDetectorProbeResponseFrozenRequestExecutionBundleCodeBundleFilesRegExpOne,
+          ),
+      ),
+      code_bundle_sha256: zod
+        .string()
+        .regex(
+          cancelDetectorProbeResponseFrozenRequestExecutionBundleCodeBundleSha256RegExp,
+        ),
+      code_commit: zod.union([
+        zod
+          .string()
+          .regex(
+            cancelDetectorProbeResponseFrozenRequestExecutionBundleCodeCommitOneRegExp,
+          ),
+        zod.null(),
+      ]),
+      code_commit_status: zod.enum(["bound", "unbound", "unavailable"]),
+      code_commit_reason: zod.union([
+        zod.enum([
+          "code_bundle_differs_from_commit",
+          "repository_commit_unavailable",
+        ]),
+        zod.null(),
+      ]),
+      code_commit_blob_files: zod.union([
+        zod.record(
+          zod.string(),
+          zod
+            .string()
+            .regex(
+              cancelDetectorProbeResponseFrozenRequestExecutionBundleCodeCommitBlobFilesOneRegExpOne,
+            ),
+        ),
+        zod.null(),
+      ]),
+      code_commit_blob_bundle_sha256: zod.union([
+        zod
+          .string()
+          .regex(
+            cancelDetectorProbeResponseFrozenRequestExecutionBundleCodeCommitBlobBundleSha256OneRegExp,
+          ),
+        zod.null(),
+      ]),
+      code_commit_binding_kind: zod.union([
+        zod.literal("exact_or_crlf_to_lf_commit_blob"),
+        zod.null(),
+      ]),
+      frozen_profiles_sha256: zod
+        .string()
+        .regex(
+          cancelDetectorProbeResponseFrozenRequestExecutionBundleFrozenProfilesSha256RegExp,
+        ),
+    }),
+    execution_bundle_sha256: zod
+      .string()
+      .regex(
+        cancelDetectorProbeResponseFrozenRequestExecutionBundleSha256RegExp,
+      ),
+    runtime_environment_sha256: zod
+      .string()
+      .regex(
+        cancelDetectorProbeResponseFrozenRequestRuntimeEnvironmentSha256RegExp,
+      ),
+    frame_indices: zod
+      .array(
+        zod
+          .number()
+          .min(cancelDetectorProbeResponseFrozenRequestFrameIndicesItemMin),
+      )
+      .min(1)
+      .max(cancelDetectorProbeResponseFrozenRequestFrameIndicesMax),
+    top_k: zod.number(),
+    requested_decode_mode: zod.enum(["sequential", "preroll", "direct"]),
+    retry_from_job_id: zod
+      .union([
+        zod
+          .string()
+          .regex(
+            cancelDetectorProbeResponseFrozenRequestRetryFromJobIdOneRegExp,
+          ),
+        zod.null(),
+      ])
+      .optional(),
+  }),
+  frozen_profiles: zod
+    .array(
+      zod.object({
+        schema_version: zod.string(),
+        artifact_type: zod.literal("detector_profile"),
+        profile_id: zod.string(),
+        version: zod.string(),
+        model_id: zod.string(),
+        model_version: zod.string(),
+        model_descriptor_sha256: zod
+          .string()
+          .regex(
+            cancelDetectorProbeResponseFrozenProfilesItemModelDescriptorSha256RegExp,
+          ),
+        mode: zod.enum(["direct", "sahi"]),
+        settings: zod.object({
+          confidence_threshold: zod
+            .number()
+            .min(
+              cancelDetectorProbeResponseFrozenProfilesItemSettingsConfidenceThresholdMin,
+            )
+            .max(
+              cancelDetectorProbeResponseFrozenProfilesItemSettingsConfidenceThresholdMax,
+            ),
+          image_size: zod
+            .number()
+            .gt(
+              cancelDetectorProbeResponseFrozenProfilesItemSettingsImageSizeExclusiveMin,
+            ),
+          use_half: zod.boolean(),
+          allowed_labels: zod.array(zod.string()),
+          top_k: zod.number(),
+          slice_height: zod
+            .union([
+              zod
+                .number()
+                .gt(
+                  cancelDetectorProbeResponseFrozenProfilesItemSettingsSliceHeightOneExclusiveMin,
+                ),
+              zod.null(),
+            ])
+            .optional(),
+          slice_width: zod
+            .union([
+              zod
+                .number()
+                .gt(
+                  cancelDetectorProbeResponseFrozenProfilesItemSettingsSliceWidthOneExclusiveMin,
+                ),
+              zod.null(),
+            ])
+            .optional(),
+          overlap_height_ratio: zod
+            .union([
+              zod
+                .number()
+                .min(
+                  cancelDetectorProbeResponseFrozenProfilesItemSettingsOverlapHeightRatioOneMin,
+                )
+                .lt(
+                  cancelDetectorProbeResponseFrozenProfilesItemSettingsOverlapHeightRatioOneExclusiveMax,
+                ),
+              zod.null(),
+            ])
+            .optional(),
+          overlap_width_ratio: zod
+            .union([
+              zod
+                .number()
+                .min(
+                  cancelDetectorProbeResponseFrozenProfilesItemSettingsOverlapWidthRatioOneMin,
+                )
+                .lt(
+                  cancelDetectorProbeResponseFrozenProfilesItemSettingsOverlapWidthRatioOneExclusiveMax,
+                ),
+              zod.null(),
+            ])
+            .optional(),
+          perform_standard_pred: zod
+            .union([zod.boolean(), zod.null()])
+            .optional(),
+          postprocess_type: zod.union([zod.string(), zod.null()]).optional(),
+          postprocess_match_metric: zod
+            .union([zod.string(), zod.null()])
+            .optional(),
+          postprocess_match_threshold: zod
+            .union([
+              zod
+                .number()
+                .min(
+                  cancelDetectorProbeResponseFrozenProfilesItemSettingsPostprocessMatchThresholdOneMin,
+                )
+                .max(
+                  cancelDetectorProbeResponseFrozenProfilesItemSettingsPostprocessMatchThresholdOneMax,
+                ),
+              zod.null(),
+            ])
+            .optional(),
+        }),
+        profile_sha256: zod
+          .string()
+          .regex(
+            cancelDetectorProbeResponseFrozenProfilesItemProfileSha256RegExp,
+          ),
+        recommended: zod.boolean(),
+        availability: zod.object({
+          status: zod.enum(["available", "unavailable", "blocked"]),
+          reason_codes: zod.array(zod.string()),
+          runtime: zod
+            .union([
+              zod.object({
+                name: zod.string(),
+                installed_version: zod.union([zod.string(), zod.null()]),
+                load_smoke: zod.boolean(),
+              }),
+              zod.null(),
+            ])
+            .optional(),
+        }),
+        selectable_for_probe: zod.boolean(),
+        model_descriptor: zod.object({
+          schema_version: zod.string(),
+          artifact_type: zod.literal("detector_model_descriptor"),
+          model_id: zod.string(),
+          version: zod.string(),
+          model_version: zod.string(),
+          display_name: zod.string(),
+          architecture_family: zod.string(),
+          weights: zod.object({
+            relative_path: zod.string(),
+            sha256: zod
+              .string()
+              .regex(
+                cancelDetectorProbeResponseFrozenProfilesItemModelDescriptorWeightsSha256RegExp,
+              ),
+            size_bytes: zod
+              .number()
+              .gt(
+                cancelDetectorProbeResponseFrozenProfilesItemModelDescriptorWeightsSizeBytesExclusiveMin,
+              ),
+          }),
+          source: zod.object({
+            project: zod.string(),
+            version: zod.string(),
+            asset_release: zod.string(),
+            weight_url: zod.string(),
+            acquisition_method: zod.string(),
+            access_requirement: zod.string(),
+          }),
+          checkpoint: zod
+            .union([zod.record(zod.string(), zod.unknown()), zod.null()])
+            .optional(),
+          runtime_contract: zod.record(zod.string(), zod.unknown()),
+          class_names: zod.array(zod.string()),
+          class_map: zod.record(zod.string(), zod.string()),
+          expected_input: zod.record(zod.string(), zod.unknown()),
+          execution: zod
+            .union([zod.record(zod.string(), zod.unknown()), zod.null()])
+            .optional(),
+          memory_envelope: zod
+            .union([zod.record(zod.string(), zod.unknown()), zod.null()])
+            .optional(),
+          licenses: zod.object({
+            dataset: zod.object({
+              name: zod.string(),
+              spdx_id: zod.string(),
+              url: zod.string(),
+              reviewed: zod.boolean(),
+              approved_for_local_probe: zod.boolean(),
+            }),
+            model: zod.object({
+              name: zod.string(),
+              spdx_id: zod.string(),
+              url: zod.string(),
+              reviewed: zod.boolean(),
+              approved_for_local_probe: zod.boolean(),
+            }),
+            runtime: zod.object({
+              name: zod.string(),
+              spdx_id: zod.string(),
+              url: zod.string(),
+              reviewed: zod.boolean(),
+              approved_for_local_probe: zod.boolean(),
+            }),
+            deployment: zod.object({
+              name: zod.string(),
+              spdx_id: zod.string(),
+              url: zod.string(),
+              reviewed: zod.boolean(),
+              approved_for_local_probe: zod.boolean(),
+            }),
+          }),
+          egress: zod.object({
+            frames_leave_local_machine: zod.boolean(),
+            destination: zod.union([zod.string(), zod.null()]),
+            operator_consent: zod.enum([
+              "not_required",
+              "granted",
+              "required_not_granted",
+            ]),
+          }),
+          lifecycle_state: zod.enum([
+            "unverified",
+            "feasibility_passed",
+            "development_candidate",
+            "source_segment_qualified",
+            "camera_qualified",
+            "retired",
+          ]),
+          bindings: zod.record(zod.string(), zod.unknown()),
+          descriptor_sha256: zod
+            .string()
+            .regex(
+              cancelDetectorProbeResponseFrozenProfilesItemModelDescriptorDescriptorSha256RegExp,
+            ),
+          import_manifest_sha256: zod
+            .union([
+              zod
+                .string()
+                .regex(
+                  cancelDetectorProbeResponseFrozenProfilesItemModelDescriptorImportManifestSha256OneRegExp,
+                ),
+              zod.null(),
+            ])
+            .optional(),
+        }),
+      }),
+    )
+    .min(cancelDetectorProbeResponseFrozenProfilesMin)
+    .max(cancelDetectorProbeResponseFrozenProfilesMax),
+  retry_from_job_id: zod.union([
+    zod.string().regex(cancelDetectorProbeResponseRetryFromJobIdOneRegExp),
+    zod.null(),
+  ]),
+  error_code: zod.union([zod.string(), zod.null()]).optional(),
+  blocker_code: zod.union([zod.string(), zod.null()]).optional(),
+  recovery_action: zod.union([zod.string(), zod.null()]).optional(),
+  report: zod.union([
+    zod.object({
+      schema_version: zod.literal("1.0"),
+      artifact_type: zod.literal("detector_probe_report"),
+      job_id: zod
+        .string()
+        .regex(cancelDetectorProbeResponseReportOneJobIdRegExp),
+      request_sha256: zod
+        .string()
+        .regex(cancelDetectorProbeResponseReportOneRequestSha256RegExp),
+      source: zod.object({
+        source_id: zod
+          .string()
+          .regex(cancelDetectorProbeResponseReportOneSourceSourceIdRegExp),
+        relative_path: zod.string(),
+        sha256: zod
+          .string()
+          .regex(cancelDetectorProbeResponseReportOneSourceSha256RegExp),
+        file_identity_sha256: zod
+          .string()
+          .regex(
+            cancelDetectorProbeResponseReportOneSourceFileIdentitySha256RegExp,
+          ),
+        size_bytes: zod
+          .number()
+          .gt(cancelDetectorProbeResponseReportOneSourceSizeBytesExclusiveMin),
+        width: zod
+          .number()
+          .gt(cancelDetectorProbeResponseReportOneSourceWidthExclusiveMin),
+        height: zod
+          .number()
+          .gt(cancelDetectorProbeResponseReportOneSourceHeightExclusiveMin),
+        frame_count: zod
+          .number()
+          .gt(cancelDetectorProbeResponseReportOneSourceFrameCountExclusiveMin),
+        tracking_contract_relative_path: zod.string(),
+        tracking_contract_sha256: zod
+          .string()
+          .regex(
+            cancelDetectorProbeResponseReportOneSourceTrackingContractSha256RegExp,
+          ),
+      }),
+      lineage: zod.object({
+        parent_trial_id: zod
+          .string()
+          .regex(
+            cancelDetectorProbeResponseReportOneLineageParentTrialIdRegExp,
+          ),
+        base_config_relative_path: zod.string(),
+        base_config_sha256: zod
+          .string()
+          .regex(
+            cancelDetectorProbeResponseReportOneLineageBaseConfigSha256RegExp,
+          ),
+        effective_config_relative_path: zod.string(),
+        effective_config_sha256: zod
+          .string()
+          .regex(
+            cancelDetectorProbeResponseReportOneLineageEffectiveConfigSha256RegExp,
+          ),
+        trial_intent_sha256: zod
+          .string()
+          .regex(
+            cancelDetectorProbeResponseReportOneLineageTrialIntentSha256RegExp,
+          ),
+        tuning_patch_binding: zod.object({
+          state: zod.enum(["absent", "versioned"]),
+          schema_version: zod.literal("1.0"),
+          version_id: zod.union([zod.string(), zod.null()]),
+          parent_version_id: zod.union([zod.string(), zod.null()]),
+          values_sha256: zod
+            .string()
+            .regex(
+              cancelDetectorProbeResponseReportOneLineageTuningPatchBindingValuesSha256RegExp,
+            ),
+        }),
+        tuning_patch_sha256: zod
+          .string()
+          .regex(
+            cancelDetectorProbeResponseReportOneLineageTuningPatchSha256RegExp,
+          ),
+        profile_sha256s: zod.object({}).passthrough(),
+        frozen_profiles_sha256: zod
+          .string()
+          .regex(
+            cancelDetectorProbeResponseReportOneLineageFrozenProfilesSha256RegExp,
+          ),
+        execution_bundle: zod.object({
+          schema_version: zod.literal("1.0"),
+          installed_runtime: zod.record(zod.string(), zod.string()),
+          runtime_contract: zod.record(zod.string(), zod.string()),
+          runtime_contract_sha256: zod
+            .string()
+            .regex(
+              cancelDetectorProbeResponseReportOneLineageExecutionBundleRuntimeContractSha256RegExp,
+            ),
+          runtime_observation_evidence_sha256s: zod.object({}).passthrough(),
+          execution_environment: zod.object({
+            device: zod.enum(["cpu", "cuda:0"]),
+            precision: zod.literal("fp32"),
+            cuda_available: zod.boolean(),
+            cuda_device_count: zod
+              .number()
+              .min(
+                cancelDetectorProbeResponseReportOneLineageExecutionBundleExecutionEnvironmentCudaDeviceCountMin,
+              ),
+            cuda_visible_devices: zod.union([zod.string(), zod.null()]),
+            cuda_compiled_version: zod.union([zod.string(), zod.null()]),
+            cudnn_version: zod
+              .union([
+                zod
+                  .number()
+                  .min(
+                    cancelDetectorProbeResponseReportOneLineageExecutionBundleExecutionEnvironmentCudnnVersionOneMin,
+                  ),
+                zod.null(),
+              ])
+              .optional(),
+            gpu_name: zod.union([zod.string(), zod.null()]),
+            gpu_compute_capability: zod.union([zod.string(), zod.null()]),
+            gpu_total_memory_bytes: zod
+              .union([
+                zod
+                  .number()
+                  .gt(
+                    cancelDetectorProbeResponseReportOneLineageExecutionBundleExecutionEnvironmentGpuTotalMemoryBytesOneExclusiveMin,
+                  ),
+                zod.null(),
+              ])
+              .optional(),
+            cuda_driver_version: zod
+              .union([
+                zod
+                  .number()
+                  .min(
+                    cancelDetectorProbeResponseReportOneLineageExecutionBundleExecutionEnvironmentCudaDriverVersionOneMin,
+                  ),
+                zod.null(),
+              ])
+              .optional(),
+            python_implementation: zod.string().min(1),
+            python_version: zod.string().min(1),
+            numpy_version: zod.string().min(1),
+            opencv_version: zod.string().min(1),
+            pydantic_version: zod.string().min(1),
+            pydantic_core_version: zod.string().min(1),
+            opencv_build_information_sha256: zod
+              .string()
+              .regex(
+                cancelDetectorProbeResponseReportOneLineageExecutionBundleExecutionEnvironmentOpencvBuildInformationSha256RegExp,
+              ),
+            opencv_ffmpeg_enabled: zod.union([zod.boolean(), zod.null()]),
+            decoder_fingerprint_sha256: zod
+              .string()
+              .regex(
+                cancelDetectorProbeResponseReportOneLineageExecutionBundleExecutionEnvironmentDecoderFingerprintSha256RegExp,
+              ),
+          }),
+          runtime_environment_sha256: zod
+            .string()
+            .regex(
+              cancelDetectorProbeResponseReportOneLineageExecutionBundleRuntimeEnvironmentSha256RegExp,
+            ),
+          code_bundle_files: zod.record(
+            zod.string(),
+            zod
+              .string()
+              .regex(
+                cancelDetectorProbeResponseReportOneLineageExecutionBundleCodeBundleFilesRegExpOne,
+              ),
+          ),
+          code_bundle_sha256: zod
+            .string()
+            .regex(
+              cancelDetectorProbeResponseReportOneLineageExecutionBundleCodeBundleSha256RegExp,
+            ),
+          code_commit: zod.union([
+            zod
+              .string()
+              .regex(
+                cancelDetectorProbeResponseReportOneLineageExecutionBundleCodeCommitOneRegExp,
+              ),
+            zod.null(),
+          ]),
+          code_commit_status: zod.enum(["bound", "unbound", "unavailable"]),
+          code_commit_reason: zod.union([
+            zod.enum([
+              "code_bundle_differs_from_commit",
+              "repository_commit_unavailable",
+            ]),
+            zod.null(),
+          ]),
+          code_commit_blob_files: zod.union([
+            zod.record(
+              zod.string(),
+              zod
+                .string()
+                .regex(
+                  cancelDetectorProbeResponseReportOneLineageExecutionBundleCodeCommitBlobFilesOneRegExpOne,
+                ),
+            ),
+            zod.null(),
+          ]),
+          code_commit_blob_bundle_sha256: zod.union([
+            zod
+              .string()
+              .regex(
+                cancelDetectorProbeResponseReportOneLineageExecutionBundleCodeCommitBlobBundleSha256OneRegExp,
+              ),
+            zod.null(),
+          ]),
+          code_commit_binding_kind: zod.union([
+            zod.literal("exact_or_crlf_to_lf_commit_blob"),
+            zod.null(),
+          ]),
+          frozen_profiles_sha256: zod
+            .string()
+            .regex(
+              cancelDetectorProbeResponseReportOneLineageExecutionBundleFrozenProfilesSha256RegExp,
+            ),
+        }),
+        execution_bundle_sha256: zod
+          .string()
+          .regex(
+            cancelDetectorProbeResponseReportOneLineageExecutionBundleSha256RegExp,
+          ),
+        runtime_environment_sha256: zod
+          .string()
+          .regex(
+            cancelDetectorProbeResponseReportOneLineageRuntimeEnvironmentSha256RegExp,
+          ),
+        intent_sha256: zod
+          .string()
+          .regex(cancelDetectorProbeResponseReportOneLineageIntentSha256RegExp),
+        retry_from_job_id: zod.union([
+          zod
+            .string()
+            .regex(
+              cancelDetectorProbeResponseReportOneLineageRetryFromJobIdOneRegExp,
+            ),
+          zod.null(),
+        ]),
+      }),
+      frozen_profiles: zod
+        .array(
+          zod.object({
+            schema_version: zod.string(),
+            artifact_type: zod.literal("detector_profile"),
+            profile_id: zod.string(),
+            version: zod.string(),
+            model_id: zod.string(),
+            model_version: zod.string(),
+            model_descriptor_sha256: zod
+              .string()
+              .regex(
+                cancelDetectorProbeResponseReportOneFrozenProfilesItemModelDescriptorSha256RegExp,
+              ),
+            mode: zod.enum(["direct", "sahi"]),
+            settings: zod.object({
+              confidence_threshold: zod
+                .number()
+                .min(
+                  cancelDetectorProbeResponseReportOneFrozenProfilesItemSettingsConfidenceThresholdMin,
+                )
+                .max(
+                  cancelDetectorProbeResponseReportOneFrozenProfilesItemSettingsConfidenceThresholdMax,
+                ),
+              image_size: zod
+                .number()
+                .gt(
+                  cancelDetectorProbeResponseReportOneFrozenProfilesItemSettingsImageSizeExclusiveMin,
+                ),
+              use_half: zod.boolean(),
+              allowed_labels: zod.array(zod.string()),
+              top_k: zod.number(),
+              slice_height: zod
+                .union([
+                  zod
+                    .number()
+                    .gt(
+                      cancelDetectorProbeResponseReportOneFrozenProfilesItemSettingsSliceHeightOneExclusiveMin,
+                    ),
+                  zod.null(),
+                ])
+                .optional(),
+              slice_width: zod
+                .union([
+                  zod
+                    .number()
+                    .gt(
+                      cancelDetectorProbeResponseReportOneFrozenProfilesItemSettingsSliceWidthOneExclusiveMin,
+                    ),
+                  zod.null(),
+                ])
+                .optional(),
+              overlap_height_ratio: zod
+                .union([
+                  zod
+                    .number()
+                    .min(
+                      cancelDetectorProbeResponseReportOneFrozenProfilesItemSettingsOverlapHeightRatioOneMin,
+                    )
+                    .lt(
+                      cancelDetectorProbeResponseReportOneFrozenProfilesItemSettingsOverlapHeightRatioOneExclusiveMax,
+                    ),
+                  zod.null(),
+                ])
+                .optional(),
+              overlap_width_ratio: zod
+                .union([
+                  zod
+                    .number()
+                    .min(
+                      cancelDetectorProbeResponseReportOneFrozenProfilesItemSettingsOverlapWidthRatioOneMin,
+                    )
+                    .lt(
+                      cancelDetectorProbeResponseReportOneFrozenProfilesItemSettingsOverlapWidthRatioOneExclusiveMax,
+                    ),
+                  zod.null(),
+                ])
+                .optional(),
+              perform_standard_pred: zod
+                .union([zod.boolean(), zod.null()])
+                .optional(),
+              postprocess_type: zod
+                .union([zod.string(), zod.null()])
+                .optional(),
+              postprocess_match_metric: zod
+                .union([zod.string(), zod.null()])
+                .optional(),
+              postprocess_match_threshold: zod
+                .union([
+                  zod
+                    .number()
+                    .min(
+                      cancelDetectorProbeResponseReportOneFrozenProfilesItemSettingsPostprocessMatchThresholdOneMin,
+                    )
+                    .max(
+                      cancelDetectorProbeResponseReportOneFrozenProfilesItemSettingsPostprocessMatchThresholdOneMax,
+                    ),
+                  zod.null(),
+                ])
+                .optional(),
+            }),
+            profile_sha256: zod
+              .string()
+              .regex(
+                cancelDetectorProbeResponseReportOneFrozenProfilesItemProfileSha256RegExp,
+              ),
+            recommended: zod.boolean(),
+            availability: zod.object({
+              status: zod.enum(["available", "unavailable", "blocked"]),
+              reason_codes: zod.array(zod.string()),
+              runtime: zod
+                .union([
+                  zod.object({
+                    name: zod.string(),
+                    installed_version: zod.union([zod.string(), zod.null()]),
+                    load_smoke: zod.boolean(),
+                  }),
+                  zod.null(),
+                ])
+                .optional(),
+            }),
+            selectable_for_probe: zod.boolean(),
+            model_descriptor: zod.object({
+              schema_version: zod.string(),
+              artifact_type: zod.literal("detector_model_descriptor"),
+              model_id: zod.string(),
+              version: zod.string(),
+              model_version: zod.string(),
+              display_name: zod.string(),
+              architecture_family: zod.string(),
+              weights: zod.object({
+                relative_path: zod.string(),
+                sha256: zod
+                  .string()
+                  .regex(
+                    cancelDetectorProbeResponseReportOneFrozenProfilesItemModelDescriptorWeightsSha256RegExp,
+                  ),
+                size_bytes: zod
+                  .number()
+                  .gt(
+                    cancelDetectorProbeResponseReportOneFrozenProfilesItemModelDescriptorWeightsSizeBytesExclusiveMin,
+                  ),
+              }),
+              source: zod.object({
+                project: zod.string(),
+                version: zod.string(),
+                asset_release: zod.string(),
+                weight_url: zod.string(),
+                acquisition_method: zod.string(),
+                access_requirement: zod.string(),
+              }),
+              checkpoint: zod
+                .union([zod.record(zod.string(), zod.unknown()), zod.null()])
+                .optional(),
+              runtime_contract: zod.record(zod.string(), zod.unknown()),
+              class_names: zod.array(zod.string()),
+              class_map: zod.record(zod.string(), zod.string()),
+              expected_input: zod.record(zod.string(), zod.unknown()),
+              execution: zod
+                .union([zod.record(zod.string(), zod.unknown()), zod.null()])
+                .optional(),
+              memory_envelope: zod
+                .union([zod.record(zod.string(), zod.unknown()), zod.null()])
+                .optional(),
+              licenses: zod.object({
+                dataset: zod.object({
+                  name: zod.string(),
+                  spdx_id: zod.string(),
+                  url: zod.string(),
+                  reviewed: zod.boolean(),
+                  approved_for_local_probe: zod.boolean(),
+                }),
+                model: zod.object({
+                  name: zod.string(),
+                  spdx_id: zod.string(),
+                  url: zod.string(),
+                  reviewed: zod.boolean(),
+                  approved_for_local_probe: zod.boolean(),
+                }),
+                runtime: zod.object({
+                  name: zod.string(),
+                  spdx_id: zod.string(),
+                  url: zod.string(),
+                  reviewed: zod.boolean(),
+                  approved_for_local_probe: zod.boolean(),
+                }),
+                deployment: zod.object({
+                  name: zod.string(),
+                  spdx_id: zod.string(),
+                  url: zod.string(),
+                  reviewed: zod.boolean(),
+                  approved_for_local_probe: zod.boolean(),
+                }),
+              }),
+              egress: zod.object({
+                frames_leave_local_machine: zod.boolean(),
+                destination: zod.union([zod.string(), zod.null()]),
+                operator_consent: zod.enum([
+                  "not_required",
+                  "granted",
+                  "required_not_granted",
+                ]),
+              }),
+              lifecycle_state: zod.enum([
+                "unverified",
+                "feasibility_passed",
+                "development_candidate",
+                "source_segment_qualified",
+                "camera_qualified",
+                "retired",
+              ]),
+              bindings: zod.record(zod.string(), zod.unknown()),
+              descriptor_sha256: zod
+                .string()
+                .regex(
+                  cancelDetectorProbeResponseReportOneFrozenProfilesItemModelDescriptorDescriptorSha256RegExp,
+                ),
+              import_manifest_sha256: zod
+                .union([
+                  zod
+                    .string()
+                    .regex(
+                      cancelDetectorProbeResponseReportOneFrozenProfilesItemModelDescriptorImportManifestSha256OneRegExp,
+                    ),
+                  zod.null(),
+                ])
+                .optional(),
+            }),
+          }),
+        )
+        .min(cancelDetectorProbeResponseReportOneFrozenProfilesMin)
+        .max(cancelDetectorProbeResponseReportOneFrozenProfilesMax),
+      top_k: zod.number(),
+      frames: zod
+        .array(
+          zod.object({
+            frame_index: zod
+              .number()
+              .min(cancelDetectorProbeResponseReportOneFramesItemFrameIndexMin),
+            source_width: zod
+              .number()
+              .gt(
+                cancelDetectorProbeResponseReportOneFramesItemSourceWidthExclusiveMin,
+              ),
+            source_height: zod
+              .number()
+              .gt(
+                cancelDetectorProbeResponseReportOneFramesItemSourceHeightExclusiveMin,
+              ),
+            requested_decode_mode: zod.enum([
+              "sequential",
+              "preroll",
+              "direct",
+            ]),
+            effective_decode_mode: zod.enum([
+              "sequential",
+              "preroll_verified",
+              "direct_verified",
+              "sequential_fallback",
+            ]),
+            decoded_frame_position: zod
+              .number()
+              .min(
+                cancelDetectorProbeResponseReportOneFramesItemDecodedFramePositionMin,
+              ),
+            media_integrity: zod.object({
+              path: zod.union([zod.string(), zod.null()]),
+              status: zod.enum(["ok", "unavailable"]),
+              width: zod
+                .number()
+                .min(
+                  cancelDetectorProbeResponseReportOneFramesItemMediaIntegrityWidthMin,
+                ),
+              height: zod
+                .number()
+                .min(
+                  cancelDetectorProbeResponseReportOneFramesItemMediaIntegrityHeightMin,
+                ),
+              mean_luma: zod
+                .number()
+                .min(
+                  cancelDetectorProbeResponseReportOneFramesItemMediaIntegrityMeanLumaMin,
+                ),
+              std_luma: zod
+                .number()
+                .min(
+                  cancelDetectorProbeResponseReportOneFramesItemMediaIntegrityStdLumaMin,
+                ),
+              texture_tile_ratio: zod
+                .number()
+                .min(
+                  cancelDetectorProbeResponseReportOneFramesItemMediaIntegrityTextureTileRatioMin,
+                )
+                .max(
+                  cancelDetectorProbeResponseReportOneFramesItemMediaIntegrityTextureTileRatioMax,
+                ),
+              dominant_color_ratio: zod
+                .number()
+                .min(
+                  cancelDetectorProbeResponseReportOneFramesItemMediaIntegrityDominantColorRatioMin,
+                )
+                .max(
+                  cancelDetectorProbeResponseReportOneFramesItemMediaIntegrityDominantColorRatioMax,
+                ),
+              gray: zod.boolean(),
+              low_information: zod.boolean(),
+              likely_corrupt: zod.boolean(),
+              reasons: zod.array(zod.string()),
+            }),
+            source_artifact_url: zod.string(),
+            source_frame_sha256: zod
+              .string()
+              .regex(
+                cancelDetectorProbeResponseReportOneFramesItemSourceFrameSha256RegExp,
+              ),
+            source_frame_size_bytes: zod
+              .number()
+              .gt(
+                cancelDetectorProbeResponseReportOneFramesItemSourceFrameSizeBytesExclusiveMin,
+              ),
+            profile_results: zod
+              .array(
+                zod.object({
+                  profile_id: zod
+                    .string()
+                    .regex(
+                      cancelDetectorProbeResponseReportOneFramesItemProfileResultsItemProfileIdRegExp,
+                    ),
+                  profile_sha256: zod
+                    .string()
+                    .regex(
+                      cancelDetectorProbeResponseReportOneFramesItemProfileResultsItemProfileSha256RegExp,
+                    ),
+                  status: zod.enum(["completed", "failed", "blocked"]),
+                  latency_ms: zod
+                    .union([
+                      zod
+                        .number()
+                        .min(
+                          cancelDetectorProbeResponseReportOneFramesItemProfileResultsItemLatencyMsOneMin,
+                        ),
+                      zod.null(),
+                    ])
+                    .optional(),
+                  candidate_count: zod
+                    .number()
+                    .min(
+                      cancelDetectorProbeResponseReportOneFramesItemProfileResultsItemCandidateCountMin,
+                    ),
+                  top_k: zod.number(),
+                  raw_candidates: zod
+                    .array(
+                      zod.object({
+                        frame_index: zod
+                          .number()
+                          .min(
+                            cancelDetectorProbeResponseReportOneFramesItemProfileResultsItemRawCandidatesItemFrameIndexMin,
+                          ),
+                        bbox_source_px: zod.tuple([
+                          zod.number(),
+                          zod.number(),
+                          zod.number(),
+                          zod.number(),
+                        ]),
+                        confidence: zod
+                          .number()
+                          .min(
+                            cancelDetectorProbeResponseReportOneFramesItemProfileResultsItemRawCandidatesItemConfidenceMin,
+                          )
+                          .max(
+                            cancelDetectorProbeResponseReportOneFramesItemProfileResultsItemRawCandidatesItemConfidenceMax,
+                          ),
+                        class_name: zod.literal("ball"),
+                        checkpoint_class_name: zod.string().min(1),
+                        source: zod.string().min(1),
+                        coordinate_reason: zod.enum([
+                          "direct_source_coordinates",
+                          "sahi_tile_offset_applied",
+                        ]),
+                        merge_reason: zod.literal("retained_top_k"),
+                      }),
+                    )
+                    .max(
+                      cancelDetectorProbeResponseReportOneFramesItemProfileResultsItemRawCandidatesMax,
+                    ),
+                  display_candidate: zod.union([
+                    zod.object({
+                      frame_index: zod
+                        .number()
+                        .min(
+                          cancelDetectorProbeResponseReportOneFramesItemProfileResultsItemDisplayCandidateOneFrameIndexMin,
+                        ),
+                      bbox_source_px: zod.tuple([
+                        zod.number(),
+                        zod.number(),
+                        zod.number(),
+                        zod.number(),
+                      ]),
+                      confidence: zod
+                        .number()
+                        .min(
+                          cancelDetectorProbeResponseReportOneFramesItemProfileResultsItemDisplayCandidateOneConfidenceMin,
+                        )
+                        .max(
+                          cancelDetectorProbeResponseReportOneFramesItemProfileResultsItemDisplayCandidateOneConfidenceMax,
+                        ),
+                      class_name: zod.literal("ball"),
+                      checkpoint_class_name: zod.string().min(1),
+                      source: zod.string().min(1),
+                      coordinate_reason: zod.enum([
+                        "direct_source_coordinates",
+                        "sahi_tile_offset_applied",
+                      ]),
+                      merge_reason: zod.literal("retained_top_k"),
+                    }),
+                    zod.null(),
+                  ]),
+                  filter_reasons: zod.record(
+                    zod.string(),
+                    zod
+                      .number()
+                      .min(
+                        cancelDetectorProbeResponseReportOneFramesItemProfileResultsItemFilterReasonsMinOne,
+                      ),
+                  ),
+                  failure_code: zod.union([zod.string(), zod.null()]),
+                  raw_overlay_artifact_url: zod.string(),
+                  raw_overlay_sha256: zod
+                    .string()
+                    .regex(
+                      cancelDetectorProbeResponseReportOneFramesItemProfileResultsItemRawOverlaySha256RegExp,
+                    ),
+                  raw_overlay_size_bytes: zod
+                    .number()
+                    .gt(
+                      cancelDetectorProbeResponseReportOneFramesItemProfileResultsItemRawOverlaySizeBytesExclusiveMin,
+                    ),
+                }),
+              )
+              .min(
+                cancelDetectorProbeResponseReportOneFramesItemProfileResultsMin,
+              )
+              .max(
+                cancelDetectorProbeResponseReportOneFramesItemProfileResultsMax,
+              ),
+          }),
+        )
+        .min(1)
+        .max(cancelDetectorProbeResponseReportOneFramesMax),
+      decode: zod.object({
+        width: zod
+          .number()
+          .gt(cancelDetectorProbeResponseReportOneDecodeWidthExclusiveMin),
+        height: zod
+          .number()
+          .gt(cancelDetectorProbeResponseReportOneDecodeHeightExclusiveMin),
+        frame_count: zod
+          .number()
+          .gt(cancelDetectorProbeResponseReportOneDecodeFrameCountExclusiveMin),
+        fps: zod
+          .number()
+          .gt(cancelDetectorProbeResponseReportOneDecodeFpsExclusiveMin),
+        requested_decode_mode: zod.enum(["sequential", "preroll", "direct"]),
+        effective_decode_mode: zod.enum([
+          "sequential",
+          "preroll_verified",
+          "direct_verified",
+          "sequential_fallback",
+        ]),
+        verified_frame_indices: zod
+          .array(
+            zod
+              .number()
+              .min(
+                cancelDetectorProbeResponseReportOneDecodeVerifiedFrameIndicesItemMin,
+              ),
+          )
+          .min(1)
+          .max(
+            cancelDetectorProbeResponseReportOneDecodeVerifiedFrameIndicesMax,
+          ),
+        position_verification: zod.literal(
+          "opencv_next_frame_index_with_0.25_tolerance",
+        ),
+      }),
+      execution: zod.object({
+        device: zod.enum(["cpu", "cuda:0"]),
+        precision: zod.literal("fp32"),
+      }),
+      artifacts: zod
+        .array(
+          zod.object({
+            artifact_id: zod
+              .string()
+              .regex(
+                cancelDetectorProbeResponseReportOneArtifactsItemArtifactIdRegExp,
+              ),
+            relative_path: zod.string(),
+            media_type: zod.literal("image/jpeg"),
+            sha256: zod
+              .string()
+              .regex(
+                cancelDetectorProbeResponseReportOneArtifactsItemSha256RegExp,
+              ),
+            size_bytes: zod
+              .number()
+              .gt(
+                cancelDetectorProbeResponseReportOneArtifactsItemSizeBytesExclusiveMin,
+              ),
+            width: zod
+              .number()
+              .gt(
+                cancelDetectorProbeResponseReportOneArtifactsItemWidthExclusiveMin,
+              ),
+            height: zod
+              .number()
+              .gt(
+                cancelDetectorProbeResponseReportOneArtifactsItemHeightExclusiveMin,
+              ),
+          }),
+        )
+        .min(cancelDetectorProbeResponseReportOneArtifactsMin)
+        .max(cancelDetectorProbeResponseReportOneArtifactsMax),
+      created_at: zod.string(),
+      report_sha256: zod
+        .string()
+        .regex(cancelDetectorProbeResponseReportOneReportSha256RegExp),
+    }),
+    zod.null(),
+  ]),
+  result_manifest_sha256: zod
+    .union([
+      zod
+        .string()
+        .regex(cancelDetectorProbeResponseResultManifestSha256OneRegExp),
+      zod.null(),
+    ])
+    .optional(),
+  created_at: zod.string(),
+  updated_at: zod.string(),
+  status_url: zod.string(),
+  cancel_url: zod.string(),
+  can_cancel: zod.boolean(),
+});
+
+/**
  * @summary Get Health
  */
 export const GetHealthResponse = zod.object({

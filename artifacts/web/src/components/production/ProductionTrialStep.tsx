@@ -65,6 +65,7 @@ import {
   type ProductionPendingConfigConfirmation,
 } from "@/lib/productionConfigFreeze";
 import type { ProductionCalibrationDraft } from "@/lib/productionCalibration";
+import { detectorProbeRecoveryEligible } from "@/lib/productionDetectorProbe";
 import {
   acceptProductionTrial,
   appendProductionTrialAttempt,
@@ -99,6 +100,8 @@ import {
   type ProductionTuningValue,
 } from "@/lib/productionTrial";
 import type { SourceSignature } from "@/lib/productionWorkflow";
+
+import { ProductionDetectorProbeController } from "./ProductionDetectorProbeController";
 
 const NO_STORE_REQUEST = {
   cache: "no-store" as const,
@@ -750,6 +753,29 @@ export function ProductionTrialStep({
     : null;
   const diagnosisAcceptable =
     productionTrialSignalGateAcceptable(diagnosisGate);
+  const detectorProbeRecovery = detectorProbeRecoveryEligible({
+    monitoredRunId,
+    diagnosisRunId: diagnosisQuery.data?.run_id ?? null,
+    authoritativeRun: latestAuthoritativeRun
+      ? {
+          runId: latestAuthoritativeRun.run_id,
+          status: latestAuthoritativeRun.status,
+        }
+      : null,
+    gate: diagnosisGate
+      ? {
+          status: diagnosisGate.status,
+          coverageComplete: diagnosisGate.coverage_complete,
+          failureCode: diagnosisGate.failure_classification.code,
+          coverageStatus: diagnosisGate.stage_counts?.coverage_status ?? null,
+          reconciliationStatus:
+            diagnosisGate.stage_counts?.reconciliation.status ?? null,
+          evaluatedFrames: diagnosisGate.stage_counts?.evaluated_frames ?? null,
+          lostFrames: diagnosisGate.stage_counts?.lost_frames ?? null,
+          rawCandidates: diagnosisGate.stage_counts?.raw_candidates ?? null,
+        }
+      : null,
+  });
   const visualConfirmationBinding =
     readiness && diagnosisAcceptable
       ? `${readiness.evidence_generation}:${diagnosisGate?.threshold_profile.sha256 ?? ""}`
@@ -2422,6 +2448,13 @@ export function ProductionTrialStep({
             )}
           </CardContent>
         </Card>
+      )}
+
+      {detectorProbeRecovery && latestAuthoritativeRun && (
+        <ProductionDetectorProbeController
+          workflowId={workflowId}
+          parentTrialId={latestAuthoritativeRun.run_id}
+        />
       )}
 
       {trial && trial.attempts.length > 0 && (

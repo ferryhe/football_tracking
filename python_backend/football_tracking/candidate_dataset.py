@@ -10,12 +10,13 @@ import shutil
 import sys
 import tempfile
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import cv2
 import numpy as np
 
 from football_tracking.detector_candidate_contract import validate_versioned_candidate_records
+from football_tracking.detector_development_common import DetectorDevelopmentError
 from football_tracking.tracking_contracts import SCHEMA_VERSION as TRACKING_CONTRACT_SCHEMA_VERSION
 from football_tracking.tracking_contracts import load_tracking_contract
 
@@ -29,6 +30,8 @@ CONTEXT_SHAPE = (5, 3, 128, 128)
 TIGHT_CROP_SCALE = 1.25
 CONTEXT_CROP_SCALE = 4.0
 PREROLL_FRAMES = 12
+MAX_DECODE_WORK_FRAMES = 4096
+MAX_DECODE_SEGMENT_SPAN = 512
 DECODE_MODES = ("sequential", "preroll", "direct")
 
 
@@ -36,8 +39,231 @@ class CandidateDatasetError(RuntimeError):
     """Raised when dataset inputs cannot produce a trustworthy artifact."""
 
 
+class CandidateDatasetCancelled(CandidateDatasetError):
+    """Raised when an operator cancellation interrupts verified decoding."""
+
+
 class _SeekError(RuntimeError):
     pass
+
+
+def decode_verified_frames(
+    video_path: Path,
+    frame_indices: list[int],
+    *,
+    requested_decode_mode: str = "sequential",
+    expected_width: int | None = None,
+    expected_height: int | None = None,
+    expected_frame_count: int | None = None,
+    cancel_callback: Callable[[], bool] | None = None,
+) -> tuple[dict[int, np.ndarray], dict[str, Any]]:
+    """Decode an exact bounded frame set with the dataset builder's verified fallback semantics."""
+
+    path = Path(video_path)
+    indices = sorted(set(frame_indices))
+    if (
+        not indices
+        or len(indices) > 50
+        or any(isinstance(index, bool) or not isinstance(index, int) or index < 0 for index in indices)
+    ):
+        raise CandidateDatasetError("verified frame decode requires 1-50 nonnegative frame indices")
+    if requested_decode_mode not in DECODE_MODES:
+        raise CandidateDatasetError(f"decode mode must be one of {DECODE_MODES}")
+    captures: list[Any] = []
+    capture = cv2.VideoCapture(str(path))
+    captures.append(capture)
+    try:
+        if not capture.isOpened():
+            raise CandidateDatasetError(f"unable to open mapped video: {path}")
+        actual = {
+            "width": _capture_positive_int(capture, cv2.CAP_PROP_FRAME_WIDTH, "width"),
+            "height": _capture_positive_int(capture, cv2.CAP_PROP_FRAME_HEIGHT, "height"),
+            "frame_count": _capture_positive_int(capture, cv2.CAP_PROP_FRAME_COUNT, "frame_count"),
+        }
+        fps = float(capture.get(cv2.CAP_PROP_FPS) or 0.0)
+        expected = {
+            "width": expected_width,
+            "height": expected_height,
+            "frame_count": expected_frame_count,
+        }
+        for name, expected_value in expected.items():
+            if expected_value is not None and actual[name] != expected_value:
+                raise CandidateDatasetError(
+                    f"source {name} mismatch for {path}: expected={expected_value}, actual={actual[name]}"
+                )
+        if indices[-1] >= actual["frame_count"]:
+            raise CandidateDatasetError("requested frame exceeds the verified source frame count")
+        _raise_if_decode_cancelled(cancel_callback)
+        effective = requested_decode_mode
+        try:
+            if requested_decode_mode == "sequential":
+                if indices[-1] + 1 > MAX_DECODE_WORK_FRAMES:
+                    raise CandidateDatasetError(
+                        "sequential decode exceeds the verified work limit"
+                    )
+                frames = _read_selected_sequential(
+                    capture,
+                    indices,
+                    actual["width"],
+                    actual["height"],
+                    cancel_callback=cancel_callback,
+                )
+            elif requested_decode_mode == "preroll":
+                frames = _read_selected_segmented(
+                    capture,
+                    indices,
+                    actual["width"],
+                    actual["height"],
+                    cancel_callback=cancel_callback,
+                )
+                effective = "preroll_verified"
+            else:
+                frames = _read_candidate_direct(
+                    capture,
+                    indices,
+                    actual["width"],
+                    actual["height"],
+                    cancel_callback=cancel_callback,
+                )
+                effective = "direct_verified"
+        except _SeekError:
+            capture.release()
+            if indices[-1] + 1 > MAX_DECODE_WORK_FRAMES:
+                raise CandidateDatasetError(
+                    "bounded fallback cannot sequentially reach the selected late frame"
+                )
+            fallback = cv2.VideoCapture(str(path))
+            captures.append(fallback)
+            if not fallback.isOpened():
+                raise CandidateDatasetError("sequential fallback could not open the source video")
+            frames = _read_selected_sequential(
+                fallback,
+                indices,
+                actual["width"],
+                actual["height"],
+                cancel_callback=cancel_callback,
+            )
+            effective = "sequential_fallback"
+        return frames, {
+            **actual,
+            "fps": fps,
+            "requested_decode_mode": requested_decode_mode,
+            "effective_decode_mode": effective,
+            "verified_frame_indices": indices,
+            "position_verification": "opencv_next_frame_index_with_0.25_tolerance",
+        }
+    except CandidateDatasetError:
+        raise
+    except DetectorDevelopmentError:
+        raise
+    except Exception as exc:
+        raise CandidateDatasetError(f"failed to decode source video {path}: {exc}") from exc
+    finally:
+        for item in captures:
+            item.release()
+
+
+def _read_selected_sequential(
+    capture: Any,
+    indices: list[int],
+    width: int,
+    height: int,
+    *,
+    cancel_callback: Callable[[], bool] | None = None,
+) -> dict[int, np.ndarray]:
+    if not math.isclose(float(capture.get(cv2.CAP_PROP_POS_FRAMES)), 0.0, abs_tol=0.25):
+        raise CandidateDatasetError("sequential decode did not start at frame 0")
+    required = set(indices)
+    frames: dict[int, np.ndarray] = {}
+    for frame_index in range(indices[-1] + 1):
+        _raise_if_decode_cancelled(cancel_callback)
+        ok, frame = capture.read()
+        if not ok or frame is None:
+            raise CandidateDatasetError(f"sequential decode ended before required frame {frame_index}")
+        if not math.isclose(
+            float(capture.get(cv2.CAP_PROP_POS_FRAMES)),
+            float(frame_index + 1),
+            abs_tol=0.25,
+        ):
+            raise CandidateDatasetError(f"sequential decoded frame position {frame_index} was not verified")
+        if frame_index in required:
+            frames[frame_index] = _validate_frame(frame, frame_index, width, height)
+            _observe_frame_cache(len(frames))
+    if set(frames) != required:
+        raise CandidateDatasetError("sequential decode did not emit every requested frame")
+    return frames
+
+
+def _read_selected_segmented(
+    capture: Any,
+    indices: list[int],
+    width: int,
+    height: int,
+    *,
+    cancel_callback: Callable[[], bool] | None = None,
+) -> dict[int, np.ndarray]:
+    groups: list[list[int]] = []
+    for index in indices:
+        if not groups or index - groups[-1][0] > MAX_DECODE_SEGMENT_SPAN:
+            groups.append([index])
+        else:
+            groups[-1].append(index)
+    work = sum(group[-1] - max(0, group[0] - PREROLL_FRAMES) + 1 for group in groups)
+    if work > MAX_DECODE_WORK_FRAMES:
+        raise CandidateDatasetError("segmented decode exceeds the verified work limit")
+
+    result: dict[int, np.ndarray] = {}
+    for group in groups:
+        _raise_if_decode_cancelled(cancel_callback)
+        start = max(0, group[0] - PREROLL_FRAMES)
+        if start == 0:
+            if not math.isclose(
+                float(capture.get(cv2.CAP_PROP_POS_FRAMES)),
+                0.0,
+                abs_tol=0.25,
+            ):
+                if not capture.set(cv2.CAP_PROP_POS_FRAMES, 0):
+                    raise _SeekError("bounded segment could not return to frame 0")
+        else:
+            if not capture.set(cv2.CAP_PROP_POS_FRAMES, start):
+                raise _SeekError(f"bounded segment seek to frame {start} failed")
+        if not math.isclose(
+            float(capture.get(cv2.CAP_PROP_POS_FRAMES)),
+            float(start),
+            abs_tol=0.25,
+        ):
+            raise _SeekError(f"bounded segment seek to frame {start} was not verified")
+        required = set(group)
+        for frame_index in range(start, group[-1] + 1):
+            _raise_if_decode_cancelled(cancel_callback)
+            ok, frame = capture.read()
+            if not ok or frame is None:
+                raise _SeekError(
+                    f"bounded segment ended before required frame {frame_index}"
+                )
+            if not math.isclose(
+                float(capture.get(cv2.CAP_PROP_POS_FRAMES)),
+                float(frame_index + 1),
+                abs_tol=0.25,
+            ):
+                raise _SeekError(
+                    f"bounded segment frame position {frame_index} was not verified"
+                )
+            if frame_index in required:
+                result[frame_index] = _validate_frame(
+                    frame, frame_index, width, height
+                )
+                _observe_frame_cache(len(result))
+    if set(result) != set(indices):
+        raise CandidateDatasetError("segmented decode did not emit every requested frame")
+    return result
+
+
+def _raise_if_decode_cancelled(
+    cancel_callback: Callable[[], bool] | None,
+) -> None:
+    if cancel_callback is not None and cancel_callback():
+        raise CandidateDatasetCancelled("verified frame decode was cancelled")
 
 
 def build_candidate_dataset(contract_path: Path, source_map_path: Path, output_dir: Path) -> dict[str, Any]:
@@ -509,9 +735,17 @@ def _validate_capture(
     return actual
 
 
-def _read_candidate_direct(capture: Any, indices: list[int], width: int, height: int) -> dict[int, np.ndarray]:
+def _read_candidate_direct(
+    capture: Any,
+    indices: list[int],
+    width: int,
+    height: int,
+    *,
+    cancel_callback: Callable[[], bool] | None = None,
+) -> dict[int, np.ndarray]:
     result: dict[int, np.ndarray] = {}
     for index in indices:
+        _raise_if_decode_cancelled(cancel_callback)
         if not capture.set(cv2.CAP_PROP_POS_FRAMES, index):
             raise _SeekError(f"seek to frame {index} failed")
         if not math.isclose(float(capture.get(cv2.CAP_PROP_POS_FRAMES)), float(index), abs_tol=0.25):
