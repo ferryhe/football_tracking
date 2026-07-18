@@ -1,6 +1,6 @@
 # Step 3 Tiny-Ball Detection, Tuning, and Camera-Adaptation Plan
 
-**Status:** Execution active · PR-T2 final evidence and merge gates in progress · independently reviewed final plan
+**Status:** Execution active · PR-T3 implementation in progress · independently reviewed final plan
 
 **Date:** 2026-07-17
 
@@ -12,19 +12,19 @@
 
 - Program status: active
 - Delivery order: `PR-T1 → PR-T2 → PR-T3 → PR-T4 → PR-T5`
-- Current PR: PR-T2 · Detector Model Registry and Bounded Probe Comparison
-- Current branch: `codex/tiny-ball-detector-registry-probes`
-- Current phase: PR-T1 merged and cleaned up · PR-T2 opened as #113 · the initial remote window was invalidated by two CI-only test-harness gaps · minimal fixes pass the complete local replacement gates and independent re-review · one corrective push will start replacement CI and a fresh 10-minute window
+- Current PR: PR-T3 · Point/Box Annotation and 20–50-Frame Feasibility
+- Current branch: `codex/tiny-ball-annotation-feasibility`
+- Current phase: PR-T1 and PR-T2 merged and cleaned up · PR-T3 started from merge `0ba5a802e2d9f150069ca98eea21a19500edaf30` on fresh latest `main` · implementation map and TDD decomposition in progress
 - Managed workflow authorized: 2026-07-17
 - Heartbeat: active · `tiny-ball-step3-managed-pr-heartbeat` · every 15 minutes
 - Merge rule: implementation, specification review, quality review, local/CI checks, then a complete 10-minute remote-feedback window; any material corrective push restarts that window
-- Blockers: none requiring user action. PR-T1 merged as `6a9db0e4d85047c2ca03ec8b2dc936fe75f67a41` after all local gates, replacement CI, independent reviews, and the complete replacement remote-feedback window passed. PR-T2 now implements the immutable registry, safe import/acquisition, direct and SAHI bounded jobs, API/UI comparison, durable recovery/cancellation, exact source/decode binding, Windows worker containment, atomic publication, strict generated contracts, and an execution bundle bound to 17 raw worktree files plus 17 Git commit blobs. Independent specification review is COMPLIANT; final quality/security review is APPROVE with P0=0/P1=0 and three documented non-blocking P2 follow-ups. The frontend suite passes 794/794 with global S/B/F/L 93.20/91.30/99.37/94.49; the repaired official Python route passes 1,848 with 66 skipped, 630 subtests, and zero failures/errors/warnings; the focused detector route passes 132 with 2 skipped and 111 subtests; OpenAPI plus React/Zod clients are byte-idempotent across 327 files; package, lock, workspace, and dependency files have zero content diff. Final real-video jobs `probe-308adcc1feaa99cc-bddecb26d127` and `probe-b59e904ee0b8a14f-e2aee08f414e` both reached `ready`, each completed 36 operations and 42 verified JPEG artifacts, bound final execution commit `7b8d45e121184f6bebe22e9a1fed4c9dca8a3a50`, performed only one 11.26 GB source hash across first/retry, reproduced the same two unconfirmed YOLO11s+SAHI suggestions, and passed the independent evidence audit. Initial GitHub run `29645080432` failed because two production E2E scenarios did not mock the newly mounted model-catalog request and two new tests used pytest although the official CI discovers native `unittest`. The minimal test-only replacements preserve product behavior and assertions: all 43 Chromium tests pass; both converted modules pass 11/11 under native and forced-no-pytest discovery; the official full Python route passes 1,905 tests with 66 skipped and zero failures/errors; and Ruff, formatting, diff, and dependency/workspace checks pass. Independent corrective-diff specification review is COMPLIANT and quality/security review is APPROVE, both with P0=0/P1=0/P2=0. One corrective push will start replacement CI and a fresh 10-minute feedback window. Earlier dry runs, superseded evidence jobs, failed initial CI, and its invalid window remain historical and are not final evidence. No dependency, workspace, lockfile, committed weight, or production-approval change is authorized.
+- Blockers: none requiring user action. PR-T1 merged as `6a9db0e4d85047c2ca03ec8b2dc936fe75f67a41` after all local gates, replacement CI, independent reviews, and the complete replacement remote-feedback window passed. PR-T2 implements the immutable registry, safe import/acquisition, direct and SAHI bounded jobs, API/UI comparison, durable recovery/cancellation, exact source/decode binding, Windows worker containment, atomic publication, strict generated contracts, and final real-video evidence bound to execution commit `7b8d45e121184f6bebe22e9a1fed4c9dca8a3a50`. Its corrective Node/Python CI passed; its complete replacement window at head `daa8fc67789817b9455338528020dceeeca0e3ef` ran from 2026-07-18T13:28:50.4578869Z through 13:39:00.559Z with no new issue comments, inline comments, reviews, or review threads; and PR #113 merged at 13:39:51Z as `0ba5a802e2d9f150069ca98eea21a19500edaf30`. PR-T3 now owns only source-bound point/box annotation, verified frame/proxy evidence, sealed development/check groups, advisory suggestions, and the one-time 20–50-frame feasibility report. It cannot train a detector, confirm suggested truth, reuse revealed check evidence for a changed attempt, or mix detector-development artifacts with PR4A/PR4B evidence.
 
 | PR | Branch | Status | Pull request | Remote feedback | Merge |
 | --- | --- | --- | --- | --- | --- |
 | PR-T1 | `codex/tiny-ball-trial-diagnosis` | completed · Copilot corrections resolved · spec APPROVE · quality/security APPROVE · replacement CI passed | https://github.com/ferryhe/football_tracking/pull/112 | complete 2026-07-18T02:12:00Z–2026-07-18T02:22:27Z | `6a9db0e` · 2026-07-18T02:23:04Z |
-| PR-T2 | `codex/tiny-ball-detector-registry-probes` | open · initial CI invalidated by self-contained test-harness gaps · replacement local gates and re-reviews pass | https://github.com/ferryhe/football_tracking/pull/113 | replacement window starts after corrective push | pending |
-| PR-T3 | pending | not started | pending | not started | pending |
+| PR-T2 | `codex/tiny-ball-detector-registry-probes` | completed · replacement Node/Python CI passed · spec COMPLIANT · quality/security APPROVE · branches cleaned | https://github.com/ferryhe/football_tracking/pull/113 | complete 2026-07-18T13:28:50.4578869Z–13:39:00.559Z | `0ba5a802` · 2026-07-18T13:39:51Z |
+| PR-T3 | `codex/tiny-ball-annotation-feasibility` | active · fresh latest-main branch · implementation map/TDD decomposition | pending | not started | pending |
 | PR-T4 | pending | not started | pending | not started | pending |
 | PR-T5 | pending | not started | pending | not started | pending |
 
