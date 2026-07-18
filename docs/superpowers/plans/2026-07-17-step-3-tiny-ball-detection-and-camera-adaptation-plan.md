@@ -1,6 +1,6 @@
 # Step 3 Tiny-Ball Detection, Tuning, and Camera-Adaptation Plan
 
-**Status:** Execution active · PR-T1 in progress · independently reviewed final plan
+**Status:** Execution active · PR-T2 in progress · independently reviewed final plan
 
 **Date:** 2026-07-17
 
@@ -12,18 +12,18 @@
 
 - Program status: active
 - Delivery order: `PR-T1 → PR-T2 → PR-T3 → PR-T4 → PR-T5`
-- Current PR: PR-T1 · Fail-Closed Trial Diagnosis and Recovery Actions
-- Current branch: `codex/tiny-ball-trial-diagnosis`
-- Current phase: PR #112 open · two Copilot findings corrected and independently re-approved · replacement remote-feedback window scheduled for 2026-07-18T02:12:00Z–2026-07-18T02:22:00Z
+- Current PR: PR-T2 · Detector Model Registry and Bounded Probe Comparison
+- Current branch: `codex/tiny-ball-detector-registry-probes`
+- Current phase: PR-T1 merged and cleaned up · PR-T2 scope prepared · implementation starting from refreshed `main`
 - Managed workflow authorized: 2026-07-17
 - Heartbeat: active · `tiny-ball-step3-managed-pr-heartbeat` · every 15 minutes
 - Merge rule: implementation, specification review, quality review, local/CI checks, then a complete 10-minute remote-feedback window; any material corrective push restarts that window
-- Blockers: none. Final specification and quality/security reviews both APPROVE, and both independently APPROVE the two Copilot corrections. Current gates: final official Python route 1,748 passed with 64 skipped; feedback-focused backend 63 passed with 56 subtests; full Vitest 542/542; feedback-focused Production page 17/17; TrialStep 45/45; both TypeScript configurations; production build/bundle inspection; Production Chromium 38/38; Ruff; and `git diff --check`.
+- Blockers: none. PR-T1 merged as `6a9db0e4d85047c2ca03ec8b2dc936fe75f67a41` after all local gates, replacement CI, independent reviews, and the complete replacement remote-feedback window passed. PR-T2 has a reviewed scope and begins with the existing Ultralytics/SAHI environment; no dependency, workspace, lockfile, or committed weight change is authorized.
 
 | PR | Branch | Status | Pull request | Remote feedback | Merge |
 | --- | --- | --- | --- | --- | --- |
-| PR-T1 | `codex/tiny-ball-trial-diagnosis` | open · Copilot corrections complete · spec APPROVE · quality/security APPROVE · checks/feedback monitoring | https://github.com/ferryhe/football_tracking/pull/112 | replacement window scheduled 2026-07-18T02:12:00Z–2026-07-18T02:22:00Z | pending |
-| PR-T2 | pending | not started | pending | not started | pending |
+| PR-T1 | `codex/tiny-ball-trial-diagnosis` | completed · Copilot corrections resolved · spec APPROVE · quality/security APPROVE · replacement CI passed | https://github.com/ferryhe/football_tracking/pull/112 | complete 2026-07-18T02:12:00Z–2026-07-18T02:22:27Z | `6a9db0e` · 2026-07-18T02:23:04Z |
+| PR-T2 | `codex/tiny-ball-detector-registry-probes` | active · scope prepared · implementation starting | pending | not started | pending |
 | PR-T3 | pending | not started | pending | not started | pending |
 | PR-T4 | pending | not started | pending | not started | pending |
 | PR-T5 | pending | not started | pending | not started | pending |

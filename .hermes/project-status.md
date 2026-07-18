@@ -3,13 +3,13 @@
 - Program: Step 3 Tiny-Ball Detection, Tuning, and Camera Adaptation
 - Canonical plan: docs/superpowers/plans/2026-07-17-step-3-tiny-ball-detection-and-camera-adaptation-plan.md
 - Program status: active · five managed PRs authorized
-- Current PR: PR-T1 · Fail-Closed Trial Diagnosis and Recovery Actions
-- Current branch: codex/tiny-ball-trial-diagnosis
-- Current phase: PR #112 open · two Copilot findings corrected and independently re-approved · replacement remote-feedback window scheduled for 2026-07-18T02:12:00Z–2026-07-18T02:22:00Z
+- Current PR: PR-T2 · Detector Model Registry and Bounded Probe Comparison
+- Current branch: codex/tiny-ball-detector-registry-probes
+- Current phase: PR-T1 merged and cleaned up · PR-T2 scope prepared · implementation starting from refreshed main
 - Approval: the user authorized the final independently reviewed plan and the established managed-PR operating method on 2026-07-17.
-- Checks: the latest official Python route passed 1,748 tests with 64 skipped in 465.219 seconds. Feedback-focused gates passed backend 63 with 56 subtests, Production page 17/17, both TypeScript configurations, Ruff, and `git diff --check`; independent specification and quality/security re-reviews both APPROVE. Prior post-correction gates passed API 156 with 2 skipped and 14 subtests; config/provider/OpenAPI 34 with 6 subtests; Web Vitest 538/538; Chromium 43/43; production build and cutover bundle inspection; and two byte-identical OpenAPI/React/Zod generations. Test-only ports are closed and the user's existing 5173 service remains running.
-- Blockers: none. Two Copilot findings were corrected: collected-count status/value invariants are fail-closed, and the stable workspace mount identity is now explicit and regression-tested across source/calibration lineage rotation versus full draft replacement.
-- Next: push the approved corrections and this status record; reply to and resolve both Copilot threads; observe the complete replacement 10-minute remote-feedback window through 2026-07-18T02:22:00Z; restart after any material push; merge only when replacement CI and thread-aware audits are clear; then start PR-T2 from refreshed main
+- Checks: PR-T1 merged as `6a9db0e4d85047c2ca03ec8b2dc936fe75f67a41` after the official Python route passed 1,748 tests with 64 skipped; full Vitest passed 542/542; Node and Python replacement CI passed; both independent reviews APPROVE; all Copilot threads were resolved; and the replacement remote-feedback window completed with zero new feedback. Test-only ports are closed and the user's existing 5173 service remains running.
+- Blockers: none. PR-T2 is constrained to immutable model descriptors, safe import, bounded probe jobs, and side-by-side probe evidence. It must not implement T3 annotation, T4 training/qualification, T5 acceptance integration, arbitrary model-path tuning, dependency/workspace changes, or committed `.pt` assets.
+- Next: commit and push the PR-T2 status checkpoint; dispatch a test-first PR-T2 implementation agent; independently review specification and quality/security; run the bounded real-video probe and complete local/CI/remote-feedback gates before merge
 - Heartbeat: ACTIVE
 - Heartbeat automation id: tiny-ball-step3-managed-pr-heartbeat
 - Heartbeat interval: every 15 minutes
@@ -21,8 +21,8 @@
 
 | PR | Branch | Status | Pull request | Remote feedback started | Merge |
 | --- | --- | --- | --- | --- | --- |
-| PR-T1 | codex/tiny-ball-trial-diagnosis | open · Copilot corrections complete · spec APPROVE · quality/security APPROVE · checks/feedback monitoring | https://github.com/ferryhe/football_tracking/pull/112 | replacement window scheduled 2026-07-18T02:12:00Z–2026-07-18T02:22:00Z | pending |
-| PR-T2 | pending | not started | pending | not started | pending |
+| PR-T1 | codex/tiny-ball-trial-diagnosis | completed · Copilot corrections resolved · spec APPROVE · quality/security APPROVE · replacement CI passed | https://github.com/ferryhe/football_tracking/pull/112 | complete 2026-07-18T02:12:00Z–2026-07-18T02:22:27Z | `6a9db0e` · 2026-07-18T02:23:04Z |
+| PR-T2 | codex/tiny-ball-detector-registry-probes | active · scope prepared · implementation starting | pending | not started | pending |
 | PR-T3 | pending | not started | pending | not started | pending |
 | PR-T4 | pending | not started | pending | not started | pending |
 | PR-T5 | pending | not started | pending | not started | pending |
