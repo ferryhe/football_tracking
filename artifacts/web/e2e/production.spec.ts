@@ -17,6 +17,7 @@ import type {
   CreateRunRequest,
   HealthResponse,
   RunRecord,
+  TrialSignalGateV2,
 } from "@workspace/api-client-react";
 
 import {
@@ -92,6 +93,11 @@ const trialCleanedTrackCsv = trialTrackCsv({
   detected: 210,
   predicted: 50,
   lost: 40,
+});
+const trialAllLostTrackCsv = trialTrackCsv({
+  detected: 0,
+  predicted: 0,
+  lost: 300,
 });
 
 const runtimeErrors = new WeakMap<Page, string[]>();
@@ -285,6 +291,43 @@ async function mockTrialDefaults(page: Page) {
       await route.fulfill({ json: [] });
       return;
     }
+    if (key === "GET /api/production-trials/tuning-schema") {
+      await route.fulfill({
+        json: {
+          schema_version: "1.0",
+          patch_schema_version: "1.0",
+          controls: [
+            {
+              path: "detector.confidence_threshold",
+              section: "detector",
+              kind: "number",
+              minimum: 0.01,
+              maximum: 0.9,
+              step: 0.01,
+              runtime_impact: "low",
+              description:
+                "Minimum detector confidence used for this bounded trial.",
+              description_zh: "本次有限试跑使用的最低检测置信度。",
+            },
+          ],
+          actions: [
+            {
+              action_code: "return_to_field_setup",
+              target_step: "field_setup",
+              reason_code: "field_geometry_requires_new_calibration",
+              affected_paths: [
+                "filtering.roi",
+                "scene_bias.ground_zones",
+                "scene_bias.negative_rois",
+              ],
+              lineage_constraint:
+                "invalidate_trial_and_downstream_then_create_new_calibration_version",
+            },
+          ],
+        },
+      });
+      return;
+    }
     await route.fallback();
   });
 }
@@ -298,12 +341,17 @@ type TrialRunStatus =
 
 interface TrialScenarioOptions {
   activeRunId?: string | null;
+  allLost?: boolean;
+  classRejected?: boolean;
+  missingDiagnosticBudgets?: boolean;
   conflictOnCreate?: boolean;
   deferDerive?: boolean;
   loseCreateResponseOnce?: boolean;
   missingArtifact?: string;
   corruptMetrics?: boolean;
   omitVideo?: boolean;
+  legacyConfigDigest?: boolean;
+  diagnosticContractFailure?: boolean;
 }
 
 function backendPathName(value: unknown): string {
@@ -337,6 +385,7 @@ async function installTrialScenario(
     : await createPlayableVideoFixture(page);
   const createBodies: Array<Record<string, unknown>> = [];
   const deriveBodies: Array<Record<string, unknown>> = [];
+  const deriveResponseNames: string[] = [];
   const cancelIds: string[] = [];
   const configGetNames: string[] = [];
   const runs: Array<Record<string, unknown>> = [];
@@ -350,6 +399,318 @@ async function installTrialScenario(
         releaseDeriveGate = resolve;
       })
     : null;
+  const noTrack = options.allLost || options.classRejected;
+  const rawTrackCsv = noTrack ? trialAllLostTrackCsv : trialRawTrackCsv;
+  const cleanedTrackCsv = noTrack ? trialAllLostTrackCsv : trialCleanedTrackCsv;
+  const auditTrackletCount = noTrack ? 0 : 1;
+
+  function trialSignalGate(runStatus: TrialRunStatus = "completed") {
+    const collectedCount = (value: number) => ({
+      value,
+      status: "collected",
+    });
+    const observation = (value: number, collected = true) => ({
+      status: collected ? "collected" : "not_collected",
+      value: collected ? value : null,
+    });
+    const allLost = options.allLost === true;
+    const classRejected = options.classRejected === true;
+    const failed = runStatus === "failed";
+    const diagnosticContractFailure =
+      options.diagnosticContractFailure === true;
+    const trackLost = allLost || classRejected;
+    const diagnosticsCollected = !failed;
+    const budgetCollected =
+      diagnosticsCollected && !options.missingDiagnosticBudgets;
+    const trackDiagnostics = (cleaned: boolean) => ({
+      status: diagnosticsCollected ? "collected" : "not_collected",
+      frame_count: observation(300, diagnosticsCollected),
+      detected: observation(
+        trackLost ? 0 : cleaned ? 210 : 200,
+        diagnosticsCollected,
+      ),
+      predicted: observation(trackLost ? 0 : 50, diagnosticsCollected),
+      lost: observation(
+        trackLost ? 300 : cleaned ? 40 : 50,
+        diagnosticsCollected,
+      ),
+      detected_ratio: observation(
+        trackLost ? 0 : cleaned ? 0.7 : 2 / 3,
+        diagnosticsCollected,
+      ),
+      predicted_ratio: observation(trackLost ? 0 : 1 / 6, diagnosticsCollected),
+      lost_ratio: observation(
+        trackLost ? 1 : cleaned ? 2 / 15 : 1 / 6,
+        diagnosticsCollected,
+      ),
+      longest_lost_streak: observation(
+        trackLost ? 300 : 4,
+        diagnosticsCollected,
+      ),
+      false_positive_island_count: observation(0, diagnosticsCollected),
+      max_step_px: observation(trackLost ? 0 : 20, diagnosticsCollected),
+    });
+    return {
+      schema_version: "2.0",
+      status:
+        failed || diagnosticContractFailure
+          ? "insufficient_evidence"
+          : trackLost
+            ? "retune_required"
+            : "acceptable",
+      coverage_complete: !failed && !diagnosticContractFailure,
+      evidence_available: !failed,
+      trajectory_acceptable: !failed && !trackLost,
+      signal_acceptable: !failed && !trackLost && !diagnosticContractFailure,
+      acceptance_metrics_complete: !failed,
+      acceptance_contract_complete: !failed && !trackLost,
+      quality_acceptable: !failed && !trackLost && !diagnosticContractFailure,
+      operator_confirmation_required: true,
+      reason_codes: failed
+        ? ["run_not_completed", "acceptance_contract_not_collected"]
+        : diagnosticContractFailure
+          ? [
+              "trial_option_conflict:postprocess",
+              "frame_exception",
+              "stage_counter_not_collected:lost_frames",
+              "filtered_candidate_count_exceeds_class_mapped",
+              "rejection_reasons_not_collected",
+            ]
+          : classRejected
+            ? [
+                "all_candidates_class_rejected",
+                "zero_tracklet",
+                "all_lost",
+                "acceptance_contract_not_collected",
+              ]
+            : allLost
+              ? [
+                  "zero_candidate",
+                  "zero_tracklet",
+                  "all_lost",
+                  "acceptance_contract_not_collected",
+                ]
+              : ["quality_thresholds_passed"],
+      failure_classification:
+        failed || diagnosticContractFailure
+          ? {
+              code: "insufficient_evidence",
+              severity: "blocking",
+              summary: "Metrics are incomplete or inconsistent.",
+              recommended_action: "Repair the failed run before acceptance.",
+            }
+          : classRejected
+            ? {
+                code: "all_candidates_class_rejected",
+                severity: "blocking",
+                summary:
+                  "Every model output was rejected during class mapping.",
+                recommended_action:
+                  "Select the correct allowed labels and rerun.",
+              }
+            : allLost
+              ? {
+                  code: "no_raw_candidates",
+                  severity: "blocking",
+                  summary: "The detector produced no ball candidates.",
+                  recommended_action:
+                    "Adjust detector sensitivity or inference mode and rerun.",
+                }
+              : {
+                  code: "acceptable",
+                  severity: "none",
+                  summary: "The signal thresholds pass.",
+                  recommended_action:
+                    "Inspect the playable evidence and explicitly confirm it.",
+                },
+      threshold_profile: {
+        profile_id: "trial-signal-conservative",
+        version: "1.1",
+        algorithm_version: "trial-signal-gate-v2.1",
+        matching_rules: {
+          stage_counter_reconciliation:
+            "all_required_counters_present_and_reconciled",
+          track_metric_scope: "raw_and_cleaned_when_postprocess_enabled",
+          follow_cam_scope: "motion_and_action_retention_when_enabled",
+          required_visual_evidence: [
+            "wide_context",
+            "tight_crop",
+            "follow_cam_when_enabled",
+            "scale_strata",
+            "lighting_strata",
+            "attack_transition_windows",
+          ],
+          required_integrity: ["media_integrity", "identity_binding"],
+          acceptance_contract: "server_verified_bundle_required",
+        },
+        sha256: "b".repeat(64),
+        thresholds: {
+          minimum_detected_ratio: 0.5,
+          maximum_predicted_ratio: 0.35,
+          maximum_lost_ratio: 0.25,
+          maximum_longest_lost_streak: 30,
+          maximum_false_positive_islands_per_100_frames: 8,
+          maximum_suspicious_tracklet_ratio: 0.35,
+          maximum_step_px: 600,
+          maximum_follow_cam_pan_step_px: 90,
+          maximum_follow_cam_pan_accel_px: 120,
+          maximum_follow_cam_zoom_step_ratio: 0.1,
+          maximum_ai_review_triggers_per_100_frames: 10,
+          maximum_event_candidates_per_100_frames: 25,
+        },
+      },
+      stage_counts: {
+        schema_version: "2.0",
+        coverage_status: failed
+          ? "not_collected"
+          : diagnosticContractFailure
+            ? "invalid"
+            : "complete",
+        evaluated_frames: collectedCount(300),
+        detected_frames: collectedCount(trackLost ? 0 : 200),
+        predicted_frames: collectedCount(trackLost ? 0 : 50),
+        lost_frames: diagnosticContractFailure
+          ? { value: null, status: "not_collected" }
+          : collectedCount(trackLost ? 300 : 50),
+        raw_candidates: collectedCount(allLost ? 0 : classRejected ? 12 : 240),
+        class_mapped_candidates: collectedCount(trackLost ? 0 : 230),
+        filtered_candidates: collectedCount(trackLost ? 0 : 220),
+        selected_candidates: collectedCount(trackLost ? 0 : 200),
+        tracklets: collectedCount(trackLost ? 0 : 1),
+        rejection_reasons: classRejected
+          ? { "class_not_allowed:person": 12 }
+          : {},
+        reconciliation: {
+          status: failed
+            ? "not_collected"
+            : diagnosticContractFailure
+              ? "mismatch"
+              : "reconciled",
+          reason_codes: diagnosticContractFailure
+            ? ["debug_frame_exception:1"]
+            : [],
+        },
+      },
+      trajectory: {
+        evaluated_frames: 300,
+        detected: trackLost ? 0 : 200,
+        predicted: trackLost ? 0 : 50,
+        lost: trackLost ? 300 : 50,
+      },
+      diagnostics: {
+        raw_track: trackDiagnostics(false),
+        cleaned_track: trackDiagnostics(true),
+        rejection_reasons: {
+          status: diagnosticsCollected ? "collected" : "not_collected",
+          value: diagnosticsCollected
+            ? classRejected
+              ? { "class_not_allowed:person": 12 }
+              : {}
+            : null,
+        },
+        ai_review_trigger_count: observation(0, budgetCollected),
+        ai_review_triggers_per_100_frames: observation(0, budgetCollected),
+        event_candidate_count: observation(0, budgetCollected),
+        event_candidates_per_100_frames: observation(0, budgetCollected),
+        follow_cam: {
+          status: budgetCollected ? "collected" : "not_collected",
+          max_pan_step_px: observation(20, budgetCollected),
+          max_pan_accel_px: observation(30, budgetCollected),
+          max_zoom_step_ratio: observation(0.02, budgetCollected),
+        },
+      },
+      evidence: {
+        wide_context: failed ? "not_collected" : "available",
+        tight_crop: failed ? "not_collected" : "available",
+        follow_cam: failed ? "not_collected" : "available",
+        follow_cam_action_retention: failed ? "not_collected" : "complete",
+        scale_strata: failed ? "not_collected" : "complete",
+        lighting_strata: failed ? "not_collected" : "complete",
+        attack_transition_windows: failed ? "not_collected" : "complete",
+        media_integrity: failed ? "not_collected" : "complete",
+        identity_binding: failed ? "not_collected" : "complete",
+      },
+    };
+  }
+
+  const tuningSchema = {
+    schema_version: "1.0",
+    patch_schema_version: "1.0",
+    controls: [
+      {
+        path: "detector.allowed_labels",
+        section: "detector",
+        kind: "multi_select",
+        options: ["sports ball", "ball"],
+        runtime_impact: "low",
+        description: "Detector labels accepted as a football.",
+        description_zh: "允许作为足球候选的检测类别。",
+      },
+      {
+        path: "detector.confidence_threshold",
+        section: "detector",
+        kind: "number",
+        minimum: 0.01,
+        maximum: 0.9,
+        step: 0.01,
+        runtime_impact: "low",
+        description: "Minimum detector confidence used for this bounded trial.",
+        description_zh: "本次有限试跑使用的最低检测置信度。",
+      },
+      {
+        path: "detector.inference_mode",
+        section: "detector",
+        kind: "select",
+        options: ["direct_full_frame", "sahi"],
+        runtime_impact: "high",
+        description: "Choose full-frame or sliced small-object inference.",
+        description_zh: "选择整帧或面向小目标的切片推理。",
+      },
+    ],
+    actions: [
+      {
+        action_code: "return_to_field_setup",
+        target_step: "field_setup",
+        reason_code: "field_geometry_requires_new_calibration",
+        affected_paths: [
+          "filtering.roi",
+          "scene_bias.ground_zones",
+          "scene_bias.negative_rois",
+        ],
+        lineage_constraint:
+          "invalidate_trial_and_downstream_then_create_new_calibration_version",
+      },
+    ],
+  };
+
+  const baseConfigDetail = {
+    name: "default.yaml",
+    path: "configs/default.yaml",
+    text: "detector:\n  allowed_labels: [sports ball]\n  confidence_threshold: 0.25\n  inference_mode: direct_full_frame\n",
+    raw: {
+      detector: {
+        allowed_labels: ["sports ball"],
+        confidence_threshold: 0.25,
+        inference_mode: "direct_full_frame",
+      },
+    },
+    resolved: {
+      detector: {
+        allowed_labels: ["sports ball"],
+        confidence_threshold: 0.25,
+        inference_mode: "direct_full_frame",
+      },
+    },
+    summary: {
+      name: "default.yaml",
+      path: "configs/default.yaml",
+      input_video: inputCatalog.videos[0].path,
+      detector_model_path: "models/ball.pt",
+      postprocess_enabled: true,
+      follow_cam_enabled: true,
+      exists: { yaml: true },
+    },
+  };
 
   const artifactList = () =>
     [
@@ -374,7 +735,7 @@ async function installTrialScenario(
         path: "ball_track.csv",
         kind: "csv",
         exists: true,
-        size_bytes: Buffer.byteLength(trialRawTrackCsv),
+        size_bytes: Buffer.byteLength(rawTrackCsv),
         content_type: "text/csv",
       },
       {
@@ -390,7 +751,7 @@ async function installTrialScenario(
         path: "ball_track.cleaned.csv",
         kind: "csv",
         exists: true,
-        size_bytes: Buffer.byteLength(trialCleanedTrackCsv),
+        size_bytes: Buffer.byteLength(cleanedTrackCsv),
         content_type: "text/csv",
       },
       ...(videoFixture
@@ -434,6 +795,7 @@ async function installTrialScenario(
       completed_at: null,
       config_name: configName,
       config_path: `configs/${configName}`,
+      config_sha256: options.legacyConfigDigest ? null : "c".repeat(64),
       input_video: body.input_video,
       parent_run_id: body.parent_run_id ?? null,
       output_dir: `outputs/${body.output_dir_name}`,
@@ -493,6 +855,10 @@ async function installTrialScenario(
       await route.fulfill({ json: runs });
       return;
     }
+    if (method === "GET" && path === "/api/production-trials/tuning-schema") {
+      await route.fulfill({ json: tuningSchema });
+      return;
+    }
     if (method === "POST" && path === "/api/runs") {
       const body = request.postDataJSON() as Record<string, unknown>;
       createBodies.push(body);
@@ -545,7 +911,7 @@ async function installTrialScenario(
           summary: {
             frame_count: 300,
             source_count: 2,
-            tracklet_count: 0,
+            tracklet_count: auditTrackletCount,
             suspicious_tracklet_count: 0,
             review_event_count: 0,
             lost_gap_count: 0,
@@ -556,16 +922,26 @@ async function installTrialScenario(
               name: "raw",
               path: "ball_track.csv",
               row_count: 300,
-              tracklet_count: 0,
+              tracklet_count: auditTrackletCount,
             },
             {
               name: "cleaned",
               path: "ball_track.cleaned.csv",
               row_count: 300,
-              tracklet_count: 0,
+              tracklet_count: auditTrackletCount,
             },
           ],
-          tracklets: [],
+          tracklets: noTrack
+            ? []
+            : [
+                {
+                  tracklet_id: "tracklet-1",
+                  start_frame: 0,
+                  end_frame: 299,
+                  row_count: 300,
+                  flags: [],
+                },
+              ],
           review_events: [],
         },
       });
@@ -610,6 +986,7 @@ async function installTrialScenario(
                 cleaned: (run.stats as Record<string, unknown>).cleaned,
               },
               quality_gate: (run.stats as Record<string, unknown>).quality_gate,
+              trial_signal_gate_v2: run.trial_signal_gate_v2,
             },
           });
         }
@@ -619,9 +996,7 @@ async function installTrialScenario(
         await route.fulfill({
           contentType: "text/csv",
           body:
-            name === "ball_track.cleaned.csv"
-              ? trialCleanedTrackCsv
-              : trialRawTrackCsv,
+            name === "ball_track.cleaned.csv" ? cleanedTrackCsv : rawTrackCsv,
         });
         return;
       }
@@ -634,6 +1009,32 @@ async function installTrialScenario(
         });
         return;
       }
+    }
+    const diagnosisMatch = path.match(
+      /^\/api\/runs\/([^/]+)\/trial-diagnosis$/,
+    );
+    if (method === "GET" && diagnosisMatch) {
+      const run = runs.find(
+        (item) => item.run_id === decodeURIComponent(diagnosisMatch[1]),
+      );
+      if (!run || !run.trial_signal_gate_v2) {
+        await route.fulfill({ status: 404, json: { detail: "missing" } });
+        return;
+      }
+      await route.fulfill({
+        json: {
+          schema_version: "1.0",
+          run_id: run.run_id,
+          legacy_quality_gate_status: (
+            (run.stats as Record<string, unknown>).quality_gate as
+              | { status?: string }
+              | undefined
+          )?.status,
+          trial_signal_gate_v2: run.trial_signal_gate_v2,
+          tuning_schema_version: "1.0",
+        },
+      });
+      return;
     }
     const runMatch = path.match(/^\/api\/runs\/([^/]+)$/);
     if (method === "GET" && runMatch) {
@@ -674,13 +1075,15 @@ async function installTrialScenario(
       configs.set(name, detail);
       configMode = "ok";
       await route.fulfill({ status: 201, json: detail });
+      deriveResponseNames.push(name);
       return;
     }
     const configMatch = path.match(/^\/api\/configs\/(.+)$/);
     if (method === "GET" && configMatch) {
       const name = decodeURIComponent(configMatch[1]);
       configGetNames.push(name);
-      const detail = configs.get(name);
+      const detail =
+        name === baseConfigDetail.name ? baseConfigDetail : configs.get(name);
       if (!detail || configMode === "missing") {
         await route.fulfill({ status: 404, json: { detail: "missing" } });
         return;
@@ -700,6 +1103,7 @@ async function installTrialScenario(
     runs,
     createBodies,
     deriveBodies,
+    deriveResponseNames,
     cancelIds,
     configGetNames,
     runId(index = 0) {
@@ -710,7 +1114,12 @@ async function installTrialScenario(
     setStatus(runId: string, status: TrialRunStatus) {
       const run = runs.find((item) => item.run_id === runId);
       if (!run) throw new Error(`Unknown run ${runId}`);
+      const gate =
+        status === "completed" || status === "failed"
+          ? trialSignalGate(status)
+          : null;
       run.status = status;
+      run.trial_signal_gate_v2 = gate;
       run.error = status === "failed" ? "trial failed" : null;
       run.completed_at =
         status === "completed" || status === "failed" || status === "cancelled"
@@ -731,28 +1140,31 @@ async function installTrialScenario(
           ? {
               raw: {
                 frame_count: 300,
-                detected: 200,
-                predicted: 50,
-                lost: 50,
-                detected_ratio: 2 / 3,
-                predicted_ratio: 1 / 6,
-                lost_ratio: 1 / 6,
-                longest_lost_streak: 4,
-                false_positive_island_count: 1,
-                max_step_px: 20,
+                detected: noTrack ? 0 : 200,
+                predicted: noTrack ? 0 : 50,
+                lost: noTrack ? 300 : 50,
+                detected_ratio: noTrack ? 0 : 2 / 3,
+                predicted_ratio: noTrack ? 0 : 1 / 6,
+                lost_ratio: noTrack ? 1 : 1 / 6,
+                longest_lost_streak: noTrack ? 300 : 4,
+                false_positive_island_count: noTrack ? 0 : 1,
+                max_step_px: noTrack ? 0 : 20,
               },
               cleaned: {
                 frame_count: 300,
-                detected: 210,
-                predicted: 50,
-                lost: 40,
-                detected_ratio: 0.7,
-                predicted_ratio: 1 / 6,
-                lost_ratio: 2 / 15,
+                detected: noTrack ? 0 : 210,
+                predicted: noTrack ? 0 : 50,
+                lost: noTrack ? 300 : 40,
+                detected_ratio: noTrack ? 0 : 0.7,
+                predicted_ratio: noTrack ? 0 : 1 / 6,
+                lost_ratio: noTrack ? 1 : 2 / 15,
               },
-              quality_gate: { status: "warn" },
+              quality_gate: { status: noTrack ? "stable" : "warn" },
+              trial_signal_gate_v2: gate,
             }
-          : {};
+          : gate
+            ? { trial_signal_gate_v2: gate }
+            : {};
     },
     setConfigMode(mode: "ok" | "missing" | "tampered") {
       configMode = mode;
@@ -871,6 +1283,15 @@ async function openTrialFromDraft(page: Page, language: "en" | "zh" = "en") {
   ).toHaveValue("default.yaml");
 }
 
+async function confirmTrialVisualEvidence(page: Page) {
+  const confirmation = page.getByRole("checkbox", {
+    name: "I visually reviewed this evidence and confirm the ball remains usable across the trial.",
+  });
+  await expect(confirmation).toBeVisible({ timeout: 15_000 });
+  await confirmation.click();
+  await expect(confirmation).toBeChecked();
+}
+
 async function finishTrialForAcceptance(
   page: Page,
   scenario: Awaited<ReturnType<typeof installTrialScenario>>,
@@ -881,6 +1302,7 @@ async function finishTrialForAcceptance(
   scenario.setStatus(runId, "running");
   await expect(page.getByTestId("trial-run-status")).toHaveText("Running");
   scenario.setStatus(runId, "completed");
+  await confirmTrialVisualEvidence(page);
   const accept = page.getByRole("button", { name: "Accept this trial" });
   await expect(accept).toBeVisible({ timeout: 15_000 });
   await accept.click();
@@ -890,6 +1312,128 @@ async function finishTrialForAcceptance(
 const BROADCAST_E2E_NOW = "2026-07-15T18:00:00.000Z";
 const ACCEPTED_TRIAL_RUN_ID = "trial-broadcast-accepted";
 const TRAJECTORY_GENERATION_ID = `trajectory-${"a".repeat(24)}`;
+const BROADCAST_TRIAL_EVIDENCE_GENERATION = "e".repeat(64);
+const BROADCAST_TRIAL_THRESHOLD_SHA256 = "b".repeat(64);
+
+function acceptedBroadcastTrialGate(): TrialSignalGateV2 {
+  const observation = (value: number) => ({
+    status: "collected" as const,
+    value,
+  });
+  const track = (cleaned: boolean) => ({
+    status: "collected" as const,
+    frame_count: observation(300),
+    detected: observation(cleaned ? 210 : 200),
+    predicted: observation(50),
+    lost: observation(cleaned ? 40 : 50),
+    detected_ratio: observation(cleaned ? 0.7 : 2 / 3),
+    predicted_ratio: observation(1 / 6),
+    lost_ratio: observation(cleaned ? 2 / 15 : 1 / 6),
+    longest_lost_streak: observation(4),
+    false_positive_island_count: observation(1),
+    max_step_px: observation(20),
+  });
+  return {
+    schema_version: "2.0",
+    status: "acceptable",
+    coverage_complete: true,
+    evidence_available: true,
+    trajectory_acceptable: true,
+    signal_acceptable: true,
+    acceptance_metrics_complete: true,
+    acceptance_contract_complete: true,
+    quality_acceptable: true,
+    operator_confirmation_required: true,
+    reason_codes: ["quality_thresholds_passed"],
+    failure_classification: {
+      code: "acceptable",
+      severity: "none",
+      summary: "The signal thresholds pass.",
+      recommended_action: "Review and confirm the bound evidence.",
+    },
+    threshold_profile: {
+      profile_id: "trial-signal-conservative",
+      version: "1.1",
+      algorithm_version: "trial-signal-gate-v2.1",
+      matching_rules: {
+        stage_counter_reconciliation:
+          "all_required_counters_present_and_reconciled",
+        track_metric_scope: "raw_and_cleaned_when_postprocess_enabled",
+        follow_cam_scope: "motion_and_action_retention_when_enabled",
+        required_visual_evidence: [
+          "wide_context",
+          "tight_crop",
+          "follow_cam_when_enabled",
+          "scale_strata",
+          "lighting_strata",
+          "attack_transition_windows",
+        ],
+        required_integrity: ["media_integrity", "identity_binding"],
+        acceptance_contract: "server_verified_bundle_required",
+      },
+      sha256: BROADCAST_TRIAL_THRESHOLD_SHA256,
+      thresholds: {
+        minimum_detected_ratio: 0.5,
+        maximum_predicted_ratio: 0.35,
+        maximum_lost_ratio: 0.25,
+        maximum_longest_lost_streak: 30,
+        maximum_false_positive_islands_per_100_frames: 8,
+        maximum_suspicious_tracklet_ratio: 0.35,
+        maximum_step_px: 600,
+        maximum_follow_cam_pan_step_px: 90,
+        maximum_follow_cam_pan_accel_px: 120,
+        maximum_follow_cam_zoom_step_ratio: 0.1,
+        maximum_ai_review_triggers_per_100_frames: 10,
+        maximum_event_candidates_per_100_frames: 25,
+      },
+    },
+    stage_counts: {
+      schema_version: "2.0",
+      coverage_status: "complete",
+      evaluated_frames: { value: 300, status: "collected" },
+      detected_frames: { value: 200, status: "collected" },
+      predicted_frames: { value: 50, status: "collected" },
+      lost_frames: { value: 50, status: "collected" },
+      raw_candidates: { value: 240, status: "collected" },
+      class_mapped_candidates: { value: 230, status: "collected" },
+      filtered_candidates: { value: 220, status: "collected" },
+      selected_candidates: { value: 200, status: "collected" },
+      tracklets: { value: 1, status: "collected" },
+      rejection_reasons: { below_confidence: 10 },
+      reconciliation: { status: "reconciled", reason_codes: [] },
+    },
+    trajectory: { evaluated_frames: 300 },
+    diagnostics: {
+      raw_track: track(false),
+      cleaned_track: track(true),
+      rejection_reasons: {
+        status: "collected",
+        value: { below_confidence: 10 },
+      },
+      ai_review_trigger_count: observation(0),
+      ai_review_triggers_per_100_frames: observation(0),
+      event_candidate_count: observation(0),
+      event_candidates_per_100_frames: observation(0),
+      follow_cam: {
+        status: "collected",
+        max_pan_step_px: observation(20),
+        max_pan_accel_px: observation(30),
+        max_zoom_step_ratio: observation(0.02),
+      },
+    },
+    evidence: {
+      wide_context: "available",
+      tight_crop: "available",
+      follow_cam: "available",
+      follow_cam_action_retention: "complete",
+      scale_strata: "complete",
+      lighting_strata: "complete",
+      attack_transition_windows: "complete",
+      media_integrity: "complete",
+      identity_binding: "complete",
+    },
+  };
+}
 
 interface ConfirmedBroadcastDraftFixture {
   draft: ProductionDraft;
@@ -946,13 +1490,14 @@ async function buildConfirmedBroadcastDraft(): Promise<ConfirmedBroadcastDraftFi
       observed_at: BROADCAST_E2E_NOW,
     },
   );
+  const trialSignalGate = acceptedBroadcastTrialGate();
   const trial = acceptProductionTrial(observedTrial, {
     run: { run_id: ACCEPTED_TRIAL_RUN_ID, status: "completed" },
     current_intent_sha256: trialSubmission.pending.intent_sha256,
     readiness: {
       run_id: ACCEPTED_TRIAL_RUN_ID,
       request_sha256: trialSubmission.pending.request_sha256,
-      evidence_generation: "e".repeat(64),
+      evidence_generation: BROADCAST_TRIAL_EVIDENCE_GENERATION,
       verified_at: BROADCAST_E2E_NOW,
       video_artifact_name: "follow_cam.webm",
       artifact_names: [
@@ -974,11 +1519,18 @@ async function buildConfirmedBroadcastDraft(): Promise<ConfirmedBroadcastDraftFi
         longest_lost_streak: 4,
         false_positive_island_count: 1,
         max_step_px: 20,
-        audit_tracklet_count: 0,
+        audit_tracklet_count: 1,
         audit_suspicious_tracklet_count: 0,
         audit_review_event_count: 0,
         audit_lost_gap_count: 0,
         quality_gate_status: "warn",
+        trial_signal_gate_v2: trialSignalGate,
+      },
+      operator_visual_confirmation: {
+        confirmed: true,
+        confirmed_at: BROADCAST_E2E_NOW,
+        evidence_generation: BROADCAST_TRIAL_EVIDENCE_GENERATION,
+        threshold_profile_sha256: BROADCAST_TRIAL_THRESHOLD_SHA256,
       },
     },
     accepted_at: BROADCAST_E2E_NOW,
@@ -1273,6 +1825,60 @@ async function installZeroReviewBroadcastScenario(
   const acceptedAttempt = fixture.draft.trial!.attempts.find(
     (attempt) => attempt.run_id === acceptedTrial.run_id,
   )!;
+  const acceptedTrialSignalGate =
+    acceptedTrial.readiness.quality.trial_signal_gate_v2;
+  if (!acceptedTrialSignalGate) {
+    throw new Error("The accepted trial fixture must include its signal gate");
+  }
+  const tuningSchema = {
+    schema_version: "1.0",
+    patch_schema_version: "1.0",
+    controls: [
+      {
+        path: "detector.allowed_labels",
+        section: "detector",
+        kind: "multi_select",
+        options: ["sports ball", "ball"],
+        runtime_impact: "low",
+        description: "Detector labels accepted as a football.",
+        description_zh: "允许作为足球候选的检测类别。",
+      },
+      {
+        path: "detector.confidence_threshold",
+        section: "detector",
+        kind: "number",
+        minimum: 0.01,
+        maximum: 0.9,
+        step: 0.01,
+        runtime_impact: "low",
+        description: "Minimum detector confidence used for this bounded trial.",
+        description_zh: "本次有限试跑使用的最低检测置信度。",
+      },
+      {
+        path: "detector.inference_mode",
+        section: "detector",
+        kind: "select",
+        options: ["direct_full_frame", "sahi"],
+        runtime_impact: "high",
+        description: "Choose full-frame or sliced small-object inference.",
+        description_zh: "选择整帧或面向小目标的切片推理。",
+      },
+    ],
+    actions: [
+      {
+        action_code: "return_to_field_setup",
+        target_step: "field_setup",
+        reason_code: "field_geometry_requires_new_calibration",
+        affected_paths: [
+          "filtering.roi",
+          "scene_bias.ground_zones",
+          "scene_bias.negative_rois",
+        ],
+        lineage_constraint:
+          "invalidate_trial_and_downstream_then_create_new_calibration_version",
+      },
+    ],
+  };
   const trialArtifacts: ArtifactSummary[] = [
     ["run_manifest.json", 100, "application/json"],
     ["metrics_report.json", 100, "application/json"],
@@ -1607,6 +2213,33 @@ async function installZeroReviewBroadcastScenario(
       path === "/api/inputs/field-suggestion"
     ) {
       await route.fallback();
+      return;
+    }
+    if (method === "GET" && path === "/api/production-trials/tuning-schema") {
+      await route.fulfill({ json: tuningSchema });
+      return;
+    }
+    const diagnosisMatch = path.match(
+      /^\/api\/runs\/([^/]+)\/trial-diagnosis$/,
+    );
+    if (method === "GET" && diagnosisMatch) {
+      const runId = decodeURIComponent(diagnosisMatch[1]);
+      if (runId !== trialRun.run_id) {
+        audit.contractViolations.push(
+          "trial diagnosis requested for a non-trial run",
+        );
+        await route.fulfill({ status: 404, json: { detail: "missing" } });
+        return;
+      }
+      await route.fulfill({
+        json: {
+          schema_version: "1.0",
+          run_id: runId,
+          legacy_quality_gate_status: "warn",
+          trial_signal_gate_v2: acceptedTrialSignalGate,
+          tuning_schema_version: tuningSchema.schema_version,
+        },
+      });
       return;
     }
     if (method === "GET" && path === "/api/configs") {
@@ -3775,11 +4408,33 @@ test("discards a delayed configuration response after trial evidence is invalida
     )
     .toEqual({ accepted: null, pending: null, confirmed: null });
 
+  const staleConfigName = `generated/${String(
+    scenario.deriveBodies[0].output_name,
+  )}`;
   scenario.releaseDerive();
+  await expect
+    .poll(() => scenario.deriveResponseNames)
+    .toContain(staleConfigName);
   await expect(page.getByText("Configuration snapshot verified")).toHaveCount(
     0,
   );
-  await expect.poll(() => scenario.configGetNames.length).toBe(0);
+  expect(scenario.configGetNames).not.toContain(staleConfigName);
+  await expect
+    .poll(() =>
+      page.evaluate(() => {
+        const raw = localStorage.getItem(
+          "football-tracking.production-draft.v1",
+        );
+        if (!raw) return null;
+        const draft = JSON.parse(raw);
+        return {
+          accepted: draft.trial?.accepted ?? null,
+          pending: draft.pending_config_confirmation ?? null,
+          confirmed: draft.confirmed_config ?? null,
+        };
+      }),
+    )
+    .toEqual({ accepted: null, pending: null, confirmed: null });
   await expect(
     page.getByRole("button", { name: "Start bounded trial" }),
   ).toBeVisible();
@@ -3879,6 +4534,194 @@ test("reconciles a lost create response after reload without another POST", asyn
   expect(scenario.createBodies).toHaveLength(1);
 });
 
+test("blocks acceptance and exposes bounded tuning when every trial frame is lost", async ({
+  page,
+}) => {
+  const scenario = await installTrialScenario(page, { allLost: true });
+  await openTrialFromDraft(page);
+
+  await page.getByRole("button", { name: "Start bounded trial" }).click();
+  await expect.poll(() => scenario.createBodies.length).toBe(1);
+  const runId = scenario.runId();
+  scenario.setStatus(runId, "completed");
+
+  const diagnosis = page.getByTestId("trial-diagnosis");
+  await expect(diagnosis).toContainText("Adjustment required");
+  await expect(diagnosis).toContainText("No raw ball candidates were found.");
+  await expect(
+    diagnosis.getByText("Raw candidates", { exact: true }).locator(".."),
+  ).toContainText("0 · Collected");
+  await expect(
+    diagnosis.getByText("Tracklets", { exact: true }).locator(".."),
+  ).toContainText("0 · Collected");
+  await expect(
+    diagnosis.getByTestId("trial-debug-status-counts"),
+  ).toContainText("Detected frames (debug)0 · Collected");
+  await expect(
+    diagnosis.getByTestId("trial-debug-status-counts"),
+  ).toContainText("Lost frames (debug)300 · Collected");
+
+  await expect(page.getByTestId("trial-evidence-ready")).toBeAttached({
+    timeout: 15_000,
+  });
+  await expect(page.getByText("Quality gate: stable")).toBeVisible();
+  expect(scenario.runs[0]).toMatchObject({
+    stats: {
+      quality_gate: { status: "stable" },
+      trial_signal_gate_v2: {
+        status: "retune_required",
+        failure_classification: { code: "no_raw_candidates" },
+        stage_counts: {
+          raw_candidates: { value: 0 },
+          tracklets: { value: 0 },
+        },
+      },
+    },
+  });
+
+  await expect(
+    page.getByRole("button", { name: "Accept this trial" }),
+  ).toHaveCount(0);
+  await expect(
+    page.getByRole("button", { name: "Save and rerun" }),
+  ).toBeEnabled();
+
+  await expectNoSeriousAccessibilityFindings(page);
+  expect(runtimeErrors.get(page) ?? []).toEqual([]);
+});
+
+test("shows readable module, frame-exception, and stage-counter reconciliation failures", async ({
+  page,
+}) => {
+  const scenario = await installTrialScenario(page, {
+    diagnosticContractFailure: true,
+  });
+  await openTrialFromDraft(page);
+  await page.getByRole("button", { name: "Start bounded trial" }).click();
+  await expect.poll(() => scenario.createBodies.length).toBe(1);
+  scenario.setStatus(scenario.runId(), "completed");
+
+  const diagnosis = page.getByTestId("trial-diagnosis");
+  await expect(diagnosis).toContainText(
+    "The saved trial option conflicts with the executed module state: post-processing.",
+  );
+  await expect(diagnosis).toContainText(
+    "At least one debug frame ended with an execution exception.",
+  );
+  await expect(diagnosis).toContainText(
+    "Required stage counter was not collected: debug Lost frames.",
+  );
+  await expect(diagnosis).toContainText(
+    "Filtered candidates exceed class-mapped candidates.",
+  );
+  await expect(diagnosis).toContainText(
+    "Stage rejection-reason counters were not collected.",
+  );
+  await expect(diagnosis).toContainText("(trial_option_conflict:postprocess)");
+});
+
+test("restarts a terminal legacy trial as an explicit generation-one root", async ({
+  page,
+}) => {
+  const scenario = await installTrialScenario(page, {
+    allLost: true,
+    legacyConfigDigest: true,
+  });
+  await openTrialFromDraft(page);
+  await page.getByRole("button", { name: "Start bounded trial" }).click();
+  await expect.poll(() => scenario.createBodies.length).toBe(1);
+  const legacyRunId = scenario.runId();
+  scenario.setStatus(legacyRunId, "completed");
+
+  await expect(page.getByTestId("trial-diagnosis-code")).toContainText(
+    "no_raw_candidates",
+  );
+  await expect(page.getByLabel("Base configuration")).toBeDisabled();
+  await expect(
+    page.getByText(
+      "Locked to the verified base configuration of the current trial lineage.",
+    ),
+  ).toBeVisible();
+  await page.getByRole("button", { name: "Save and rerun" }).click();
+  await expect.poll(() => scenario.createBodies.length).toBe(2);
+
+  const restart = scenario.createBodies[1];
+  expect(restart.parent_run_id).toBeNull();
+  expect(restart.output_dir_name).not.toBe(
+    scenario.createBodies[0].output_dir_name,
+  );
+  expect(JSON.parse(String(restart.notes))).toMatchObject({
+    generation: 1,
+    legacy_restart_run_id: legacyRunId,
+  });
+});
+
+test("shows class-mapping rejection, missing budgets, bounded labels, and the Step 2 action", async ({
+  page,
+}) => {
+  const scenario = await installTrialScenario(page, {
+    classRejected: true,
+    missingDiagnosticBudgets: true,
+  });
+  await openTrialFromDraft(page);
+
+  await page
+    .getByLabel("detector.allowed_labels")
+    .selectOption(["sports ball", "ball"]);
+  await page.getByRole("button", { name: "Save adjustments" }).click();
+  await expect(page.getByText(/Current patch version:/)).toBeVisible();
+
+  await page.getByRole("button", { name: "Start bounded trial" }).click();
+  await expect.poll(() => scenario.createBodies.length).toBe(1);
+  expect(scenario.createBodies[0]).toMatchObject({
+    config_patch: {
+      detector: { allowed_labels: ["sports ball", "ball"] },
+    },
+  });
+  const runId = scenario.runId();
+  scenario.setStatus(runId, "completed");
+
+  const diagnosis = page.getByTestId("trial-diagnosis");
+  await expect(diagnosis.getByTestId("trial-diagnosis-code")).toContainText(
+    "all_candidates_class_rejected",
+  );
+  await expect(
+    diagnosis.getByTestId("trial-detection-stage-chain"),
+  ).toContainText(
+    /Raw candidates[\s\S]*12[\s\S]*Class-mapped candidates[\s\S]*0/,
+  );
+  await expect(
+    diagnosis.getByTestId("trial-stage-rejection-reasons"),
+  ).toContainText("Class not allowed: person: 12");
+  const typedDiagnostics = diagnosis.getByTestId("trial-typed-diagnostics");
+  await expect(typedDiagnostics).toContainText(
+    "AI review triggers / 100 frames",
+  );
+  await expect(typedDiagnostics).toContainText(
+    "Follow-camera maximum pan step",
+  );
+  await expect(typedDiagnostics).toContainText("— · Not collected");
+
+  const fieldAction = page.getByTestId("trial-field-setup-action");
+  await expect(fieldAction).toContainText(
+    "invalidates this trial and every downstream result",
+  );
+  await fieldAction
+    .getByRole("button", { name: "Return to field setup" })
+    .click();
+  await expect(
+    page.getByText(/clears trial and configuration evidence from this draft/i),
+  ).toBeVisible();
+  await page.getByRole("button", { name: "Invalidate and edit" }).click();
+  await expect(
+    page.getByRole("heading", { name: "Field calibration" }),
+  ).toBeVisible();
+  await expect(page.locator("main [data-aria-hidden='true']")).toHaveCount(0);
+
+  await expectNoSeriousAccessibilityFindings(page);
+  expect(runtimeErrors.get(page) ?? []).toEqual([]);
+});
+
 test("tunes after a failed trial, accepts the successful child, and preserves lineage", async ({
   page,
 }) => {
@@ -3889,6 +4732,12 @@ test("tunes after a failed trial, accepts the successful child, and preserves li
   const firstRunId = scenario.runId();
   scenario.setStatus(firstRunId, "failed");
   await expect(page.getByTestId("trial-run-status")).toHaveText("Failed");
+  await expect(page.getByLabel("Base configuration")).toBeDisabled();
+  await expect(
+    page.getByText(
+      "Locked to the verified base configuration of the current trial lineage.",
+    ),
+  ).toBeVisible();
   await page.getByLabel("Frame count").fill("120");
   await page.getByRole("button", { name: "Retry as a new trial" }).click();
   await expect.poll(() => scenario.createBodies.length).toBe(2);
@@ -3903,9 +4752,12 @@ test("tunes after a failed trial, accepts the successful child, and preserves li
   await expect(page.getByTestId("trial-evidence-ready")).toBeAttached({
     timeout: 15_000,
   });
+  await confirmTrialVisualEvidence(page);
   await page.getByRole("button", { name: "Accept this trial" }).click();
   await expect(page.getByText("Trial accepted")).toBeVisible();
-  const attempts = page.getByRole("listitem");
+  const attempts = page
+    .locator('section[aria-labelledby="trial-attempts-title"]')
+    .getByRole("listitem");
   await expect(attempts.nth(0)).toContainText(firstRunId);
   await expect(attempts.nth(0)).toContainText("Failed");
   await expect(attempts.nth(1)).toContainText(secondRunId);

@@ -528,6 +528,30 @@ class YOLOSahiBallDetectorModeTests(unittest.TestCase):
             (candidates[0].x1, candidates[0].y1, candidates[0].x2, candidates[0].y2),
         )
 
+    def test_direct_detector_records_pre_and_post_class_mapping_counts(self) -> None:
+        detector = self.make_detector("direct_full_frame")
+        boxes = SimpleNamespace(
+            xyxy=_TensorList([[1.0, 2.0, 9.0, 10.0], [20.0, 30.0, 40.0, 50.0]]),
+            conf=_TensorList([0.91, 0.88]),
+            cls=_TensorList([0, 1]),
+        )
+        model = Mock()
+        model.predict.return_value = [
+            SimpleNamespace(boxes=boxes, names={0: "ball", 1: "person"})
+        ]
+        detector._get_direct_model = Mock(return_value=model)
+
+        candidates = detector.detect_direct(frame=object(), frame_index=7)
+
+        self.assertEqual(["ball"], [candidate.label for candidate in candidates])
+        evidence = detector.last_stage_evidence
+        self.assertIsNotNone(evidence)
+        assert evidence is not None
+        self.assertEqual("1.0", evidence.schema_version)
+        self.assertEqual(2, evidence.detector_output_count)
+        self.assertEqual(1, evidence.class_mapped_candidate_count)
+        self.assertEqual({"person": 1}, evidence.class_rejection_counts)
+
     def test_detect_uses_direct_full_frame_model_without_sahi_slicing(self) -> None:
         detector = self.make_detector("direct_full_frame")
         fake_model = _FakeDirectModel()

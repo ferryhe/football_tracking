@@ -12,6 +12,7 @@ import {
   canonicalJson,
   deepMergeProductionPatch,
   isProductionTrialState,
+  productionTrialAcceptanceIsValid,
   productionTrialArtifactContract,
   productionTrialMatchesContext,
   sha256Text,
@@ -174,16 +175,13 @@ function uuid(value: string): boolean {
 }
 
 function acceptedAttempt(trial: ProductionTrialState) {
-  if (!isProductionTrialState(trial) || !trial.accepted) {
+  if (
+    !isProductionTrialState(trial) ||
+    !productionTrialAcceptanceIsValid(trial)
+  ) {
     throw new TypeError("An accepted production trial is required");
   }
-  const attempt = trial.attempts.find(
-    (candidate) => candidate.run_id === trial.accepted?.run_id,
-  );
-  if (!attempt || attempt.last_observed.status !== "completed") {
-    throw new TypeError("Accepted trial attempt is not completed");
-  }
-  return { accepted: trial.accepted, attempt };
+  return { accepted: trial.accepted, attempt: trial.attempts.at(-1)! };
 }
 
 export async function buildProductionConfigConfirmation(input: {

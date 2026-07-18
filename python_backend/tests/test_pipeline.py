@@ -163,6 +163,8 @@ class BallTrackingPipelinePriorTests(unittest.TestCase):
         self.assertIsNotNone(pipeline.selection_pitch_calibration)
         self.assertIsNotNone(pipeline.selection_player_tracks_report)
         self.assertIsNotNone(result.point)
+        self.assertEqual(1, result.selected_candidate_count)
+        self.assertEqual(1, result.to_debug_dict()["selected_candidate_count"])
         assert result.point is not None
         self.assertEqual((80.0, 50.0), (result.point.x, result.point.y))
         near_score = next(score for score in result.selected_candidate_scores if score.candidate is near_player)

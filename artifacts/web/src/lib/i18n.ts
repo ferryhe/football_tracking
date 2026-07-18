@@ -153,6 +153,10 @@ export const translations = {
         "Review a bounded trial, tune parameters, and confirm the result before full tracking.",
       trialPending: "Trial and tuning controls arrive in a later delivery.",
       trialBaseConfig: "Base configuration",
+      trialBaseConfigLineageLocked:
+        "Locked to the verified base configuration of the current trial lineage.",
+      trialLineageUnavailable:
+        "The latest trial lineage is still being verified. Wait for it to load before rerunning.",
       trialStartFrame: "Start frame",
       trialMaxFrames: "Frame count",
       trialPostprocess: "Clean the ball track after the trial",
@@ -180,6 +184,309 @@ export const translations = {
         "Run service health could not be verified. No trial was submitted; try again after the service recovers.",
       trialInvalidFrameRange:
         "Start frame must be a non-negative integer and frame count must be a positive integer.",
+      trialTuningTitle: "Bounded trial adjustments",
+      trialTuningDescription:
+        "Only backend-approved controls are available. Every saved change creates a traceable patch version.",
+      trialTuningSection: (section: string) =>
+        ({
+          detector: "Detector",
+          sahi: "Small-object slicing",
+          filtering: "Candidate filtering",
+          selection: "Candidate selection",
+          tracking: "Tracking",
+          postprocess: "Post-processing",
+        })[section] ?? section,
+      trialTuningChanged: "Changed",
+      trialTuningUnchanged: "Current",
+      trialTuningBoolean: (enabled: boolean) =>
+        enabled ? "Enabled" : "Disabled",
+      trialTuningRange: (
+        minimum: number | null | undefined,
+        maximum: number | null | undefined,
+        step: number | null | undefined,
+      ) =>
+        minimum == null || maximum == null
+          ? "Backend-approved option"
+          : `Range ${minimum}–${maximum} · step ${step ?? "—"}`,
+      trialTuningRuntime: "Runtime impact",
+      trialTuningCurrent: "Current",
+      trialTuningProposed: "Proposed",
+      trialTuningDiff: "Saved difference",
+      trialTuningVersion: "Current patch version",
+      trialTuningHistory: "Earlier patch versions",
+      trialTuningRestore: "Use these values",
+      trialTuningReset: "Reset to base profile",
+      trialTuningSave: "Save adjustments",
+      trialAdjustAndRerun: "Save and rerun",
+      trialTuningUnavailable:
+        "The approved tuning schema or selected base configuration is unavailable.",
+      trialTuningInvalid:
+        "The adjustments were not saved because a value is outside the approved range.",
+      trialTuningSaved: (count: number) =>
+        `Saved a new patch version with ${count} changed control${count === 1 ? "" : "s"}.`,
+      trialTuningRestored:
+        "Earlier values are loaded for review. Save them to create a new version.",
+      trialFieldSetupActionTitle: "Field geometry must be adjusted in Step 2",
+      trialFieldSetupActionDescription:
+        "Return to field setup to change the field ROI or exclusion zones. Confirming that change invalidates this trial and every downstream result, then creates a new calibration version.",
+      trialReturnToFieldSetup: "Return to field setup",
+      trialDiagnosisTitle: "Trial signal diagnosis",
+      trialDiagnosisStatus: (status: string) =>
+        ({
+          acceptable: "Acceptable",
+          retune_required: "Adjustment required",
+          insufficient_evidence: "Insufficient evidence",
+        })[status] ?? status,
+      trialDiagnosisLoading: "Loading trial diagnosis…",
+      trialDiagnosisUnavailable:
+        "The trial diagnosis is unavailable, so acceptance remains blocked.",
+      trialDiagnosisSummary: (code: string) =>
+        ({
+          insufficient_evidence: "Required evidence or metrics are incomplete.",
+          decode_failure: "The source segment could not be decoded.",
+          no_raw_candidates: "No raw ball candidates were found.",
+          all_candidates_class_rejected:
+            "The model returned candidates, but none matched an allowed ball class.",
+          all_candidates_filtered:
+            "All raw candidates were rejected by filtering.",
+          no_tracklets: "No usable ball tracklet was formed.",
+          all_lost: "The ball is lost throughout the evaluated segment.",
+          wrong_or_noisy_candidates:
+            "Candidates are dominated by false or noisy detections.",
+          unstable_tracking:
+            "The resulting trajectory is unstable or too incomplete.",
+          acceptable: "The bounded trial meets the signal and evidence gates.",
+        })[code] ?? "The trial requires review.",
+      trialDiagnosisAction: (code: string) =>
+        ({
+          insufficient_evidence:
+            "Collect the listed evidence or metrics, then rerun the gate.",
+          decode_failure:
+            "Verify the source media and retry a decodable segment.",
+          no_raw_candidates:
+            "Lower detector sensitivity thresholds or select a small-ball model, then rerun.",
+          all_candidates_class_rejected:
+            "Select the correct allowed ball labels or a compatible detector, then rerun.",
+          all_candidates_filtered:
+            "Relax the bounded size or confidence filters, then rerun.",
+          no_tracklets:
+            "Adjust candidate selection and tracking continuity, then rerun.",
+          all_lost:
+            "Increase detector recall and tracking tolerance, then rerun.",
+          wrong_or_noisy_candidates:
+            "Tighten candidate filtering and selection, then rerun.",
+          unstable_tracking:
+            "Tune tracking continuity and motion limits, then rerun.",
+          acceptable:
+            "Visually review the bound evidence before accepting the trial.",
+        })[code] ?? "Review the listed gate reasons before rerunning.",
+      trialDiagnosisReason: (reason: string) => {
+        const [code, detail] = reason.split(":", 2);
+        const detailLabel =
+          {
+            longest_lost_streak: "longest lost streak",
+            false_positive_island_count: "false-positive island count",
+            max_step_px: "maximum trajectory step",
+            tracklet_count: "tracklet count",
+            suspicious_tracklet_count: "suspicious tracklet count",
+            review_event_count: "review event count",
+            lost_gap_count: "lost-gap count",
+            max_pan_step_px: "maximum pan step",
+            max_pan_accel_px: "maximum pan acceleration",
+            max_zoom_step_ratio: "maximum zoom step",
+            wide_context: "wide-context video",
+            tight_crop: "tight-crop video",
+            follow_cam: "follow-camera video",
+            follow_cam_action_retention: "follow-camera action retention",
+            scale_strata: "near, medium, and far scale strata",
+            lighting_strata: "lighting strata",
+            attack_transition_windows: "attack-transition windows",
+            media_integrity: "media integrity check",
+            identity_binding: "run and evidence identity binding",
+            postprocess: "post-processing",
+            evaluated_frames: "evaluated frames",
+            detected_frames: "debug Detected frames",
+            predicted_frames: "debug Predicted frames",
+            lost_frames: "debug Lost frames",
+            raw_candidates: "raw candidates",
+            class_mapped_candidates: "class-mapped candidates",
+            filtered_candidates: "filtered candidates",
+            selected_candidates: "selected candidates",
+            tracklets: "tracklets",
+          }[detail ?? ""] ??
+          detail ??
+          "required value";
+        return (
+          {
+            decode_failure: "Source decoding failed.",
+            run_not_completed: "The trial run did not complete.",
+            metrics_not_collected:
+              "Required trajectory metrics were not collected.",
+            stage_counts_not_collected:
+              "Detection-stage counters were not collected.",
+            stage_counter_mismatch:
+              "Detection-stage counters do not reconcile.",
+            trial_option_conflict: `The saved trial option conflicts with the executed module state: ${detailLabel}.`,
+            frame_exception:
+              "At least one debug frame ended with an execution exception.",
+            stage_counter_not_collected: `Required stage counter was not collected: ${detailLabel}.`,
+            rejection_reasons_not_collected:
+              "Stage rejection-reason counters were not collected.",
+            audit_not_collected: "The ball audit summary was not collected.",
+            raw_audit_tracklet_count_not_collected:
+              "The raw-track tracklet count was not collected from the full ball audit.",
+            evaluated_frames_zero: "No frames were evaluated.",
+            track_frame_count_mismatch:
+              "Track and evaluated-frame counts disagree.",
+            cleaned_frame_count_mismatch:
+              "Cleaned-track and evaluated-frame counts disagree.",
+            tracklet_count_mismatch:
+              "Stage and audit tracklet counts disagree.",
+            track_detected_count_mismatch:
+              "Debug Detected-frame and raw-track counts disagree.",
+            track_predicted_count_mismatch:
+              "Debug Predicted-frame and raw-track counts disagree.",
+            track_lost_count_mismatch:
+              "Debug Lost-frame and raw-track counts disagree.",
+            selected_detected_count_mismatch:
+              "Independent selector and Detected-frame counts disagree.",
+            class_mapped_candidate_count_exceeds_detector_output:
+              "Class-mapped candidates exceed detector outputs.",
+            filtered_candidate_count_exceeds_class_mapped:
+              "Filtered candidates exceed class-mapped candidates.",
+            selected_candidate_count_exceeds_filtered:
+              "Selected candidates exceed filtered candidates.",
+            tracklet_count_exceeds_selected_candidates:
+              "Tracklets exceed selected candidates.",
+            zero_candidate: "No raw candidates were detected.",
+            all_candidates_class_rejected:
+              "Every model output was rejected during class mapping.",
+            all_candidates_filtered: "Every raw candidate was filtered out.",
+            zero_tracklet: "No tracklet was formed.",
+            all_lost: "Every evaluated frame is marked lost.",
+            trajectory_noisy:
+              "The trajectory contains too many noisy candidates.",
+            partial_signal: "Detected signal coverage is too low.",
+            trajectory_unstable:
+              "Trajectory motion or continuity exceeds the safe range.",
+            cleaned_metrics_not_collected:
+              "Cleaned-track metrics were not collected.",
+            follow_cam_motion_not_collected:
+              "Follow-camera motion metrics were not collected.",
+            ai_review_trigger_budget_not_collected:
+              "The AI-review trigger budget was not collected.",
+            event_candidate_budget_not_collected:
+              "The event-candidate budget was not collected.",
+            ai_review_trigger_budget_exceeded:
+              "AI-review triggers exceed the threshold budget.",
+            event_candidate_budget_exceeded:
+              "Event candidates exceed the threshold budget.",
+            acceptance_contract_not_collected:
+              "The server-verified acceptance evidence contract has not been collected.",
+            quality_thresholds_passed:
+              "All required quality thresholds passed.",
+            raw_metric_not_collected: `Raw metric not collected: ${detailLabel}.`,
+            cleaned_metric_not_collected: `Cleaned metric not collected: ${detailLabel}.`,
+            raw_metric_invalid: `Raw metric is invalid: ${detailLabel}.`,
+            cleaned_metric_invalid: `Cleaned metric is invalid: ${detailLabel}.`,
+            audit_metric_not_collected: `Audit metric not collected: ${detailLabel}.`,
+            follow_cam_metric_not_collected: `Follow-camera metric not collected: ${detailLabel}.`,
+            evidence_not_collected: `Evidence is incomplete: ${detailLabel}.`,
+          }[code] ?? `Unrecognized gate reason: ${reason}`
+        );
+      },
+      trialDiagnosisNext: "Recommended next action",
+      trialDiagnosisStages: "Detection stages",
+      trialDiagnosisStageChain: "Candidate processing chain",
+      trialDiagnosisStage: (stage: string) =>
+        ({
+          evaluated_frames: "Evaluated frames",
+          detected_frames: "Detected frames (debug)",
+          predicted_frames: "Predicted frames (debug)",
+          lost_frames: "Lost frames (debug)",
+          raw_candidates: "Raw candidates",
+          class_mapped_candidates: "Class-mapped candidates",
+          filtered_candidates: "Candidates after filtering",
+          selected_candidates: "Selected candidates",
+          tracklets: "Tracklets",
+        })[stage] ?? stage,
+      trialDiagnosisRejectionReasons: "Rejection reasons",
+      trialDiagnosisNoRejections: "No rejection was recorded.",
+      trialDiagnosisRejectionReason: (reason: string) => {
+        const [code, detail] = reason.split(":", 2);
+        return (
+          {
+            class_not_allowed: `Class not allowed${detail ? `: ${detail}` : ""}`,
+            below_confidence: "Below confidence threshold",
+            too_small: "Below minimum size",
+            too_large: "Above maximum size",
+            confidence_below_min: "Confidence below the configured minimum",
+            width_out_of_range: "Candidate width is outside the allowed range",
+            height_out_of_range:
+              "Candidate height is outside the allowed range",
+            aspect_ratio_too_small: "Candidate aspect ratio is too small",
+            aspect_ratio_too_large: "Candidate aspect ratio is too large",
+            outside_filtering_roi: "Candidate is outside the filtering area",
+            negative_zone: `Candidate is inside an excluded zone${detail ? `: ${detail}` : ""}`,
+            outside_ground_and_positive_zones:
+              "Candidate is outside the field and every positive zone",
+          }[code] ?? reason
+        );
+      },
+      trialTrajectoryComparison: "Raw and cleaned trajectory comparison",
+      trialDiagnosticMetric: "Metric",
+      trialDiagnosticRaw: "Raw track",
+      trialDiagnosticCleaned: "Cleaned track",
+      trialDiagnosticMetricLabel: (metric: string) =>
+        ({
+          frame_count: "Frames",
+          detected: "Detected frames",
+          predicted: "Predicted frames",
+          lost: "Lost frames",
+          detected_ratio: "Detected ratio",
+          predicted_ratio: "Predicted ratio",
+          lost_ratio: "Lost ratio",
+          longest_lost_streak: "Longest lost streak",
+          false_positive_island_count: "False-positive islands",
+          max_step_px: "Maximum trajectory step",
+          ai_review_trigger_count: "AI review triggers",
+          ai_review_triggers_per_100_frames: "AI review triggers / 100 frames",
+          event_candidate_count: "Event candidates",
+          event_candidates_per_100_frames: "Event candidates / 100 frames",
+          max_pan_step_px: "Follow-camera maximum pan step",
+          max_pan_accel_px: "Follow-camera maximum pan acceleration",
+          max_zoom_step_ratio: "Follow-camera maximum zoom step",
+        })[metric] ?? metric,
+      trialDiagnosisEvidence: "Acceptance evidence",
+      trialDiagnosisEvidenceKey: (key: string) =>
+        ({
+          wide_context: "Wide context",
+          tight_crop: "Tight crop",
+          follow_cam: "Follow camera",
+          follow_cam_action_retention: "Follow-camera action retention",
+          scale_strata: "Near / medium / far scale coverage",
+          lighting_strata: "Lighting coverage",
+          attack_transition_windows: "Attack-transition coverage",
+          media_integrity: "Media integrity",
+          identity_binding: "Evidence identity binding",
+        })[key] ?? key,
+      trialDiagnosisEvidenceStatus: (status: string) =>
+        ({
+          available: "Available",
+          complete: "Complete",
+          not_applicable: "Not applicable",
+          not_collected: "Not collected",
+          unavailable: "Unavailable",
+          invalid: "Invalid",
+        })[status] ?? status,
+      trialDiagnosisCounterStatus: (status: string) =>
+        ({
+          collected: "Collected",
+          not_collected: "Not collected",
+          invalid: "Invalid",
+        })[status] ?? status,
+      trialTuningRuntimeImpact: (impact: string) =>
+        ({ low: "Low", medium: "Medium", high: "High" })[impact] ?? impact,
       trialEvidenceLoading: "Loading and checking trial evidence…",
       trialEvidenceBlocked: "This completed trial cannot be accepted yet.",
       trialEvidenceReady: "Trial evidence is ready for confirmation.",
@@ -187,6 +494,8 @@ export const translations = {
         "The latest trial evidence could not be verified. Review the evidence and try again.",
       trialEvidenceChanged:
         "Trial evidence changed during the final check. Review it again before accepting.",
+      trialVisualConfirmationChanged:
+        "The evidence threshold profile changed during the final check. Review and confirm the evidence again.",
       trialEvidenceReason: (reason: string) => {
         const [code, artifact] = reason.split(":", 2);
         const label = {
@@ -207,6 +516,11 @@ export const translations = {
       },
       trialAccept: "Accept this trial",
       trialAccepted: "Trial accepted",
+      trialVisualConfirmationTitle: "Operator visual confirmation",
+      trialVisualConfirmationDescription:
+        "Review the wide context, tight crop, and follow-camera evidence for this exact evidence generation and threshold profile.",
+      trialVisualConfirmationLabel:
+        "I visually reviewed this evidence and confirm the ball remains usable across the trial.",
       trialQualitySignals: "Quality signals for operator review",
       trialQuality: {
         detected: "Detected",
@@ -1175,7 +1489,8 @@ export const translations = {
       statusGeneration: "Status generation",
       operationalReleaseGate:
         "Artifact verification is not release approval. Real evidence and an independent visual review are still required before publishing.",
-      focusedRun: (runId: string) => `Opened run ${runId} in Production History.`,
+      focusedRun: (runId: string) =>
+        `Opened run ${runId} in Production History.`,
       broadcastMigrated: (runId: string) =>
         `The Broadcast link moved to Production History and opened run ${runId}.`,
       runNotFound: (runId: string) =>
@@ -1339,6 +1654,8 @@ export const translations = {
       trialDescription: "检查短片试跑、调整参数，并在整场追踪前确认结果。",
       trialPending: "试跑和调参操作将在后续交付中接入。",
       trialBaseConfig: "基础配置",
+      trialBaseConfigLineageLocked: "已锁定为当前试跑谱系验证过的基础配置。",
+      trialLineageUnavailable: "正在核验最新试跑谱系，请等待加载完成后再重跑。",
       trialStartFrame: "起始帧",
       trialMaxFrames: "试跑帧数",
       trialPostprocess: "试跑后清洗球轨迹",
@@ -1365,11 +1682,280 @@ export const translations = {
       trialHealthUnavailable:
         "无法核验运行服务健康状态，本次未提交试跑；请在服务恢复后重试。",
       trialInvalidFrameRange: "起始帧必须是非负整数，试跑帧数必须是正整数。",
+      trialTuningTitle: "有限试跑调参",
+      trialTuningDescription:
+        "这里只提供后台批准的参数；每次保存都会生成可追溯的补丁版本。",
+      trialTuningSection: (section: string) =>
+        ({
+          detector: "检测器",
+          sahi: "小目标切片",
+          filtering: "候选过滤",
+          selection: "候选选择",
+          tracking: "轨迹追踪",
+          postprocess: "后处理",
+        })[section] ?? section,
+      trialTuningChanged: "已修改",
+      trialTuningUnchanged: "当前值",
+      trialTuningBoolean: (enabled: boolean) => (enabled ? "启用" : "停用"),
+      trialTuningRange: (
+        minimum: number | null | undefined,
+        maximum: number | null | undefined,
+        step: number | null | undefined,
+      ) =>
+        minimum == null || maximum == null
+          ? "后台批准的选项"
+          : `范围 ${minimum}–${maximum} · 步长 ${step ?? "—"}`,
+      trialTuningRuntime: "运行耗时影响",
+      trialTuningCurrent: "当前值",
+      trialTuningProposed: "拟采用值",
+      trialTuningDiff: "已保存的差异",
+      trialTuningVersion: "当前补丁版本",
+      trialTuningHistory: "历史补丁版本",
+      trialTuningRestore: "采用这些值",
+      trialTuningReset: "恢复基础配置",
+      trialTuningSave: "保存调整",
+      trialAdjustAndRerun: "保存并重跑",
+      trialTuningUnavailable: "当前无法读取批准的调参范围或基础配置。",
+      trialTuningInvalid: "参数超出批准范围，本次调整没有保存。",
+      trialTuningSaved: (count: number) =>
+        `已保存新补丁版本，其中 ${count} 个参数发生变化。`,
+      trialTuningRestored: "历史值已载入供检查；保存后才会生成一个新版本。",
+      trialFieldSetupActionTitle: "球场范围需要返回步骤 2 调整",
+      trialFieldSetupActionDescription:
+        "请返回球场设置修改场地区域或排除区域。确认修改后，本次试跑及其后的所有结果都会失效，并创建一个新的校准版本。",
+      trialReturnToFieldSetup: "返回球场设置调整",
+      trialDiagnosisTitle: "试跑信号诊断",
+      trialDiagnosisStatus: (status: string) =>
+        ({
+          acceptable: "可以接受",
+          retune_required: "需要调参",
+          insufficient_evidence: "证据不足",
+        })[status] ?? status,
+      trialDiagnosisLoading: "正在加载试跑诊断…",
+      trialDiagnosisUnavailable: "无法读取试跑诊断，因此仍不能接受本次试跑。",
+      trialDiagnosisSummary: (code: string) =>
+        ({
+          insufficient_evidence: "必需的证据或指标尚不完整。",
+          decode_failure: "无法解码所选原片片段。",
+          no_raw_candidates: "没有发现原始足球候选。",
+          all_candidates_class_rejected:
+            "模型产生了候选，但没有候选匹配允许的足球类别。",
+          all_candidates_filtered: "所有原始候选都被过滤条件排除。",
+          no_tracklets: "没有形成可用的足球轨迹段。",
+          all_lost: "评估片段中的足球始终处于丢失状态。",
+          wrong_or_noisy_candidates: "候选主要是错误识别或噪声。",
+          unstable_tracking: "生成的轨迹不稳定或缺失过多。",
+          acceptable: "本次有限试跑已通过信号和证据门禁。",
+        })[code] ?? "本次试跑需要复核。",
+      trialDiagnosisAction: (code: string) =>
+        ({
+          insufficient_evidence: "补齐列出的证据或指标后重新检查。",
+          decode_failure: "检查原片文件，并改用可正常解码的片段重试。",
+          no_raw_candidates: "降低检测阈值或选择小球模型后重跑。",
+          all_candidates_class_rejected:
+            "选择正确的允许足球类别或兼容的检测器后重跑。",
+          all_candidates_filtered: "在批准范围内放宽尺寸或置信度过滤后重跑。",
+          no_tracklets: "调整候选选择与轨迹连续性参数后重跑。",
+          all_lost: "提高检测召回率和轨迹容错后重跑。",
+          wrong_or_noisy_candidates: "收紧候选过滤和选择条件后重跑。",
+          unstable_tracking: "调整轨迹连续性和运动限制后重跑。",
+          acceptable: "接受前请目视检查与本次结果绑定的证据。",
+        })[code] ?? "请检查列出的门禁原因后再重跑。",
+      trialDiagnosisReason: (reason: string) => {
+        const [code, detail] = reason.split(":", 2);
+        const detailLabel =
+          {
+            longest_lost_streak: "最长连续丢失",
+            false_positive_island_count: "疑似误检孤岛数",
+            max_step_px: "最大轨迹步长",
+            tracklet_count: "轨迹段数量",
+            suspicious_tracklet_count: "可疑轨迹段数量",
+            review_event_count: "复核事件数量",
+            lost_gap_count: "丢失区间数量",
+            max_pan_step_px: "最大平移步长",
+            max_pan_accel_px: "最大平移加速度",
+            max_zoom_step_ratio: "最大缩放步长",
+            wide_context: "全景视频",
+            tight_crop: "局部裁剪视频",
+            follow_cam: "跟随镜头视频",
+            follow_cam_action_retention: "跟随镜头动作保留",
+            scale_strata: "近、中、远尺度分层",
+            lighting_strata: "光照分层",
+            attack_transition_windows: "攻防转换窗口",
+            media_integrity: "媒体完整性检查",
+            identity_binding: "任务与证据身份绑定",
+            postprocess: "后处理",
+            evaluated_frames: "已评估帧",
+            detected_frames: "调试记录中的 Detected 帧",
+            predicted_frames: "调试记录中的 Predicted 帧",
+            lost_frames: "调试记录中的 Lost 帧",
+            raw_candidates: "原始候选",
+            class_mapped_candidates: "类别映射后候选",
+            filtered_candidates: "过滤后候选",
+            selected_candidates: "已选候选",
+            tracklets: "轨迹段",
+          }[detail ?? ""] ??
+          detail ??
+          "必需值";
+        return (
+          {
+            decode_failure: "原片解码失败。",
+            run_not_completed: "试跑任务没有完成。",
+            metrics_not_collected: "没有采集必需的轨迹指标。",
+            stage_counts_not_collected: "没有采集检测阶段计数。",
+            stage_counter_mismatch: "检测阶段计数无法对账。",
+            trial_option_conflict: `保存的试跑选项与实际执行模块冲突：${detailLabel}。`,
+            frame_exception: "至少一个调试帧因执行异常而结束。",
+            stage_counter_not_collected: `未采集必需的阶段计数：${detailLabel}。`,
+            rejection_reasons_not_collected: "未采集阶段排除原因计数。",
+            audit_not_collected: "没有采集足球审计摘要。",
+            raw_audit_tracklet_count_not_collected:
+              "完整足球审计中没有采集原始轨迹的轨迹段数量。",
+            evaluated_frames_zero: "没有实际评估任何帧。",
+            track_frame_count_mismatch: "轨迹帧数与已评估帧数不一致。",
+            cleaned_frame_count_mismatch: "清洗后轨迹帧数与已评估帧数不一致。",
+            tracklet_count_mismatch: "阶段计数与审计中的轨迹段数量不一致。",
+            track_detected_count_mismatch:
+              "调试记录的 Detected 帧数与原始轨迹不一致。",
+            track_predicted_count_mismatch:
+              "调试记录的 Predicted 帧数与原始轨迹不一致。",
+            track_lost_count_mismatch: "调试记录的 Lost 帧数与原始轨迹不一致。",
+            selected_detected_count_mismatch:
+              "独立采集的选择器计数与 Detected 帧数不一致。",
+            class_mapped_candidate_count_exceeds_detector_output:
+              "类别映射后的候选数超过检测器输出数。",
+            filtered_candidate_count_exceeds_class_mapped:
+              "过滤后候选数超过类别映射后的候选数。",
+            selected_candidate_count_exceeds_filtered:
+              "已选候选数超过过滤后候选数。",
+            tracklet_count_exceeds_selected_candidates:
+              "轨迹段数量超过已选候选数。",
+            zero_candidate: "没有检测到原始候选。",
+            all_candidates_class_rejected: "所有模型输出都在类别映射时被排除。",
+            all_candidates_filtered: "所有原始候选都被过滤。",
+            zero_tracklet: "没有形成轨迹段。",
+            all_lost: "所有已评估帧都标记为丢失。",
+            trajectory_noisy: "轨迹中噪声候选过多。",
+            partial_signal: "有效识别信号覆盖率过低。",
+            trajectory_unstable: "轨迹运动或连续性超过安全范围。",
+            cleaned_metrics_not_collected: "没有采集清洗后轨迹指标。",
+            follow_cam_motion_not_collected: "没有采集跟随镜头运动指标。",
+            ai_review_trigger_budget_not_collected:
+              "没有采集 AI 复核触发预算。",
+            event_candidate_budget_not_collected: "没有采集事件候选预算。",
+            ai_review_trigger_budget_exceeded: "AI 复核触发次数超过阈值预算。",
+            event_candidate_budget_exceeded: "事件候选数超过阈值预算。",
+            acceptance_contract_not_collected:
+              "尚未采集由服务器验证的完整接受证据契约。",
+            quality_thresholds_passed: "全部必需质量阈值均已通过。",
+            raw_metric_not_collected: `未采集原始轨迹指标：${detailLabel}。`,
+            cleaned_metric_not_collected: `未采集清洗后轨迹指标：${detailLabel}。`,
+            raw_metric_invalid: `原始轨迹指标无效：${detailLabel}。`,
+            cleaned_metric_invalid: `清洗后轨迹指标无效：${detailLabel}。`,
+            audit_metric_not_collected: `未采集审计指标：${detailLabel}。`,
+            follow_cam_metric_not_collected: `未采集跟随镜头指标：${detailLabel}。`,
+            evidence_not_collected: `证据不完整：${detailLabel}。`,
+          }[code] ?? `未识别的门禁原因：${reason}`
+        );
+      },
+      trialDiagnosisNext: "建议下一步",
+      trialDiagnosisStages: "检测阶段",
+      trialDiagnosisStageChain: "候选处理链路",
+      trialDiagnosisStage: (stage: string) =>
+        ({
+          evaluated_frames: "已评估帧",
+          detected_frames: "检测到的帧（调试记录）",
+          predicted_frames: "预测补齐的帧（调试记录）",
+          lost_frames: "丢失帧（调试记录）",
+          raw_candidates: "原始候选",
+          class_mapped_candidates: "类别映射后候选",
+          filtered_candidates: "过滤后候选",
+          selected_candidates: "已选候选",
+          tracklets: "轨迹段",
+        })[stage] ?? stage,
+      trialDiagnosisRejectionReasons: "排除原因",
+      trialDiagnosisNoRejections: "没有记录排除项。",
+      trialDiagnosisRejectionReason: (reason: string) => {
+        const [code, detail] = reason.split(":", 2);
+        return (
+          {
+            class_not_allowed: `类别不在允许范围${detail ? `：${detail}` : ""}`,
+            below_confidence: "低于置信度阈值",
+            too_small: "小于最小尺寸",
+            too_large: "大于最大尺寸",
+            confidence_below_min: "置信度低于当前最低阈值",
+            width_out_of_range: "候选宽度不在允许范围内",
+            height_out_of_range: "候选高度不在允许范围内",
+            aspect_ratio_too_small: "候选宽高比过小",
+            aspect_ratio_too_large: "候选宽高比过大",
+            outside_filtering_roi: "候选位于过滤区域之外",
+            negative_zone: `候选落入排除区域${detail ? `：${detail}` : ""}`,
+            outside_ground_and_positive_zones:
+              "候选不在球场区域或任何正向区域内",
+          }[code] ?? reason
+        );
+      },
+      trialTrajectoryComparison: "原始与清洗后轨迹对比",
+      trialDiagnosticMetric: "指标",
+      trialDiagnosticRaw: "原始轨迹",
+      trialDiagnosticCleaned: "清洗后轨迹",
+      trialDiagnosticMetricLabel: (metric: string) =>
+        ({
+          frame_count: "帧数",
+          detected: "检测到的帧",
+          predicted: "预测补齐的帧",
+          lost: "丢失帧",
+          detected_ratio: "检测比例",
+          predicted_ratio: "预测比例",
+          lost_ratio: "丢失比例",
+          longest_lost_streak: "最长连续丢失",
+          false_positive_island_count: "疑似误检孤岛",
+          max_step_px: "最大轨迹步长",
+          ai_review_trigger_count: "AI 复核触发数",
+          ai_review_triggers_per_100_frames: "每 100 帧 AI 复核触发数",
+          event_candidate_count: "事件候选数",
+          event_candidates_per_100_frames: "每 100 帧事件候选数",
+          max_pan_step_px: "跟随镜头最大平移步长",
+          max_pan_accel_px: "跟随镜头最大平移加速度",
+          max_zoom_step_ratio: "跟随镜头最大缩放步长",
+        })[metric] ?? metric,
+      trialDiagnosisEvidence: "接受门禁证据",
+      trialDiagnosisEvidenceKey: (key: string) =>
+        ({
+          wide_context: "全景证据",
+          tight_crop: "局部裁剪证据",
+          follow_cam: "跟随镜头证据",
+          follow_cam_action_retention: "跟随镜头动作保留",
+          scale_strata: "近 / 中 / 远尺度覆盖",
+          lighting_strata: "光照覆盖",
+          attack_transition_windows: "攻防转换覆盖",
+          media_integrity: "媒体完整性",
+          identity_binding: "证据身份绑定",
+        })[key] ?? key,
+      trialDiagnosisEvidenceStatus: (status: string) =>
+        ({
+          available: "已提供",
+          complete: "完整",
+          not_applicable: "不适用",
+          not_collected: "未采集",
+          unavailable: "不可用",
+          invalid: "无效",
+        })[status] ?? status,
+      trialDiagnosisCounterStatus: (status: string) =>
+        ({
+          collected: "已采集",
+          not_collected: "未采集",
+          invalid: "无效",
+        })[status] ?? status,
+      trialTuningRuntimeImpact: (impact: string) =>
+        ({ low: "低", medium: "中", high: "高" })[impact] ?? impact,
       trialEvidenceLoading: "正在加载并核验试跑证据…",
       trialEvidenceBlocked: "该试跑虽已完成，但暂时不能接受。",
       trialEvidenceReady: "试跑证据已就绪，可以确认。",
       trialEvidenceRefreshFailed: "无法核验最新试跑证据，请检查证据后重试。",
       trialEvidenceChanged: "最终核验时试跑证据发生变化，请重新检查后再接受。",
+      trialVisualConfirmationChanged:
+        "最终核验时证据阈值版本发生变化，请重新检查并确认证据。",
       trialEvidenceReason: (reason: string) => {
         const [code, artifact] = reason.split(":", 2);
         const label = {
@@ -1390,6 +1976,11 @@ export const translations = {
       },
       trialAccept: "接受本次试跑",
       trialAccepted: "已接受试跑",
+      trialVisualConfirmationTitle: "人工视觉确认",
+      trialVisualConfirmationDescription:
+        "请检查与当前证据版本和阈值版本绑定的全景、局部裁剪及跟随镜头证据。",
+      trialVisualConfirmationLabel:
+        "我已目视检查本次证据，并确认足球在整个试跑片段中可用。",
       trialQualitySignals: "供人工判断的质量信号",
       trialQuality: {
         detected: "系统识别",
@@ -2313,8 +2904,7 @@ export const translations = {
       focusedRun: (runId: string) => `已在成品历史中打开任务 ${runId}。`,
       broadcastMigrated: (runId: string) =>
         `导播链接已迁移到成品历史，并已打开任务 ${runId}。`,
-      runNotFound: (runId: string) =>
-        `当前成品历史快照中未找到任务 ${runId}。`,
+      runNotFound: (runId: string) => `当前成品历史快照中未找到任务 ${runId}。`,
       openAiReview: "打开 AI 复核",
       openHighlightTools: "打开集锦工具",
       originalMetadata: "原片元数据",

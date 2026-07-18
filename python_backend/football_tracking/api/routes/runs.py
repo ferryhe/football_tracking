@@ -12,6 +12,8 @@ from football_tracking.api.schemas import (
     FollowCamRenderRequest,
     HighlightRenderRequest,
     RunRecord,
+    TrialDiagnosisResponse,
+    TrialTuningSchemaResponse,
 )
 from football_tracking.api.service import ApiService
 
@@ -34,6 +36,32 @@ def get_run(run_id: str, service: ApiService = Depends(get_service)) -> RunRecor
         return RunRecord(**service.get_run(run_id))
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=f"Run not found: {run_id}") from exc
+
+
+@router.get(
+    "/runs/{run_id}/trial-diagnosis",
+    response_model=TrialDiagnosisResponse,
+    responses={
+        400: {"model": ApiErrorResponse, "description": "Run is not a production trial"},
+        404: {"model": ApiErrorResponse, "description": "Run or output not found"},
+    },
+)
+def get_trial_diagnosis(run_id: str, service: ApiService = Depends(get_service)) -> TrialDiagnosisResponse:
+    try:
+        return TrialDiagnosisResponse(**service.get_trial_diagnosis(run_id))
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=f"Run not found: {run_id}") from exc
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.get("/production-trials/tuning-schema", response_model=TrialTuningSchemaResponse)
+def get_production_trial_tuning_schema(
+    service: ApiService = Depends(get_service),
+) -> TrialTuningSchemaResponse:
+    return TrialTuningSchemaResponse(**service.get_trial_tuning_schema())
 
 
 @router.delete("/runs", response_model=DeleteResourceResponse)

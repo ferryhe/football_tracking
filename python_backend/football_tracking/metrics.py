@@ -29,6 +29,7 @@ from football_tracking.player_tracks import (
     write_player_tracks_artifacts,
 )
 from football_tracking.review_packets import compact_review_packet_summary
+from football_tracking.trial_diagnosis import build_trial_diagnosis
 
 SCHEMA_VERSION = "1.0"
 FALSE_POSITIVE_ISLAND_MAX_LENGTH = 2
@@ -96,7 +97,7 @@ def compute_track_metrics(csv_path: Path) -> dict[str, Any] | None:
     }
 
 
-def build_metrics_report(output_dir: Path) -> dict[str, Any]:
+def build_metrics_report(output_dir: Path, run: dict[str, Any] | None = None) -> dict[str, Any]:
     tracks: dict[str, Any] = {}
     raw_metrics = compute_track_metrics(output_dir / "ball_track.csv")
     if raw_metrics is not None:
@@ -168,6 +169,14 @@ def build_metrics_report(output_dir: Path) -> dict[str, Any]:
     )
     if quality_gate_summary is not None:
         report["quality_gate"] = quality_gate_summary
+    if _is_production_trial_run(run):
+        diagnosis = build_trial_diagnosis(output_dir, run or {}, metrics_report=report)
+        trial_gate = diagnosis.get("trial_signal_gate_v2")
+        if isinstance(trial_gate, dict):
+            stages = trial_gate.get("stage_counts")
+            if isinstance(stages, dict):
+                report["detection_stages"] = stages
+            report["trial_signal_gate_v2"] = trial_gate
     return report
 
 
@@ -182,6 +191,7 @@ def build_run_manifest(output_dir: Path, run: dict[str, Any]) -> dict[str, Any]:
         "completed_at": run.get("completed_at"),
         "config_name": run.get("config_name"),
         "config_path": run.get("config_path"),
+        "config_sha256": run.get("config_sha256"),
         "input_video": run.get("input_video"),
         "output_dir": str(output_dir.resolve()),
         "modules_enabled": run.get("modules_enabled") or {},
@@ -215,7 +225,7 @@ def write_run_artifacts(output_dir: Path, run: dict[str, Any]) -> tuple[dict[str
         write_player_tracks_artifacts(output_dir)
     except Exception as exc:
         player_tracks_error = f"Failed to write player track artifacts: {exc}"
-    report = build_metrics_report(output_dir)
+    report = build_metrics_report(output_dir, run=run)
     if ball_audit_error is not None:
         report["ball_audit_error"] = ball_audit_error
     if ai_review_triggers_error is not None:
@@ -291,6 +301,12 @@ def stats_from_metrics_report(report: dict[str, Any]) -> dict[str, Any]:
     quality_gate = report.get("quality_gate")
     if isinstance(quality_gate, dict):
         stats["quality_gate"] = quality_gate
+    detection_stages = report.get("detection_stages")
+    if isinstance(detection_stages, dict):
+        stats["detection_stages"] = detection_stages
+    trial_signal_gate = report.get("trial_signal_gate_v2")
+    if isinstance(trial_signal_gate, dict):
+        stats["trial_signal_gate_v2"] = trial_signal_gate
     ai_visual_review = report.get("ai_visual_review")
     if isinstance(ai_visual_review, dict):
         stats["ai_visual_review"] = ai_visual_review
@@ -308,6 +324,19 @@ def stats_from_metrics_report(report: dict[str, Any]) -> dict[str, Any]:
         "generated_at": report.get("generated_at"),
     }
     return stats
+
+
+def _is_production_trial_run(run: dict[str, Any] | None) -> bool:
+    if not isinstance(run, dict):
+        return False
+    notes = run.get("notes")
+    if not isinstance(notes, str):
+        return False
+    try:
+        parsed = json.loads(notes)
+    except json.JSONDecodeError:
+        return False
+    return isinstance(parsed, dict) and parsed.get("purpose") == "production_trial"
 
 
 def compact_temporal_chunk_summary(report: dict[str, Any]) -> dict[str, Any] | None:

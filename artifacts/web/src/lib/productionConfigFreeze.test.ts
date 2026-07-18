@@ -18,6 +18,7 @@ import {
   type ProductionTrialState,
 } from "./productionTrial";
 import type { SourceSignature } from "./productionWorkflow";
+import { ACCEPTABLE_TRIAL_SIGNAL_GATE } from "../test/productionTrialFixtures";
 
 const NOW = "2026-07-15T13:00:00.000Z";
 const SOURCE: SourceSignature = {
@@ -138,6 +139,14 @@ async function acceptedTrial(): Promise<ProductionTrialState> {
           audit_review_event_count: 2,
           audit_lost_gap_count: 3,
           quality_gate_status: "warn",
+          trial_signal_gate_v2: ACCEPTABLE_TRIAL_SIGNAL_GATE,
+        },
+        operator_visual_confirmation: {
+          confirmed: true,
+          confirmed_at: NOW,
+          evidence_generation: "e".repeat(64),
+          threshold_profile_sha256:
+            ACCEPTABLE_TRIAL_SIGNAL_GATE.threshold_profile.sha256,
         },
       },
     },

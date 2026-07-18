@@ -1,3 +1,34 @@
+# Step 3 Tiny-Ball Managed PR Status
+
+- Program: Step 3 Tiny-Ball Detection, Tuning, and Camera Adaptation
+- Canonical plan: docs/superpowers/plans/2026-07-17-step-3-tiny-ball-detection-and-camera-adaptation-plan.md
+- Program status: active · five managed PRs authorized
+- Current PR: PR-T1 · Fail-Closed Trial Diagnosis and Recovery Actions
+- Current branch: codex/tiny-ball-trial-diagnosis
+- Current phase: PR #112 open · two Copilot findings corrected and independently re-approved · replacement remote-feedback window scheduled for 2026-07-18T02:12:00Z–2026-07-18T02:22:00Z
+- Approval: the user authorized the final independently reviewed plan and the established managed-PR operating method on 2026-07-17.
+- Checks: the latest official Python route passed 1,748 tests with 64 skipped in 465.219 seconds. Feedback-focused gates passed backend 63 with 56 subtests, Production page 17/17, both TypeScript configurations, Ruff, and `git diff --check`; independent specification and quality/security re-reviews both APPROVE. Prior post-correction gates passed API 156 with 2 skipped and 14 subtests; config/provider/OpenAPI 34 with 6 subtests; Web Vitest 538/538; Chromium 43/43; production build and cutover bundle inspection; and two byte-identical OpenAPI/React/Zod generations. Test-only ports are closed and the user's existing 5173 service remains running.
+- Blockers: none. Two Copilot findings were corrected: collected-count status/value invariants are fail-closed, and the stable workspace mount identity is now explicit and regression-tested across source/calibration lineage rotation versus full draft replacement.
+- Next: push the approved corrections and this status record; reply to and resolve both Copilot threads; observe the complete replacement 10-minute remote-feedback window through 2026-07-18T02:22:00Z; restart after any material push; merge only when replacement CI and thread-aware audits are clear; then start PR-T2 from refreshed main
+- Heartbeat: ACTIVE
+- Heartbeat automation id: tiny-ball-step3-managed-pr-heartbeat
+- Heartbeat interval: every 15 minutes
+- Heartbeat scope: PR-T1 through PR-T5, including checks, feedback windows, merges, and cleanup
+- Dirty-baseline preservation: the pre-existing line-ending-only modification to `docs/superpowers/plans/2026-07-14-production-workflow-final-managed-pr-plan.md` is unrelated user state and must not be staged or changed by this program
+- Last updated: 2026-07-17 ET
+
+## Current Program PR Ledger
+
+| PR | Branch | Status | Pull request | Remote feedback started | Merge |
+| --- | --- | --- | --- | --- | --- |
+| PR-T1 | codex/tiny-ball-trial-diagnosis | open · Copilot corrections complete · spec APPROVE · quality/security APPROVE · checks/feedback monitoring | https://github.com/ferryhe/football_tracking/pull/112 | replacement window scheduled 2026-07-18T02:12:00Z–2026-07-18T02:22:00Z | pending |
+| PR-T2 | pending | not started | pending | not started | pending |
+| PR-T3 | pending | not started | pending | not started | pending |
+| PR-T4 | pending | not started | pending | not started | pending |
+| PR-T5 | pending | not started | pending | not started | pending |
+
+---
+
 # Production Workflow Managed PR Status
 
 - Program: Production Workflow, review-evidence provisioning, target audit, and configuration-lineage reconfirmation

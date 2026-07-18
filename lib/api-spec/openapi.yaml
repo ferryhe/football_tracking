@@ -396,6 +396,19 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/HTTPValidationError'
+  /production-trials/tuning-schema:
+    get:
+      tags:
+      - runs
+      summary: Get Production Trial Tuning Schema
+      operationId: get_production_trial_tuning_schema
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TrialTuningSchemaResponse'
   /runs:
     get:
       tags:
@@ -1270,6 +1283,44 @@ paths:
                 $ref: '#/components/schemas/PlayerTracksReport'
         '404':
           description: Run or player tracks report not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiErrorResponse'
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /runs/{run_id}/trial-diagnosis:
+    get:
+      tags:
+      - runs
+      summary: Get Trial Diagnosis
+      operationId: get_trial_diagnosis
+      parameters:
+      - name: run_id
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Run Id
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TrialDiagnosisResponse'
+        '400':
+          description: Run is not a production trial
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiErrorResponse'
+        '404':
+          description: Run or output not found
           content:
             application/json:
               schema:
@@ -5641,6 +5692,12 @@ components:
           - type: string
           - type: 'null'
           title: Config Path
+        config_sha256:
+          anyOf:
+          - type: string
+            pattern: ^[0-9a-f]{64}$
+          - type: 'null'
+          title: Config Sha256
         input_video:
           anyOf:
           - type: string
@@ -5668,6 +5725,10 @@ components:
           additionalProperties: true
           type: object
           title: Stats
+        trial_signal_gate_v2:
+          anyOf:
+          - $ref: '#/components/schemas/TrialSignalGateV2'
+          - type: 'null'
         broadcast:
           $ref: '#/components/schemas/BroadcastRunState'
         ai_candidate_lifecycle:
@@ -5694,6 +5755,542 @@ components:
       - created_at
       - output_dir
       title: RunRecord
+    TrialCollectedCount:
+      properties:
+        value:
+          anyOf:
+          - type: integer
+            minimum: 0.0
+          - type: 'null'
+          title: Value
+        status:
+          type: string
+          enum:
+          - collected
+          - not_collected
+          - invalid
+          title: Status
+      type: object
+      required:
+      - status
+      title: TrialCollectedCount
+    TrialDetectionStages:
+      properties:
+        schema_version:
+          type: string
+          const: '2.0'
+          title: Schema Version
+          default: '2.0'
+        coverage_status:
+          type: string
+          enum:
+          - complete
+          - invalid
+          - not_collected
+          title: Coverage Status
+        evaluated_frames:
+          $ref: '#/components/schemas/TrialCollectedCount'
+        detected_frames:
+          $ref: '#/components/schemas/TrialCollectedCount'
+        predicted_frames:
+          $ref: '#/components/schemas/TrialCollectedCount'
+        lost_frames:
+          $ref: '#/components/schemas/TrialCollectedCount'
+        raw_candidates:
+          $ref: '#/components/schemas/TrialCollectedCount'
+        class_mapped_candidates:
+          $ref: '#/components/schemas/TrialCollectedCount'
+        filtered_candidates:
+          $ref: '#/components/schemas/TrialCollectedCount'
+        selected_candidates:
+          $ref: '#/components/schemas/TrialCollectedCount'
+        tracklets:
+          $ref: '#/components/schemas/TrialCollectedCount'
+        rejection_reasons:
+          additionalProperties:
+            type: integer
+          type: object
+          title: Rejection Reasons
+        reconciliation:
+          $ref: '#/components/schemas/TrialStageReconciliation'
+      type: object
+      required:
+      - coverage_status
+      - evaluated_frames
+      - detected_frames
+      - predicted_frames
+      - lost_frames
+      - raw_candidates
+      - class_mapped_candidates
+      - filtered_candidates
+      - selected_candidates
+      - tracklets
+      - reconciliation
+      title: TrialDetectionStages
+    TrialDiagnosisResponse:
+      properties:
+        schema_version:
+          type: string
+          const: '1.0'
+          title: Schema Version
+          default: '1.0'
+        run_id:
+          type: string
+          title: Run Id
+        legacy_quality_gate_status:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Legacy Quality Gate Status
+        trial_signal_gate_v2:
+          $ref: '#/components/schemas/TrialSignalGateV2'
+        tuning_schema_version:
+          type: string
+          const: '1.0'
+          title: Tuning Schema Version
+          default: '1.0'
+      type: object
+      required:
+      - run_id
+      - trial_signal_gate_v2
+      title: TrialDiagnosisResponse
+    TrialFailureClassification:
+      properties:
+        code:
+          type: string
+          enum:
+          - insufficient_evidence
+          - decode_failure
+          - no_raw_candidates
+          - all_candidates_class_rejected
+          - all_candidates_filtered
+          - no_tracklets
+          - all_lost
+          - wrong_or_noisy_candidates
+          - unstable_tracking
+          - acceptable
+          title: Code
+        severity:
+          type: string
+          enum:
+          - none
+          - high
+          - blocking
+          title: Severity
+        summary:
+          type: string
+          title: Summary
+        recommended_action:
+          type: string
+          title: Recommended Action
+      type: object
+      required:
+      - code
+      - severity
+      - summary
+      - recommended_action
+      title: TrialFailureClassification
+    TrialFollowCamDiagnostics:
+      properties:
+        status:
+          type: string
+          enum:
+          - collected
+          - not_collected
+          - invalid
+          title: Status
+        max_pan_step_px:
+          $ref: '#/components/schemas/TrialNumericObservation'
+        max_pan_accel_px:
+          $ref: '#/components/schemas/TrialNumericObservation'
+        max_zoom_step_ratio:
+          $ref: '#/components/schemas/TrialNumericObservation'
+      type: object
+      required:
+      - status
+      - max_pan_step_px
+      - max_pan_accel_px
+      - max_zoom_step_ratio
+      title: TrialFollowCamDiagnostics
+    TrialGateDiagnostics:
+      properties:
+        raw_track:
+          $ref: '#/components/schemas/TrialTrackDiagnostics'
+        cleaned_track:
+          $ref: '#/components/schemas/TrialTrackDiagnostics'
+        rejection_reasons:
+          $ref: '#/components/schemas/TrialRejectionReasonsObservation'
+        ai_review_trigger_count:
+          $ref: '#/components/schemas/TrialNumericObservation'
+        ai_review_triggers_per_100_frames:
+          $ref: '#/components/schemas/TrialNumericObservation'
+        event_candidate_count:
+          $ref: '#/components/schemas/TrialNumericObservation'
+        event_candidates_per_100_frames:
+          $ref: '#/components/schemas/TrialNumericObservation'
+        follow_cam:
+          $ref: '#/components/schemas/TrialFollowCamDiagnostics'
+      type: object
+      required:
+      - raw_track
+      - cleaned_track
+      - rejection_reasons
+      - ai_review_trigger_count
+      - ai_review_triggers_per_100_frames
+      - event_candidate_count
+      - event_candidates_per_100_frames
+      - follow_cam
+      title: TrialGateDiagnostics
+    TrialNumericObservation:
+      properties:
+        status:
+          type: string
+          enum:
+          - collected
+          - not_collected
+          - invalid
+          title: Status
+        value:
+          anyOf:
+          - type: integer
+          - type: number
+          - type: 'null'
+          title: Value
+      type: object
+      required:
+      - status
+      title: TrialNumericObservation
+    TrialRejectionReasonsObservation:
+      properties:
+        status:
+          type: string
+          enum:
+          - collected
+          - not_collected
+          - invalid
+          title: Status
+        value:
+          anyOf:
+          - additionalProperties:
+              type: integer
+            type: object
+          - type: 'null'
+          title: Value
+      type: object
+      required:
+      - status
+      title: TrialRejectionReasonsObservation
+    TrialSignalGateV2:
+      properties:
+        schema_version:
+          type: string
+          const: '2.0'
+          title: Schema Version
+          default: '2.0'
+        status:
+          type: string
+          enum:
+          - insufficient_evidence
+          - retune_required
+          - acceptable
+          title: Status
+        coverage_complete:
+          type: boolean
+          title: Coverage Complete
+        evidence_available:
+          type: boolean
+          title: Evidence Available
+        trajectory_acceptable:
+          type: boolean
+          title: Trajectory Acceptable
+        signal_acceptable:
+          type: boolean
+          title: Signal Acceptable
+        acceptance_metrics_complete:
+          type: boolean
+          title: Acceptance Metrics Complete
+        acceptance_contract_complete:
+          type: boolean
+          title: Acceptance Contract Complete
+        quality_acceptable:
+          type: boolean
+          title: Quality Acceptable
+        operator_confirmation_required:
+          type: boolean
+          const: true
+          title: Operator Confirmation Required
+          default: true
+        reason_codes:
+          items:
+            type: string
+          type: array
+          title: Reason Codes
+        failure_classification:
+          $ref: '#/components/schemas/TrialFailureClassification'
+        threshold_profile:
+          $ref: '#/components/schemas/TrialThresholdProfile'
+        stage_counts:
+          anyOf:
+          - $ref: '#/components/schemas/TrialDetectionStages'
+          - type: 'null'
+        trajectory:
+          additionalProperties: true
+          type: object
+          title: Trajectory
+        diagnostics:
+          $ref: '#/components/schemas/TrialGateDiagnostics'
+        evidence:
+          additionalProperties:
+            type: string
+          type: object
+          title: Evidence
+      type: object
+      required:
+      - status
+      - coverage_complete
+      - evidence_available
+      - trajectory_acceptable
+      - signal_acceptable
+      - acceptance_metrics_complete
+      - acceptance_contract_complete
+      - quality_acceptable
+      - failure_classification
+      - threshold_profile
+      - trajectory
+      - diagnostics
+      - evidence
+      title: TrialSignalGateV2
+    TrialStageReconciliation:
+      properties:
+        status:
+          type: string
+          enum:
+          - reconciled
+          - mismatch
+          - not_collected
+          title: Status
+        reason_codes:
+          items:
+            type: string
+          type: array
+          title: Reason Codes
+      type: object
+      required:
+      - status
+      title: TrialStageReconciliation
+    TrialThresholdProfile:
+      properties:
+        profile_id:
+          type: string
+          title: Profile Id
+        version:
+          type: string
+          title: Version
+        algorithm_version:
+          type: string
+          title: Algorithm Version
+        matching_rules:
+          additionalProperties: true
+          type: object
+          title: Matching Rules
+        sha256:
+          type: string
+          pattern: ^[0-9a-f]{64}$
+          title: Sha256
+        thresholds:
+          additionalProperties:
+            type: number
+          type: object
+          title: Thresholds
+      type: object
+      required:
+      - profile_id
+      - version
+      - algorithm_version
+      - matching_rules
+      - sha256
+      - thresholds
+      title: TrialThresholdProfile
+    TrialTrackDiagnostics:
+      properties:
+        status:
+          type: string
+          enum:
+          - collected
+          - not_collected
+          - invalid
+          title: Status
+        frame_count:
+          $ref: '#/components/schemas/TrialNumericObservation'
+        detected:
+          $ref: '#/components/schemas/TrialNumericObservation'
+        predicted:
+          $ref: '#/components/schemas/TrialNumericObservation'
+        lost:
+          $ref: '#/components/schemas/TrialNumericObservation'
+        detected_ratio:
+          $ref: '#/components/schemas/TrialNumericObservation'
+        predicted_ratio:
+          $ref: '#/components/schemas/TrialNumericObservation'
+        lost_ratio:
+          $ref: '#/components/schemas/TrialNumericObservation'
+        longest_lost_streak:
+          $ref: '#/components/schemas/TrialNumericObservation'
+        false_positive_island_count:
+          $ref: '#/components/schemas/TrialNumericObservation'
+        max_step_px:
+          $ref: '#/components/schemas/TrialNumericObservation'
+      type: object
+      required:
+      - status
+      - frame_count
+      - detected
+      - predicted
+      - lost
+      - detected_ratio
+      - predicted_ratio
+      - lost_ratio
+      - longest_lost_streak
+      - false_positive_island_count
+      - max_step_px
+      title: TrialTrackDiagnostics
+    TrialTuningAction:
+      properties:
+        action_code:
+          type: string
+          const: return_to_field_setup
+          title: Action Code
+        target_step:
+          type: string
+          const: field_setup
+          title: Target Step
+        reason_code:
+          type: string
+          const: field_geometry_requires_new_calibration
+          title: Reason Code
+        affected_paths:
+          items:
+            type: string
+            enum:
+            - filtering.roi
+            - scene_bias.ground_zones
+            - scene_bias.negative_rois
+          type: array
+          maxItems: 3
+          minItems: 3
+          title: Affected Paths
+        lineage_constraint:
+          type: string
+          const: invalidate_trial_and_downstream_then_create_new_calibration_version
+          title: Lineage Constraint
+      additionalProperties: false
+      type: object
+      required:
+      - action_code
+      - target_step
+      - reason_code
+      - affected_paths
+      - lineage_constraint
+      title: TrialTuningAction
+    TrialTuningControl:
+      properties:
+        path:
+          type: string
+          title: Path
+        section:
+          type: string
+          enum:
+          - detector
+          - sahi
+          - filtering
+          - selection
+          - tracking
+          - postprocess
+          title: Section
+        kind:
+          type: string
+          enum:
+          - number
+          - integer
+          - boolean
+          - select
+          - multi_select
+          title: Kind
+        minimum:
+          anyOf:
+          - type: number
+          - type: 'null'
+          title: Minimum
+        maximum:
+          anyOf:
+          - type: number
+          - type: 'null'
+          title: Maximum
+        step:
+          anyOf:
+          - type: number
+          - type: 'null'
+          title: Step
+        options:
+          anyOf:
+          - items:
+              type: string
+            type: array
+          - type: 'null'
+          title: Options
+        runtime_impact:
+          type: string
+          enum:
+          - low
+          - medium
+          - high
+          title: Runtime Impact
+        description:
+          type: string
+          title: Description
+        description_zh:
+          type: string
+          title: Description Zh
+      additionalProperties: false
+      type: object
+      required:
+      - path
+      - section
+      - kind
+      - runtime_impact
+      - description
+      - description_zh
+      title: TrialTuningControl
+    TrialTuningSchemaResponse:
+      properties:
+        schema_version:
+          type: string
+          const: '1.0'
+          title: Schema Version
+          default: '1.0'
+        patch_schema_version:
+          type: string
+          const: '1.0'
+          title: Patch Schema Version
+          default: '1.0'
+        controls:
+          items:
+            $ref: '#/components/schemas/TrialTuningControl'
+          type: array
+          minItems: 1
+          title: Controls
+        actions:
+          items:
+            $ref: '#/components/schemas/TrialTuningAction'
+          type: array
+          maxItems: 1
+          minItems: 1
+          title: Actions
+      type: object
+      required:
+      - controls
+      - actions
+      title: TrialTuningSchemaResponse
     UpdateConfigRequest:
       properties:
         content:

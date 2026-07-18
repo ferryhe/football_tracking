@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -919,7 +920,11 @@ def _to_high_recall_windows(raw_high_recall_windows: Any) -> HighRecallWindowCon
     return HighRecallWindowConfig(**config_values)
 
 
-def load_config(config_path: Path) -> AppConfig:
+def load_config(
+    config_path: Path,
+    *,
+    raw_config: dict[str, Any] | None = None,
+) -> AppConfig:
     """从 YAML 加载配置，并将相对路径解析为绝对路径。"""
     if not config_path.exists():
         raise FileNotFoundError(f"配置文件不存在: {config_path}")
@@ -931,8 +936,11 @@ def load_config(config_path: Path) -> AppConfig:
             base_dir = parent.parent
             break
 
-    with config_path.open("r", encoding="utf-8") as file:
-        raw = yaml.safe_load(file) or {}
+    if raw_config is None:
+        with config_path.open("r", encoding="utf-8") as file:
+            raw = yaml.safe_load(file) or {}
+    else:
+        raw = deepcopy(raw_config)
 
     detector_raw = raw.get("detector", {})
     detector = DetectorConfig(

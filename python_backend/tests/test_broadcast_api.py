@@ -1520,15 +1520,25 @@ class BroadcastApiServiceTests(unittest.TestCase):
         self.assertNotEqual(confirmed_path.resolve(), materialized_path.resolve())
         self.assertTrue(materialized_path.is_file())
 
-    def test_production_full_preflight_accepts_the_bound_completed_trial(self) -> None:
-        request, parent_run_id, _, _ = self.production_full_request()
+    def test_production_full_preflight_rejects_trial_without_server_acceptance_contract(self) -> None:
+        request, _, _, _ = self.production_full_request()
 
         with mock.patch.object(self.service, "_start_thread_or_cleanup") as starter:
-            run = self.service.create_run(request)
+            with self.assertRaisesRegex(RuntimeError, "server-verified acceptance contract"):
+                self.service.create_run(request)
 
-        self.assertEqual(parent_run_id, run["parent_run_id"])
-        self.assertEqual("broadcast_hybrid", run["source"])
-        starter.assert_called_once()
+        starter.assert_not_called()
+
+    def test_production_full_route_blocks_direct_api_acceptance_bypass(self) -> None:
+        request, _, _, _ = self.production_full_request()
+        app = create_app(initialize_service=False)
+        app.dependency_overrides[get_service] = lambda: self.service
+
+        with TestClient(app) as client:
+            response = client.post("/api/v1/runs", json=request)
+
+        self.assertEqual(409, response.status_code)
+        self.assertIn("server-verified acceptance contract", response.json()["detail"])
 
     def test_production_full_rejects_request_execution_tampering(self) -> None:
         request, _, _, _ = self.production_full_request()

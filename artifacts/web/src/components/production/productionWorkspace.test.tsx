@@ -17,6 +17,7 @@ import {
 } from "@/lib/productionWorkflow";
 import type { ProductionTrialState } from "@/lib/productionTrial";
 import { ProductionWorkspace } from "./ProductionWorkspace";
+import { ACCEPTABLE_TRIAL_SIGNAL_GATE } from "@/test/productionTrialFixtures";
 
 const fullRunMock = vi.hoisted(() => ({
   recovered: null as ProductionDraft["full_run"],
@@ -234,6 +235,14 @@ function acceptedTrial(): ProductionTrialState {
           audit_review_event_count: 1,
           audit_lost_gap_count: 2,
           quality_gate_status: null,
+          trial_signal_gate_v2: ACCEPTABLE_TRIAL_SIGNAL_GATE,
+        },
+        operator_visual_confirmation: {
+          confirmed: true,
+          confirmed_at: "2026-07-14T12:00:00Z",
+          evidence_generation: evidence,
+          threshold_profile_sha256:
+            ACCEPTABLE_TRIAL_SIGNAL_GATE.threshold_profile.sha256,
         },
       },
     },

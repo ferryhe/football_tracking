@@ -115,6 +115,11 @@ export function ProductionPageContent({
       ? initialLoad.draft
       : createProductionDraft(),
   );
+  // Keep the workspace mounted across ordinary workflow lineage rotations;
+  // only replacing or clearing the whole draft creates a new mount identity.
+  const [workspaceMountIdentity, setWorkspaceMountIdentity] = useState(
+    draft.workflow_id,
+  );
   const draftRef = useRef(draft);
   draftRef.current = draft;
   const [notice, setNotice] = useState<ProductionNotice | null>(() => {
@@ -257,6 +262,7 @@ export function ProductionPageContent({
     if (blockActiveWorkDiscard()) return;
     const result = clearProductionDraft(storage);
     draftRef.current = nextDraft;
+    setWorkspaceMountIdentity(nextDraft.workflow_id);
     setDraft(nextDraft);
     setReplacement(null);
     setRecovery(null);
@@ -438,7 +444,7 @@ export function ProductionPageContent({
   return (
     <>
       <ProductionWorkspace
-        key={draft.workflow_id}
+        key={workspaceMountIdentity}
         draft={draft}
         videos={videos}
         sourceIssue={sourceIssue}

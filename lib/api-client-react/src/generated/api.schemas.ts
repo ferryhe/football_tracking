@@ -790,6 +790,222 @@ export const RunRecordStatus = {
   cancelled: "cancelled",
 } as const;
 
+export type TrialSignalGateV2Status =
+  (typeof TrialSignalGateV2Status)[keyof typeof TrialSignalGateV2Status];
+
+export const TrialSignalGateV2Status = {
+  insufficient_evidence: "insufficient_evidence",
+  retune_required: "retune_required",
+  acceptable: "acceptable",
+} as const;
+
+export type TrialFailureClassificationCode =
+  (typeof TrialFailureClassificationCode)[keyof typeof TrialFailureClassificationCode];
+
+export const TrialFailureClassificationCode = {
+  insufficient_evidence: "insufficient_evidence",
+  decode_failure: "decode_failure",
+  no_raw_candidates: "no_raw_candidates",
+  all_candidates_class_rejected: "all_candidates_class_rejected",
+  all_candidates_filtered: "all_candidates_filtered",
+  no_tracklets: "no_tracklets",
+  all_lost: "all_lost",
+  wrong_or_noisy_candidates: "wrong_or_noisy_candidates",
+  unstable_tracking: "unstable_tracking",
+  acceptable: "acceptable",
+} as const;
+
+export type TrialFailureClassificationSeverity =
+  (typeof TrialFailureClassificationSeverity)[keyof typeof TrialFailureClassificationSeverity];
+
+export const TrialFailureClassificationSeverity = {
+  none: "none",
+  high: "high",
+  blocking: "blocking",
+} as const;
+
+export interface TrialFailureClassification {
+  code: TrialFailureClassificationCode;
+  severity: TrialFailureClassificationSeverity;
+  summary: string;
+  recommended_action: string;
+}
+
+export type TrialThresholdProfileMatchingRules = { [key: string]: unknown };
+
+export type TrialThresholdProfileThresholds = { [key: string]: number };
+
+export interface TrialThresholdProfile {
+  profile_id: string;
+  version: string;
+  algorithm_version: string;
+  matching_rules: TrialThresholdProfileMatchingRules;
+  /** @pattern ^[0-9a-f]{64}$ */
+  sha256: string;
+  thresholds: TrialThresholdProfileThresholds;
+}
+
+export type TrialDetectionStagesCoverageStatus =
+  (typeof TrialDetectionStagesCoverageStatus)[keyof typeof TrialDetectionStagesCoverageStatus];
+
+export const TrialDetectionStagesCoverageStatus = {
+  complete: "complete",
+  invalid: "invalid",
+  not_collected: "not_collected",
+} as const;
+
+export type TrialCollectedCountStatus =
+  (typeof TrialCollectedCountStatus)[keyof typeof TrialCollectedCountStatus];
+
+export const TrialCollectedCountStatus = {
+  collected: "collected",
+  not_collected: "not_collected",
+  invalid: "invalid",
+} as const;
+
+export interface TrialCollectedCount {
+  value?: number | null;
+  status: TrialCollectedCountStatus;
+}
+
+export type TrialStageReconciliationStatus =
+  (typeof TrialStageReconciliationStatus)[keyof typeof TrialStageReconciliationStatus];
+
+export const TrialStageReconciliationStatus = {
+  reconciled: "reconciled",
+  mismatch: "mismatch",
+  not_collected: "not_collected",
+} as const;
+
+export interface TrialStageReconciliation {
+  status: TrialStageReconciliationStatus;
+  reason_codes?: string[];
+}
+
+export type TrialDetectionStagesRejectionReasons = { [key: string]: number };
+
+export interface TrialDetectionStages {
+  schema_version?: "2.0";
+  coverage_status: TrialDetectionStagesCoverageStatus;
+  evaluated_frames: TrialCollectedCount;
+  detected_frames: TrialCollectedCount;
+  predicted_frames: TrialCollectedCount;
+  lost_frames: TrialCollectedCount;
+  raw_candidates: TrialCollectedCount;
+  class_mapped_candidates: TrialCollectedCount;
+  filtered_candidates: TrialCollectedCount;
+  selected_candidates: TrialCollectedCount;
+  tracklets: TrialCollectedCount;
+  rejection_reasons?: TrialDetectionStagesRejectionReasons;
+  reconciliation: TrialStageReconciliation;
+}
+
+export type TrialTrackDiagnosticsStatus =
+  (typeof TrialTrackDiagnosticsStatus)[keyof typeof TrialTrackDiagnosticsStatus];
+
+export const TrialTrackDiagnosticsStatus = {
+  collected: "collected",
+  not_collected: "not_collected",
+  invalid: "invalid",
+} as const;
+
+export type TrialNumericObservationStatus =
+  (typeof TrialNumericObservationStatus)[keyof typeof TrialNumericObservationStatus];
+
+export const TrialNumericObservationStatus = {
+  collected: "collected",
+  not_collected: "not_collected",
+  invalid: "invalid",
+} as const;
+
+export interface TrialNumericObservation {
+  status: TrialNumericObservationStatus;
+  value?: number | null;
+}
+
+export interface TrialTrackDiagnostics {
+  status: TrialTrackDiagnosticsStatus;
+  frame_count: TrialNumericObservation;
+  detected: TrialNumericObservation;
+  predicted: TrialNumericObservation;
+  lost: TrialNumericObservation;
+  detected_ratio: TrialNumericObservation;
+  predicted_ratio: TrialNumericObservation;
+  lost_ratio: TrialNumericObservation;
+  longest_lost_streak: TrialNumericObservation;
+  false_positive_island_count: TrialNumericObservation;
+  max_step_px: TrialNumericObservation;
+}
+
+export type TrialRejectionReasonsObservationStatus =
+  (typeof TrialRejectionReasonsObservationStatus)[keyof typeof TrialRejectionReasonsObservationStatus];
+
+export const TrialRejectionReasonsObservationStatus = {
+  collected: "collected",
+  not_collected: "not_collected",
+  invalid: "invalid",
+} as const;
+
+export type TrialRejectionReasonsObservationValue = {
+  [key: string]: number;
+} | null;
+
+export interface TrialRejectionReasonsObservation {
+  status: TrialRejectionReasonsObservationStatus;
+  value?: TrialRejectionReasonsObservationValue;
+}
+
+export type TrialFollowCamDiagnosticsStatus =
+  (typeof TrialFollowCamDiagnosticsStatus)[keyof typeof TrialFollowCamDiagnosticsStatus];
+
+export const TrialFollowCamDiagnosticsStatus = {
+  collected: "collected",
+  not_collected: "not_collected",
+  invalid: "invalid",
+} as const;
+
+export interface TrialFollowCamDiagnostics {
+  status: TrialFollowCamDiagnosticsStatus;
+  max_pan_step_px: TrialNumericObservation;
+  max_pan_accel_px: TrialNumericObservation;
+  max_zoom_step_ratio: TrialNumericObservation;
+}
+
+export interface TrialGateDiagnostics {
+  raw_track: TrialTrackDiagnostics;
+  cleaned_track: TrialTrackDiagnostics;
+  rejection_reasons: TrialRejectionReasonsObservation;
+  ai_review_trigger_count: TrialNumericObservation;
+  ai_review_triggers_per_100_frames: TrialNumericObservation;
+  event_candidate_count: TrialNumericObservation;
+  event_candidates_per_100_frames: TrialNumericObservation;
+  follow_cam: TrialFollowCamDiagnostics;
+}
+
+export type TrialSignalGateV2Trajectory = { [key: string]: unknown };
+
+export type TrialSignalGateV2Evidence = { [key: string]: string };
+
+export interface TrialSignalGateV2 {
+  schema_version?: "2.0";
+  status: TrialSignalGateV2Status;
+  coverage_complete: boolean;
+  evidence_available: boolean;
+  trajectory_acceptable: boolean;
+  signal_acceptable: boolean;
+  acceptance_metrics_complete: boolean;
+  acceptance_contract_complete: boolean;
+  quality_acceptable: boolean;
+  operator_confirmation_required?: true;
+  reason_codes?: string[];
+  failure_classification: TrialFailureClassification;
+  threshold_profile: TrialThresholdProfile;
+  stage_counts?: TrialDetectionStages | null;
+  trajectory: TrialSignalGateV2Trajectory;
+  diagnostics: TrialGateDiagnostics;
+  evidence: TrialSignalGateV2Evidence;
+}
+
 /**
  * Three-frame, per-source calibration required by the hybrid broadcast workflow.
  */
@@ -941,12 +1157,14 @@ export interface RunRecord {
   completed_at?: string | null;
   config_name?: string | null;
   config_path?: string | null;
+  config_sha256?: string | null;
   input_video?: string | null;
   parent_run_id?: string | null;
   output_dir: string;
   modules_enabled?: RunRecordModulesEnabled;
   artifacts?: ArtifactSummary[];
   stats?: RunRecordStats;
+  trial_signal_gate_v2?: TrialSignalGateV2 | null;
   broadcast?: BroadcastRunState;
   ai_candidate_lifecycle?: AICandidateLifecycleReport;
   progress?: RunProgress | null;
@@ -1918,6 +2136,92 @@ export interface PlayerTracksReport {
   source: PlayerTracksSource;
   summary: PlayerTracksSummary;
   tracks?: PlayerTrack[];
+}
+
+export interface TrialDiagnosisResponse {
+  schema_version?: "1.0";
+  run_id: string;
+  legacy_quality_gate_status?: string | null;
+  trial_signal_gate_v2: TrialSignalGateV2;
+  tuning_schema_version?: "1.0";
+}
+
+export type TrialTuningActionAffectedPathsItem =
+  (typeof TrialTuningActionAffectedPathsItem)[keyof typeof TrialTuningActionAffectedPathsItem];
+
+export const TrialTuningActionAffectedPathsItem = {
+  filteringroi: "filtering.roi",
+  scene_biasground_zones: "scene_bias.ground_zones",
+  scene_biasnegative_rois: "scene_bias.negative_rois",
+} as const;
+
+export interface TrialTuningAction {
+  action_code: "return_to_field_setup";
+  target_step: "field_setup";
+  reason_code: "field_geometry_requires_new_calibration";
+  /**
+   * @minItems 3
+   * @maxItems 3
+   */
+  affected_paths: TrialTuningActionAffectedPathsItem[];
+  lineage_constraint: "invalidate_trial_and_downstream_then_create_new_calibration_version";
+}
+
+export type TrialTuningControlSection =
+  (typeof TrialTuningControlSection)[keyof typeof TrialTuningControlSection];
+
+export const TrialTuningControlSection = {
+  detector: "detector",
+  sahi: "sahi",
+  filtering: "filtering",
+  selection: "selection",
+  tracking: "tracking",
+  postprocess: "postprocess",
+} as const;
+
+export type TrialTuningControlKind =
+  (typeof TrialTuningControlKind)[keyof typeof TrialTuningControlKind];
+
+export const TrialTuningControlKind = {
+  number: "number",
+  integer: "integer",
+  boolean: "boolean",
+  select: "select",
+  multi_select: "multi_select",
+} as const;
+
+export type TrialTuningControlRuntimeImpact =
+  (typeof TrialTuningControlRuntimeImpact)[keyof typeof TrialTuningControlRuntimeImpact];
+
+export const TrialTuningControlRuntimeImpact = {
+  low: "low",
+  medium: "medium",
+  high: "high",
+} as const;
+
+export interface TrialTuningControl {
+  path: string;
+  section: TrialTuningControlSection;
+  kind: TrialTuningControlKind;
+  minimum?: number | null;
+  maximum?: number | null;
+  step?: number | null;
+  options?: string[] | null;
+  runtime_impact: TrialTuningControlRuntimeImpact;
+  description: string;
+  description_zh: string;
+}
+
+export interface TrialTuningSchemaResponse {
+  schema_version?: "1.0";
+  patch_schema_version?: "1.0";
+  /** @minItems 1 */
+  controls: TrialTuningControl[];
+  /**
+   * @minItems 1
+   * @maxItems 1
+   */
+  actions: TrialTuningAction[];
 }
 
 export interface UpdateConfigRequest {

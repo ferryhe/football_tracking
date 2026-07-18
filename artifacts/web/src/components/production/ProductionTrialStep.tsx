@@ -7,6 +7,8 @@ import {
   getGetConfigQueryOptions,
   getGetHealthQueryKey,
   getGetRunQueryKey,
+  getGetTrialDiagnosisQueryKey,
+  getGetProductionTrialTuningSchemaQueryKey,
   getListArtifactsQueryKey,
   getListRunsQueryKey,
   useCancelRun,
@@ -17,6 +19,8 @@ import {
   useGetConfig,
   useGetHealth,
   useGetRun,
+  useGetTrialDiagnosis,
+  useGetProductionTrialTuningSchema,
   useListArtifacts,
   useListConfigs,
   useListRuns,
@@ -67,20 +71,32 @@ import {
   assessProductionTrialEvidence,
   buildProductionTrialIntent,
   buildProductionTrialSubmission,
+  buildVersionedProductionTuningPatch,
   canonicalJson,
   createProductionTrialState,
   invalidateProductionTrialAcceptance,
-  nextProductionTrialGeneration,
+  isProductionTrialState,
   observeProductionTrialRun,
   productionTrialArtifactContract,
   productionTrialEvidenceGeneration,
   productionTrialEvidenceSnapshotIdentity,
+  productionTrialSignalGateAcceptable,
+  productionTrialSubmissionLineage,
+  productionTrialTuningSchema,
+  productionTuningDraft,
+  productionTuningHistory,
+  productionTuningVersion,
   reconcilePendingProductionTrial,
   selectProductionTrialVideo,
   sha256Text,
+  isTrialSignalGateV2,
+  type ProductionTrialTuningControl,
   type ProductionTrialReadinessSummary,
   type ProductionTrialSettings,
   type ProductionTrialState,
+  type TrialDiagnosticObservation,
+  type ProductionTuningDiff,
+  type ProductionTuningValue,
 } from "@/lib/productionTrial";
 import type { SourceSignature } from "@/lib/productionWorkflow";
 
@@ -114,6 +130,7 @@ interface ProductionTrialStepProps {
     confirmed: ProductionConfigEvidence,
     expectedPending: ProductionPendingConfigConfirmation,
   ) => boolean;
+  onReturnToFieldSetup: () => void;
   onUsabilityChange: (usable: boolean) => void;
   stopButtonRef?: Ref<HTMLButtonElement>;
 }
@@ -149,6 +166,43 @@ function sameSnapshot(left: unknown, right: unknown): boolean {
   }
 }
 
+function tuningValueLabel(value: unknown) {
+  if (value === undefined || value === null || value === "") return "—";
+  if (Array.isArray(value)) return value.join(", ");
+  return String(value);
+}
+
+function tuningControlGroups(
+  controls: readonly ProductionTrialTuningControl[],
+) {
+  const groups = new Map<string, ProductionTrialTuningControl[]>();
+  for (const control of controls) {
+    const group = groups.get(control.section) ?? [];
+    group.push(control);
+    groups.set(control.section, group);
+  }
+  return Array.from(groups.entries());
+}
+
+const TRACK_DIAGNOSTIC_KEYS = [
+  "frame_count",
+  "detected",
+  "predicted",
+  "lost",
+  "detected_ratio",
+  "predicted_ratio",
+  "lost_ratio",
+  "longest_lost_streak",
+  "false_positive_island_count",
+  "max_step_px",
+] as const;
+
+function diagnosticObservationValue(observation: TrialDiagnosticObservation) {
+  return observation.status === "collected" && observation.value !== null
+    ? observation.value
+    : "—";
+}
+
 export function ProductionTrialStep({
   workflowId,
   source,
@@ -159,10 +213,11 @@ export function ProductionTrialStep({
   onTrialChange,
   onPendingConfigChange,
   onConfirmedConfigChange,
+  onReturnToFieldSetup,
   onUsabilityChange,
   stopButtonRef,
 }: ProductionTrialStepProps) {
-  const { t } = useLanguage();
+  const { language, t } = useLanguage();
   const configs = useListConfigs();
   const health = useGetHealth({
     query: { queryKey: getGetHealthQueryKey(), refetchInterval: 3_000 },
@@ -174,6 +229,12 @@ export function ProductionTrialStep({
   const cancelRun = useCancelRun();
   const deriveConfig = useDeriveConfig();
   const queryClient = useQueryClient();
+  const tuningSchemaQuery = useGetProductionTrialTuningSchema({
+    query: {
+      queryKey: getGetProductionTrialTuningSchemaQueryKey(),
+      staleTime: 60_000,
+    },
+  });
 
   const initialSettings = trial?.settings ?? {
     base_config_name: "",
@@ -215,18 +276,25 @@ export function ProductionTrialStep({
     useState<ProductionConfigVerification | null>(null);
   const [configDeriveActive, setConfigDeriveActive] = useState(false);
   const [acceptRefreshing, setAcceptRefreshing] = useState(false);
+  const [visualConfirmed, setVisualConfirmed] = useState(false);
+  const [tuningDraft, setTuningDraft] = useState<Record<string, unknown>>({});
+  const [tuningDiff, setTuningDiff] = useState<ProductionTuningDiff[]>([]);
+  const [tuningSaving, setTuningSaving] = useState(false);
+  const [tuningMessage, setTuningMessage] = useState<string | null>(null);
+  const [startRequestInFlight, setStartRequestInFlight] = useState(false);
+  const [retryInFlight, setRetryInFlight] = useState(false);
   const startInFlightRef = useRef(false);
+  const retryInFlightRef = useRef(false);
   const cancelInFlightRef = useRef(false);
   const acceptInFlightRef = useRef(false);
   const configInFlightRef = useRef(false);
-  const submissionGenerationRef = useRef(
-    nextProductionTrialGeneration(trial) - 1,
-  );
   const configGenerationRef = useRef(pendingConfig?.generation ?? 0);
   const evidenceGenerationRef = useRef(0);
   const configVerificationGenerationRef = useRef(0);
   const currentEvidenceFingerprintRef = useRef<string | null>(null);
   const latestTrialRef = useRef(trial);
+  const trialPropRef = useRef(trial);
+  const operationEpochRef = useRef({ epoch: 0, active: false });
   const latestPendingConfigRef = useRef(pendingConfig);
   const latestConfirmedConfigRef = useRef(confirmedConfig);
   const unlockButtonRef = useRef<HTMLButtonElement>(null);
@@ -234,9 +302,32 @@ export function ProductionTrialStep({
   const operationContextRef = useRef(operationContext);
 
   operationContextRef.current = operationContext;
-  latestTrialRef.current = trial;
+  if (trialPropRef.current !== trial) {
+    trialPropRef.current = trial;
+    latestTrialRef.current = trial;
+  }
   latestPendingConfigRef.current = pendingConfig;
   latestConfirmedConfigRef.current = confirmedConfig;
+
+  useEffect(() => {
+    const epoch = operationEpochRef.current.epoch + 1;
+    operationEpochRef.current = { epoch, active: true };
+    return () => {
+      if (operationEpochRef.current.epoch === epoch) {
+        operationEpochRef.current = { epoch, active: false };
+      }
+    };
+  }, []);
+
+  function currentOperationEpoch(): number | null {
+    const current = operationEpochRef.current;
+    return current.active ? current.epoch : null;
+  }
+
+  function operationEpochIsActive(epoch: number): boolean {
+    const current = operationEpochRef.current;
+    return current.active && current.epoch === epoch;
+  }
 
   useEffect(() => {
     if (!baseConfig && configs.data?.[0]?.name) {
@@ -269,6 +360,60 @@ export function ProductionTrialStep({
     },
   });
   const run = runQuery.data ?? null;
+  const latestAuthoritativeRun =
+    (run?.run_id === latestAttempt?.run_id ? run : null) ??
+    (runs.data ?? []).find(
+      (candidate) => candidate.run_id === latestAttempt?.run_id,
+    ) ??
+    null;
+  const submissionLineage = trial
+    ? productionTrialSubmissionLineage(trial, latestAuthoritativeRun)
+    : null;
+  const localBaseConfigLineageLocked = Boolean(
+    trial &&
+    (trial.attempts.length > 0 ||
+      trial.pending_submission ||
+      trial.active_run_id ||
+      trial.accepted),
+  );
+  const baseConfigLineageLocked =
+    localBaseConfigLineageLocked ||
+    submissionLineage?.base_config_locked === true;
+  const authoritativeBaseConfigName =
+    submissionLineage?.base_config_locked && latestAttempt?.request.config_name
+      ? latestAttempt.request.config_name
+      : null;
+
+  useEffect(() => {
+    if (!authoritativeBaseConfigName) return;
+    setBaseConfig(authoritativeBaseConfigName);
+    const current = latestTrialRef.current;
+    if (
+      !current ||
+      current.settings.base_config_name === authoritativeBaseConfigName
+    )
+      return;
+    const next: ProductionTrialState = {
+      ...current,
+      settings: {
+        ...current.settings,
+        base_config_name: authoritativeBaseConfigName,
+      },
+    };
+    if (isProductionTrialState(next) && onTrialChange(next, current)) {
+      latestTrialRef.current = next;
+    }
+  }, [authoritativeBaseConfigName, onTrialChange]);
+  const diagnosisEnabled =
+    run?.status === "completed" || run?.status === "failed";
+  const diagnosisQuery = useGetTrialDiagnosis(monitoredRunId, {
+    query: {
+      queryKey: getGetTrialDiagnosisQueryKey(monitoredRunId),
+      enabled: Boolean(monitoredRunId) && diagnosisEnabled,
+      staleTime: 0,
+    },
+    request: NO_STORE_REQUEST,
+  });
   const evidenceEnabled = run?.status === "completed";
   const artifactsQuery = useListArtifacts(monitoredRunId, undefined, {
     query: {
@@ -355,6 +500,78 @@ export function ProductionTrialStep({
       retry: false,
     },
   });
+  const tuningBaseConfigQuery = useGetConfig(baseConfig, {
+    query: {
+      queryKey: getGetConfigQueryKey(baseConfig),
+      enabled: Boolean(baseConfig) && !trial?.accepted,
+      staleTime: 0,
+      retry: false,
+    },
+  });
+  const tuningSchema = useMemo(
+    () => productionTrialTuningSchema(tuningSchemaQuery.data),
+    [tuningSchemaQuery.data],
+  );
+  const tuningControls = useMemo(
+    () => tuningSchema?.controls ?? [],
+    [tuningSchema?.controls],
+  );
+  const fieldSetupAction = tuningSchema?.actions.find(
+    (action) => action.action_code === "return_to_field_setup",
+  );
+  const tuningBaseConfig = tuningBaseConfigQuery.data?.resolved ?? null;
+  const tuningPatch = trial?.settings.tuning_patch ?? {};
+  const tuningSourceIdentity = useMemo(() => {
+    try {
+      return canonicalJson({
+        base_config: tuningBaseConfig,
+        patch: tuningPatch,
+        controls: tuningControls,
+      });
+    } catch {
+      return "invalid";
+    }
+  }, [tuningBaseConfig, tuningControls, tuningPatch]);
+  const tuningCurrentValues = useMemo(
+    () =>
+      tuningBaseConfig
+        ? productionTuningDraft({
+            base_config: tuningBaseConfig,
+            patch: tuningPatch,
+            controls: tuningControls,
+          })
+        : {},
+    [tuningBaseConfig, tuningControls, tuningPatch],
+  );
+  const tuningGroups = useMemo(
+    () => tuningControlGroups(tuningControls),
+    [tuningControls],
+  );
+  const tuningHistory = useMemo(
+    () => productionTuningHistory(tuningPatch),
+    [tuningPatch],
+  );
+  const currentTuningVersion = useMemo(
+    () => productionTuningVersion(tuningPatch),
+    [tuningPatch],
+  );
+
+  useEffect(() => {
+    if (!tuningBaseConfig || tuningControls.length === 0) {
+      setTuningDraft({});
+      setTuningDiff([]);
+      return;
+    }
+    setTuningDraft(
+      productionTuningDraft({
+        base_config: tuningBaseConfig,
+        patch: tuningPatch,
+        controls: tuningControls,
+      }),
+    );
+    setTuningDiff([]);
+    setTuningMessage(null);
+  }, [tuningSourceIdentity]);
 
   useEffect(() => {
     if (!trial?.pending_submission || !runs.data) return;
@@ -446,6 +663,7 @@ export function ProductionTrialStep({
       enable_postprocess: Boolean(latestAttempt.request.enable_postprocess),
       enable_follow_cam: Boolean(latestAttempt.request.enable_follow_cam),
       video_loaded: videoMetadataLoaded && videoCanPlay,
+      trial_signal_gate_v2: diagnosisQuery.data?.trial_signal_gate_v2 ?? null,
     });
   }, [
     artifactsQuery.data,
@@ -455,6 +673,7 @@ export function ProductionTrialStep({
     metricsQuery.data,
     rawTrackQuery.data,
     cleanedTrackQuery.data,
+    diagnosisQuery.data,
     readableArtifactNames,
     run,
     videoCanPlay,
@@ -524,6 +743,21 @@ export function ProductionTrialStep({
     manifestQuery.dataUpdatedAt,
   ]);
   currentEvidenceFingerprintRef.current = currentEvidenceFingerprint;
+  const diagnosisGateCandidate: unknown =
+    diagnosisQuery.data?.trial_signal_gate_v2;
+  const diagnosisGate = isTrialSignalGateV2(diagnosisGateCandidate)
+    ? diagnosisGateCandidate
+    : null;
+  const diagnosisAcceptable =
+    productionTrialSignalGateAcceptable(diagnosisGate);
+  const visualConfirmationBinding =
+    readiness && diagnosisAcceptable
+      ? `${readiness.evidence_generation}:${diagnosisGate?.threshold_profile.sha256 ?? ""}`
+      : null;
+
+  useEffect(() => {
+    setVisualConfirmed(false);
+  }, [visualConfirmationBinding]);
 
   useEffect(() => {
     const generation = ++evidenceGenerationRef.current;
@@ -657,29 +891,132 @@ export function ProductionTrialStep({
       max_frames: parsedMax,
       enable_postprocess: postprocess,
       enable_follow_cam: followCam,
-      tuning_patch: trial?.settings.tuning_patch ?? {},
+      tuning_patch: latestTrialRef.current?.settings.tuning_patch ?? {},
     };
   }
 
   function updateSettings(change: Partial<ProductionTrialSettings>) {
     const current = latestTrialRef.current;
-    if (!current || current.accepted || current.active_run_id) return;
-    onTrialChange(
-      {
+    if (
+      !current ||
+      current.accepted ||
+      current.active_run_id ||
+      current.pending_submission
+    )
+      return;
+    const next = {
+      ...current,
+      settings: { ...current.settings, ...change },
+      accepted: null,
+    };
+    if (onTrialChange(next, current)) latestTrialRef.current = next;
+  }
+
+  async function handleSaveTuning(rerun: boolean) {
+    if (tuningSaving || running || latestTrialRef.current?.pending_submission)
+      return;
+    setTuningMessage(null);
+    const settings = currentSettings();
+    const expectedTrial = latestTrialRef.current;
+    if (
+      !settings ||
+      !tuningBaseConfig ||
+      tuningControls.length === 0 ||
+      expectedTrial?.accepted ||
+      expectedTrial?.active_run_id ||
+      expectedTrial?.pending_submission
+    ) {
+      setTuningMessage(t.production.trialTuningUnavailable);
+      return;
+    }
+    setTuningSaving(true);
+    try {
+      const result = await buildVersionedProductionTuningPatch({
+        base_config: tuningBaseConfig,
+        previous_patch: expectedTrial?.settings.tuning_patch ?? {},
+        controls: tuningControls,
+        values: tuningDraft,
+        version_id: crypto.randomUUID(),
+        created_at: new Date().toISOString(),
+      });
+      const latest = latestTrialRef.current;
+      if (
+        !sameSnapshot(latest, expectedTrial) ||
+        latest?.accepted ||
+        latest?.active_run_id ||
+        latest?.pending_submission
+      )
+        return;
+      const current = latest ?? createProductionTrialState(settings);
+      const next: ProductionTrialState = {
         ...current,
-        settings: { ...current.settings, ...change },
+        settings: { ...settings, tuning_patch: result.patch },
         accepted: null,
-      },
-      current,
+      };
+      if (!onTrialChange(next, expectedTrial)) return;
+      latestTrialRef.current = next;
+      setTuningDiff(result.diff);
+      setTuningMessage(t.production.trialTuningSaved(result.diff.length));
+      if (rerun) {
+        startInFlightRef.current = false;
+        await handleStartTrial();
+      }
+    } catch (error) {
+      setTuningMessage(
+        `${t.production.trialTuningInvalid} ${errorText(error)}`,
+      );
+    } finally {
+      setTuningSaving(false);
+    }
+  }
+
+  function handleResetTuning() {
+    if (
+      latestTrialRef.current?.pending_submission ||
+      !tuningBaseConfig ||
+      tuningControls.length === 0
+    )
+      return;
+    setTuningDraft(
+      productionTuningDraft({
+        base_config: tuningBaseConfig,
+        patch: {},
+        controls: tuningControls,
+      }),
     );
+    setTuningDiff([]);
+    setTuningMessage(null);
+  }
+
+  function handleRestoreTuning(values: Record<string, ProductionTuningValue>) {
+    if (latestTrialRef.current?.pending_submission) return;
+    setTuningDraft(
+      Object.fromEntries(
+        tuningControls.map((control) => [
+          control.path,
+          values[control.path] ?? tuningCurrentValues[control.path],
+        ]),
+      ),
+    );
+    setTuningDiff([]);
+    setTuningMessage(t.production.trialTuningRestored);
   }
 
   async function handleStartTrial() {
-    if (startInFlightRef.current) return;
+    const operationEpoch = currentOperationEpoch();
+    const initialTrial = latestTrialRef.current;
+    if (
+      operationEpoch === null ||
+      startInFlightRef.current ||
+      initialTrial?.pending_submission ||
+      initialTrial?.active_run_id ||
+      initialTrial?.accepted
+    )
+      return;
     startInFlightRef.current = true;
+    setStartRequestInFlight(true);
     setMessage(null);
     setConflictRunId(null);
-    let persistedSubmission = false;
     const expectedContext = operationContextRef.current;
     try {
       const settings = currentSettings();
@@ -688,24 +1025,42 @@ export function ProductionTrialStep({
         return;
       }
       const expectedTrial = latestTrialRef.current;
-      const current = expectedTrial ?? createProductionTrialState(settings);
-      const generation = Math.max(
-        ++submissionGenerationRef.current,
-        nextProductionTrialGeneration(current),
-      );
-      submissionGenerationRef.current = generation;
+      const lineage = expectedTrial
+        ? productionTrialSubmissionLineage(
+            expectedTrial,
+            latestAuthoritativeRun,
+          )
+        : productionTrialSubmissionLineage(
+            createProductionTrialState(settings),
+            null,
+          );
+      if (!lineage) {
+        setMessage(t.production.trialLineageUnavailable);
+        return;
+      }
+      const current = lineage.state;
+      const generation = lineage.generation;
       const submission = await buildProductionTrialSubmission({
         workflow_id: workflowId,
         source,
         calibration,
         settings,
-        parent_run_id: current.attempts.at(-1)?.run_id ?? null,
+        parent_run_id: lineage.parent_run_id,
+        legacy_restart_run_id: lineage.legacy_restart_run_id,
         submission_id: crypto.randomUUID(),
         output_id: crypto.randomUUID(),
         generation,
         created_at: new Date().toISOString(),
       });
-      if (operationContextRef.current !== expectedContext) return;
+      if (
+        !operationEpochIsActive(operationEpoch) ||
+        operationContextRef.current !== expectedContext ||
+        !sameSnapshot(latestTrialRef.current, expectedTrial) ||
+        latestTrialRef.current?.pending_submission ||
+        latestTrialRef.current?.active_run_id ||
+        latestTrialRef.current?.accepted
+      )
+        return;
       const pendingState: ProductionTrialState = {
         ...current,
         settings,
@@ -713,11 +1068,19 @@ export function ProductionTrialStep({
         accepted: null,
       };
       if (!onTrialChange(pendingState, expectedTrial)) return;
-      persistedSubmission = true;
+      if (!operationEpochIsActive(operationEpoch)) return;
       latestTrialRef.current = pendingState;
 
       const healthResult = await health.refetch();
-      if (operationContextRef.current !== expectedContext) return;
+      const pendingAfterHealth = latestTrialRef.current?.pending_submission;
+      if (
+        !operationEpochIsActive(operationEpoch) ||
+        operationContextRef.current !== expectedContext ||
+        pendingAfterHealth?.submission_id !==
+          submission.pending.submission_id ||
+        pendingAfterHealth?.request_sha256 !== submission.pending.request_sha256
+      )
+        return;
       if (
         healthResult.isError ||
         !healthResult.data ||
@@ -733,13 +1096,20 @@ export function ProductionTrialStep({
         return;
       }
       try {
+        if (!operationEpochIsActive(operationEpoch)) return;
         const created = await createRun.mutateAsync({
           data: submission.pending.request,
         });
-        if (operationContextRef.current !== expectedContext) return;
+        if (
+          !operationEpochIsActive(operationEpoch) ||
+          operationContextRef.current !== expectedContext
+        )
+          return;
         if (
           latestTrialRef.current?.pending_submission?.submission_id !==
-          submission.pending.submission_id
+            submission.pending.submission_id ||
+          latestTrialRef.current?.pending_submission?.request_sha256 !==
+            submission.pending.request_sha256
         )
           return;
         const next = appendProductionTrialAttempt(latestTrialRef.current, {
@@ -749,12 +1119,17 @@ export function ProductionTrialStep({
         });
         onTrialChange(next, pendingState);
       } catch (error) {
+        if (!operationEpochIsActive(operationEpoch)) return;
         if (errorStatus(error) === 409) {
           const [healthAfter, runsAfter] = await Promise.all([
             health.refetch(),
             runs.refetch(),
           ]);
-          if (operationContextRef.current !== expectedContext) return;
+          if (
+            !operationEpochIsActive(operationEpoch) ||
+            operationContextRef.current !== expectedContext
+          )
+            return;
           const currentState = latestTrialRef.current;
           if (currentState) {
             const reconciled = reconcilePendingProductionTrial(currentState, {
@@ -777,7 +1152,10 @@ export function ProductionTrialStep({
         }
       }
     } finally {
-      if (!persistedSubmission) startInFlightRef.current = false;
+      if (operationEpochIsActive(operationEpoch)) {
+        startInFlightRef.current = false;
+        setStartRequestInFlight(false);
+      }
     }
   }
 
@@ -805,47 +1183,74 @@ export function ProductionTrialStep({
   }
 
   async function handleRetryPending() {
+    const operationEpoch = currentOperationEpoch();
     const current = latestTrialRef.current;
-    if (!current?.pending_submission || current.active_run_id) return;
-    setMessage(null);
-    const expectedContext = operationContextRef.current;
-    const [healthResult, runsResult] = await Promise.all([
-      health.refetch(),
-      runs.refetch(),
-    ]);
-    if (operationContextRef.current !== expectedContext) return;
     if (
-      healthResult.isError ||
-      runsResult.isError ||
-      !healthResult.data ||
-      healthResult.data.status !== "ok" ||
-      !runsResult.data
-    ) {
-      setMessage(t.production.trialHealthUnavailable);
+      operationEpoch === null ||
+      retryInFlightRef.current ||
+      startInFlightRef.current ||
+      !current?.pending_submission ||
+      current.active_run_id
+    )
       return;
+    retryInFlightRef.current = true;
+    setRetryInFlight(true);
+    try {
+      setMessage(null);
+      const expectedContext = operationContextRef.current;
+      const [healthResult, runsResult] = await Promise.all([
+        health.refetch(),
+        runs.refetch(),
+      ]);
+      const latestPending = latestTrialRef.current?.pending_submission;
+      if (
+        !operationEpochIsActive(operationEpoch) ||
+        operationContextRef.current !== expectedContext ||
+        latestPending?.submission_id !==
+          current.pending_submission.submission_id ||
+        latestPending?.request_sha256 !==
+          current.pending_submission.request_sha256
+      )
+        return;
+      if (
+        healthResult.isError ||
+        runsResult.isError ||
+        !healthResult.data ||
+        healthResult.data.status !== "ok" ||
+        !runsResult.data
+      ) {
+        setMessage(t.production.trialHealthUnavailable);
+        return;
+      }
+      const reconciled = reconcilePendingProductionTrial(current, {
+        workflow_id: workflowId,
+        expected_generation: current.pending_submission.generation,
+        runs: runsResult.data,
+        observed_at: new Date().toISOString(),
+      });
+      if (!sameTrial(reconciled, current)) {
+        onTrialChange(reconciled, current);
+        return;
+      }
+      if (healthResult.data.active_run_id) {
+        setConflictRunId(healthResult.data.active_run_id);
+        setMessage(
+          t.production.trialActiveConflict(healthResult.data.active_run_id),
+        );
+        return;
+      }
+      const cleared = { ...current, pending_submission: null };
+      if (!onTrialChange(cleared, current)) return;
+      if (!operationEpochIsActive(operationEpoch)) return;
+      latestTrialRef.current = cleared;
+      startInFlightRef.current = false;
+      await handleStartTrial();
+    } finally {
+      if (operationEpochIsActive(operationEpoch)) {
+        retryInFlightRef.current = false;
+        setRetryInFlight(false);
+      }
     }
-    const reconciled = reconcilePendingProductionTrial(current, {
-      workflow_id: workflowId,
-      expected_generation: current.pending_submission.generation,
-      runs: runsResult.data,
-      observed_at: new Date().toISOString(),
-    });
-    if (!sameTrial(reconciled, current)) {
-      onTrialChange(reconciled, current);
-      return;
-    }
-    if (healthResult.data.active_run_id) {
-      setConflictRunId(healthResult.data.active_run_id);
-      setMessage(
-        t.production.trialActiveConflict(healthResult.data.active_run_id),
-      );
-      return;
-    }
-    const cleared = { ...current, pending_submission: null };
-    if (!onTrialChange(cleared, current)) return;
-    latestTrialRef.current = cleared;
-    startInFlightRef.current = false;
-    await handleStartTrial();
   }
 
   async function handleAccept() {
@@ -857,7 +1262,10 @@ export function ProductionTrialStep({
       !readiness ||
       !latestTrialRef.current ||
       !fingerprint ||
-      readinessFingerprint !== fingerprint
+      readinessFingerprint !== fingerprint ||
+      !visualConfirmed ||
+      !diagnosisAcceptable ||
+      !visualConfirmationBinding
     )
       return;
     acceptInFlightRef.current = true;
@@ -866,6 +1274,7 @@ export function ProductionTrialStep({
     try {
       const attempt = latestTrialRef.current.attempts.at(-1);
       const priorEvidenceGeneration = readiness.evidence_generation;
+      const priorThresholdProfile = diagnosisGate?.threshold_profile.sha256;
       if (!attempt || attempt.run_id !== run.run_id) return;
 
       const [
@@ -876,6 +1285,7 @@ export function ProductionTrialStep({
         freshRawTrackResult,
         freshCleanedTrackResult,
         freshAuditResult,
+        freshDiagnosisResult,
       ] = await Promise.all([
         runQuery.refetch(),
         artifactsQuery.refetch(),
@@ -890,6 +1300,7 @@ export function ProductionTrialStep({
               dataUpdatedAt: cleanedTrackQuery.dataUpdatedAt,
             }),
         auditQuery.refetch(),
+        diagnosisQuery.refetch(),
       ]);
       if (operationContextRef.current !== expectedContext) return;
       if (
@@ -900,6 +1311,7 @@ export function ProductionTrialStep({
         freshRawTrackResult.isError ||
         freshCleanedTrackResult.isError ||
         freshAuditResult.isError ||
+        freshDiagnosisResult.isError ||
         !freshRunResult.data ||
         !freshArtifactsResult.data ||
         !freshManifestResult.data ||
@@ -907,7 +1319,8 @@ export function ProductionTrialStep({
         typeof freshRawTrackResult.data !== "string" ||
         (attempt.request.enable_postprocess &&
           typeof freshCleanedTrackResult.data !== "string") ||
-        !freshAuditResult.data
+        !freshAuditResult.data ||
+        !freshDiagnosisResult.data
       ) {
         setReadiness(null);
         setReadinessFingerprint(null);
@@ -935,10 +1348,18 @@ export function ProductionTrialStep({
         enable_postprocess: Boolean(attempt.request.enable_postprocess),
         enable_follow_cam: Boolean(attempt.request.enable_follow_cam),
         video_loaded: videoMetadataLoaded && videoCanPlay,
+        trial_signal_gate_v2: freshDiagnosisResult.data.trial_signal_gate_v2,
       });
-      if (!freshEvidence.ready || !freshEvidence.video || !videoMediaMetadata) {
+      const freshGate = freshDiagnosisResult.data.trial_signal_gate_v2;
+      if (
+        !freshEvidence.ready ||
+        !freshEvidence.video ||
+        !videoMediaMetadata ||
+        !productionTrialSignalGateAcceptable(freshGate)
+      ) {
         setReadiness(null);
         setReadinessFingerprint(null);
+        setVisualConfirmed(false);
         setMessage(t.production.trialEvidenceRefreshFailed);
         return;
       }
@@ -998,6 +1419,14 @@ export function ProductionTrialStep({
         setMessage(t.production.trialEvidenceChanged);
         return;
       }
+      if (freshGate.threshold_profile.sha256 !== priorThresholdProfile) {
+        setReadiness(null);
+        setReadinessFingerprint(null);
+        setVisualConfirmed(false);
+        setMessage(t.production.trialVisualConfirmationChanged);
+        return;
+      }
+      const confirmedAt = new Date().toISOString();
       const freshReadiness: ProductionTrialReadinessSummary = {
         run_id: freshRunResult.data.run_id,
         request_sha256: attempt.request_sha256,
@@ -1009,6 +1438,12 @@ export function ProductionTrialStep({
           video_artifact_name: freshEvidence.video.name,
         }).required_names,
         quality: freshEvidence.quality,
+        operator_visual_confirmation: {
+          confirmed: true,
+          confirmed_at: confirmedAt,
+          evidence_generation: freshEvidenceGeneration,
+          threshold_profile_sha256: freshGate.threshold_profile.sha256,
+        },
       };
       setReadiness(freshReadiness);
       setReadinessFingerprint(freshFingerprint);
@@ -1028,7 +1463,7 @@ export function ProductionTrialStep({
         run: freshRunResult.data,
         current_intent_sha256: intentDigest,
         readiness: freshReadiness,
-        accepted_at: new Date().toISOString(),
+        accepted_at: confirmedAt,
       });
       onTrialChange(next, currentTrial);
     } catch (error) {
@@ -1133,7 +1568,14 @@ export function ProductionTrialStep({
 
   const locked = Boolean(trial?.accepted);
   const running = run?.status === "queued" || run?.status === "running";
-  const canStart = !locked && !running && !trial?.pending_submission;
+  const requestIntentLocked =
+    locked || running || Boolean(trial?.pending_submission);
+  const canStart =
+    !locked &&
+    !running &&
+    !trial?.pending_submission &&
+    !startRequestInFlight &&
+    !retryInFlight;
   const showRetry = run?.status === "failed" || run?.status === "cancelled";
   const evidenceLoading =
     evidenceEnabled &&
@@ -1142,6 +1584,7 @@ export function ProductionTrialStep({
       metricsQuery.isPending ||
       rawTrackQuery.isPending ||
       auditQuery.isPending ||
+      diagnosisQuery.isPending ||
       (Boolean(latestAttempt?.request.enable_postprocess) &&
         cleanedTrackQuery.isPending));
   const evidenceRefreshing =
@@ -1152,11 +1595,14 @@ export function ProductionTrialStep({
     Boolean(metricsQuery.isFetching) ||
     Boolean(rawTrackQuery.isFetching) ||
     Boolean(cleanedTrackQuery.isFetching) ||
-    Boolean(auditQuery.isFetching);
+    Boolean(auditQuery.isFetching) ||
+    Boolean(diagnosisQuery.isFetching);
   const evidenceReadyForAction =
     Boolean(readiness) &&
     readinessFingerprint === currentEvidenceFingerprint &&
     !evidenceRefreshing;
+  const canAcceptTrial =
+    evidenceReadyForAction && diagnosisAcceptable && visualConfirmed;
 
   const verificationMessage = (() => {
     switch (configVerification?.status) {
@@ -1195,7 +1641,7 @@ export function ProductionTrialStep({
 
       <fieldset
         className="grid gap-4 sm:grid-cols-2"
-        disabled={locked || running}
+        disabled={requestIntentLocked}
       >
         <legend className="sr-only">{t.production.stages.trial}</legend>
         <div className="space-y-2 sm:col-span-2">
@@ -1205,6 +1651,7 @@ export function ProductionTrialStep({
           <select
             id="trial-base-config"
             value={baseConfig}
+            disabled={baseConfigLineageLocked}
             onChange={(event) => {
               setBaseConfig(event.target.value);
               updateSettings({ base_config_name: event.target.value });
@@ -1218,6 +1665,11 @@ export function ProductionTrialStep({
               </option>
             ))}
           </select>
+          {baseConfigLineageLocked && (
+            <p className="text-xs text-muted-foreground">
+              {t.production.trialBaseConfigLineageLocked}
+            </p>
+          )}
         </div>
         <div className="space-y-2">
           <Label htmlFor="trial-start-frame">
@@ -1279,6 +1731,287 @@ export function ProductionTrialStep({
         </div>
       </fieldset>
 
+      {!locked && fieldSetupAction && (
+        <Alert data-testid="trial-field-setup-action">
+          <AlertTitle>{t.production.trialFieldSetupActionTitle}</AlertTitle>
+          <AlertDescription className="space-y-3">
+            <p>{t.production.trialFieldSetupActionDescription}</p>
+            <p className="font-mono text-xs text-muted-foreground">
+              {fieldSetupAction.reason_code} · {fieldSetupAction.target_step}
+            </p>
+            <Button
+              type="button"
+              variant="outline"
+              onClick={onReturnToFieldSetup}
+              disabled={requestIntentLocked}
+            >
+              {t.production.trialReturnToFieldSetup}
+            </Button>
+          </AlertDescription>
+        </Alert>
+      )}
+
+      {!locked && tuningBaseConfig && tuningControls.length > 0 && (
+        <Card data-testid="trial-tuning-editor">
+          <CardHeader>
+            <CardTitle className="text-base">
+              {t.production.trialTuningTitle}
+            </CardTitle>
+            <p className="text-sm text-muted-foreground">
+              {t.production.trialTuningDescription}
+            </p>
+          </CardHeader>
+          <CardContent className="space-y-5">
+            <fieldset
+              className="space-y-5"
+              disabled={requestIntentLocked || tuningSaving}
+            >
+              <legend className="sr-only">
+                {t.production.trialTuningTitle}
+              </legend>
+              {tuningGroups.map(([section, controls]) => (
+                <section key={section} className="space-y-3">
+                  <h3 className="text-sm font-semibold">
+                    {t.production.trialTuningSection(section)}
+                  </h3>
+                  <div className="grid gap-3 sm:grid-cols-2">
+                    {controls.map((control) => {
+                      const id = `trial-tuning-${control.path.replaceAll(".", "-")}`;
+                      const currentValue = tuningCurrentValues[control.path];
+                      const proposedValue = tuningDraft[control.path];
+                      const changed = !sameSnapshot(
+                        currentValue,
+                        proposedValue,
+                      );
+                      const description =
+                        language === "zh"
+                          ? control.description_zh
+                          : control.description;
+                      return (
+                        <div
+                          key={control.path}
+                          className={`space-y-2 rounded-md border p-3 ${changed ? "border-primary" : ""}`}
+                        >
+                          <div className="flex items-start justify-between gap-2">
+                            <Label htmlFor={id}>{control.path}</Label>
+                            <Badge variant={changed ? "default" : "secondary"}>
+                              {changed
+                                ? t.production.trialTuningChanged
+                                : t.production.trialTuningUnchanged}
+                            </Badge>
+                          </div>
+                          <p className="text-xs text-muted-foreground">
+                            {description}
+                          </p>
+                          {control.kind === "boolean" ? (
+                            <div className="flex items-center gap-2">
+                              <Checkbox
+                                id={id}
+                                checked={proposedValue === true}
+                                onCheckedChange={(checked) =>
+                                  setTuningDraft((current) => ({
+                                    ...current,
+                                    [control.path]: checked === true,
+                                  }))
+                                }
+                              />
+                              <span className="text-sm">
+                                {t.production.trialTuningBoolean(
+                                  proposedValue === true,
+                                )}
+                              </span>
+                            </div>
+                          ) : control.kind === "select" ? (
+                            <select
+                              id={id}
+                              value={String(proposedValue ?? "")}
+                              onChange={(event) =>
+                                setTuningDraft((current) => ({
+                                  ...current,
+                                  [control.path]: event.target.value,
+                                }))
+                              }
+                              className="flex h-10 w-full rounded-md border border-input bg-background px-3 text-sm"
+                            >
+                              {(control.options ?? []).map((option) => (
+                                <option key={option} value={option}>
+                                  {option}
+                                </option>
+                              ))}
+                            </select>
+                          ) : control.kind === "multi_select" ? (
+                            <select
+                              id={id}
+                              multiple
+                              size={Math.min(
+                                Math.max(control.options?.length ?? 2, 2),
+                                5,
+                              )}
+                              value={
+                                Array.isArray(proposedValue)
+                                  ? proposedValue
+                                  : []
+                              }
+                              onChange={(event) =>
+                                setTuningDraft((current) => ({
+                                  ...current,
+                                  [control.path]: Array.from(
+                                    event.target.selectedOptions,
+                                    (option) => option.value,
+                                  ),
+                                }))
+                              }
+                              className="flex w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
+                            >
+                              {(control.options ?? []).map((option) => (
+                                <option key={option} value={option}>
+                                  {option}
+                                </option>
+                              ))}
+                            </select>
+                          ) : (
+                            <Input
+                              id={id}
+                              type="number"
+                              value={String(proposedValue ?? "")}
+                              min={control.minimum ?? undefined}
+                              max={control.maximum ?? undefined}
+                              step={control.step ?? undefined}
+                              onChange={(event) =>
+                                setTuningDraft((current) => ({
+                                  ...current,
+                                  [control.path]:
+                                    event.target.value === ""
+                                      ? ""
+                                      : Number(event.target.value),
+                                }))
+                              }
+                            />
+                          )}
+                          <p className="text-xs">
+                            {t.production.trialTuningRange(
+                              control.minimum,
+                              control.maximum,
+                              control.step,
+                            )}
+                          </p>
+                          <p className="text-xs">
+                            {t.production.trialTuningRuntime}:{" "}
+                            {t.production.trialTuningRuntimeImpact(
+                              control.runtime_impact,
+                            )}
+                          </p>
+                          <p className="text-xs font-mono">
+                            {t.production.trialTuningCurrent}:{" "}
+                            {tuningValueLabel(currentValue)} ·{" "}
+                            {t.production.trialTuningProposed}:{" "}
+                            {tuningValueLabel(proposedValue)}
+                          </p>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </section>
+              ))}
+            </fieldset>
+
+            {tuningDiff.length > 0 && (
+              <div
+                data-testid="trial-tuning-diff"
+                className="space-y-1 text-xs"
+              >
+                <p className="font-semibold">{t.production.trialTuningDiff}</p>
+                <ul className="list-disc pl-5 font-mono">
+                  {tuningDiff.map((item) => (
+                    <li key={item.path}>
+                      {item.path}: {tuningValueLabel(item.previous_value)} →{" "}
+                      {tuningValueLabel(item.next_value)}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+
+            {currentTuningVersion && (
+              <p className="text-xs font-mono break-all">
+                {t.production.trialTuningVersion}:{" "}
+                {currentTuningVersion.version_id}
+              </p>
+            )}
+            {tuningHistory.length > 0 && (
+              <details className="text-sm">
+                <summary>{t.production.trialTuningHistory}</summary>
+                <ol className="mt-2 space-y-2">
+                  {tuningHistory.map((version) => (
+                    <li
+                      key={version.version_id}
+                      className="flex items-center justify-between gap-2 rounded-md border p-2"
+                    >
+                      <span className="font-mono text-xs break-all">
+                        {version.version_id}
+                      </span>
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="outline"
+                        onClick={() => handleRestoreTuning(version.values)}
+                        disabled={requestIntentLocked || tuningSaving}
+                      >
+                        {t.production.trialTuningRestore}
+                      </Button>
+                    </li>
+                  ))}
+                </ol>
+              </details>
+            )}
+            {tuningMessage && (
+              <p role="status" className="text-sm">
+                {tuningMessage}
+              </p>
+            )}
+            <div className="flex flex-wrap gap-2">
+              <Button
+                type="button"
+                variant="outline"
+                onClick={handleResetTuning}
+                disabled={requestIntentLocked || tuningSaving}
+              >
+                {t.production.trialTuningReset}
+              </Button>
+              <Button
+                type="button"
+                variant="outline"
+                onClick={() => void handleSaveTuning(false)}
+                disabled={requestIntentLocked || tuningSaving}
+              >
+                {t.production.trialTuningSave}
+              </Button>
+              <Button
+                type="button"
+                onClick={() => void handleSaveTuning(true)}
+                disabled={requestIntentLocked || tuningSaving || !canStart}
+              >
+                {tuningSaving && (
+                  <Loader2
+                    className="mr-2 h-4 w-4 animate-spin"
+                    aria-hidden="true"
+                  />
+                )}
+                {t.production.trialAdjustAndRerun}
+              </Button>
+            </div>
+          </CardContent>
+        </Card>
+      )}
+      {(tuningSchemaQuery.isError || tuningBaseConfigQuery.isError) &&
+        !locked && (
+          <Alert variant="destructive">
+            <AlertDescription>
+              {t.production.trialTuningUnavailable}
+            </AlertDescription>
+          </Alert>
+        )}
+
       <div className="flex flex-wrap gap-2">
         {locked ? (
           <Button
@@ -1332,6 +2065,7 @@ export function ProductionTrialStep({
               size="sm"
               variant="outline"
               onClick={() => void handleRetryPending()}
+              disabled={startRequestInFlight || retryInFlight}
             >
               <RotateCcw className="mr-2 h-4 w-4" aria-hidden="true" />
               {t.production.trialRetry}
@@ -1363,6 +2097,328 @@ export function ProductionTrialStep({
             )}
             {run.error && (
               <p className="text-sm text-destructive">{run.error}</p>
+            )}
+          </CardContent>
+        </Card>
+      )}
+
+      {diagnosisEnabled && (
+        <Card data-testid="trial-diagnosis">
+          <CardHeader>
+            <CardTitle className="flex items-center justify-between gap-3 text-base">
+              <span>{t.production.trialDiagnosisTitle}</span>
+              {diagnosisGate && (
+                <Badge
+                  variant={diagnosisAcceptable ? "default" : "destructive"}
+                >
+                  {t.production.trialDiagnosisStatus(diagnosisGate.status)}
+                </Badge>
+              )}
+            </CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-4 text-sm">
+            {diagnosisQuery.isPending && (
+              <p role="status">{t.production.trialDiagnosisLoading}</p>
+            )}
+            {diagnosisQuery.isError && (
+              <Alert variant="destructive">
+                <AlertDescription>
+                  {t.production.trialDiagnosisUnavailable}
+                </AlertDescription>
+              </Alert>
+            )}
+            {!diagnosisQuery.isPending &&
+              !diagnosisQuery.isError &&
+              !diagnosisGate && (
+                <Alert variant="destructive">
+                  <AlertDescription>
+                    {t.production.trialDiagnosisUnavailable}
+                  </AlertDescription>
+                </Alert>
+              )}
+            {diagnosisGate && (
+              <>
+                <div className="space-y-1">
+                  <p
+                    className="font-semibold"
+                    data-testid="trial-diagnosis-code"
+                  >
+                    {t.production.trialDiagnosisSummary(
+                      diagnosisGate.failure_classification.code,
+                    )}
+                    <span className="ml-2 font-mono text-xs text-muted-foreground">
+                      {diagnosisGate.failure_classification.code}
+                    </span>
+                  </p>
+                  <p>
+                    {t.production.trialDiagnosisNext}:{" "}
+                    {t.production.trialDiagnosisAction(
+                      diagnosisGate.failure_classification.code,
+                    )}
+                  </p>
+                  {diagnosisGate.reason_codes &&
+                    diagnosisGate.reason_codes.length > 0 && (
+                      <ul className="list-disc pl-5 text-xs">
+                        {diagnosisGate.reason_codes.map((reason) => (
+                          <li key={reason}>
+                            {t.production.trialDiagnosisReason(reason)}{" "}
+                            <span className="font-mono text-muted-foreground">
+                              ({reason})
+                            </span>
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                </div>
+
+                {diagnosisGate.stage_counts && (
+                  <div className="space-y-2">
+                    <p className="font-semibold">
+                      {t.production.trialDiagnosisStages}
+                    </p>
+                    <dl
+                      className="grid gap-2 sm:grid-cols-2 lg:grid-cols-4"
+                      data-testid="trial-debug-status-counts"
+                    >
+                      {(
+                        [
+                          [
+                            "evaluated_frames",
+                            diagnosisGate.stage_counts.evaluated_frames,
+                          ],
+                          [
+                            "detected_frames",
+                            diagnosisGate.stage_counts.detected_frames,
+                          ],
+                          [
+                            "predicted_frames",
+                            diagnosisGate.stage_counts.predicted_frames,
+                          ],
+                          [
+                            "lost_frames",
+                            diagnosisGate.stage_counts.lost_frames,
+                          ],
+                        ] as const
+                      ).map(([label, count]) => (
+                        <div key={label} className="rounded-md border p-2">
+                          <dt>{t.production.trialDiagnosisStage(label)}</dt>
+                          <dd className="font-mono">
+                            {count.value ?? "—"} ·{" "}
+                            {t.production.trialDiagnosisCounterStatus(
+                              count.status,
+                            )}
+                          </dd>
+                        </div>
+                      ))}
+                    </dl>
+                    <ol
+                      className="flex flex-wrap items-stretch gap-2"
+                      data-testid="trial-detection-stage-chain"
+                      aria-label={t.production.trialDiagnosisStageChain}
+                    >
+                      {(
+                        [
+                          [
+                            "raw_candidates",
+                            diagnosisGate.stage_counts.raw_candidates,
+                          ],
+                          [
+                            "class_mapped_candidates",
+                            diagnosisGate.stage_counts.class_mapped_candidates,
+                          ],
+                          [
+                            "filtered_candidates",
+                            diagnosisGate.stage_counts.filtered_candidates,
+                          ],
+                          [
+                            "selected_candidates",
+                            diagnosisGate.stage_counts.selected_candidates,
+                          ],
+                          ["tracklets", diagnosisGate.stage_counts.tracklets],
+                        ] as const
+                      ).map(([label, count], index) => (
+                        <li key={label} className="flex items-center gap-2">
+                          {index > 0 && (
+                            <span aria-hidden="true" className="text-primary">
+                              →
+                            </span>
+                          )}
+                          <dl className="h-full rounded-md border p-2">
+                            <dt>{t.production.trialDiagnosisStage(label)}</dt>
+                            <dd className="font-mono">
+                              {count.value ?? "—"} ·{" "}
+                              {t.production.trialDiagnosisCounterStatus(
+                                count.status,
+                              )}
+                            </dd>
+                          </dl>
+                        </li>
+                      ))}
+                    </ol>
+                    <div data-testid="trial-stage-rejection-reasons">
+                      <p className="font-medium">
+                        {t.production.trialDiagnosisRejectionReasons}
+                      </p>
+                      {Object.keys(
+                        diagnosisGate.stage_counts.rejection_reasons ?? {},
+                      ).length === 0 ? (
+                        <p className="text-xs text-muted-foreground">
+                          {t.production.trialDiagnosisNoRejections}
+                        </p>
+                      ) : (
+                        <ul className="list-disc pl-5 text-xs">
+                          {Object.entries(
+                            diagnosisGate.stage_counts.rejection_reasons ?? {},
+                          ).map(([reason, count]) => (
+                            <li key={reason}>
+                              {t.production.trialDiagnosisRejectionReason(
+                                reason,
+                              )}
+                              : {count}{" "}
+                              <span className="font-mono text-muted-foreground">
+                                ({reason})
+                              </span>
+                            </li>
+                          ))}
+                        </ul>
+                      )}
+                    </div>
+                  </div>
+                )}
+
+                <div
+                  className="space-y-3"
+                  data-testid="trial-typed-diagnostics"
+                >
+                  <p className="font-semibold">
+                    {t.production.trialTrajectoryComparison}
+                  </p>
+                  <div className="overflow-x-auto">
+                    <table className="w-full border-collapse text-left text-xs">
+                      <thead>
+                        <tr>
+                          <th className="border p-2">
+                            {t.production.trialDiagnosticMetric}
+                          </th>
+                          <th className="border p-2">
+                            {t.production.trialDiagnosticRaw}
+                          </th>
+                          <th className="border p-2">
+                            {t.production.trialDiagnosticCleaned}
+                          </th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {TRACK_DIAGNOSTIC_KEYS.map((metric) => {
+                          const raw =
+                            diagnosisGate.diagnostics.raw_track[metric];
+                          const cleaned =
+                            diagnosisGate.diagnostics.cleaned_track[metric];
+                          return (
+                            <tr key={metric}>
+                              <th className="border p-2 font-medium">
+                                {t.production.trialDiagnosticMetricLabel(
+                                  metric,
+                                )}
+                              </th>
+                              {[raw, cleaned].map((observation, index) => (
+                                <td
+                                  key={index === 0 ? "raw" : "cleaned"}
+                                  className="border p-2 font-mono"
+                                >
+                                  {diagnosticObservationValue(observation)} ·{" "}
+                                  {t.production.trialDiagnosisCounterStatus(
+                                    observation.status,
+                                  )}
+                                </td>
+                              ))}
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+
+                  <div className="grid gap-2 sm:grid-cols-2">
+                    {(
+                      [
+                        [
+                          "ai_review_trigger_count",
+                          diagnosisGate.diagnostics.ai_review_trigger_count,
+                        ],
+                        [
+                          "ai_review_triggers_per_100_frames",
+                          diagnosisGate.diagnostics
+                            .ai_review_triggers_per_100_frames,
+                        ],
+                        [
+                          "event_candidate_count",
+                          diagnosisGate.diagnostics.event_candidate_count,
+                        ],
+                        [
+                          "event_candidates_per_100_frames",
+                          diagnosisGate.diagnostics
+                            .event_candidates_per_100_frames,
+                        ],
+                        [
+                          "max_pan_step_px",
+                          diagnosisGate.diagnostics.follow_cam.max_pan_step_px,
+                        ],
+                        [
+                          "max_pan_accel_px",
+                          diagnosisGate.diagnostics.follow_cam.max_pan_accel_px,
+                        ],
+                        [
+                          "max_zoom_step_ratio",
+                          diagnosisGate.diagnostics.follow_cam
+                            .max_zoom_step_ratio,
+                        ],
+                      ] as const
+                    ).map(([metric, observation]) => (
+                      <dl key={metric} className="rounded-md border p-2">
+                        <dt>
+                          {t.production.trialDiagnosticMetricLabel(metric)}
+                        </dt>
+                        <dd className="font-mono">
+                          {diagnosticObservationValue(observation)} ·{" "}
+                          {t.production.trialDiagnosisCounterStatus(
+                            observation.status,
+                          )}
+                        </dd>
+                      </dl>
+                    ))}
+                  </div>
+
+                  <div data-testid="trial-diagnostic-rejection-status">
+                    <p className="font-medium">
+                      {t.production.trialDiagnosisRejectionReasons}:{" "}
+                      {t.production.trialDiagnosisCounterStatus(
+                        diagnosisGate.diagnostics.rejection_reasons.status,
+                      )}
+                    </p>
+                  </div>
+                </div>
+
+                <div className="space-y-2">
+                  <p className="font-semibold">
+                    {t.production.trialDiagnosisEvidence}
+                  </p>
+                  <dl className="grid gap-2 sm:grid-cols-2">
+                    {Object.entries(diagnosisGate.evidence).map(
+                      ([name, status]) => (
+                        <div key={name} className="rounded-md border p-2">
+                          <dt>
+                            {t.production.trialDiagnosisEvidenceKey(name)}
+                          </dt>
+                          <dd className="font-mono">
+                            {t.production.trialDiagnosisEvidenceStatus(status)}
+                          </dd>
+                        </div>
+                      ),
+                    )}
+                  </dl>
+                </div>
+              </>
             )}
           </CardContent>
         </Card>
@@ -1518,20 +2574,50 @@ export function ProductionTrialStep({
       )}
       {readiness &&
         readinessFingerprint === currentEvidenceFingerprint &&
+        diagnosisAcceptable &&
         !trial?.accepted && (
-          <Button
-            type="button"
-            onClick={() => void handleAccept()}
-            disabled={evidenceRefreshing}
+          <section
+            className="space-y-3 rounded-md border p-4"
+            aria-labelledby="trial-visual-confirmation-title"
           >
-            {acceptRefreshing && (
-              <Loader2
-                className="mr-2 h-4 w-4 animate-spin"
-                aria-hidden="true"
+            <h3
+              id="trial-visual-confirmation-title"
+              className="text-sm font-semibold"
+            >
+              {t.production.trialVisualConfirmationTitle}
+            </h3>
+            <p className="text-sm text-muted-foreground">
+              {t.production.trialVisualConfirmationDescription}
+            </p>
+            <div className="flex items-start gap-2">
+              <Checkbox
+                id="trial-visual-confirmation"
+                checked={visualConfirmed}
+                onCheckedChange={(checked) =>
+                  setVisualConfirmed(checked === true)
+                }
+                disabled={evidenceRefreshing}
               />
+              <Label htmlFor="trial-visual-confirmation">
+                {t.production.trialVisualConfirmationLabel}
+              </Label>
+            </div>
+            {visualConfirmed && (
+              <Button
+                type="button"
+                onClick={() => void handleAccept()}
+                disabled={!canAcceptTrial || evidenceRefreshing}
+              >
+                {acceptRefreshing && (
+                  <Loader2
+                    className="mr-2 h-4 w-4 animate-spin"
+                    aria-hidden="true"
+                  />
+                )}
+                {t.production.trialAccept}
+              </Button>
             )}
-            {t.production.trialAccept}
-          </Button>
+          </section>
         )}
       {trial?.accepted && (
         <Alert>

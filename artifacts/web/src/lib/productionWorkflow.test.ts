@@ -26,13 +26,18 @@ import {
   type ProductionWorkflowStage,
   type SourceSignature,
 } from "./productionWorkflow";
-import type { ProductionTrialState } from "./productionTrial";
+import {
+  buildProductionTrialSubmission,
+  createProductionTrialState,
+  type ProductionTrialState,
+} from "./productionTrial";
 import type {
   ProductionFullRunState,
   ProductionFullRunStatus,
 } from "./productionBroadcast";
 import { clearPendingProductionFullRun } from "./productionBroadcast";
 import type { ProductionProductEvidence } from "./broadcastDelivery";
+import { ACCEPTABLE_TRIAL_SIGNAL_GATE } from "../test/productionTrialFixtures";
 
 const NOW = "2026-07-14T12:00:00.000Z";
 const LATER = "2026-07-14T12:05:00.000Z";
@@ -182,6 +187,14 @@ function trialState(accepted = true): ProductionTrialState {
               audit_review_event_count: 1,
               audit_lost_gap_count: 2,
               quality_gate_status: null,
+              trial_signal_gate_v2: ACCEPTABLE_TRIAL_SIGNAL_GATE,
+            },
+            operator_visual_confirmation: {
+              confirmed: true,
+              confirmed_at: NOW,
+              evidence_generation: EVIDENCE_DIGEST,
+              threshold_profile_sha256:
+                ACCEPTABLE_TRIAL_SIGNAL_GATE.threshold_profile.sha256,
             },
           },
         }
@@ -791,9 +804,16 @@ describe("production full-run and delivery transitions", () => {
 describe("production workflow invalidation", () => {
   it("invalidates all downstream evidence when the source changes", () => {
     const current = draftWithEvidence();
+    const currentSnapshot = JSON.stringify(current);
     const nextSource = { ...SOURCE, path: "data/match-b.mp4" };
-    const updated = updateProductionSource(current, nextSource, LATER);
+    const updated = updateProductionSource(
+      current,
+      nextSource,
+      LATER,
+      () => "workflow-b",
+    );
 
+    expect(updated.workflow_id).toBe("workflow-b");
     expect(updated.source).toEqual(nextSource);
     expect(updated.calibration).toBeNull();
     expect(updated.trial).toBeNull();
@@ -802,6 +822,8 @@ describe("production workflow invalidation", () => {
     expect(updated.verified_product).toBeNull();
     expect(updated.status).toBe("active");
     expect(updated.updated_at).toBe(LATER);
+    expect(JSON.stringify(current)).toBe(currentSnapshot);
+    expect(current.workflow_id).toBe("workflow-a");
   });
 
   it.each([
@@ -814,7 +836,9 @@ describe("production workflow invalidation", () => {
         draftWithEvidence(),
         replacement,
         LATER,
+        () => "workflow-source-replacement",
       );
+      expect(updated.workflow_id).toBe("workflow-source-replacement");
       expect(updated.source).toEqual(replacement);
       expect(updated.calibration).toBeNull();
       expect(deriveProductionWorkflow(updated).stage).toBe("calibration");
@@ -823,7 +847,14 @@ describe("production workflow invalidation", () => {
 
   it("does not invalidate evidence for an identical source signature", () => {
     const current = draftWithEvidence();
-    expect(updateProductionSource(current, { ...SOURCE }, LATER)).toBe(current);
+    let idCalls = 0;
+    expect(
+      updateProductionSource(current, { ...SOURCE }, LATER, () => {
+        idCalls += 1;
+        return "workflow-unused";
+      }),
+    ).toBe(current);
+    expect(idCalls).toBe(0);
     expect(sourceSignaturesMatch(current.source, SOURCE)).toBe(true);
   });
 
@@ -832,7 +863,9 @@ describe("production workflow invalidation", () => {
       draftWithEvidence(),
       "calibration",
       LATER,
+      () => "workflow-recalibration",
     );
+    expect(fromCalibration.workflow_id).toBe("workflow-recalibration");
     expect(fromCalibration.source).toEqual(SOURCE);
     expect(fromCalibration.calibration).toBeNull();
     expect(fromCalibration.trial).toBeNull();
@@ -852,7 +885,9 @@ describe("production workflow invalidation", () => {
       draftWithEvidence(),
       "source",
       LATER,
+      () => "workflow-new-source",
     );
+    expect(fromSource.workflow_id).toBe("workflow-new-source");
     expect(fromSource.source).toBeNull();
     expect(fromSource.calibration).toBeNull();
 
@@ -894,7 +929,9 @@ describe("production workflow invalidation", () => {
         },
       },
       LATER,
+      () => "workflow-unused",
     );
+    expect(suggestionOnly.workflow_id).toBe("workflow-a");
     expect(suggestionOnly.trial).toEqual(current.trial);
     expect(suggestionOnly.calibration?.confirmed_frames).toHaveLength(3);
 
@@ -911,12 +948,115 @@ describe("production workflow invalidation", () => {
         confirmed_frames: [],
       },
       LATER,
+      () => "workflow-new-calibration",
     );
+    expect(approvedEdit.workflow_id).toBe("workflow-new-calibration");
     expect(approvedEdit.calibration?.confirmed_frames).toEqual([]);
     expect(approvedEdit.trial).toBeNull();
     expect(approvedEdit.confirmed_config).toBeNull();
     expect(approvedEdit.full_run).toBeNull();
     expect(approvedEdit.verified_product).toBeNull();
+  });
+
+  it("keeps the initial workflow root until execution lineage exists", () => {
+    const empty = createProductionDraft(NOW, "workflow-initial");
+    const sourced = updateProductionSource(
+      empty,
+      SOURCE,
+      LATER,
+      () => "workflow-unused-source",
+    );
+    const calibrated = updateProductionCalibration(
+      sourced,
+      completeCalibration(),
+      LATER,
+      () => "workflow-unused-calibration",
+    );
+    const editedBeforeTrial = updateProductionCalibration(
+      calibrated,
+      {
+        ...completeCalibration(),
+        polygon_digest: "1".repeat(64),
+        approved_polygon: [
+          [10, 10],
+          [1_900, 10],
+          [1_900, 1_000],
+        ],
+        confirmed_frames: [],
+      },
+      LATER,
+      () => "workflow-unused-edit",
+    );
+
+    expect(sourced.workflow_id).toBe("workflow-initial");
+    expect(calibrated.workflow_id).toBe("workflow-initial");
+    expect(editedBeforeTrial.workflow_id).toBe("workflow-initial");
+  });
+
+  it("does not rotate an initialized trial draft that has no run lineage", () => {
+    const draft: ProductionDraft = {
+      ...createProductionDraft(NOW, "workflow-empty-trial"),
+      source: SOURCE,
+      calibration: completeCalibration(),
+      trial: createProductionTrialState(),
+    };
+    let idCalls = 0;
+
+    const reset = invalidateProductionDraft(draft, "calibration", LATER, () => {
+      idCalls += 1;
+      return "workflow-unused";
+    });
+
+    expect(reset.workflow_id).toBe("workflow-empty-trial");
+    expect(reset.trial).toBeNull();
+    expect(idCalls).toBe(0);
+  });
+
+  it("starts a recalibrated workflow as generation one without a parent", async () => {
+    const current = draftWithEvidence();
+    const oldAttempt = current.trial?.attempts[0];
+    const reset = invalidateProductionDraft(
+      current,
+      "calibration",
+      LATER,
+      () => "workflow-recalibrated",
+    );
+    const recalibrated = updateProductionCalibration(
+      reset,
+      completeCalibration(),
+      LATER,
+      () => "workflow-unused",
+    );
+    const root = await buildProductionTrialSubmission({
+      workflow_id: recalibrated.workflow_id,
+      source: recalibrated.source!,
+      calibration: recalibrated.calibration!,
+      settings: {
+        base_config_name: "default.yaml",
+        start_frame: 0,
+        max_frames: 300,
+        enable_postprocess: true,
+        enable_follow_cam: true,
+        tuning_patch: {},
+      },
+      parent_run_id: null,
+      submission_id: "submission-recalibrated",
+      output_id: "output-recalibrated",
+      generation: 1,
+      created_at: LATER,
+    });
+
+    expect(reset.workflow_id).toBe("workflow-recalibrated");
+    expect(reset.trial).toBeNull();
+    expect(recalibrated.workflow_id).toBe("workflow-recalibrated");
+    expect(root.pending.generation).toBe(1);
+    expect(root.pending.request.parent_run_id).toBeNull();
+    expect(JSON.parse(String(root.pending.request.notes))).toMatchObject({
+      workflow_id: "workflow-recalibrated",
+      generation: 1,
+    });
+    expect(current.workflow_id).toBe("workflow-a");
+    expect(current.trial?.attempts[0]).toEqual(oldAttempt);
   });
 
   it("validates trial/config transitions and clears only their downstream evidence", () => {
@@ -1447,6 +1587,132 @@ describe("production draft persistence", () => {
         calibration: completeCalibration(),
         trial: trialState(),
         confirmed_config: confirmedConfig(),
+        full_run: null,
+        verified_product: null,
+      },
+    });
+  });
+
+  it("migrates a v3 trial without gate or visual acceptance while preserving its tuning history", () => {
+    const legacyTrial = structuredClone(trialState());
+    legacyTrial.settings.tuning_patch = {
+      detector: { confidence_threshold: 0.15 },
+      metadata: {
+        production_tuning: {
+          schema_version: "1.0",
+          version_id: "tuning-v2",
+          created_at: LATER,
+          values: { "detector.confidence_threshold": 0.15 },
+          history: [
+            {
+              version_id: "tuning-v1",
+              created_at: NOW,
+              values: { "detector.confidence_threshold": 0.2 },
+            },
+          ],
+        },
+      },
+    };
+    const legacyReadiness = legacyTrial.accepted!.readiness as unknown as {
+      quality: { trial_signal_gate_v2?: unknown };
+      operator_visual_confirmation?: unknown;
+    };
+    delete legacyReadiness.quality.trial_signal_gate_v2;
+    delete legacyReadiness.operator_visual_confirmation;
+    const legacy = {
+      ...draftWithEvidence(),
+      schema_version: 3,
+      status: "completed",
+      trial: legacyTrial,
+      pending_config_confirmation: pendingConfig(),
+      confirmed_config: confirmedConfig(),
+      full_run: fullRunState(),
+      verified_product: { legacy_product_id: "legacy-product" },
+    };
+
+    const result = loadProductionDraft(memoryStorage(JSON.stringify(legacy)));
+
+    expect(result).toMatchObject({
+      status: "restored",
+      migrated: true,
+      draft: {
+        schema_version: PRODUCTION_DRAFT_SCHEMA_VERSION,
+        status: "active",
+        pending_config_confirmation: null,
+        confirmed_config: null,
+        full_run: null,
+        verified_product: null,
+      },
+    });
+    if (result.status === "restored") {
+      expect(result.draft.trial?.accepted).toBeNull();
+      expect(result.draft.trial?.settings).toEqual(legacyTrial.settings);
+      expect(result.draft.trial?.attempts).toEqual(legacyTrial.attempts);
+      expect(
+        (
+          result.draft.trial?.settings.tuning_patch.metadata as Record<
+            string,
+            unknown
+          >
+        ).production_tuning,
+      ).toEqual(
+        (legacyTrial.settings.tuning_patch.metadata as Record<string, unknown>)
+          .production_tuning,
+      );
+    }
+  });
+
+  it("migrates v4 acceptance only when the latest attempt has the full bound gate and visual evidence", () => {
+    const current = draftWithEvidence();
+    const validV4 = { ...current, schema_version: 4 };
+    expect(
+      loadProductionDraft(memoryStorage(JSON.stringify(validV4))),
+    ).toMatchObject({
+      status: "restored",
+      migrated: true,
+      draft: {
+        schema_version: PRODUCTION_DRAFT_SCHEMA_VERSION,
+        trial: { accepted: { run_id: "trial-2" } },
+        confirmed_config: confirmedConfig(),
+        full_run: current.full_run,
+      },
+    });
+
+    const ready = fullRunState("ready");
+    const legacy = structuredClone({
+      ...current,
+      schema_version: 4,
+      status: "completed",
+      pending_config_confirmation: pendingConfig(),
+      full_run: ready,
+      verified_product: productEvidence(ready),
+    });
+    const preservedSettings = structuredClone(legacy.trial!.settings);
+    const preservedAttempts = structuredClone(legacy.trial!.attempts);
+    delete legacy.trial!.accepted!.readiness.operator_visual_confirmation;
+    delete (
+      legacy.trial!.accepted!.readiness.quality as unknown as Record<
+        string,
+        unknown
+      >
+    ).trial_signal_gate_v2;
+
+    const result = loadProductionDraft(memoryStorage(JSON.stringify(legacy)));
+    expect(result).toMatchObject({
+      status: "restored",
+      migrated: true,
+      draft: {
+        schema_version: PRODUCTION_DRAFT_SCHEMA_VERSION,
+        status: "active",
+        source: SOURCE,
+        calibration: completeCalibration(),
+        trial: {
+          settings: preservedSettings,
+          attempts: preservedAttempts,
+          accepted: null,
+        },
+        pending_config_confirmation: null,
+        confirmed_config: null,
         full_run: null,
         verified_product: null,
       },

@@ -13,7 +13,7 @@ import torch
 
 from football_tracking.calibration import build_pitch_calibration_from_field_polygon
 from football_tracking.config import AppConfig
-from football_tracking.detector import MockBallDetector, YOLOSahiBallDetector
+from football_tracking.detector import DetectorStageEvidence, MockBallDetector, YOLOSahiBallDetector
 from football_tracking.detector_candidate_contract import (
     CandidateSourceSnapshot,
     assign_candidate_ids,
@@ -385,8 +385,13 @@ class BallTrackingPipeline:
     def _process_frame(self, frame, frame_index: int):
         """处理单帧，任何异常都退化为预测或丢失，不让整体流程中断。"""
         raw_candidates = []
+        detector_stage_evidence: DetectorStageEvidence | None = None
+        frame_exception = False
         try:
             raw_candidates = self.detector.detect(frame, frame_index=frame_index)
+            observed_stage_evidence = getattr(self.detector, "last_stage_evidence", None)
+            if isinstance(observed_stage_evidence, DetectorStageEvidence):
+                detector_stage_evidence = observed_stage_evidence
             self._assign_candidate_ids(raw_candidates)
             context = self._attach_selection_prior_context(self.tracker.build_context())
             filtered_candidates, filter_rejections, filter_rejection_counts = self.candidate_filter.filter(
@@ -427,6 +432,17 @@ class BallTrackingPipeline:
                 filter_rejection_counts=filter_rejection_counts,
                 decision=decision,
             )
+            if reacquire_attempted:
+                reacquire_stage_evidence = getattr(self.detector, "last_stage_evidence", None)
+                if (
+                    isinstance(reacquire_stage_evidence, DetectorStageEvidence)
+                    and reacquire_stage_evidence is not detector_stage_evidence
+                ):
+                    detector_stage_evidence = (
+                        reacquire_stage_evidence
+                        if detector_stage_evidence is None
+                        else detector_stage_evidence.merged(reacquire_stage_evidence)
+                    )
             decision = self._maybe_reject_low_quality_reacquire(
                 decision=decision,
                 context=context,
@@ -501,6 +517,7 @@ class BallTrackingPipeline:
             track_result.air_burst_active = burst_active
             track_result.air_burst_frames_remaining = self.air_burst_frames_remaining
         except Exception as exc:
+            frame_exception = True
             self.logger.exception("第 %s 帧处理异常，系统将退化为预测/丢失: %s", frame_index, exc)
             decision = SelectionDecision(
                 selected_candidate=None,
@@ -534,6 +551,25 @@ class BallTrackingPipeline:
             self._advance_air_burst_state(None)
             track_result.air_burst_active = False
             track_result.air_burst_frames_remaining = self.air_burst_frames_remaining
+
+        track_result.detector_stage_schema_version = (
+            None if detector_stage_evidence is None else detector_stage_evidence.schema_version
+        )
+        track_result.detector_output_count = (
+            None if detector_stage_evidence is None else detector_stage_evidence.detector_output_count
+        )
+        track_result.class_mapped_candidate_count = (
+            None
+            if detector_stage_evidence is None
+            else detector_stage_evidence.class_mapped_candidate_count
+        )
+        track_result.class_rejection_counts = (
+            {}
+            if detector_stage_evidence is None
+            else dict(detector_stage_evidence.class_rejection_counts)
+        )
+        track_result.frame_exception = frame_exception
+        track_result.selected_candidate_count = int(decision.selected_candidate is not None)
 
         self.logger.debug(
             "frame=%s raw_candidates=%s filtered_candidates=%s status=%s state=%s lost_frames=%s reason=%s",

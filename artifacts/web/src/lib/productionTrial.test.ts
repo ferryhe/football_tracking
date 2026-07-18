@@ -3,6 +3,7 @@ import type {
   ArtifactSummary,
   BallAuditReport,
   RunRecord,
+  TrialTuningControl,
 } from "@workspace/api-client-react";
 
 import type { ProductionCalibrationDraft } from "./productionCalibration";
@@ -10,6 +11,7 @@ import {
   acceptProductionTrial,
   appendProductionTrialAttempt,
   assessProductionTrialEvidence,
+  buildVersionedProductionTuningPatch,
   buildProductionTrialIntent,
   buildProductionTrialSubmission,
   canonicalJson,
@@ -17,18 +19,28 @@ import {
   invalidateProductionTrialAcceptance,
   isProductionTrialSettings,
   isProductionTrialState,
+  isTrialSignalGateV2,
   materializedProductionTrialConfigName,
   observeProductionTrialRun,
   productionTrialArtifactContract,
   productionTrialEvidenceGeneration,
   productionTrialEvidenceSnapshotIdentity,
+  productionTrialSignalGateAcceptable,
+  productionTrialSubmissionLineage,
+  productionTrialTuningSchema,
+  productionTuningDraft,
+  productionTuningHistory,
+  productionTuningVersion,
   reconcilePendingProductionTrial,
   selectProductionTrialVideo,
   setPendingProductionTrial,
   sha256Text,
+  type ProductionTrialSignalGateV2,
+  type ProductionTrialTuningControl,
   type ProductionTrialPendingSubmission,
   type ProductionTrialReadinessSummary,
   type ProductionTrialSettings,
+  type TrialDiagnosticObservation,
 } from "./productionTrial";
 import type { SourceSignature } from "./productionWorkflow";
 
@@ -70,9 +82,149 @@ const SETTINGS: ProductionTrialSettings = {
   max_frames: 240,
   enable_postprocess: true,
   enable_follow_cam: true,
-  tuning_patch: { detector: { confidence: 0.2 } },
+  tuning_patch: { detector: { confidence_threshold: 0.2 } },
 };
 const CREATED_AT = "2026-07-15T12:00:00.000Z";
+
+const collected = (value: number): TrialDiagnosticObservation => ({
+  status: "collected",
+  value,
+});
+
+const trackDiagnostics = (input: {
+  detected: number;
+  predicted: number;
+  lost: number;
+}) => {
+  const frameCount = input.detected + input.predicted + input.lost;
+  return {
+    status: "collected" as const,
+    frame_count: collected(frameCount),
+    detected: collected(input.detected),
+    predicted: collected(input.predicted),
+    lost: collected(input.lost),
+    detected_ratio: collected(input.detected / frameCount),
+    predicted_ratio: collected(input.predicted / frameCount),
+    lost_ratio: collected(input.lost / frameCount),
+    longest_lost_streak: collected(4),
+    false_positive_island_count: collected(1),
+    max_step_px: collected(20),
+  };
+};
+
+const ACCEPTABLE_GATE: ProductionTrialSignalGateV2 = {
+  schema_version: "2.0",
+  status: "acceptable",
+  coverage_complete: true,
+  evidence_available: true,
+  trajectory_acceptable: true,
+  signal_acceptable: true,
+  acceptance_metrics_complete: true,
+  acceptance_contract_complete: true,
+  quality_acceptable: true,
+  operator_confirmation_required: true,
+  reason_codes: ["quality_thresholds_passed"],
+  failure_classification: {
+    code: "acceptable",
+    severity: "none",
+    summary: "The signal thresholds pass.",
+    recommended_action: "Inspect the playable evidence.",
+  },
+  threshold_profile: {
+    profile_id: "trial-signal-conservative",
+    version: "1.1",
+    algorithm_version: "trial-signal-gate-v2.1",
+    matching_rules: {
+      stage_counter_reconciliation:
+        "all_required_counters_present_and_reconciled",
+      track_metric_scope: "raw_and_cleaned_when_postprocess_enabled",
+      follow_cam_scope: "motion_and_action_retention_when_enabled",
+      required_visual_evidence: [
+        "wide_context",
+        "tight_crop",
+        "follow_cam_when_enabled",
+        "scale_strata",
+        "lighting_strata",
+        "attack_transition_windows",
+      ],
+      required_integrity: ["media_integrity", "identity_binding"],
+      acceptance_contract: "server_verified_bundle_required",
+    },
+    sha256: "a".repeat(64),
+    thresholds: {
+      minimum_detected_ratio: 0.5,
+      maximum_predicted_ratio: 0.35,
+      maximum_lost_ratio: 0.25,
+      maximum_longest_lost_streak: 30,
+      maximum_false_positive_islands_per_100_frames: 8,
+      maximum_suspicious_tracklet_ratio: 0.35,
+      maximum_step_px: 600,
+      maximum_follow_cam_pan_step_px: 90,
+      maximum_follow_cam_pan_accel_px: 120,
+      maximum_follow_cam_zoom_step_ratio: 0.1,
+      maximum_ai_review_triggers_per_100_frames: 10,
+      maximum_event_candidates_per_100_frames: 25,
+    },
+  },
+  stage_counts: {
+    schema_version: "2.0",
+    coverage_status: "complete",
+    evaluated_frames: { value: 240, status: "collected" },
+    detected_frames: { value: 150, status: "collected" },
+    predicted_frames: { value: 50, status: "collected" },
+    lost_frames: { value: 40, status: "collected" },
+    raw_candidates: { value: 180, status: "collected" },
+    class_mapped_candidates: { value: 180, status: "collected" },
+    filtered_candidates: { value: 175, status: "collected" },
+    selected_candidates: { value: 150, status: "collected" },
+    tracklets: { value: 4, status: "collected" },
+    rejection_reasons: { below_confidence: 5 },
+    reconciliation: { status: "reconciled", reason_codes: [] },
+  },
+  trajectory: { raw: { frame_count: 240 } },
+  diagnostics: {
+    raw_track: trackDiagnostics({ detected: 150, predicted: 50, lost: 40 }),
+    cleaned_track: trackDiagnostics({
+      detected: 160,
+      predicted: 50,
+      lost: 30,
+    }),
+    rejection_reasons: {
+      status: "collected",
+      value: { below_confidence: 5 },
+    },
+    ai_review_trigger_count: collected(1),
+    ai_review_triggers_per_100_frames: collected(1 / 2.4),
+    event_candidate_count: collected(2),
+    event_candidates_per_100_frames: collected(2 / 2.4),
+    follow_cam: {
+      status: "collected",
+      max_pan_step_px: collected(20),
+      max_pan_accel_px: collected(30),
+      max_zoom_step_ratio: collected(0.02),
+    },
+  },
+  evidence: {
+    wide_context: "available",
+    tight_crop: "available",
+    follow_cam: "available",
+    follow_cam_action_retention: "complete",
+    scale_strata: "complete",
+    lighting_strata: "complete",
+    attack_transition_windows: "complete",
+    media_integrity: "complete",
+    identity_binding: "complete",
+  },
+};
+
+function visualConfirmation(evidenceGeneration: string) {
+  return {
+    confirmed: true as const,
+    confirmed_at: CREATED_AT,
+    evidence_generation: evidenceGeneration,
+    threshold_profile_sha256: ACCEPTABLE_GATE.threshold_profile.sha256,
+  };
+}
 
 async function submission(parent_run_id: string | null = null, generation = 1) {
   return buildProductionTrialSubmission({
@@ -167,6 +319,7 @@ const STATS = {
     lost_ratio: 0.0833,
   },
   quality_gate: { status: "warn" },
+  trial_signal_gate_v2: ACCEPTABLE_GATE,
 };
 
 const AUDIT: BallAuditReport = {
@@ -227,6 +380,7 @@ const METRICS = {
   generated_at: CREATED_AT,
   tracks: { raw: STATS.raw, cleaned: STATS.cleaned },
   quality_gate: STATS.quality_gate,
+  trial_signal_gate_v2: ACCEPTABLE_GATE,
 };
 function trackCsv(stats: {
   detected: number;
@@ -287,6 +441,301 @@ describe("canonical production JSON", () => {
     expect(await sha256Text("hello")).toBe(
       "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824",
     );
+  });
+});
+
+describe("bounded production tuning patches", () => {
+  const controls: TrialTuningControl[] = [
+    {
+      path: "detector.confidence_threshold",
+      section: "detector",
+      kind: "number",
+      minimum: 0.01,
+      maximum: 0.9,
+      step: 0.01,
+      runtime_impact: "low",
+      description: "Detector confidence",
+      description_zh: "检测置信度",
+    },
+    {
+      path: "detector.image_size",
+      section: "detector",
+      kind: "integer",
+      minimum: 640,
+      maximum: 2560,
+      step: 32,
+      runtime_impact: "high",
+      description: "Inference size",
+      description_zh: "推理尺寸",
+    },
+    {
+      path: "detector.inference_mode",
+      section: "detector",
+      kind: "select",
+      options: ["direct_full_frame", "sahi"],
+      runtime_impact: "high",
+      description: "Inference mode",
+      description_zh: "推理模式",
+    },
+  ];
+  const baseConfig = {
+    detector: {
+      confidence_threshold: 0.25,
+      image_size: 1280,
+      inference_mode: "direct_full_frame",
+    },
+  };
+
+  it("accepts only bounded multi-select labels and the versioned field action", async () => {
+    const labelControl: ProductionTrialTuningControl = {
+      path: "detector.allowed_labels",
+      section: "detector",
+      kind: "multi_select",
+      options: ["sports ball", "ball"],
+      runtime_impact: "low",
+      description: "Allowed ball labels",
+      description_zh: "允许的足球类别",
+    };
+    const schema = productionTrialTuningSchema({
+      schema_version: "1.0",
+      patch_schema_version: "1.0",
+      controls: [labelControl],
+      actions: [
+        {
+          action_code: "return_to_field_setup",
+          target_step: "field_setup",
+          reason_code: "field_geometry_requires_new_calibration",
+          affected_paths: [
+            "filtering.roi",
+            "scene_bias.ground_zones",
+            "scene_bias.negative_rois",
+          ],
+          lineage_constraint:
+            "invalidate_trial_and_downstream_then_create_new_calibration_version",
+        },
+      ],
+    });
+    expect(schema?.actions[0].target_step).toBe("field_setup");
+
+    const result = await buildVersionedProductionTuningPatch({
+      base_config: { detector: { allowed_labels: ["sports ball"] } },
+      previous_patch: {},
+      controls: [labelControl],
+      values: { "detector.allowed_labels": ["sports ball", "ball"] },
+      version_id: "labels-1",
+      created_at: CREATED_AT,
+    });
+    expect(result.patch).toMatchObject({
+      detector: { allowed_labels: ["sports ball", "ball"] },
+    });
+    await expect(
+      buildVersionedProductionTuningPatch({
+        base_config: { detector: { allowed_labels: ["sports ball"] } },
+        previous_patch: {},
+        controls: [labelControl],
+        values: { "detector.allowed_labels": ["person"] },
+        version_id: "labels-invalid",
+        created_at: CREATED_AT,
+      }),
+    ).rejects.toThrow("Invalid tuning value");
+  });
+
+  it("creates immutable, digest-bound versions with minimal diffs and history", async () => {
+    const first = await buildVersionedProductionTuningPatch({
+      base_config: baseConfig,
+      previous_patch: {},
+      controls,
+      values: {
+        "detector.confidence_threshold": 0.15,
+        "detector.image_size": 1280,
+        "detector.inference_mode": "sahi",
+      },
+      version_id: "tune-1",
+      created_at: CREATED_AT,
+    });
+    expect(first.patch).toMatchObject({
+      detector: { confidence_threshold: 0.15, inference_mode: "sahi" },
+      metadata: {
+        production_tuning: {
+          version_id: "tune-1",
+          parent_version_id: null,
+        },
+      },
+    });
+    expect((first.patch.detector as Record<string, unknown>).image_size).toBe(
+      undefined,
+    );
+    expect(first.diff.map((item) => item.path)).toEqual([
+      "detector.confidence_threshold",
+      "detector.inference_mode",
+    ]);
+    expect(
+      productionTuningDraft({
+        base_config: baseConfig,
+        patch: first.patch,
+        controls,
+      }),
+    ).toEqual(first.version.values);
+
+    const second = await buildVersionedProductionTuningPatch({
+      base_config: baseConfig,
+      previous_patch: first.patch,
+      controls,
+      values: {
+        ...first.version.values,
+        "detector.image_size": 1536,
+      },
+      version_id: "tune-2",
+      created_at: "2026-07-15T12:01:00.000Z",
+    });
+    expect(second.version.parent_version_id).toBe("tune-1");
+    expect(second.diff).toEqual([
+      {
+        path: "detector.image_size",
+        previous_value: 1280,
+        next_value: 1536,
+      },
+    ]);
+    expect(productionTuningHistory(second.patch)).toHaveLength(1);
+    expect(productionTuningHistory(second.patch)[0]).toMatchObject({
+      version_id: "tune-1",
+      values: first.version.values,
+    });
+    expect(productionTuningVersion(second.patch)).toEqual(second.version);
+    expect(first.version.history).toEqual([]);
+  });
+
+  it("submits the current draft while preserving the two prior tuning versions", async () => {
+    const v1 = await buildVersionedProductionTuningPatch({
+      base_config: baseConfig,
+      previous_patch: {},
+      controls,
+      values: {
+        "detector.confidence_threshold": 0.2,
+        "detector.image_size": 1280,
+        "detector.inference_mode": "direct_full_frame",
+      },
+      version_id: "tune-v1",
+      created_at: CREATED_AT,
+    });
+    const v2 = await buildVersionedProductionTuningPatch({
+      base_config: baseConfig,
+      previous_patch: v1.patch,
+      controls,
+      values: {
+        ...v1.version.values,
+        "detector.confidence_threshold": 0.15,
+      },
+      version_id: "tune-v2",
+      created_at: "2026-07-15T12:01:00.000Z",
+    });
+    const v3 = await buildVersionedProductionTuningPatch({
+      base_config: baseConfig,
+      previous_patch: v2.patch,
+      controls,
+      values: {
+        ...v2.version.values,
+        "detector.inference_mode": "sahi",
+      },
+      version_id: "tune-v3",
+      created_at: "2026-07-15T12:02:00.000Z",
+    });
+
+    const rerun = await buildProductionTrialSubmission({
+      workflow_id: "workflow-a",
+      source: SOURCE,
+      calibration: CALIBRATION,
+      settings: {
+        ...SETTINGS,
+        tuning_patch: v3.patch,
+      },
+      parent_run_id: "trial-parent",
+      submission_id: "submission-v3",
+      output_id: "output-v3",
+      generation: 2,
+      created_at: "2026-07-15T12:03:00.000Z",
+    });
+    const submittedVersion = productionTuningVersion(
+      rerun.pending.request.config_patch,
+    );
+
+    expect(submittedVersion?.version_id).toBe("tune-v3");
+    expect(submittedVersion?.parent_version_id).toBe("tune-v2");
+    expect(
+      submittedVersion?.history.map(({ version_id }) => version_id),
+    ).toEqual(["tune-v1", "tune-v2"]);
+    expect(v1.version.history).toEqual([]);
+    expect(v2.version.history.map(({ version_id }) => version_id)).toEqual([
+      "tune-v1",
+    ]);
+  });
+
+  it.each([
+    ["arbitrary path", { "detector.model_path": "foreign.pt" }],
+    [
+      "out of range",
+      {
+        "detector.confidence_threshold": 0,
+        "detector.image_size": 1280,
+        "detector.inference_mode": "sahi",
+      },
+    ],
+    [
+      "wrong step",
+      {
+        "detector.confidence_threshold": 0.155,
+        "detector.image_size": 1280,
+        "detector.inference_mode": "sahi",
+      },
+    ],
+    [
+      "invalid option",
+      {
+        "detector.confidence_threshold": 0.15,
+        "detector.image_size": 1280,
+        "detector.inference_mode": "remote",
+      },
+    ],
+  ])("rejects %s", async (_label, values) => {
+    await expect(
+      buildVersionedProductionTuningPatch({
+        base_config: baseConfig,
+        previous_patch: {},
+        controls,
+        values,
+        version_id: "invalid",
+        created_at: CREATED_AT,
+      }),
+    ).rejects.toThrow();
+  });
+
+  it("rejects duplicate or prototype-polluting schema paths", async () => {
+    for (const candidateControls of [
+      [...controls, controls[0]],
+      [
+        {
+          ...controls[0],
+          path: "detector.__proto__.polluted",
+        },
+      ],
+    ]) {
+      await expect(
+        buildVersionedProductionTuningPatch({
+          base_config: baseConfig,
+          previous_patch: {},
+          controls: candidateControls,
+          values: Object.fromEntries(
+            candidateControls.map((control) => [
+              control.path,
+              control.kind === "number" ? 0.25 : 1280,
+            ]),
+          ),
+          version_id: "invalid-schema",
+          created_at: CREATED_AT,
+        }),
+      ).rejects.toThrow(/safe paths/);
+    }
+    expect(({} as Record<string, unknown>).polluted).toBeUndefined();
   });
 });
 
@@ -450,7 +899,7 @@ describe("production trial request", () => {
       parent_run_id: "trial-previous",
       output_dir_name: "production_trial_output-1",
       config_patch: {
-        detector: { confidence: 0.2 },
+        detector: { confidence_threshold: 0.2 },
         input_video: SOURCE.path,
         filtering: { roi: [100, 150, 1_800, 950] },
         scene_bias: {
@@ -619,10 +1068,89 @@ describe("production trial append-only recovery", () => {
     expect(failed.attempts[0].last_observed.status).toBe("failed");
   });
 
+  it("keeps a hash-bound failed run as parent and restarts a digest-less legacy run explicitly", async () => {
+    const { pending } = await submission(null, 1);
+    const completed = appendProductionTrialAttempt(
+      setPendingProductionTrial(createProductionTrialState(SETTINGS), pending),
+      {
+        run: { run_id: "trial-legacy-or-modern", status: "completed" },
+        pending,
+        observed_at: CREATED_AT,
+      },
+    );
+    const failed = observeProductionTrialRun(completed, {
+      run_id: "trial-legacy-or-modern",
+      status: "failed",
+      observed_at: "later",
+    });
+
+    const modern = productionTrialSubmissionLineage(failed, {
+      run_id: "trial-legacy-or-modern",
+      status: "failed",
+      config_sha256: "a".repeat(64),
+    });
+    expect(modern).toMatchObject({
+      state: failed,
+      parent_run_id: "trial-legacy-or-modern",
+      generation: 2,
+      legacy_restart_run_id: null,
+      base_config_locked: true,
+    });
+
+    const legacy = productionTrialSubmissionLineage(completed, {
+      run_id: "trial-legacy-or-modern",
+      status: "completed",
+      config_sha256: null,
+    });
+    expect(legacy).not.toBeNull();
+    expect(legacy).toMatchObject({
+      parent_run_id: null,
+      generation: 1,
+      legacy_restart_run_id: "trial-legacy-or-modern",
+      base_config_locked: true,
+    });
+    expect(legacy?.state.attempts).toEqual([]);
+    expect(legacy?.state.settings).toEqual(completed.settings);
+
+    const restart = await buildProductionTrialSubmission({
+      workflow_id: "workflow-a",
+      source: SOURCE,
+      calibration: CALIBRATION,
+      settings: legacy!.state.settings,
+      parent_run_id: legacy!.parent_run_id,
+      legacy_restart_run_id: legacy!.legacy_restart_run_id,
+      submission_id: "restart-submission",
+      output_id: "restart-output",
+      generation: legacy!.generation,
+      created_at: CREATED_AT,
+    });
+    expect(restart.pending.request.parent_run_id).toBeNull();
+    expect(JSON.parse(String(restart.pending.request.notes))).toMatchObject({
+      generation: 1,
+      legacy_restart_run_id: "trial-legacy-or-modern",
+    });
+  });
+
+  it("rejects generation drift for modern and legacy roots", async () => {
+    await expect(
+      buildProductionTrialSubmission({
+        workflow_id: "workflow-a",
+        source: SOURCE,
+        calibration: CALIBRATION,
+        settings: SETTINGS,
+        parent_run_id: null,
+        submission_id: "bad-root-submission",
+        output_id: "bad-root-output",
+        generation: 2,
+        created_at: CREATED_AT,
+      }),
+    ).rejects.toThrow(/generation 1/i);
+  });
+
   it.each(["queued", "running", "completed"] as const)(
     "reconciles one materialized %s run only for the current generation",
     async (status) => {
-      const { pending } = await submission(null, 2);
+      const { pending } = await submission(null, 1);
       const state = setPendingProductionTrial(
         createProductionTrialState(SETTINGS),
         pending,
@@ -648,14 +1176,14 @@ describe("production trial append-only recovery", () => {
       expect(
         reconcilePendingProductionTrial(state, {
           workflow_id: "workflow-a",
-          expected_generation: 1,
+          expected_generation: 2,
           runs: [run],
           observed_at: CREATED_AT,
         }),
       ).toBe(state);
       const recovered = reconcilePendingProductionTrial(state, {
         workflow_id: "workflow-a",
-        expected_generation: 2,
+        expected_generation: 1,
         runs: [run],
         observed_at: CREATED_AT,
       });
@@ -670,7 +1198,7 @@ describe("production trial append-only recovery", () => {
       expect(
         reconcilePendingProductionTrial(state, {
           workflow_id: "workflow-a",
-          expected_generation: 2,
+          expected_generation: 1,
           runs: [run, { ...run }],
           observed_at: CREATED_AT,
         }),
@@ -679,7 +1207,7 @@ describe("production trial append-only recovery", () => {
   );
 
   it("rejects base configs and every foreign recovery identity", async () => {
-    const { pending } = await submission(null, 2);
+    const { pending } = await submission(null, 1);
     const state = setPendingProductionTrial(
       createProductionTrialState(SETTINGS),
       pending,
@@ -733,7 +1261,7 @@ describe("production trial append-only recovery", () => {
       expect(
         reconcilePendingProductionTrial(state, {
           workflow_id: "workflow-a",
-          expected_generation: 2,
+          expected_generation: 1,
           runs: [foreign],
           observed_at: CREATED_AT,
         }),
@@ -766,6 +1294,127 @@ describe("production trial append-only recovery", () => {
 });
 
 describe("production trial evidence and acceptance", () => {
+  it("accepts only a complete v2 signal gate and rejects fail-open variants", () => {
+    expect(isTrialSignalGateV2(ACCEPTABLE_GATE)).toBe(true);
+    expect(productionTrialSignalGateAcceptable(ACCEPTABLE_GATE)).toBe(true);
+    for (const gate of [
+      { ...ACCEPTABLE_GATE, status: "retune_required" },
+      { ...ACCEPTABLE_GATE, coverage_complete: false },
+      { ...ACCEPTABLE_GATE, evidence_available: false },
+      { ...ACCEPTABLE_GATE, acceptance_metrics_complete: false },
+      { ...ACCEPTABLE_GATE, acceptance_contract_complete: false },
+      { ...ACCEPTABLE_GATE, quality_acceptable: false },
+      {
+        ...ACCEPTABLE_GATE,
+        stage_counts: {
+          ...ACCEPTABLE_GATE.stage_counts!,
+          raw_candidates: { value: 0, status: "collected" as const },
+        },
+      },
+      {
+        ...ACCEPTABLE_GATE,
+        stage_counts: {
+          ...ACCEPTABLE_GATE.stage_counts!,
+          detected_frames: { value: null, status: "not_collected" as const },
+        },
+      },
+      {
+        ...ACCEPTABLE_GATE,
+        stage_counts: {
+          ...ACCEPTABLE_GATE.stage_counts!,
+          lost_frames: { value: 41, status: "collected" as const },
+        },
+      },
+      {
+        ...ACCEPTABLE_GATE,
+        stage_counts: {
+          ...ACCEPTABLE_GATE.stage_counts!,
+          selected_candidates: { value: 149, status: "collected" as const },
+        },
+      },
+      {
+        ...ACCEPTABLE_GATE,
+        stage_counts: {
+          ...ACCEPTABLE_GATE.stage_counts!,
+          filtered_candidates: { value: 181, status: "collected" as const },
+        },
+      },
+      {
+        ...ACCEPTABLE_GATE,
+        evidence: {
+          ...ACCEPTABLE_GATE.evidence,
+          identity_binding: "not_collected",
+        },
+      },
+      {
+        ...ACCEPTABLE_GATE,
+        evidence: {
+          ...ACCEPTABLE_GATE.evidence,
+          scale_strata: "not_collected",
+        },
+      },
+    ]) {
+      expect(productionTrialSignalGateAcceptable(gate)).toBe(false);
+    }
+    expect(
+      isTrialSignalGateV2({
+        ...ACCEPTABLE_GATE,
+        threshold_profile: {
+          ...ACCEPTABLE_GATE.threshold_profile,
+          sha256: "not-a-digest",
+        },
+      }),
+    ).toBe(false);
+    const withoutDebugStatusCount = structuredClone(ACCEPTABLE_GATE) as Record<
+      string,
+      unknown
+    >;
+    delete (withoutDebugStatusCount.stage_counts as Record<string, unknown>)
+      .detected_frames;
+    expect(isTrialSignalGateV2(withoutDebugStatusCount)).toBe(false);
+    expect(
+      isTrialSignalGateV2({
+        ...ACCEPTABLE_GATE,
+        threshold_profile: {
+          ...ACCEPTABLE_GATE.threshold_profile,
+          algorithm_version: "",
+        },
+      }),
+    ).toBe(false);
+    expect(
+      isTrialSignalGateV2({
+        ...ACCEPTABLE_GATE,
+        threshold_profile: {
+          ...ACCEPTABLE_GATE.threshold_profile,
+          matching_rules: {},
+        },
+      }),
+    ).toBe(false);
+    expect(
+      isTrialSignalGateV2({
+        ...ACCEPTABLE_GATE,
+        stage_counts: {
+          ...ACCEPTABLE_GATE.stage_counts,
+          schema_version: "1.0",
+        },
+      }),
+    ).toBe(false);
+    expect(
+      isTrialSignalGateV2({
+        ...ACCEPTABLE_GATE,
+        stage_counts: {
+          ...ACCEPTABLE_GATE.stage_counts,
+          class_mapped_candidates: { value: 180, status: "inferred" },
+        },
+      }),
+    ).toBe(false);
+    const withoutDiagnostics: Record<string, unknown> = {
+      ...ACCEPTABLE_GATE,
+    };
+    delete withoutDiagnostics.diagnostics;
+    expect(isTrialSignalGateV2(withoutDiagnostics)).toBe(false);
+  });
+
   it("requires unique readable evidence, valid raw/cleaned stats, and a loaded main video", () => {
     const run = completedRun();
     const result = assessProductionTrialEvidence({
@@ -804,7 +1453,62 @@ describe("production trial evidence and acceptance", () => {
       false_positive_island_count: 2,
       audit_tracklet_count: 4,
       quality_gate_status: "warn",
+      trial_signal_gate_v2: ACCEPTABLE_GATE,
     });
+  });
+
+  it("keeps readable artifacts visible but clears a missing or mismatched signal gate", () => {
+    const run = completedRun();
+    const common = {
+      run,
+      artifacts: run.artifacts ?? [],
+      manifest: {
+        schema_version: "1.0",
+        run_id: run.run_id,
+        input_video: run.input_video,
+        config_name: run.config_name,
+        status: run.status,
+        notes: null,
+      },
+      metrics: METRICS,
+      audit: AUDIT,
+      raw_csv: TRACK_CSV,
+      cleaned_csv: CLEANED_TRACK_CSV,
+      readable_artifact_names: [
+        "run_manifest.json",
+        "metrics_report.json",
+        "ball_track.csv",
+        "ball_audit.json",
+        "ball_track.cleaned.csv",
+      ],
+      enable_postprocess: true,
+      enable_follow_cam: true,
+      video_loaded: true,
+    };
+    const mismatched = assessProductionTrialEvidence({
+      ...common,
+      trial_signal_gate_v2: {
+        ...ACCEPTABLE_GATE,
+        status: "retune_required",
+        quality_acceptable: false,
+      },
+    });
+    expect(mismatched.ready).toBe(true);
+    if (!mismatched.ready) throw new Error("expected readable evidence");
+    expect(mismatched.quality.trial_signal_gate_v2).toBeNull();
+
+    const legacy = assessProductionTrialEvidence({
+      ...common,
+      run: completedRun({ stats: { raw: STATS.raw, cleaned: STATS.cleaned } }),
+      metrics: {
+        schema_version: "1.0",
+        generated_at: CREATED_AT,
+        tracks: { raw: STATS.raw, cleaned: STATS.cleaned },
+      },
+    });
+    expect(legacy.ready).toBe(true);
+    if (!legacy.ready) throw new Error("expected readable legacy evidence");
+    expect(legacy.quality.trial_signal_gate_v2).toBeNull();
   });
 
   it.each([
@@ -1169,8 +1873,53 @@ describe("production trial evidence and acceptance", () => {
         audit_review_event_count: 2,
         audit_lost_gap_count: 3,
         quality_gate_status: "warn",
+        trial_signal_gate_v2: ACCEPTABLE_GATE,
       },
+      operator_visual_confirmation: visualConfirmation(generation),
     };
+    expect(() =>
+      acceptProductionTrial(state, {
+        run: { run_id: "trial-1", status: "completed" },
+        current_intent_sha256: pending.intent_sha256,
+        readiness: {
+          ...readiness,
+          operator_visual_confirmation: undefined,
+        },
+        accepted_at: CREATED_AT,
+      }),
+    ).toThrow("not eligible");
+    expect(() =>
+      acceptProductionTrial(state, {
+        run: { run_id: "trial-1", status: "completed" },
+        current_intent_sha256: pending.intent_sha256,
+        readiness: {
+          ...readiness,
+          quality: {
+            ...readiness.quality,
+            trial_signal_gate_v2: {
+              ...ACCEPTABLE_GATE,
+              status: "retune_required",
+              quality_acceptable: false,
+            },
+          },
+        },
+        accepted_at: CREATED_AT,
+      }),
+    ).toThrow("not eligible");
+    expect(() =>
+      acceptProductionTrial(state, {
+        run: { run_id: "trial-1", status: "completed" },
+        current_intent_sha256: pending.intent_sha256,
+        readiness: {
+          ...readiness,
+          operator_visual_confirmation: {
+            ...readiness.operator_visual_confirmation!,
+            evidence_generation: "0".repeat(64),
+          },
+        },
+        accepted_at: CREATED_AT,
+      }),
+    ).toThrow("not eligible");
     state = acceptProductionTrial(state, {
       run: { run_id: "trial-1", status: "completed" },
       current_intent_sha256: pending.intent_sha256,
@@ -1280,7 +2029,9 @@ describe("production trial state validation", () => {
         audit_review_event_count: 2,
         audit_lost_gap_count: 1,
         quality_gate_status: "warn",
+        trial_signal_gate_v2: ACCEPTABLE_GATE,
       },
+      operator_visual_confirmation: visualConfirmation("f".repeat(64)),
     };
     const accepted = acceptProductionTrial(observed, {
       run: { run_id: "trial-1", status: "completed" },
@@ -1289,6 +2040,53 @@ describe("production trial state validation", () => {
       accepted_at: CREATED_AT,
     });
     expect(isProductionTrialState(accepted)).toBe(true);
+    const legacyAccepted = structuredClone(accepted);
+    delete legacyAccepted.accepted!.readiness.operator_visual_confirmation;
+    delete (
+      legacyAccepted.accepted!.readiness.quality as unknown as Record<
+        string,
+        unknown
+      >
+    ).trial_signal_gate_v2;
+    expect(isProductionTrialState(legacyAccepted)).toBe(false);
+
+    const missingVisual = structuredClone(accepted);
+    delete missingVisual.accepted!.readiness.operator_visual_confirmation;
+    expect(isProductionTrialState(missingVisual)).toBe(false);
+
+    const retuneAccepted = structuredClone(accepted);
+    retuneAccepted.accepted!.readiness.quality.trial_signal_gate_v2 = {
+      ...ACCEPTABLE_GATE,
+      status: "retune_required",
+      quality_acceptable: false,
+    };
+    expect(isProductionTrialState(retuneAccepted)).toBe(false);
+
+    const retry = await submission("trial-1", 2);
+    const withLatestRetry = appendProductionTrialAttempt(
+      setPendingProductionTrial(
+        invalidateProductionTrialAcceptance(accepted),
+        retry.pending,
+      ),
+      {
+        run: { run_id: "trial-2", status: "completed" },
+        pending: retry.pending,
+        observed_at: CREATED_AT,
+      },
+    );
+    const olderAttemptAccepted = {
+      ...withLatestRetry,
+      accepted: accepted.accepted,
+    };
+    expect(isProductionTrialState(olderAttemptAccepted)).toBe(false);
+    expect(() =>
+      acceptProductionTrial(withLatestRetry, {
+        run: { run_id: "trial-1", status: "completed" },
+        current_intent_sha256: pending.intent_sha256,
+        readiness,
+        accepted_at: CREATED_AT,
+      }),
+    ).toThrow("not eligible");
     const corruptions = [
       (value: ProductionTrialState) => {
         value.accepted!.intent_sha256 = "0".repeat(64);
@@ -1307,6 +2105,14 @@ describe("production trial state validation", () => {
       },
       (value: ProductionTrialState) => {
         value.accepted!.readiness.artifact_names = ["same", "same"];
+      },
+      (value: ProductionTrialState) => {
+        value.accepted!.readiness.operator_visual_confirmation!.evidence_generation =
+          "0".repeat(64);
+      },
+      (value: ProductionTrialState) => {
+        value.accepted!.readiness.operator_visual_confirmation!.threshold_profile_sha256 =
+          "0".repeat(64);
       },
     ];
     for (const corrupt of corruptions) {
