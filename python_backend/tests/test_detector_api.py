@@ -632,7 +632,7 @@ class DetectorApiTests(unittest.TestCase):
                 set(execution_bundle["code_commit_blob_files"]),
             )
             self.assertEqual(
-                "git_clean_filter_to_commit_blob",
+                "exact_or_crlf_to_lf_commit_blob",
                 execution_bundle["code_commit_binding_kind"],
             )
             self.assertRegex(

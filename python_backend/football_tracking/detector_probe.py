@@ -482,6 +482,9 @@ class DetectorProbeCoordinator:
         self._execution_quarantined = False
         self._quarantined_execution_lease: Any | None = None
         self._quarantine_child_exited = False
+        self._quarantine_watchers = 0
+        self._quarantine_cleanup_drained = threading.Event()
+        self._quarantine_cleanup_drained.set()
         try:
             with self._lock:
                 self._load_and_recover_jobs()
@@ -1007,7 +1010,12 @@ class DetectorProbeCoordinator:
         if dispatcher is not None:
             dispatcher.join(timeout=max(0.0, deadline - time.monotonic()))
         self._executions_drained.wait(timeout=max(0.0, deadline - time.monotonic()))
-        shutdown_complete = (dispatcher is None or not dispatcher.is_alive()) and self._executions_drained.is_set()
+        self._quarantine_cleanup_drained.wait(timeout=max(0.0, deadline - time.monotonic()))
+        shutdown_complete = (
+            (dispatcher is None or not dispatcher.is_alive())
+            and self._executions_drained.is_set()
+            and self._quarantine_cleanup_drained.is_set()
+        )
         if not shutdown_complete:
             threading.Thread(
                 target=self._release_lease_after_shutdown,
@@ -1022,6 +1030,7 @@ class DetectorProbeCoordinator:
         if dispatcher is not None:
             dispatcher.join()
         self._executions_drained.wait()
+        self._quarantine_cleanup_drained.wait()
         self._release_owner_lease()
 
     def _begin_active_execution(self) -> None:
@@ -2145,6 +2154,8 @@ class DetectorProbeCoordinator:
             child.quarantined = True
             self._execution_quarantined = True
             self._quarantine_child_exited = False
+            self._quarantine_watchers += 1
+            self._quarantine_cleanup_drained.clear()
         threading.Thread(
             target=self._watch_quarantined_worker,
             args=(job_id, child),
@@ -2182,6 +2193,10 @@ class DetectorProbeCoordinator:
                 _unlock_handle(execution_lease)
             finally:
                 execution_lease.close()
+        with self._quarantine_lock:
+            self._quarantine_watchers -= 1
+            if self._quarantine_watchers == 0:
+                self._quarantine_cleanup_drained.set()
 
     def _worker_is_alive(self, job_id: str) -> bool:
         with self._children_lock:

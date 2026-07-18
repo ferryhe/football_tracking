@@ -1729,7 +1729,8 @@ class DetectorProbeJobTests(unittest.TestCase):
 
     def setUp(self) -> None:
         development = self.repo_root / "data" / "ball_detector_development_v1"
-        shutil.rmtree(development, ignore_errors=True)
+        if development.exists():
+            shutil.rmtree(development)
 
     def _request(self, **patch_values: object) -> dict[str, object]:
         request: dict[str, object] = {
@@ -3869,6 +3870,67 @@ finally:
         self.assertEqual("worker_termination_failed", first_failed["error_code"])
         self.assertIsNone(first_failed["report"])
         first.close()
+
+    def test_close_waits_for_quarantine_watcher_to_release_global_lease(self) -> None:
+        import football_tracking.detector_probe as probe_module
+
+        service = self._supervised_service("hang")
+        coordinator = service._probes()
+        cleanup_entered = threading.Event()
+        release_cleanup = threading.Event()
+        owner_release_attempted = threading.Event()
+        original_unlock = probe_module._unlock_handle
+        original_owner_release = coordinator._release_owner_lease
+
+        def blocking_execution_lease_unlock(handle) -> None:
+            if Path(handle.name) == coordinator._execution_lease_path:
+                cleanup_entered.set()
+                self.assertTrue(release_cleanup.wait(5))
+            original_unlock(handle)
+
+        def observed_owner_release() -> None:
+            owner_release_attempted.set()
+            original_owner_release()
+
+        child = None
+        closer = None
+        try:
+            with (
+                patch.object(coordinator, "_signal_worker_tree", return_value=None),
+                patch.object(coordinator, "_wait_for_worker_exit", return_value=False),
+            ):
+                job = service.create_probe(self._request())
+                service.execute_probe(job["job_id"])
+                with coordinator._children_lock:
+                    child = coordinator._children[job["job_id"]]
+
+            with (
+                patch.object(probe_module, "_unlock_handle", side_effect=blocking_execution_lease_unlock),
+                patch.object(coordinator, "_release_owner_lease", side_effect=observed_owner_release),
+            ):
+                child.process.kill()
+                self.assertTrue(cleanup_entered.wait(5))
+                with coordinator._children_lock:
+                    self.assertEqual({}, coordinator._children)
+
+                closer = threading.Thread(target=service.close)
+                closer.start()
+                self.assertFalse(owner_release_attempted.wait(0.25))
+                self.assertTrue(closer.is_alive())
+                self.assertIsNotNone(coordinator._owner_lease)
+
+                release_cleanup.set()
+                self.assertTrue(owner_release_attempted.wait(5))
+                closer.join(5)
+                self.assertFalse(closer.is_alive())
+                self.assertIsNone(coordinator._owner_lease)
+        finally:
+            release_cleanup.set()
+            if child is not None and child.process.poll() is None:
+                child.process.kill()
+            if closer is not None:
+                closer.join(5)
+            service.close()
 
     def test_containment_false_or_exception_quarantines_before_cleanup(self) -> None:
         cases: tuple[object, ...] = (False, OSError("job query failed"))
