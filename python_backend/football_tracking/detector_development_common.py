@@ -379,7 +379,7 @@ def _capture_ancestor_identities(
     path: Path,
     trusted_root: Path | None,
     label: str,
-) -> tuple[tuple[Path, tuple[int, int, int, int, int]], ...]:
+) -> tuple[tuple[Path, tuple[int, int]], ...]:
     if trusted_root is None:
         root = _secure_resolved_root(path.parent, label)
     else:
@@ -389,32 +389,40 @@ def _capture_ancestor_identities(
         candidate.relative_to(root)
     except ValueError as exc:
         raise DetectorDevelopmentError("path_outside_trusted_root", f"{label} escapes its trusted root") from exc
-    identities: list[tuple[Path, tuple[int, int, int, int, int]]] = []
+    identities: list[tuple[Path, tuple[int, int]]] = []
     current = root
     relative_parent = candidate.parent.relative_to(root)
     for part in (Path(), *relative_parent.parts):
         if part != Path():
             current = current / part
-        if is_link_or_reparse(current):
-            raise DetectorDevelopmentError("unsafe_path", f"{label} traverses a link or reparse point")
         try:
-            metadata = current.stat()
+            metadata = current.lstat()
         except OSError as exc:
             raise DetectorDevelopmentError("path_unavailable", f"{label} ancestor is unavailable") from exc
+        if stat.S_ISLNK(metadata.st_mode) or bool(
+            getattr(metadata, "st_file_attributes", 0) & WINDOWS_REPARSE_ATTRIBUTE
+        ):
+            raise DetectorDevelopmentError("unsafe_path", f"{label} traverses a link or reparse point")
         if not stat.S_ISDIR(metadata.st_mode):
             raise DetectorDevelopmentError("unsafe_path", f"{label} ancestor must be a directory")
-        identities.append((current, stat_token(metadata)))
+        identities.append((current, (int(metadata.st_dev), int(metadata.st_ino))))
     return tuple(identities)
 
 
 def _ancestor_identities_are_current(
-    identities: tuple[tuple[Path, tuple[int, int, int, int, int]], ...]
+    identities: tuple[tuple[Path, tuple[int, int]], ...]
 ) -> bool:
     for path, expected in identities:
         try:
-            if is_link_or_reparse(path) or stat_token(path.stat()) != expected:
-                return False
+            metadata = path.lstat()
         except OSError:
+            return False
+        if (
+            stat.S_ISLNK(metadata.st_mode)
+            or bool(getattr(metadata, "st_file_attributes", 0) & WINDOWS_REPARSE_ATTRIBUTE)
+            or not stat.S_ISDIR(metadata.st_mode)
+            or (int(metadata.st_dev), int(metadata.st_ino)) != expected
+        ):
             return False
     return True
 
