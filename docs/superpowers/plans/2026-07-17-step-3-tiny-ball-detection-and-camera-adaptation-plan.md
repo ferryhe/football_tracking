@@ -1,6 +1,6 @@
 # Step 3 Tiny-Ball Detection, Tuning, and Camera-Adaptation Plan
 
-**Status:** Execution active · PR-T2 in progress · independently reviewed final plan
+**Status:** Execution active · PR-T2 final evidence and merge gates in progress · independently reviewed final plan
 
 **Date:** 2026-07-17
 
@@ -14,16 +14,16 @@
 - Delivery order: `PR-T1 → PR-T2 → PR-T3 → PR-T4 → PR-T5`
 - Current PR: PR-T2 · Detector Model Registry and Bounded Probe Comparison
 - Current branch: `codex/tiny-ball-detector-registry-probes`
-- Current phase: PR-T1 merged and cleaned up · PR-T2 core/frontend/contract gates green · final execution-provenance hardening in progress before real-video evidence
+- Current phase: PR-T1 merged and cleaned up · PR-T2 implementation, final-code real-video evidence, full local gates, and independent reviews complete · PR publication in progress
 - Managed workflow authorized: 2026-07-17
 - Heartbeat: active · `tiny-ball-step3-managed-pr-heartbeat` · every 15 minutes
 - Merge rule: implementation, specification review, quality review, local/CI checks, then a complete 10-minute remote-feedback window; any material corrective push restarts that window
-- Blockers: none requiring user action. PR-T1 merged as `6a9db0e4d85047c2ca03ec8b2dc936fe75f67a41` after all local gates, replacement CI, independent reviews, and the complete replacement remote-feedback window passed. PR-T2's registry, safe import, bounded probes, API/UI comparison, exact parent-window binding, durable recovery, bounded rendering, supervised worker, source verification, and generated contracts are implemented; the enforced frontend suite passes 774/774 with each new core file above 90%, and canonical codegen is independently byte-idempotent with no workspace/lock/dependency change. A final-schema dry run proved one 11.34-second source hash and cache-hit retry but failed closed before inference with `worker_containment_unavailable`, so it is not evidence. Independent review then exposed merge-blocking execution provenance gaps: dirty/untracked code could be mislabeled as old-HEAD `bound`, five locally executed report-validation modules were outside the bundle, and Pydantic/Pydantic Core versions were absent from the environment binding. Those bindings must be repaired and independently reviewed before committing a clean execution bundle and rerunning the six-profile real source. The older `probe-6cf...` evidence remains historical. No dependency, workspace, lockfile, or committed weight change is authorized.
+- Blockers: none requiring user action. PR-T1 merged as `6a9db0e4d85047c2ca03ec8b2dc936fe75f67a41` after all local gates, replacement CI, independent reviews, and the complete replacement remote-feedback window passed. PR-T2 now implements the immutable registry, safe import/acquisition, direct and SAHI bounded jobs, API/UI comparison, durable recovery/cancellation, exact source/decode binding, Windows worker containment, atomic publication, strict generated contracts, and an execution bundle bound to 17 raw worktree files plus 17 Git commit blobs. Independent specification review is COMPLIANT; final quality/security review is APPROVE with P0=0/P1=0 and three documented non-blocking P2 follow-ups. The frontend suite passes 794/794 with global S/B/F/L 93.20/91.30/99.37/94.49; the repaired official Python route passes 1,848 with 66 skipped, 630 subtests, and zero failures/errors/warnings; the focused backend route passes 132 with 2 skipped and 111 subtests; OpenAPI plus React/Zod clients are byte-idempotent across 327 files; package, lock, workspace, and dependency files have zero content diff. Final real-video jobs `probe-308adcc1feaa99cc-bddecb26d127` and `probe-b59e904ee0b8a14f-e2aee08f414e` both reached `ready`, each completed 36 operations and 42 verified JPEG artifacts, bound final execution commit `7b8d45e121184f6bebe22e9a1fed4c9dca8a3a50`, performed only one 11.26 GB source hash across first/retry, reproduced the same two unconfirmed YOLO11s+SAHI suggestions, and passed the independent evidence audit. All local gates are complete; only PR publication, remote CI, and the restartable 10-minute remote-feedback window remain. Earlier dry runs and superseded evidence jobs remain historical and are not final evidence. No dependency, workspace, lockfile, committed weight, or production-approval change is authorized.
 
 | PR | Branch | Status | Pull request | Remote feedback | Merge |
 | --- | --- | --- | --- | --- | --- |
 | PR-T1 | `codex/tiny-ball-trial-diagnosis` | completed · Copilot corrections resolved · spec APPROVE · quality/security APPROVE · replacement CI passed | https://github.com/ferryhe/football_tracking/pull/112 | complete 2026-07-18T02:12:00Z–2026-07-18T02:22:27Z | `6a9db0e` · 2026-07-18T02:23:04Z |
-| PR-T2 | `codex/tiny-ball-detector-registry-probes` | active · execution provenance hardening before final-schema real-video evidence | pending | not started | pending |
+| PR-T2 | `codex/tiny-ball-detector-registry-probes` | active · all local/evidence/review gates complete · PR publication in progress | pending | not started | pending |
 | PR-T3 | pending | not started | pending | not started | pending |
 | PR-T4 | pending | not started | pending | not started | pending |
 | PR-T5 | pending | not started | pending | not started | pending |
