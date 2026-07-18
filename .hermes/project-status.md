@@ -5,24 +5,24 @@
 - Program status: active · five managed PRs authorized
 - Current PR: PR-T2 · Detector Model Registry and Bounded Probe Comparison
 - Current branch: codex/tiny-ball-detector-registry-probes
-- Current phase: PR-T1 merged and cleaned up · PR-T2 implementation, final-code real-video evidence, full local gates, and independent reviews complete · PR publication in progress
+- Current phase: PR-T1 merged and cleaned up · PR-T2 opened as #113 after all local/evidence/review gates · remote CI and restartable 10-minute feedback window in progress
 - Approval: the user authorized the final independently reviewed plan and the established managed-PR operating method on 2026-07-17.
 - Checks: PR-T1 merged as `6a9db0e4d85047c2ca03ec8b2dc936fe75f67a41` after the official Python route passed 1,748 tests with 64 skipped; full Vitest passed 542/542; Node and Python replacement CI passed; both independent reviews APPROVE; all Copilot threads were resolved; and the replacement remote-feedback window completed with zero new feedback. PR-T2 passes 794/794 frontend tests with global S/B/F/L 93.20/91.30/99.37/94.49; library and application TypeScript; production build/cutover verification; Ruff; OpenAPI check; and two byte-identical 327-file codegen manifests. The repaired official Python route passes 1,848 tests with 66 skipped, 630 subtests, and zero failures/errors/warnings in 571.22 seconds; the focused detector route passes 132 with 2 skipped and 111 subtests. Independent specification review is COMPLIANT and final quality/security review is APPROVE with P0=0/P1=0; three non-blocking P2 follow-ups cover bounded runtime-observation output, a fully event-driven negative timing assertion, and thread-start/multi-watcher fault injection. Final execution commit `7b8d45e121184f6bebe22e9a1fed4c9dca8a3a50` is bound through 17 raw worktree hashes, 17 commit-blob hashes, strict exact-or-CRLF normalization, runtime/schema versions, and decoder fingerprint. Final jobs `probe-308adcc1feaa99cc-bddecb26d127` and `probe-b59e904ee0b8a14f-e2aee08f414e` are both ready; each completed 36 operations and 42 independently hash/size/dimension-verified JPEG artifacts. The first performed one 12.769377-second full source hash; retry reused it and reproduced the same two unconfirmed YOLO11s+SAHI suggestions. The final independent evidence audit passed and candidate evidence is exact across retry.
-- Blockers: none requiring user action. All local implementation, full-suite, real-video, specification, and quality/security gates are complete; only PR publication, remote CI, and the restartable 10-minute remote-feedback window remain before merge. Earlier containment, sibling-churn, Windows sharing, incomplete-lineage, CRLF-ambiguity, and close/lease attempts are historical diagnostics only and are excluded from final evidence. Scope remains immutable model descriptors, safe import, bounded probe jobs, and side-by-side exploratory evidence; no dependency/workspace/lock/weight change or production-qualification claim is authorized.
-- Next: commit the final evidence/status update; push and open PR-T2; complete CI and a clean restartable 10-minute remote-feedback window; merge and clean up; then start PR-T3 from fresh main
+- Blockers: none requiring user action. All local implementation, full-suite, real-video, specification, and quality/security gates are complete; only remote CI and a clean restartable 10-minute remote-feedback window remain before merge. Earlier containment, sibling-churn, Windows sharing, incomplete-lineage, CRLF-ambiguity, and close/lease attempts are historical diagnostics only and are excluded from final evidence. Scope remains immutable model descriptors, safe import, bounded probe jobs, and side-by-side exploratory evidence; no dependency/workspace/lock/weight change or production-qualification claim is authorized.
+- Next: monitor PR #113 checks, Copilot reviews/comments, top-level discussion, and unresolved threads; resolve any actionable feedback and restart the full window after material pushes; merge and clean up only after a clean window; then start PR-T3 from fresh main
 - Heartbeat: ACTIVE
 - Heartbeat automation id: tiny-ball-step3-managed-pr-heartbeat
 - Heartbeat interval: every 15 minutes
 - Heartbeat scope: PR-T1 through PR-T5, including checks, feedback windows, merges, and cleanup
 - Dirty-baseline preservation: the pre-existing line-ending-only modification to `docs/superpowers/plans/2026-07-14-production-workflow-final-managed-pr-plan.md` is unrelated user state and must not be staged or changed by this program
-- Last updated: 2026-07-18 08:32 ET
+- Last updated: 2026-07-18 08:50 ET
 
 ## Current Program PR Ledger
 
 | PR | Branch | Status | Pull request | Remote feedback started | Merge |
 | --- | --- | --- | --- | --- | --- |
 | PR-T1 | codex/tiny-ball-trial-diagnosis | completed · Copilot corrections resolved · spec APPROVE · quality/security APPROVE · replacement CI passed | https://github.com/ferryhe/football_tracking/pull/112 | complete 2026-07-18T02:12:00Z–2026-07-18T02:22:27Z | `6a9db0e` · 2026-07-18T02:23:04Z |
-| PR-T2 | codex/tiny-ball-detector-registry-probes | active · all local/evidence/review gates complete · PR publication in progress | pending | not started | pending |
+| PR-T2 | codex/tiny-ball-detector-registry-probes | open · all local/evidence/review gates complete · remote checks/feedback in progress | https://github.com/ferryhe/football_tracking/pull/113 | starts after final status push | pending |
 | PR-T3 | pending | not started | pending | not started | pending |
 | PR-T4 | pending | not started | pending | not started | pending |
 | PR-T5 | pending | not started | pending | not started | pending |
