@@ -14,7 +14,7 @@
 - Delivery order: `PR-T1 → PR-T2 → PR-T3 → PR-T4 → PR-T5`
 - Current PR: PR-T1 · Fail-Closed Trial Diagnosis and Recovery Actions
 - Current branch: `codex/tiny-ball-trial-diagnosis`
-- Current phase: specification APPROVE · quality/security APPROVE · ready to submit PR
+- Current phase: PR #112 open · final remote-feedback window scheduled for 2026-07-18T01:57:00Z–2026-07-18T02:07:00Z
 - Managed workflow authorized: 2026-07-17
 - Heartbeat: active · `tiny-ball-step3-managed-pr-heartbeat` · every 15 minutes
 - Merge rule: implementation, specification review, quality review, local/CI checks, then a complete 10-minute remote-feedback window; any material corrective push restarts that window
@@ -22,7 +22,7 @@
 
 | PR | Branch | Status | Pull request | Remote feedback | Merge |
 | --- | --- | --- | --- | --- | --- |
-| PR-T1 | `codex/tiny-ball-trial-diagnosis` | ready to submit · spec APPROVE · quality/security APPROVE | pending | not started | pending |
+| PR-T1 | `codex/tiny-ball-trial-diagnosis` | open · spec APPROVE · quality/security APPROVE · checks/feedback monitoring | https://github.com/ferryhe/football_tracking/pull/112 | scheduled 2026-07-18T01:57:00Z–2026-07-18T02:07:00Z | pending |
 | PR-T2 | pending | not started | pending | not started | pending |
 | PR-T3 | pending | not started | pending | not started | pending |
 | PR-T4 | pending | not started | pending | not started | pending |

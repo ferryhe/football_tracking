@@ -5,11 +5,11 @@
 - Program status: active · five managed PRs authorized
 - Current PR: PR-T1 · Fail-Closed Trial Diagnosis and Recovery Actions
 - Current branch: codex/tiny-ball-trial-diagnosis
-- Current phase: specification APPROVE · quality/security APPROVE · ready to submit PR
+- Current phase: PR #112 open · final remote-feedback window scheduled for 2026-07-18T01:57:00Z–2026-07-18T02:07:00Z
 - Approval: the user authorized the final independently reviewed plan and the established managed-PR operating method on 2026-07-17.
 - Checks: the latest official Python route passed 1,748 tests with 64 skipped in 465.219 seconds. Prior post-correction gates passed API 156 with 2 skipped and 14 subtests; config/provider/OpenAPI 34 with 6 subtests; Web Vitest 538/538; Chromium 43/43; application/test TypeScript; Ruff; production build and cutover bundle inspection; `git diff --check`; and two byte-identical OpenAPI/React/Zod generations. Test-only ports are closed and the user's existing 5173 service remains running.
 - Blockers: none. Final specification and quality/security reviews both APPROVE. Mount-scoped operation epochs invalidate every stale post-await path; real unmount/remount and post-POST durable-pending regressions pass.
-- Next: complete selective staging and boundary checks; open the PR; observe the complete 10-minute remote-feedback window; then merge before PR-T2
+- Next: push this status record; observe the complete 10-minute remote-feedback window through 2026-07-18T02:07:00Z; resolve all valid or ambiguous feedback and restart the window after any material push; merge only when CI and thread-aware audits are clear; then start PR-T2 from refreshed main
 - Heartbeat: ACTIVE
 - Heartbeat automation id: tiny-ball-step3-managed-pr-heartbeat
 - Heartbeat interval: every 15 minutes
@@ -21,7 +21,7 @@
 
 | PR | Branch | Status | Pull request | Remote feedback started | Merge |
 | --- | --- | --- | --- | --- | --- |
-| PR-T1 | codex/tiny-ball-trial-diagnosis | ready to submit · spec APPROVE · quality/security APPROVE | pending | not started | pending |
+| PR-T1 | codex/tiny-ball-trial-diagnosis | open · spec APPROVE · quality/security APPROVE · checks/feedback monitoring | https://github.com/ferryhe/football_tracking/pull/112 | scheduled 2026-07-18T01:57:00Z–2026-07-18T02:07:00Z | pending |
 | PR-T2 | pending | not started | pending | not started | pending |
 | PR-T3 | pending | not started | pending | not started | pending |
 | PR-T4 | pending | not started | pending | not started | pending |
