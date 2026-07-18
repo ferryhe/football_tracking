@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import os
 import shutil
 import subprocess
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -21,6 +23,12 @@ from football_tracking.detector_development_common import (
 
 
 class TrustedRegularFileReadTests(unittest.TestCase):
+    @staticmethod
+    def _sharing_error(winerror: int = 5) -> PermissionError:
+        error = PermissionError("controlled Windows sharing collision")
+        error.winerror = winerror
+        return error
+
     def _create_directory_link(self, link: Path, target: Path) -> None:
         if os.name == "nt":
             completed = subprocess.run(
@@ -382,6 +390,335 @@ class TrustedRegularFileReadTests(unittest.TestCase):
 
             self.assertTrue(disappeared)
             self.assertEqual("source_changed", raised.exception.code)
+
+    def test_atomic_write_retries_bounded_windows_sharing_collisions(self) -> None:
+        for winerror in (5, 32):
+            with self.subTest(winerror=winerror), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                destination = root / "heartbeat.json"
+                atomic_write_json(destination, {"sequence": 0}, trusted_root=root)
+                original_replace = common.os.replace
+                attempts = 0
+
+                def flaky_replace(source: Path, target: Path) -> None:
+                    nonlocal attempts
+                    attempts += 1
+                    if attempts < 3:
+                        raise self._sharing_error(winerror)
+                    original_replace(source, target)
+
+                with (
+                    patch.object(common.os, "replace", side_effect=flaky_replace),
+                    patch.object(
+                        common,
+                        "_is_windows_atomic_replace_sharing_error",
+                        return_value=True,
+                        create=True,
+                    ),
+                    patch.object(common.time, "sleep") as bounded_sleep,
+                ):
+                    atomic_write_json(destination, {"sequence": 1}, trusted_root=root)
+
+                self.assertEqual(3, attempts)
+                self.assertEqual(2, bounded_sleep.call_count)
+                self.assertEqual(
+                    {"sequence": 1},
+                    json.loads(destination.read_text(encoding="utf-8")),
+                )
+
+    def test_atomic_write_sharing_classifier_is_windows_and_code_specific(self) -> None:
+        with patch.object(common.os, "name", "nt"):
+            self.assertTrue(
+                common._is_windows_atomic_replace_sharing_error(
+                    self._sharing_error(5)
+                )
+            )
+            self.assertTrue(
+                common._is_windows_atomic_replace_sharing_error(
+                    self._sharing_error(32)
+                )
+            )
+            self.assertFalse(
+                common._is_windows_atomic_replace_sharing_error(
+                    self._sharing_error(33)
+                )
+            )
+        with patch.object(common.os, "name", "posix"):
+            self.assertFalse(
+                common._is_windows_atomic_replace_sharing_error(
+                    self._sharing_error(5)
+                )
+            )
+
+    def test_atomic_write_persistent_sharing_collision_is_bounded_and_cleans_temp(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            destination = root / "heartbeat.json"
+            atomic_write_json(destination, {"sequence": 0}, trusted_root=root)
+            attempts = 0
+
+            def locked_replace(_source: Path, _target: Path) -> None:
+                nonlocal attempts
+                attempts += 1
+                raise self._sharing_error()
+
+            with (
+                patch.object(common.os, "replace", side_effect=locked_replace),
+                patch.object(
+                    common,
+                    "_is_windows_atomic_replace_sharing_error",
+                    return_value=True,
+                    create=True,
+                ),
+                patch.object(
+                    common,
+                    "_WINDOWS_ATOMIC_REPLACE_RETRY_SECONDS",
+                    0.0,
+                    create=True,
+                ),
+                self.assertRaises(PermissionError),
+            ):
+                atomic_write_json(destination, {"sequence": 1}, trusted_root=root)
+
+            self.assertEqual(1, attempts)
+            self.assertEqual([], list(root.glob(".heartbeat.json.*.tmp")))
+            self.assertEqual(
+                {"sequence": 0},
+                json.loads(destination.read_text(encoding="utf-8")),
+            )
+
+    def test_atomic_write_does_not_attempt_after_retry_deadline(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            destination = root / "heartbeat.json"
+            atomic_write_json(destination, {"sequence": 0}, trusted_root=root)
+
+            with (
+                patch.object(
+                    common.os,
+                    "replace",
+                    side_effect=self._sharing_error(),
+                ) as replace,
+                patch.object(
+                    common,
+                    "_is_windows_atomic_replace_sharing_error",
+                    return_value=True,
+                ),
+                patch.object(
+                    common.time,
+                    "monotonic",
+                    side_effect=(100.0, 100.5, 101.0),
+                ),
+                patch.object(common.time, "sleep") as bounded_sleep,
+                self.assertRaises(PermissionError),
+            ):
+                atomic_write_json(destination, {"sequence": 1}, trusted_root=root)
+
+            self.assertEqual(1, replace.call_count)
+            bounded_sleep.assert_called_once_with(0.005)
+
+    def test_atomic_write_does_not_retry_nonsharing_or_disk_full_errors(self) -> None:
+        cases = (
+            (PermissionError("permanent ACL denial"), False),
+            (OSError(errno.ENOSPC, "controlled disk full"), False),
+        )
+        for failure, retryable in cases:
+            with self.subTest(failure=type(failure).__name__), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                destination = root / "job.json"
+                attempts = 0
+
+                def failed_replace(_source: Path, _target: Path) -> None:
+                    nonlocal attempts
+                    attempts += 1
+                    raise failure
+
+                with (
+                    patch.object(common.os, "replace", side_effect=failed_replace),
+                    patch.object(
+                        common,
+                        "_is_windows_atomic_replace_sharing_error",
+                        return_value=retryable,
+                        create=True,
+                    ),
+                    self.assertRaises(type(failure)),
+                ):
+                    atomic_write_json(destination, {"status": "ready"}, trusted_root=root)
+
+                self.assertEqual(1, attempts)
+
+    def test_atomic_write_revalidates_ancestor_before_sharing_retry(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            destination = root / "heartbeat.json"
+            atomic_write_json(destination, {"sequence": 0}, trusted_root=root)
+            checks = iter((True, False))
+
+            with (
+                patch.object(
+                    common.os,
+                    "replace",
+                    side_effect=self._sharing_error(),
+                ) as replace,
+                patch.object(
+                    common,
+                    "_is_windows_atomic_replace_sharing_error",
+                    return_value=True,
+                    create=True,
+                ),
+                patch.object(
+                    common,
+                    "_ancestor_identities_are_current",
+                    side_effect=lambda _identities: next(checks),
+                ),
+                patch.object(common.time, "sleep"),
+                self.assertRaises(DetectorDevelopmentError) as raised,
+            ):
+                atomic_write_json(destination, {"sequence": 1}, trusted_root=root)
+
+            self.assertEqual("source_changed", raised.exception.code)
+            self.assertEqual(1, replace.call_count)
+
+    def test_atomic_write_rejects_temporary_tamper_during_sharing_retry(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            destination = root / "heartbeat.json"
+            atomic_write_json(destination, {"sequence": 0}, trusted_root=root)
+            attempts = 0
+
+            def tamper_then_lock(source: Path, _target: Path) -> None:
+                nonlocal attempts
+                attempts += 1
+                source.write_text('{"tampered":true}\n', encoding="utf-8")
+                raise self._sharing_error()
+
+            with (
+                patch.object(common.os, "replace", side_effect=tamper_then_lock),
+                patch.object(
+                    common,
+                    "_is_windows_atomic_replace_sharing_error",
+                    return_value=True,
+                    create=True,
+                ),
+                patch.object(common.time, "sleep"),
+                self.assertRaises(DetectorDevelopmentError) as raised,
+            ):
+                atomic_write_json(destination, {"sequence": 1}, trusted_root=root)
+
+            self.assertEqual("source_changed", raised.exception.code)
+            self.assertEqual(1, attempts)
+
+    def test_atomic_write_rejects_destination_tamper_during_sharing_retry(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            destination = root / "heartbeat.json"
+            atomic_write_json(destination, {"sequence": 0}, trusted_root=root)
+            attempts = 0
+
+            def tamper_then_lock(_source: Path, target: Path) -> None:
+                nonlocal attempts
+                attempts += 1
+                target.write_text('{"sequence":999}\n', encoding="utf-8")
+                raise self._sharing_error()
+
+            with (
+                patch.object(common.os, "replace", side_effect=tamper_then_lock),
+                patch.object(
+                    common,
+                    "_is_windows_atomic_replace_sharing_error",
+                    return_value=True,
+                ),
+                patch.object(common.time, "sleep"),
+                self.assertRaises(DetectorDevelopmentError) as raised,
+            ):
+                atomic_write_json(destination, {"sequence": 1}, trusted_root=root)
+
+            self.assertEqual("source_changed", raised.exception.code)
+            self.assertEqual(1, attempts)
+
+    def test_atomic_write_rejects_destination_reparse_during_sharing_retry(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            destination = root / "heartbeat.json"
+            external = root / "external"
+            external.mkdir()
+            attempts = 0
+
+            def link_then_lock(_source: Path, target: Path) -> None:
+                nonlocal attempts
+                attempts += 1
+                self._create_directory_link(target, external)
+                raise self._sharing_error()
+
+            try:
+                with (
+                    patch.object(common.os, "replace", side_effect=link_then_lock),
+                    patch.object(
+                        common,
+                        "_is_windows_atomic_replace_sharing_error",
+                        return_value=True,
+                    ),
+                    patch.object(common.time, "sleep"),
+                    self.assertRaises(DetectorDevelopmentError) as raised,
+                ):
+                    atomic_write_json(
+                        destination,
+                        {"sequence": 1},
+                        trusted_root=root,
+                    )
+            finally:
+                self._remove_directory_link(destination)
+
+            self.assertEqual("unsafe_path", raised.exception.code)
+            self.assertEqual(1, attempts)
+
+    @unittest.skipUnless(os.name == "nt", "Windows sharing semantics only")
+    def test_atomic_heartbeat_write_survives_concurrent_same_path_reads(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            heartbeat = root / "heartbeat.json"
+            atomic_write_json(heartbeat, {"sequence": 0}, trusted_root=root)
+            stop = threading.Event()
+            unexpected: list[BaseException] = []
+
+            def read_heartbeat() -> None:
+                while not stop.is_set():
+                    try:
+                        read_regular_bytes(
+                            heartbeat,
+                            "detector probe worker heartbeat",
+                            max_bytes=4096,
+                            trusted_root=root,
+                        )
+                    except DetectorDevelopmentError as exc:
+                        if exc.code not in {"source_changed", "path_unavailable"}:
+                            unexpected.append(exc)
+                            return
+                    except BaseException as exc:
+                        unexpected.append(exc)
+                        return
+
+            reader = threading.Thread(target=read_heartbeat, daemon=True)
+            reader.start()
+            try:
+                for sequence in range(1, 501):
+                    atomic_write_json(
+                        heartbeat,
+                        {"sequence": sequence},
+                        trusted_root=root,
+                    )
+            finally:
+                stop.set()
+                reader.join(timeout=5.0)
+
+            self.assertFalse(reader.is_alive())
+            self.assertEqual([], unexpected)
+            self.assertEqual(
+                {"sequence": 500},
+                json.loads(heartbeat.read_text(encoding="utf-8")),
+            )
 
 
 if __name__ == "__main__":

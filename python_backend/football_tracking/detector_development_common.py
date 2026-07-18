@@ -6,6 +6,7 @@ import math
 import os
 import re
 import stat
+import time
 import unicodedata
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
@@ -14,6 +15,10 @@ from typing import Any
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 SAFE_ID_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,119}$")
 WINDOWS_REPARSE_ATTRIBUTE = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+_WINDOWS_ATOMIC_REPLACE_RETRY_SECONDS = 0.75
+_WINDOWS_ATOMIC_REPLACE_INITIAL_BACKOFF_SECONDS = 0.005
+_WINDOWS_ATOMIC_REPLACE_MAX_BACKOFF_SECONDS = 0.02
+_WINDOWS_ATOMIC_REPLACE_SHARING_ERRORS = {5, 32}
 WINDOWS_RESERVED_NAMES = {
     "CON", "PRN", "AUX", "NUL",
     *(f"COM{index}" for index in range(1, 10)),
@@ -311,9 +316,8 @@ def atomic_write_json(path: Path, value: Any, *, trusted_root: Path | None = Non
         raise DetectorDevelopmentError("path_outside_trusted_root", "atomic JSON destination escapes its root") from exc
     if not destination.parent.is_dir():
         raise DetectorDevelopmentError("path_unavailable", "atomic JSON parent must already exist")
-    ancestors = _capture_directory_object_identities(root, destination.parent, "atomic JSON")
-    if is_link_or_reparse(destination) or is_link_or_reparse(destination.parent):
-        raise DetectorDevelopmentError("unsafe_path", "atomic JSON destination must not be a link or reparse point")
+    ancestors = _capture_ancestor_identities(destination, root, "atomic JSON")
+    destination_identity = _atomic_json_destination_identity(destination)
     temporary = destination.with_name(f".{destination.name}.{os.getpid()}.{id(value)}.tmp")
     content = json.dumps(value, ensure_ascii=False, allow_nan=False, sort_keys=True, indent=2) + "\n"
     expected_sha256 = hashlib.sha256(content.encode("utf-8")).hexdigest()
@@ -322,10 +326,18 @@ def atomic_write_json(path: Path, value: Any, *, trusted_root: Path | None = Non
             handle.write(content)
             handle.flush()
             os.fsync(handle.fileno())
-        if not _directory_object_identities_are_current(ancestors):
-            raise DetectorDevelopmentError("source_changed", "atomic JSON ancestor changed before publication")
-        os.replace(temporary, destination)
-        if not _directory_object_identities_are_current(ancestors):
+        temporary_identity = regular_file_change_identity(
+            temporary,
+            "atomic JSON temporary",
+        )
+        _replace_atomic_json_with_bounded_windows_retry(
+            temporary,
+            destination,
+            ancestors=ancestors,
+            destination_identity=destination_identity,
+            temporary_identity=temporary_identity,
+        )
+        if not _ancestor_identities_are_current(ancestors):
             raise DetectorDevelopmentError("source_changed", "atomic JSON ancestor changed during publication")
         actual_sha256, _ = hash_regular_file(
             destination,
@@ -340,6 +352,97 @@ def atomic_write_json(path: Path, value: Any, *, trusted_root: Path | None = Non
             temporary.unlink(missing_ok=True)
         except OSError:
             pass
+
+
+def _replace_atomic_json_with_bounded_windows_retry(
+    temporary: Path,
+    destination: Path,
+    *,
+    ancestors: tuple[tuple[Path, tuple[int, int]], ...],
+    destination_identity: tuple[int, int, int, int, int] | None,
+    temporary_identity: tuple[int, int, int, int, int, int],
+) -> None:
+    deadline = time.monotonic() + _WINDOWS_ATOMIC_REPLACE_RETRY_SECONDS
+    backoff = _WINDOWS_ATOMIC_REPLACE_INITIAL_BACKOFF_SECONDS
+    last_sharing_error: PermissionError | None = None
+    while True:
+        if last_sharing_error is not None and time.monotonic() >= deadline:
+            raise last_sharing_error
+        if not _ancestor_identities_are_current(ancestors):
+            raise DetectorDevelopmentError(
+                "source_changed",
+                "atomic JSON ancestor changed before publication",
+            )
+        if _atomic_json_destination_identity(destination) != destination_identity:
+            raise DetectorDevelopmentError(
+                "source_changed",
+                "atomic JSON destination changed before publication",
+            )
+        try:
+            current_temporary_identity = regular_file_change_identity(
+                temporary,
+                "atomic JSON temporary",
+            )
+        except DetectorDevelopmentError as exc:
+            raise DetectorDevelopmentError(
+                "source_changed",
+                "atomic JSON temporary changed before publication",
+            ) from exc
+        if current_temporary_identity != temporary_identity:
+            raise DetectorDevelopmentError(
+                "source_changed",
+                "atomic JSON temporary changed before publication",
+            )
+        try:
+            os.replace(temporary, destination)
+            return
+        except PermissionError as exc:
+            if not _is_windows_atomic_replace_sharing_error(exc):
+                raise
+            remaining = deadline - time.monotonic()
+            if remaining <= 0.0:
+                raise
+            last_sharing_error = exc
+            time.sleep(min(backoff, remaining))
+            backoff = min(
+                backoff * 2.0,
+                _WINDOWS_ATOMIC_REPLACE_MAX_BACKOFF_SECONDS,
+            )
+
+
+def _is_windows_atomic_replace_sharing_error(exc: PermissionError) -> bool:
+    return (
+        os.name == "nt"
+        and getattr(exc, "winerror", None)
+        in _WINDOWS_ATOMIC_REPLACE_SHARING_ERRORS
+    )
+
+
+def _atomic_json_destination_identity(
+    destination: Path,
+) -> tuple[int, int, int, int, int] | None:
+    try:
+        metadata = destination.lstat()
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise DetectorDevelopmentError(
+            "path_unavailable",
+            "atomic JSON destination is unavailable",
+        ) from exc
+    if stat.S_ISLNK(metadata.st_mode) or bool(
+        getattr(metadata, "st_file_attributes", 0) & WINDOWS_REPARSE_ATTRIBUTE
+    ):
+        raise DetectorDevelopmentError(
+            "unsafe_path",
+            "atomic JSON destination must not be a link or reparse point",
+        )
+    if not stat.S_ISREG(metadata.st_mode):
+        raise DetectorDevelopmentError(
+            "unsafe_path",
+            "atomic JSON destination must be a regular file",
+        )
+    return stat_token(metadata)
 
 
 def secure_mkdirs(root: Path, *parts: str) -> Path:
@@ -447,42 +550,6 @@ def _secure_resolved_root(root: Path, label: str) -> Path:
     if resolved != raw:
         raise DetectorDevelopmentError("unsafe_trusted_root", f"{label} trusted root identity is ambiguous")
     return resolved
-
-
-def _capture_directory_object_identities(
-    root: Path,
-    parent: Path,
-    label: str,
-) -> tuple[tuple[Path, tuple[int, int]], ...]:
-    identities: list[tuple[Path, tuple[int, int]]] = []
-    current = root
-    for part in (Path(), *parent.relative_to(root).parts):
-        if part != Path():
-            current = current / part
-        if is_link_or_reparse(current):
-            raise DetectorDevelopmentError("unsafe_path", f"{label} traverses a link or reparse point")
-        metadata = current.stat()
-        if not stat.S_ISDIR(metadata.st_mode):
-            raise DetectorDevelopmentError("unsafe_path", f"{label} ancestor must be a directory")
-        identities.append((current, (int(metadata.st_dev), int(metadata.st_ino))))
-    return tuple(identities)
-
-
-def _directory_object_identities_are_current(
-    identities: tuple[tuple[Path, tuple[int, int]], ...]
-) -> bool:
-    for path, expected in identities:
-        try:
-            metadata = path.stat()
-        except OSError:
-            return False
-        if (
-            is_link_or_reparse(path)
-            or not stat.S_ISDIR(metadata.st_mode)
-            or (int(metadata.st_dev), int(metadata.st_ino)) != expected
-        ):
-            return False
-    return True
 
 
 def finite_number(value: Any, label: str, *, minimum: float | None = None) -> float:
