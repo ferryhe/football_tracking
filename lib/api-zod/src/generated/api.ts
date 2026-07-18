@@ -1692,6 +1692,10 @@ export const getDetectorProbeResponseFrozenRequestExecutionBundleCodeBundleSha25
   new RegExp("^[0-9a-f]{64}$");
 export const getDetectorProbeResponseFrozenRequestExecutionBundleCodeCommitOneRegExp =
   new RegExp("^(?:[0-9a-f]{40}|[0-9a-f]{64})$");
+export const getDetectorProbeResponseFrozenRequestExecutionBundleCodeCommitBlobFilesOneRegExpOne =
+  new RegExp("^[0-9a-f]{64}$");
+export const getDetectorProbeResponseFrozenRequestExecutionBundleCodeCommitBlobBundleSha256OneRegExp =
+  new RegExp("^[0-9a-f]{64}$");
 export const getDetectorProbeResponseFrozenRequestExecutionBundleFrozenProfilesSha256RegExp =
   new RegExp("^[0-9a-f]{64}$");
 export const getDetectorProbeResponseFrozenRequestExecutionBundleSha256RegExp =
@@ -1800,6 +1804,10 @@ export const getDetectorProbeResponseReportOneLineageExecutionBundleCodeBundleSh
   new RegExp("^[0-9a-f]{64}$");
 export const getDetectorProbeResponseReportOneLineageExecutionBundleCodeCommitOneRegExp =
   new RegExp("^(?:[0-9a-f]{40}|[0-9a-f]{64})$");
+export const getDetectorProbeResponseReportOneLineageExecutionBundleCodeCommitBlobFilesOneRegExpOne =
+  new RegExp("^[0-9a-f]{64}$");
+export const getDetectorProbeResponseReportOneLineageExecutionBundleCodeCommitBlobBundleSha256OneRegExp =
+  new RegExp("^[0-9a-f]{64}$");
 export const getDetectorProbeResponseReportOneLineageExecutionBundleFrozenProfilesSha256RegExp =
   new RegExp("^[0-9a-f]{64}$");
 export const getDetectorProbeResponseReportOneLineageExecutionBundleSha256RegExp =
@@ -2171,6 +2179,29 @@ export const GetDetectorProbeResponse = zod.object({
           "code_bundle_differs_from_commit",
           "repository_commit_unavailable",
         ]),
+        zod.null(),
+      ]),
+      code_commit_blob_files: zod.union([
+        zod.record(
+          zod.string(),
+          zod
+            .string()
+            .regex(
+              getDetectorProbeResponseFrozenRequestExecutionBundleCodeCommitBlobFilesOneRegExpOne,
+            ),
+        ),
+        zod.null(),
+      ]),
+      code_commit_blob_bundle_sha256: zod.union([
+        zod
+          .string()
+          .regex(
+            getDetectorProbeResponseFrozenRequestExecutionBundleCodeCommitBlobBundleSha256OneRegExp,
+          ),
+        zod.null(),
+      ]),
+      code_commit_binding_kind: zod.union([
+        zod.literal("exact_or_crlf_to_lf_commit_blob"),
         zod.null(),
       ]),
       frozen_profiles_sha256: zod
@@ -2627,6 +2658,29 @@ export const GetDetectorProbeResponse = zod.object({
               "code_bundle_differs_from_commit",
               "repository_commit_unavailable",
             ]),
+            zod.null(),
+          ]),
+          code_commit_blob_files: zod.union([
+            zod.record(
+              zod.string(),
+              zod
+                .string()
+                .regex(
+                  getDetectorProbeResponseReportOneLineageExecutionBundleCodeCommitBlobFilesOneRegExpOne,
+                ),
+            ),
+            zod.null(),
+          ]),
+          code_commit_blob_bundle_sha256: zod.union([
+            zod
+              .string()
+              .regex(
+                getDetectorProbeResponseReportOneLineageExecutionBundleCodeCommitBlobBundleSha256OneRegExp,
+              ),
+            zod.null(),
+          ]),
+          code_commit_binding_kind: zod.union([
+            zod.literal("exact_or_crlf_to_lf_commit_blob"),
             zod.null(),
           ]),
           frozen_profiles_sha256: zod
@@ -3304,6 +3358,10 @@ export const cancelDetectorProbeResponseFrozenRequestExecutionBundleCodeBundleSh
   new RegExp("^[0-9a-f]{64}$");
 export const cancelDetectorProbeResponseFrozenRequestExecutionBundleCodeCommitOneRegExp =
   new RegExp("^(?:[0-9a-f]{40}|[0-9a-f]{64})$");
+export const cancelDetectorProbeResponseFrozenRequestExecutionBundleCodeCommitBlobFilesOneRegExpOne =
+  new RegExp("^[0-9a-f]{64}$");
+export const cancelDetectorProbeResponseFrozenRequestExecutionBundleCodeCommitBlobBundleSha256OneRegExp =
+  new RegExp("^[0-9a-f]{64}$");
 export const cancelDetectorProbeResponseFrozenRequestExecutionBundleFrozenProfilesSha256RegExp =
   new RegExp("^[0-9a-f]{64}$");
 export const cancelDetectorProbeResponseFrozenRequestExecutionBundleSha256RegExp =
@@ -3409,6 +3467,10 @@ export const cancelDetectorProbeResponseReportOneLineageExecutionBundleCodeBundl
   new RegExp("^[0-9a-f]{64}$");
 export const cancelDetectorProbeResponseReportOneLineageExecutionBundleCodeCommitOneRegExp =
   new RegExp("^(?:[0-9a-f]{40}|[0-9a-f]{64})$");
+export const cancelDetectorProbeResponseReportOneLineageExecutionBundleCodeCommitBlobFilesOneRegExpOne =
+  new RegExp("^[0-9a-f]{64}$");
+export const cancelDetectorProbeResponseReportOneLineageExecutionBundleCodeCommitBlobBundleSha256OneRegExp =
+  new RegExp("^[0-9a-f]{64}$");
 export const cancelDetectorProbeResponseReportOneLineageExecutionBundleFrozenProfilesSha256RegExp =
   new RegExp("^[0-9a-f]{64}$");
 export const cancelDetectorProbeResponseReportOneLineageExecutionBundleSha256RegExp =
@@ -3788,6 +3850,29 @@ export const CancelDetectorProbeResponse = zod.object({
           "code_bundle_differs_from_commit",
           "repository_commit_unavailable",
         ]),
+        zod.null(),
+      ]),
+      code_commit_blob_files: zod.union([
+        zod.record(
+          zod.string(),
+          zod
+            .string()
+            .regex(
+              cancelDetectorProbeResponseFrozenRequestExecutionBundleCodeCommitBlobFilesOneRegExpOne,
+            ),
+        ),
+        zod.null(),
+      ]),
+      code_commit_blob_bundle_sha256: zod.union([
+        zod
+          .string()
+          .regex(
+            cancelDetectorProbeResponseFrozenRequestExecutionBundleCodeCommitBlobBundleSha256OneRegExp,
+          ),
+        zod.null(),
+      ]),
+      code_commit_binding_kind: zod.union([
+        zod.literal("exact_or_crlf_to_lf_commit_blob"),
         zod.null(),
       ]),
       frozen_profiles_sha256: zod
@@ -4254,6 +4339,29 @@ export const CancelDetectorProbeResponse = zod.object({
               "code_bundle_differs_from_commit",
               "repository_commit_unavailable",
             ]),
+            zod.null(),
+          ]),
+          code_commit_blob_files: zod.union([
+            zod.record(
+              zod.string(),
+              zod
+                .string()
+                .regex(
+                  cancelDetectorProbeResponseReportOneLineageExecutionBundleCodeCommitBlobFilesOneRegExpOne,
+                ),
+            ),
+            zod.null(),
+          ]),
+          code_commit_blob_bundle_sha256: zod.union([
+            zod
+              .string()
+              .regex(
+                cancelDetectorProbeResponseReportOneLineageExecutionBundleCodeCommitBlobBundleSha256OneRegExp,
+              ),
+            zod.null(),
+          ]),
+          code_commit_binding_kind: zod.union([
+            zod.literal("exact_or_crlf_to_lf_commit_blob"),
             zod.null(),
           ]),
           frozen_profiles_sha256: zod

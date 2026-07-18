@@ -2240,6 +2240,10 @@ export const DetectorProbeExecutionBundleViewCodeCommitStatus = {
   unavailable: "unavailable",
 } as const;
 
+export type DetectorProbeExecutionBundleViewCodeCommitBlobFiles = {
+  [key: string]: string;
+} | null;
+
 export type DetectorProbeExecutionEnvironmentViewDevice =
   (typeof DetectorProbeExecutionEnvironmentViewDevice)[keyof typeof DetectorProbeExecutionEnvironmentViewDevice];
 
@@ -2299,6 +2303,9 @@ export interface DetectorProbeExecutionBundleView {
     | "code_bundle_differs_from_commit"
     | "repository_commit_unavailable"
     | null;
+  code_commit_blob_files: DetectorProbeExecutionBundleViewCodeCommitBlobFiles;
+  code_commit_blob_bundle_sha256: string | null;
+  code_commit_binding_kind: "exact_or_crlf_to_lf_commit_blob" | null;
   /** @pattern ^[0-9a-f]{64}$ */
   frozen_profiles_sha256: string;
 }

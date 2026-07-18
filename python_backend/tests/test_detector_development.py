@@ -1030,58 +1030,157 @@ class ProbeContractTests(unittest.TestCase):
         )
         return completed.stdout.strip()
 
-    def _commit_binding_fixture(self, *, include_second: bool = True) -> tuple[tempfile.TemporaryDirectory, Path, tuple[str, ...], str]:
+    @staticmethod
+    def _git_bytes(root: Path, *arguments: str, input_bytes: bytes | None = None) -> bytes:
+        completed = subprocess.run(
+            ["git", *arguments],
+            cwd=root,
+            check=True,
+            input=input_bytes,
+            stdin=subprocess.DEVNULL if input_bytes is None else None,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        return completed.stdout
+
+    def _commit_binding_fixture(
+        self,
+        *,
+        include_second: bool = True,
+        crlf_worktree: bool = False,
+        constant_clean_filter: bool = False,
+    ) -> tuple[tempfile.TemporaryDirectory, Path, tuple[str, ...], str]:
         temporary = tempfile.TemporaryDirectory()
         root = Path(temporary.name)
         paths = (
             "python_backend/football_tracking/detector_probe.py",
             "python_backend/football_tracking/api/schemas.py",
         )
-        for path in paths[: 2 if include_second else 1]:
-            target = root / Path(path)
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_text(f"# {path}\n", encoding="utf-8")
         self._git(root, "init")
         self._git(root, "config", "user.email", "probe-tests@example.invalid")
         self._git(root, "config", "user.name", "Probe Tests")
-        self._git(root, "add", "--", *paths[: 2 if include_second else 1])
+        self._git(root, "config", "core.autocrlf", "true" if crlf_worktree else "false")
+        if constant_clean_filter:
+            self._git(
+                root,
+                "config",
+                "filter.constant.clean",
+                "printf 'trusted-blob\\n'",
+            )
+            (root / ".gitattributes").write_text(
+                "".join(
+                    f"{path} filter=constant\n"
+                    for path in paths[: 2 if include_second else 1]
+                ),
+                encoding="utf-8",
+            )
+        for path in paths[: 2 if include_second else 1]:
+            target = root / Path(path)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            newline = b"\r\n" if crlf_worktree else b"\n"
+            target.write_bytes(b"# " + path.encode("utf-8") + newline)
+        files_to_add = list(paths[: 2 if include_second else 1])
+        if constant_clean_filter:
+            files_to_add.append(".gitattributes")
+        self._git(root, "add", "--", *files_to_add)
         self._git(root, "commit", "-m", "fixture")
         return temporary, root, paths, self._git(root, "rev-parse", "--verify", "HEAD").lower()
+
+    @staticmethod
+    def _assert_unbound_commit_evidence(binding) -> None:
+        assert binding.code_commit is None
+        assert binding.code_commit_status == "unbound"
+        assert binding.code_commit_reason == "code_bundle_differs_from_commit"
+        assert binding.code_commit_blob_files is None
+        assert binding.code_commit_blob_bundle_sha256 is None
+        assert binding.code_commit_binding_kind is None
+
+    @staticmethod
+    def _assert_unavailable_commit_evidence(binding) -> None:
+        assert binding.code_commit is None
+        assert binding.code_commit_status == "unavailable"
+        assert binding.code_commit_reason == "repository_commit_unavailable"
+        assert binding.code_commit_blob_files is None
+        assert binding.code_commit_blob_bundle_sha256 is None
+        assert binding.code_commit_binding_kind is None
+
+    def test_code_commit_binding_distinguishes_crlf_worktree_from_lf_blobs(self) -> None:
+        from football_tracking.detector_probe import DetectorProbeCoordinator
+
+        temporary, root, paths, commit = self._commit_binding_fixture(crlf_worktree=True)
+        try:
+            raw_worktree = {path: (root / Path(path)).read_bytes() for path in paths}
+            raw_blobs = {
+                path: self._git_bytes(root, "cat-file", "blob", f"{commit}:{path}")
+                for path in paths
+            }
+            self.assertTrue(all(b"\r\n" in content for content in raw_worktree.values()))
+            self.assertTrue(all(b"\r\n" not in content for content in raw_blobs.values()))
+
+            binding = DetectorProbeCoordinator._code_commit_binding(root, paths)
+
+            self.assertEqual(commit, binding.code_commit)
+            self.assertEqual("bound", binding.code_commit_status)
+            self.assertIsNone(binding.code_commit_reason)
+            self.assertEqual(
+                "exact_or_crlf_to_lf_commit_blob",
+                binding.code_commit_binding_kind,
+            )
+            self.assertEqual(
+                {path: hashlib.sha256(content).hexdigest() for path, content in raw_worktree.items()},
+                binding.worktree_files,
+            )
+            self.assertEqual(
+                {path: hashlib.sha256(content).hexdigest() for path, content in raw_blobs.items()},
+                binding.code_commit_blob_files,
+            )
+            self.assertNotEqual(binding.worktree_files, binding.code_commit_blob_files)
+            self.assertEqual(
+                canonical_sha256(binding.code_commit_blob_files),
+                binding.code_commit_blob_bundle_sha256,
+            )
+            self.assertEqual(raw_worktree, {path: (root / Path(path)).read_bytes() for path in paths})
+        finally:
+            temporary.cleanup()
 
     def test_code_commit_binding_requires_every_allowlisted_path_to_match_head(self) -> None:
         from football_tracking.detector_probe import DetectorProbeCoordinator
 
         temporary, root, paths, commit = self._commit_binding_fixture()
         try:
+            binding = DetectorProbeCoordinator._code_commit_binding(root, paths)
+            self.assertEqual(commit, binding.code_commit)
+            self.assertEqual("bound", binding.code_commit_status)
+            self.assertIsNone(binding.code_commit_reason)
             self.assertEqual(
-                (commit, "bound", None),
-                DetectorProbeCoordinator._code_commit_binding(root, paths),
+                "exact_or_crlf_to_lf_commit_blob",
+                binding.code_commit_binding_kind,
+            )
+            self.assertEqual(
+                canonical_sha256(binding.code_commit_blob_files),
+                binding.code_commit_blob_bundle_sha256,
             )
             unrelated = root / "unrelated.txt"
             unrelated.write_text("unrelated dirty state\n", encoding="utf-8")
-            self.assertEqual(
-                (commit, "bound", None),
-                DetectorProbeCoordinator._code_commit_binding(root, paths),
-            )
+            binding = DetectorProbeCoordinator._code_commit_binding(root, paths)
+            self.assertEqual(commit, binding.code_commit)
+            self.assertEqual("bound", binding.code_commit_status)
 
             tracked = root / Path(paths[0])
             tracked.write_text("modified\n", encoding="utf-8")
-            self.assertEqual(
-                (None, "unbound", "code_bundle_differs_from_commit"),
-                DetectorProbeCoordinator._code_commit_binding(root, paths),
+            self._assert_unbound_commit_evidence(
+                DetectorProbeCoordinator._code_commit_binding(root, paths)
             )
             self._git(root, "restore", "--", paths[0])
             tracked.unlink()
-            self.assertEqual(
-                (None, "unbound", "code_bundle_differs_from_commit"),
-                DetectorProbeCoordinator._code_commit_binding(root, paths),
+            self._assert_unbound_commit_evidence(
+                DetectorProbeCoordinator._code_commit_binding(root, paths)
             )
             self._git(root, "restore", "--", paths[0])
             renamed = "python_backend/football_tracking/renamed_probe.py"
             self._git(root, "mv", paths[0], renamed)
-            self.assertEqual(
-                (None, "unbound", "code_bundle_differs_from_commit"),
-                DetectorProbeCoordinator._code_commit_binding(root, paths),
+            self._assert_unbound_commit_evidence(
+                DetectorProbeCoordinator._code_commit_binding(root, paths)
             )
         finally:
             temporary.cleanup()
@@ -1091,9 +1190,8 @@ class ProbeContractTests(unittest.TestCase):
             untracked = root / Path(paths[1])
             untracked.parent.mkdir(parents=True, exist_ok=True)
             untracked.write_text("untracked\n", encoding="utf-8")
-            self.assertEqual(
-                (None, "unbound", "code_bundle_differs_from_commit"),
-                DetectorProbeCoordinator._code_commit_binding(root, paths),
+            self._assert_unbound_commit_evidence(
+                DetectorProbeCoordinator._code_commit_binding(root, paths)
             )
         finally:
             temporary.cleanup()
@@ -1114,21 +1212,221 @@ class ProbeContractTests(unittest.TestCase):
                     side_effect=failure if isinstance(failure, BaseException) else None,
                     return_value=None if isinstance(failure, BaseException) else failure,
                 ):
-                    self.assertEqual(
-                        (None, "unavailable", "repository_commit_unavailable"),
+                    self._assert_unavailable_commit_evidence(
                         DetectorProbeCoordinator._code_commit_binding(
                             Path("unused"),
                             ("python_backend/football_tracking/detector_probe.py",),
-                        ),
+                        )
                     )
 
-        self.assertEqual(
-            (None, "unavailable", "repository_commit_unavailable"),
-            DetectorProbeCoordinator._code_commit_binding(
-                Path("unused"),
-                (":(glob)python_backend/**/*.py",),
-            ),
+        for unsafe_path in (
+            ":(glob)python_backend/**/*.py",
+            "../detector_probe.py",
+            "/python_backend/detector_probe.py",
+            "python_backend\\detector_probe.py",
+            "python_backend/detector_probe.py\0suffix",
+        ):
+            with self.subTest(unsafe_path=unsafe_path):
+                self._assert_unavailable_commit_evidence(
+                    DetectorProbeCoordinator._code_commit_binding(
+                        Path("unused"),
+                        (unsafe_path,),
+                    )
+                )
+
+    def test_code_commit_binding_ignores_inherited_git_redirection_environment(self) -> None:
+        from football_tracking.detector_probe import DetectorProbeCoordinator
+
+        first_temporary, first_root, paths, first_commit = (
+            self._commit_binding_fixture()
         )
+        second_temporary, second_root, second_paths, _second_commit = (
+            self._commit_binding_fixture()
+        )
+        original_run = subprocess.run
+        observed_environments: list[dict[str, str]] = []
+        try:
+            redirected = second_root / Path(second_paths[0])
+            redirected.write_text("# redirected repository\n", encoding="utf-8")
+            self._git(second_root, "add", "--", second_paths[0])
+            self._git(second_root, "commit", "-m", "redirected fixture")
+            second_commit = self._git(
+                second_root,
+                "rev-parse",
+                "--verify",
+                "HEAD",
+            ).lower()
+            self.assertNotEqual(first_commit, second_commit)
+
+            def inspect_environment(command, **kwargs):
+                observed_environments.append(dict(kwargs["env"]))
+                return original_run(command, **kwargs)
+
+            malicious_git_environment = {
+                "GIT_DIR": str(second_root / ".git"),
+                "GIT_WORK_TREE": str(second_root),
+                "GIT_CONFIG_COUNT": "not-an-integer",
+                "GIT_CONFIG_KEY_0": "core.bare",
+                "GIT_CONFIG_VALUE_0": "true",
+            }
+            with (
+                patch.dict(os.environ, malicious_git_environment, clear=False),
+                patch(
+                    "football_tracking.detector_probe.subprocess.run",
+                    side_effect=inspect_environment,
+                ),
+            ):
+                binding = DetectorProbeCoordinator._code_commit_binding(
+                    first_root,
+                    paths,
+                )
+
+            self.assertEqual(first_commit, binding.code_commit)
+            self.assertEqual("bound", binding.code_commit_status)
+            self.assertTrue(observed_environments)
+            for environment in observed_environments:
+                inherited_git_names = {
+                    name
+                    for name in environment
+                    if name.upper().startswith("GIT_")
+                }
+                self.assertEqual({"GIT_TERMINAL_PROMPT"}, inherited_git_names)
+                self.assertEqual("0", environment["GIT_TERMINAL_PROMPT"])
+        finally:
+            second_temporary.cleanup()
+            first_temporary.cleanup()
+
+    def test_code_commit_binding_rejects_mismatched_reported_repository_root(self) -> None:
+        from football_tracking.detector_probe import DetectorProbeCoordinator
+
+        first_temporary, first_root, paths, _commit = self._commit_binding_fixture()
+        second_temporary, second_root, _second_paths, _second_commit = (
+            self._commit_binding_fixture()
+        )
+        original_run = subprocess.run
+        try:
+            def redirect_reported_root(command, **kwargs):
+                if command[1:] == ["rev-parse", "--show-toplevel"]:
+                    return subprocess.CompletedProcess(
+                        command,
+                        0,
+                        stdout=str(second_root).encode("utf-8") + b"\n",
+                        stderr=b"",
+                    )
+                return original_run(command, **kwargs)
+
+            with patch(
+                "football_tracking.detector_probe.subprocess.run",
+                side_effect=redirect_reported_root,
+            ):
+                self._assert_unavailable_commit_evidence(
+                    DetectorProbeCoordinator._code_commit_binding(first_root, paths)
+                )
+        finally:
+            second_temporary.cleanup()
+            first_temporary.cleanup()
+
+    def test_code_commit_binding_rejects_arbitrary_clean_filter_equivalence(self) -> None:
+        from football_tracking.detector_probe import DetectorProbeCoordinator
+
+        temporary, root, paths, commit = self._commit_binding_fixture(
+            constant_clean_filter=True
+        )
+        try:
+            status = self._git_bytes(
+                root,
+                "--literal-pathspecs",
+                "status",
+                "--porcelain=v1",
+                "-z",
+                "--",
+                *paths,
+            )
+            self.assertEqual(b"", status)
+            raw_worktree = {path: (root / Path(path)).read_bytes() for path in paths}
+            raw_blobs = {
+                path: self._git_bytes(root, "cat-file", "blob", f"{commit}:{path}")
+                for path in paths
+            }
+            self.assertTrue(
+                all(content == b"trusted-blob\n" for content in raw_blobs.values())
+            )
+            self.assertTrue(
+                all(content != raw_blobs[path] for path, content in raw_worktree.items())
+            )
+
+            self._assert_unbound_commit_evidence(
+                DetectorProbeCoordinator._code_commit_binding(root, paths)
+            )
+        finally:
+            temporary.cleanup()
+
+    def test_code_commit_binding_fails_closed_on_git_head_and_worktree_drift(self) -> None:
+        from football_tracking.detector_probe import DetectorProbeCoordinator
+
+        temporary, root, paths, _commit = self._commit_binding_fixture(
+            crlf_worktree=True
+        )
+        original_run = subprocess.run
+        try:
+            def git_failure(command, **kwargs):
+                if command[1:3] == ["cat-file", "blob"]:
+                    raise subprocess.TimeoutExpired(command, 2)
+                return original_run(command, **kwargs)
+
+            with patch(
+                "football_tracking.detector_probe.subprocess.run",
+                side_effect=git_failure,
+            ):
+                self._assert_unavailable_commit_evidence(
+                    DetectorProbeCoordinator._code_commit_binding(root, paths)
+                )
+
+            rev_parse_calls = 0
+
+            def drift_head_after_capture(command, **kwargs):
+                nonlocal rev_parse_calls
+                if command[1:] == ["rev-parse", "--verify", "HEAD"]:
+                    rev_parse_calls += 1
+                    if rev_parse_calls == 2:
+                        return subprocess.CompletedProcess(
+                            command,
+                            0,
+                            stdout=b"f" * 40 + b"\n",
+                            stderr=b"",
+                        )
+                return original_run(command, **kwargs)
+
+            with patch(
+                "football_tracking.detector_probe.subprocess.run",
+                side_effect=drift_head_after_capture,
+            ):
+                self._assert_unavailable_commit_evidence(
+                    DetectorProbeCoordinator._code_commit_binding(root, paths)
+                )
+            self.assertEqual(2, rev_parse_calls)
+
+            drifted = False
+
+            def drift_worktree_after_blob_read(command, **kwargs):
+                nonlocal drifted
+                completed = original_run(command, **kwargs)
+                if command[1:3] == ["cat-file", "blob"] and not drifted:
+                    drifted = True
+                    target = root / Path(paths[0])
+                    target.write_bytes(target.read_bytes().replace(b"\r\n", b"\n"))
+                return completed
+
+            with patch(
+                "football_tracking.detector_probe.subprocess.run",
+                side_effect=drift_worktree_after_blob_read,
+            ):
+                self._assert_unbound_commit_evidence(
+                    DetectorProbeCoordinator._code_commit_binding(root, paths)
+                )
+            self.assertTrue(drifted)
+        finally:
+            temporary.cleanup()
 
     def test_windows_parent_monitor_uses_explicit_process_handle_and_fails_closed(self) -> None:
         import football_tracking.detector_probe_worker as worker
@@ -1728,6 +2026,29 @@ class DetectorProbeJobTests(unittest.TestCase):
             canonical_sha256(bundle["code_bundle_files"]),
             bundle["code_bundle_sha256"],
         )
+        self.assertIn("code_commit_blob_files", bundle)
+        self.assertIn("code_commit_blob_bundle_sha256", bundle)
+        self.assertIn("code_commit_binding_kind", bundle)
+        if bundle["code_commit_status"] == "bound":
+            self.assertEqual(
+                set(bundle["code_bundle_files"]),
+                set(bundle["code_commit_blob_files"]),
+            )
+            self.assertEqual(
+                canonical_sha256(bundle["code_commit_blob_files"]),
+                bundle["code_commit_blob_bundle_sha256"],
+            )
+            self.assertEqual(
+                "exact_or_crlf_to_lf_commit_blob",
+                bundle["code_commit_binding_kind"],
+            )
+        else:
+            self.assertIsNone(bundle["code_commit_blob_files"])
+            self.assertIsNone(bundle["code_commit_blob_bundle_sha256"])
+            self.assertIsNone(bundle["code_commit_binding_kind"])
+        from football_tracking.api.schemas import DetectorProbeExecutionBundleView
+
+        DetectorProbeExecutionBundleView.model_validate(bundle)
         self.assertTrue(bundle["execution_environment"]["pydantic_version"])
         self.assertTrue(bundle["execution_environment"]["pydantic_core_version"])
 
@@ -1762,6 +2083,24 @@ class DetectorProbeJobTests(unittest.TestCase):
                 code_commit=None,
                 code_commit_status="bound",
                 code_commit_reason=None,
+            ),
+            lambda bundle: bundle.update(
+                code_commit="a" * 40,
+                code_commit_status="bound",
+                code_commit_reason=None,
+                code_commit_blob_files=dict(bundle["code_bundle_files"]),
+                code_commit_blob_bundle_sha256="b" * 64,
+                code_commit_binding_kind="exact_or_crlf_to_lf_commit_blob",
+            ),
+            lambda bundle: bundle.update(
+                code_commit="a" * 40,
+                code_commit_status="bound",
+                code_commit_reason=None,
+                code_commit_blob_files=dict(bundle["code_bundle_files"]),
+                code_commit_blob_bundle_sha256=canonical_sha256(
+                    bundle["code_bundle_files"]
+                ),
+                code_commit_binding_kind="raw_byte_equality",
             ),
             lambda bundle: bundle.update(
                 code_commit=None,
@@ -2398,7 +2737,7 @@ class DetectorProbeJobTests(unittest.TestCase):
     def test_execution_blocks_when_code_bundle_or_hardware_binding_drifts(self) -> None:
         import football_tracking.detector_probe as probe_module
 
-        original_hash = probe_module.hash_regular_file
+        original_read = probe_module.read_regular_bytes
         changed_files = (
             "__init__.py",
             "api/__init__.py",
@@ -2416,13 +2755,24 @@ class DetectorProbeJobTests(unittest.TestCase):
                 try:
                     job = service.create_probe(self._request(trial_intent_sha256=f"{index + 10:064x}"))
 
-                    def changed_hash(path, *args, **kwargs):
-                        digest, size = original_hash(path, *args, **kwargs)
-                        if Path(path).resolve().relative_to(package_root).as_posix() == changed_name:
-                            digest = ("0" if digest[0] != "0" else "1") + digest[1:]
-                        return digest, size
+                    def changed_read(path, *args, **kwargs):
+                        content, digest = original_read(path, *args, **kwargs)
+                        try:
+                            relative_path = (
+                                Path(path).resolve().relative_to(package_root).as_posix()
+                            )
+                        except ValueError:
+                            return content, digest
+                        if relative_path == changed_name:
+                            content += b"# simulated source drift\n"
+                            digest = hashlib.sha256(content).hexdigest()
+                        return content, digest
 
-                    with patch.object(probe_module, "hash_regular_file", side_effect=changed_hash):
+                    with patch.object(
+                        probe_module,
+                        "read_regular_bytes",
+                        side_effect=changed_read,
+                    ):
                         service.execute_probe(job["job_id"])
                     blocked = service.get_probe(job["job_id"])
                 finally:

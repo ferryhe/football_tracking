@@ -177,6 +177,45 @@ class ExportOpenApiTests(unittest.TestCase):
         self.assertIn("getTrialDiagnosisResponse", zod_api)
         self.assertIn("getProductionTrialTuningSchemaResponse", zod_api)
 
+    def test_openapi_and_generated_clients_expose_detector_probe_commit_blob_binding(self) -> None:
+        document = build_openapi_document()
+        schema = document["components"]["schemas"]["DetectorProbeExecutionBundleView"]
+        fields = (
+            "code_commit_blob_files",
+            "code_commit_blob_bundle_sha256",
+            "code_commit_binding_kind",
+        )
+        for field in fields:
+            self.assertIn(field, schema["properties"])
+            self.assertIn(field, schema["required"])
+            self.assertEqual(
+                "null",
+                schema["properties"][field]["anyOf"][1]["type"],
+            )
+        self.assertEqual(
+            "^[0-9a-f]{64}$",
+            schema["properties"]["code_commit_blob_files"]["anyOf"][0]
+            ["additionalProperties"]["pattern"],
+        )
+        self.assertEqual(
+            "exact_or_crlf_to_lf_commit_blob",
+            schema["properties"]["code_commit_binding_kind"]["anyOf"][0]["const"],
+        )
+
+        react_schemas = Path("lib/api-client-react/src/generated/api.schemas.ts").read_text(
+            encoding="utf-8"
+        )
+        zod_api = Path("lib/api-zod/src/generated/api.ts").read_text(encoding="utf-8")
+        zod_type = Path(
+            "lib/api-zod/src/generated/types/detectorProbeExecutionBundleView.ts"
+        ).read_text(encoding="utf-8")
+        for field in fields:
+            self.assertIn(field, react_schemas)
+            self.assertIn(field, zod_api)
+            self.assertIn(field, zod_type)
+        self.assertIn("exact_or_crlf_to_lf_commit_blob", react_schemas)
+        self.assertIn("exact_or_crlf_to_lf_commit_blob", zod_api)
+
     def test_generated_clients_expose_highlight_boundary_contracts(self) -> None:
         react_schemas = Path("lib/api-client-react/src/generated/api.schemas.ts").read_text(encoding="utf-8")
         zod_api = Path("lib/api-zod/src/generated/api.ts").read_text(encoding="utf-8")

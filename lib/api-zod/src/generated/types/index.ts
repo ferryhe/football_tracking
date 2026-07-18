@@ -204,6 +204,7 @@ export * from "./detectorProbeDecodeViewEffectiveDecodeMode";
 export * from "./detectorProbeDecodeViewRequestedDecodeMode";
 export * from "./detectorProbeExecutionBundleView";
 export * from "./detectorProbeExecutionBundleViewCodeBundleFiles";
+export * from "./detectorProbeExecutionBundleViewCodeCommitBlobFiles";
 export * from "./detectorProbeExecutionBundleViewCodeCommitStatus";
 export * from "./detectorProbeExecutionBundleViewInstalledRuntime";
 export * from "./detectorProbeExecutionBundleViewRuntimeContract";

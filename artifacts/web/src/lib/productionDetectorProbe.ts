@@ -1752,6 +1752,9 @@ function executionBundle(
       "code_commit",
       "code_commit_status",
       "code_commit_reason",
+      "code_commit_blob_files",
+      "code_commit_blob_bundle_sha256",
+      "code_commit_binding_kind",
       "frozen_profiles_sha256",
     ],
     label,
@@ -1910,22 +1913,45 @@ function executionBundle(
   );
   if (codeCommitStatus === "bound") {
     const commit = string(bundle.code_commit, `${label} code commit`);
+    const commitBlobFiles = record(
+      bundle.code_commit_blob_files,
+      `${label} commit blob files`,
+    );
+    exactKeys(
+      commitBlobFiles,
+      EXECUTION_CODE_BUNDLE_FILES,
+      `${label} commit blob files`,
+    );
+    EXECUTION_CODE_BUNDLE_FILES.forEach((path) =>
+      sha256(commitBlobFiles[path], `${label} commit blob ${path}`),
+    );
+    sha256(
+      bundle.code_commit_blob_bundle_sha256,
+      `${label} commit blob bundle SHA-256`,
+    );
     if (
       !/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(commit) ||
-      bundle.code_commit_reason !== null
+      bundle.code_commit_reason !== null ||
+      bundle.code_commit_binding_kind !== "exact_or_crlf_to_lf_commit_blob"
     ) {
       throw new Error(`${label} code commit binding is invalid`);
     }
   } else if (codeCommitStatus === "unbound") {
     if (
       bundle.code_commit !== null ||
-      bundle.code_commit_reason !== "code_bundle_differs_from_commit"
+      bundle.code_commit_reason !== "code_bundle_differs_from_commit" ||
+      bundle.code_commit_blob_files !== null ||
+      bundle.code_commit_blob_bundle_sha256 !== null ||
+      bundle.code_commit_binding_kind !== null
     ) {
       throw new Error(`${label} unbound code commit binding is invalid`);
     }
   } else if (
     bundle.code_commit !== null ||
-    bundle.code_commit_reason !== "repository_commit_unavailable"
+    bundle.code_commit_reason !== "repository_commit_unavailable" ||
+    bundle.code_commit_blob_files !== null ||
+    bundle.code_commit_blob_bundle_sha256 !== null ||
+    bundle.code_commit_binding_kind !== null
   ) {
     throw new Error(`${label} unavailable code commit binding is invalid`);
   }

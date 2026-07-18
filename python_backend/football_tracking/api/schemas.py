@@ -1987,6 +1987,13 @@ class DetectorProbeExecutionBundleView(DetectorProbeStrictView):
     code_commit_reason: Literal[
         "code_bundle_differs_from_commit", "repository_commit_unavailable"
     ] | None
+    code_commit_blob_files: (
+        dict[str, Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]] | None
+    )
+    code_commit_blob_bundle_sha256: (
+        Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")] | None
+    )
+    code_commit_binding_kind: Literal["exact_or_crlf_to_lf_commit_blob"] | None
     frozen_profiles_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
 
     @model_validator(mode="after")
@@ -2011,16 +2018,45 @@ class DetectorProbeExecutionBundleView(DetectorProbeStrictView):
             "code_commit": self.code_commit,
             "code_commit_status": self.code_commit_status,
             "code_commit_reason": self.code_commit_reason,
+            "code_commit_blob_bundle_sha256": (
+                self.code_commit_blob_bundle_sha256
+            ),
+            "code_commit_binding_kind": self.code_commit_binding_kind,
         }
         if canonical_sha256(runtime_environment) != self.runtime_environment_sha256:
             raise ValueError("execution bundle environment digest does not match")
         if self.code_commit_status == "bound":
-            if self.code_commit is None or self.code_commit_reason is not None:
+            if (
+                self.code_commit is None
+                or self.code_commit_reason is not None
+                or self.code_commit_blob_files is None
+                or self.code_commit_blob_bundle_sha256 is None
+                or self.code_commit_binding_kind
+                != "exact_or_crlf_to_lf_commit_blob"
+            ):
                 raise ValueError("bound code commit evidence is incomplete")
+            if (
+                set(self.code_commit_blob_files) != set(self.code_bundle_files)
+                or canonical_sha256(self.code_commit_blob_files)
+                != self.code_commit_blob_bundle_sha256
+            ):
+                raise ValueError("bound commit blob digest does not match")
         elif self.code_commit_status == "unbound":
-            if self.code_commit is not None or self.code_commit_reason != "code_bundle_differs_from_commit":
+            if (
+                self.code_commit is not None
+                or self.code_commit_reason != "code_bundle_differs_from_commit"
+                or self.code_commit_blob_files is not None
+                or self.code_commit_blob_bundle_sha256 is not None
+                or self.code_commit_binding_kind is not None
+            ):
                 raise ValueError("unbound code commit evidence is inconsistent")
-        elif self.code_commit is not None or self.code_commit_reason != "repository_commit_unavailable":
+        elif (
+            self.code_commit is not None
+            or self.code_commit_reason != "repository_commit_unavailable"
+            or self.code_commit_blob_files is not None
+            or self.code_commit_blob_bundle_sha256 is not None
+            or self.code_commit_binding_kind is not None
+        ):
             raise ValueError("unavailable code commit evidence is inconsistent")
         return self
 

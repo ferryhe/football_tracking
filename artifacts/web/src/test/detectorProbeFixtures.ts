@@ -418,6 +418,9 @@ export function detectorProbeJobFixture(
     code_commit: null,
     code_commit_status: "unavailable",
     code_commit_reason: "repository_commit_unavailable",
+    code_commit_blob_files: null as Record<string, string> | null,
+    code_commit_blob_bundle_sha256: null as string | null,
+    code_commit_binding_kind: null as "exact_or_crlf_to_lf_commit_blob" | null,
     frozen_profiles_sha256: frozenProfilesSha256,
   };
   const executionBundleSha256 = detectorProbeSha("6");

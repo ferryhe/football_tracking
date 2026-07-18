@@ -285,6 +285,22 @@ function strictJobFixture() {
   });
 }
 
+function bindExecutionBundles(job: ReturnType<typeof strictJobFixture>) {
+  for (const bundle of [
+    job.frozen_request.execution_bundle,
+    job.report.lineage.execution_bundle,
+  ]) {
+    Object.assign(bundle, {
+      code_commit: "a".repeat(40),
+      code_commit_status: "bound",
+      code_commit_reason: null,
+      code_commit_blob_files: structuredClone(bundle.code_bundle_files),
+      code_commit_blob_bundle_sha256: sha("7"),
+      code_commit_binding_kind: "exact_or_crlf_to_lf_commit_blob",
+    });
+  }
+}
+
 function publicFindingFixture(findingId: string) {
   return {
     finding_id: findingId,
@@ -874,6 +890,25 @@ describe("production detector probe API mapping", () => {
     });
   });
 
+  it("accepts an explicitly unavailable code bundle without inventing commit evidence", () => {
+    const job = strictJobFixture();
+
+    for (const bundle of [
+      job.frozen_request.execution_bundle,
+      job.report.lineage.execution_bundle,
+    ]) {
+      expect(bundle).toMatchObject({
+        code_commit: null,
+        code_commit_status: "unavailable",
+        code_commit_reason: "repository_commit_unavailable",
+        code_commit_blob_files: null,
+        code_commit_blob_bundle_sha256: null,
+        code_commit_binding_kind: null,
+      });
+    }
+    expect(detectorProbeJobView(job).jobId).toBe(job.job_id);
+  });
+
   it("accepts an honestly unbound code bundle without inventing a commit", () => {
     const job = strictJobFixture();
     for (const bundle of [
@@ -884,10 +919,131 @@ describe("production detector probe API mapping", () => {
         code_commit: null,
         code_commit_status: "unbound",
         code_commit_reason: "code_bundle_differs_from_commit",
+        code_commit_blob_files: null,
+        code_commit_blob_bundle_sha256: null,
+        code_commit_binding_kind: null,
       });
     }
 
     expect(detectorProbeJobView(job).jobId).toBe(job.job_id);
+  });
+
+  it("accepts a bound commit only with the complete normalized blob bundle", () => {
+    const job = strictJobFixture();
+    bindExecutionBundles(job);
+
+    expect(detectorProbeJobView(job).jobId).toBe(job.job_id);
+  });
+
+  it.each([
+    "code_commit_blob_files",
+    "code_commit_blob_bundle_sha256",
+    "code_commit_binding_kind",
+  ] as const)("rejects a missing required %s field", (field) => {
+    const job = strictJobFixture();
+    delete (job.frozen_request.execution_bundle as Record<string, unknown>)[
+      field
+    ];
+
+    expect(() => detectorProbeJobView(job)).toThrow(/fields are invalid/i);
+  });
+
+  it.each([
+    {
+      name: "incomplete commit blob allowlist",
+      mutate: (job: ReturnType<typeof strictJobFixture>) => {
+        bindExecutionBundles(job);
+        delete job.frozen_request.execution_bundle.code_commit_blob_files![
+          "football_tracking/detector.py"
+        ];
+      },
+    },
+    {
+      name: "invalid commit blob digest",
+      mutate: (job: ReturnType<typeof strictJobFixture>) => {
+        bindExecutionBundles(job);
+        job.frozen_request.execution_bundle.code_commit_blob_files![
+          "football_tracking/detector.py"
+        ] = "latest";
+      },
+    },
+    {
+      name: "invalid commit blob aggregate digest",
+      mutate: (job: ReturnType<typeof strictJobFixture>) => {
+        bindExecutionBundles(job);
+        job.frozen_request.execution_bundle.code_commit_blob_bundle_sha256 =
+          "latest";
+      },
+    },
+    {
+      name: "unknown commit binding kind",
+      mutate: (job: ReturnType<typeof strictJobFixture>) => {
+        bindExecutionBundles(job);
+        (
+          job.frozen_request.execution_bundle as Record<string, unknown>
+        ).code_commit_binding_kind = "working_tree_bytes";
+      },
+    },
+    {
+      name: "unbound status carrying commit blob files",
+      mutate: (job: ReturnType<typeof strictJobFixture>) => {
+        job.frozen_request.execution_bundle.code_commit_status = "unbound";
+        job.frozen_request.execution_bundle.code_commit_reason =
+          "code_bundle_differs_from_commit";
+        job.frozen_request.execution_bundle.code_commit_blob_files =
+          structuredClone(
+            job.frozen_request.execution_bundle.code_bundle_files,
+          );
+      },
+    },
+    {
+      name: "unbound status carrying a commit blob aggregate",
+      mutate: (job: ReturnType<typeof strictJobFixture>) => {
+        job.frozen_request.execution_bundle.code_commit_status = "unbound";
+        job.frozen_request.execution_bundle.code_commit_reason =
+          "code_bundle_differs_from_commit";
+        job.frozen_request.execution_bundle.code_commit_blob_bundle_sha256 =
+          sha("7");
+      },
+    },
+    {
+      name: "unbound status carrying a commit binding kind",
+      mutate: (job: ReturnType<typeof strictJobFixture>) => {
+        job.frozen_request.execution_bundle.code_commit_status = "unbound";
+        job.frozen_request.execution_bundle.code_commit_reason =
+          "code_bundle_differs_from_commit";
+        job.frozen_request.execution_bundle.code_commit_binding_kind =
+          "exact_or_crlf_to_lf_commit_blob";
+      },
+    },
+    {
+      name: "unavailable status carrying commit blob files",
+      mutate: (job: ReturnType<typeof strictJobFixture>) => {
+        job.frozen_request.execution_bundle.code_commit_blob_files =
+          structuredClone(
+            job.frozen_request.execution_bundle.code_bundle_files,
+          );
+      },
+    },
+    {
+      name: "unavailable status carrying a commit blob aggregate",
+      mutate: (job: ReturnType<typeof strictJobFixture>) => {
+        job.frozen_request.execution_bundle.code_commit_blob_bundle_sha256 =
+          sha("7");
+      },
+    },
+    {
+      name: "unavailable status carrying a commit binding kind",
+      mutate: (job: ReturnType<typeof strictJobFixture>) => {
+        job.frozen_request.execution_bundle.code_commit_binding_kind =
+          "exact_or_crlf_to_lf_commit_blob";
+      },
+    },
+  ])("rejects $name", ({ mutate }) => {
+    const job = strictJobFixture();
+    mutate(job);
+
+    expect(() => detectorProbeJobView(job)).toThrow();
   });
 
   it.each([

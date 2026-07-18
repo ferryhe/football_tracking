@@ -625,6 +625,24 @@ class DetectorApiTests(unittest.TestCase):
             round_trip["frozen_request"]["execution_bundle"],
             round_trip["report"]["lineage"]["execution_bundle"],
         )
+        execution_bundle = round_trip["frozen_request"]["execution_bundle"]
+        if execution_bundle["code_commit_status"] == "bound":
+            self.assertEqual(
+                set(execution_bundle["code_bundle_files"]),
+                set(execution_bundle["code_commit_blob_files"]),
+            )
+            self.assertEqual(
+                "git_clean_filter_to_commit_blob",
+                execution_bundle["code_commit_binding_kind"],
+            )
+            self.assertRegex(
+                execution_bundle["code_commit_blob_bundle_sha256"],
+                r"^[0-9a-f]{64}$",
+            )
+        else:
+            self.assertIsNone(execution_bundle["code_commit_blob_files"])
+            self.assertIsNone(execution_bundle["code_commit_blob_bundle_sha256"])
+            self.assertIsNone(execution_bundle["code_commit_binding_kind"])
         self.assertEqual(
             round_trip["frozen_request"]["execution_bundle_sha256"],
             round_trip["report"]["lineage"]["execution_bundle_sha256"],

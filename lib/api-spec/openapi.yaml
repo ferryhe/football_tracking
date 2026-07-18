@@ -5613,6 +5613,26 @@ components:
             - repository_commit_unavailable
           - type: 'null'
           title: Code Commit Reason
+        code_commit_blob_files:
+          anyOf:
+          - additionalProperties:
+              type: string
+              pattern: ^[0-9a-f]{64}$
+            type: object
+          - type: 'null'
+          title: Code Commit Blob Files
+        code_commit_blob_bundle_sha256:
+          anyOf:
+          - type: string
+            pattern: ^[0-9a-f]{64}$
+          - type: 'null'
+          title: Code Commit Blob Bundle Sha256
+        code_commit_binding_kind:
+          anyOf:
+          - type: string
+            const: exact_or_crlf_to_lf_commit_blob
+          - type: 'null'
+          title: Code Commit Binding Kind
         frozen_profiles_sha256:
           type: string
           pattern: ^[0-9a-f]{64}$
@@ -5632,6 +5652,9 @@ components:
       - code_commit
       - code_commit_status
       - code_commit_reason
+      - code_commit_blob_files
+      - code_commit_blob_bundle_sha256
+      - code_commit_binding_kind
       - frozen_profiles_sha256
       title: DetectorProbeExecutionBundleView
     DetectorProbeExecutionEnvironmentView:

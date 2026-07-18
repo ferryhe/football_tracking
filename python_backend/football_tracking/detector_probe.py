@@ -14,6 +14,7 @@ import time
 import uuid
 from collections import OrderedDict
 from copy import deepcopy
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
@@ -74,6 +75,8 @@ _CODE_BUNDLE_REPO_FILES = tuple(
     f"python_backend/football_tracking/{name}" for name in _CODE_BUNDLE_FILES
 )
 _MAX_GIT_PROVENANCE_OUTPUT_BYTES = 64 * 1024
+_MAX_CODE_BUNDLE_FILE_BYTES = 4 * 1024 * 1024
+_CODE_COMMIT_BINDING_KIND = "exact_or_crlf_to_lf_commit_blob"
 _RUNTIME_NAMES = ("sahi", "torch", "ultralytics")
 _WORKER_DEADLINE_SECONDS = 20 * 60.0
 _WORKER_HEARTBEAT_TIMEOUT_SECONDS = 10.0
@@ -103,6 +106,19 @@ _REQUEST_FIELDS = {
     "requested_decode_mode",
     "retry_from_job_id",
 }
+
+
+@dataclass(frozen=True)
+class _CodeCommitBinding:
+    worktree_files: dict[str, str]
+    code_commit: str | None
+    code_commit_status: str
+    code_commit_reason: str | None
+    code_commit_blob_files: dict[str, str] | None
+    code_commit_blob_bundle_sha256: str | None
+    code_commit_binding_kind: str | None
+
+
 _ROOT_LOCKS_GUARD = threading.Lock()
 _ROOT_LOCKS: dict[str, _RootRegistryLock] = {}
 _ROOT_EXECUTION_LOCKS: dict[str, threading.Lock] = {}
@@ -3424,27 +3440,80 @@ class DetectorProbeCoordinator:
 
         if installed_runtime is None or runtime_contract is None:
             raise DetectorDevelopmentError("invalid_registry", "Detector probe execution bundle is empty")
+        repo_root = Path(__file__).resolve().parents[2]
         package_root = Path(__file__).resolve().parent
         code_bundle_files: dict[str, str] = {}
-        for name in _CODE_BUNDLE_FILES:
+        worktree_contents: dict[str, bytes] = {}
+        for name, repo_relative_path in zip(
+            _CODE_BUNDLE_FILES,
+            _CODE_BUNDLE_REPO_FILES,
+            strict=True,
+        ):
             path = package_root / name
-            digest, _ = hash_regular_file(
+            content, digest = read_regular_bytes(
                 path,
                 "detector probe code bundle file",
+                max_bytes=_MAX_CODE_BUNDLE_FILE_BYTES,
                 trusted_root=package_root,
             )
             code_bundle_files[f"football_tracking/{name}"] = digest
+            worktree_contents[repo_relative_path] = content
         code_bundle_sha256 = canonical_sha256(code_bundle_files)
-        code_commit, code_commit_status, code_commit_reason = self._code_commit_binding()
+        code_binding = self._code_commit_binding(
+            repo_root,
+            _CODE_BUNDLE_REPO_FILES,
+            worktree_contents,
+        )
+        expected_worktree_files = {
+            repo_relative_path: code_bundle_files[f"football_tracking/{name}"]
+            for name, repo_relative_path in zip(
+                _CODE_BUNDLE_FILES,
+                _CODE_BUNDLE_REPO_FILES,
+                strict=True,
+            )
+        }
+        if code_binding.worktree_files != expected_worktree_files:
+            raise DetectorDevelopmentError(
+                "source_changed",
+                "Detector probe execution worktree changed during provenance capture",
+            )
+        code_commit_blob_files = (
+            None
+            if code_binding.code_commit_blob_files is None
+            else {
+                f"football_tracking/{name}": code_binding.code_commit_blob_files[repo_relative_path]
+                for name, repo_relative_path in zip(
+                    _CODE_BUNDLE_FILES,
+                    _CODE_BUNDLE_REPO_FILES,
+                    strict=True,
+                )
+            }
+        )
+        code_commit_blob_bundle_sha256 = (
+            None
+            if code_commit_blob_files is None
+            else canonical_sha256(code_commit_blob_files)
+        )
+        if (
+            code_binding.code_commit_blob_files is not None
+            and canonical_sha256(code_binding.code_commit_blob_files)
+            != code_binding.code_commit_blob_bundle_sha256
+        ):
+            raise DetectorDevelopmentError(
+                "source_changed",
+                "Detector probe commit blob provenance changed during capture",
+            )
         execution_environment = probe_execution_environment()
         runtime_environment = {
             "installed_runtime": installed_runtime,
             "runtime_observation_evidence_sha256s": dict(sorted(observation_sha256s.items())),
             "execution_environment": execution_environment,
             "code_bundle_sha256": code_bundle_sha256,
-            "code_commit": code_commit,
-            "code_commit_status": code_commit_status,
-            "code_commit_reason": code_commit_reason,
+            "code_commit": code_binding.code_commit,
+            "code_commit_status": code_binding.code_commit_status,
+            "code_commit_reason": code_binding.code_commit_reason,
+            "code_commit_blob_bundle_sha256": code_commit_blob_bundle_sha256,
+            "code_commit_binding_kind": code_binding.code_commit_binding_kind,
         }
         return {
             "schema_version": "1.0",
@@ -3456,9 +3525,12 @@ class DetectorProbeCoordinator:
             "runtime_environment_sha256": canonical_sha256(runtime_environment),
             "code_bundle_files": code_bundle_files,
             "code_bundle_sha256": code_bundle_sha256,
-            "code_commit": code_commit,
-            "code_commit_status": code_commit_status,
-            "code_commit_reason": code_commit_reason,
+            "code_commit": code_binding.code_commit,
+            "code_commit_status": code_binding.code_commit_status,
+            "code_commit_reason": code_binding.code_commit_reason,
+            "code_commit_blob_files": code_commit_blob_files,
+            "code_commit_blob_bundle_sha256": code_commit_blob_bundle_sha256,
+            "code_commit_binding_kind": code_binding.code_commit_binding_kind,
             "frozen_profiles_sha256": canonical_sha256(frozen_profiles),
         }
 
@@ -3466,9 +3538,45 @@ class DetectorProbeCoordinator:
     def _code_commit_binding(
         repo_root: Path | None = None,
         repo_relative_files: tuple[str, ...] | None = None,
-    ) -> tuple[str | None, str, str | None]:
+        worktree_contents: dict[str, bytes] | None = None,
+    ) -> _CodeCommitBinding:
         root = Path(repo_root) if repo_root is not None else Path(__file__).resolve().parents[2]
         paths = repo_relative_files if repo_relative_files is not None else _CODE_BUNDLE_REPO_FILES
+
+        def result(
+            status: str,
+            reason: str | None,
+            *,
+            commit: str | None = None,
+            captured_worktree_files: dict[str, str] | None = None,
+            blob_files: dict[str, str] | None = None,
+        ) -> _CodeCommitBinding:
+            return _CodeCommitBinding(
+                worktree_files=dict(captured_worktree_files or {}),
+                code_commit=commit,
+                code_commit_status=status,
+                code_commit_reason=reason,
+                code_commit_blob_files=(None if blob_files is None else dict(blob_files)),
+                code_commit_blob_bundle_sha256=(
+                    None if blob_files is None else canonical_sha256(blob_files)
+                ),
+                code_commit_binding_kind=(
+                    _CODE_COMMIT_BINDING_KIND if status == "bound" else None
+                ),
+            )
+
+        provided_worktree_files: dict[str, str] = {}
+        if worktree_contents is not None:
+            if set(worktree_contents) != set(paths) or any(
+                not isinstance(content, bytes)
+                or len(content) > _MAX_CODE_BUNDLE_FILE_BYTES
+                for content in worktree_contents.values()
+            ):
+                return result("unavailable", "repository_commit_unavailable")
+            provided_worktree_files = {
+                path: hashlib.sha256(worktree_contents[path]).hexdigest()
+                for path in paths
+            }
         if (
             not paths
             or len(set(paths)) != len(paths)
@@ -3483,16 +3591,38 @@ class DetectorProbeCoordinator:
                 for path in paths
             )
         ):
-            return None, "unavailable", "repository_commit_unavailable"
+            return result(
+                "unavailable",
+                "repository_commit_unavailable",
+                captured_worktree_files=provided_worktree_files,
+            )
         kwargs: dict[str, Any] = {}
         if os.name == "nt":
             kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        git_environment = {
+            name: value
+            for name, value in os.environ.items()
+            if not name.upper().startswith("GIT_")
+        }
+        git_environment["GIT_TERMINAL_PROMPT"] = "0"
+        try:
+            trusted_root = root.resolve(strict=False)
+        except (OSError, RuntimeError):
+            return result(
+                "unavailable",
+                "repository_commit_unavailable",
+                captured_worktree_files=provided_worktree_files,
+            )
 
-        def run(arguments: list[str]) -> bytes | None:
+        def run(
+            arguments: list[str],
+            *,
+            max_output_bytes: int = _MAX_GIT_PROVENANCE_OUTPUT_BYTES,
+        ) -> bytes | None:
             try:
                 completed = subprocess.run(
                     ["git", *arguments],
-                    cwd=root,
+                    cwd=trusted_root,
                     stdin=subprocess.DEVNULL,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.DEVNULL,
@@ -3500,7 +3630,7 @@ class DetectorProbeCoordinator:
                     shell=False,
                     check=False,
                     timeout=2,
-                    env={**os.environ, "GIT_TERMINAL_PROMPT": "0"},
+                    env=git_environment,
                     **kwargs,
                 )
             except (OSError, subprocess.TimeoutExpired):
@@ -3509,26 +3639,72 @@ class DetectorProbeCoordinator:
             if (
                 completed.returncode != 0
                 or not isinstance(stdout, bytes)
-                or len(stdout) > _MAX_GIT_PROVENANCE_OUTPUT_BYTES
+                or len(stdout) > max_output_bytes
             ):
                 return None
             return stdout
 
+        def parse_single_line(raw: bytes | None) -> bytes | None:
+            if raw is None or not raw:
+                return None
+            value = raw.rstrip(b"\r\n")
+            if raw not in {value, value + b"\n", value + b"\r\n"}:
+                return None
+            return value
+
+        raw_toplevel = run(["rev-parse", "--show-toplevel"])
+        toplevel_bytes = parse_single_line(raw_toplevel)
+        if toplevel_bytes is None:
+            return result(
+                "unavailable",
+                "repository_commit_unavailable",
+                captured_worktree_files=provided_worktree_files,
+            )
+        try:
+            reported_path = Path(os.fsdecode(toplevel_bytes))
+            if not reported_path.is_absolute():
+                raise ValueError("Git repository root is not absolute")
+            reported_root = reported_path.resolve(strict=False)
+        except (OSError, RuntimeError, ValueError):
+            return result(
+                "unavailable",
+                "repository_commit_unavailable",
+                captured_worktree_files=provided_worktree_files,
+            )
+        if os.path.normcase(str(reported_root)) != os.path.normcase(
+            str(trusted_root)
+        ):
+            return result(
+                "unavailable",
+                "repository_commit_unavailable",
+                captured_worktree_files=provided_worktree_files,
+            )
+
         raw_commit = run(["rev-parse", "--verify", "HEAD"])
-        if raw_commit is None:
-            return None, "unavailable", "repository_commit_unavailable"
-        commit_bytes = raw_commit.rstrip(b"\r\n")
-        if raw_commit not in {commit_bytes, commit_bytes + b"\n", commit_bytes + b"\r\n"}:
-            return None, "unavailable", "repository_commit_unavailable"
+        commit_bytes = parse_single_line(raw_commit)
+        if commit_bytes is None:
+            return result(
+                "unavailable",
+                "repository_commit_unavailable",
+                captured_worktree_files=provided_worktree_files,
+            )
         try:
             commit = commit_bytes.decode("ascii").lower()
         except UnicodeDecodeError:
-            return None, "unavailable", "repository_commit_unavailable"
+            return result(
+                "unavailable",
+                "repository_commit_unavailable",
+                captured_worktree_files=provided_worktree_files,
+            )
         if (
             len(commit) not in {40, 64}
             or any(character not in "0123456789abcdef" for character in commit)
         ):
-            return None, "unavailable", "repository_commit_unavailable"
+            return result(
+                "unavailable",
+                "repository_commit_unavailable",
+                captured_worktree_files=provided_worktree_files,
+            )
 
         status = run(
             [
@@ -3542,28 +3718,191 @@ class DetectorProbeCoordinator:
             ]
         )
         if status is None:
-            return None, "unavailable", "repository_commit_unavailable"
+            return result(
+                "unavailable",
+                "repository_commit_unavailable",
+                captured_worktree_files=provided_worktree_files,
+            )
         if status:
-            return None, "unbound", "code_bundle_differs_from_commit"
+            return result(
+                "unbound",
+                "code_bundle_differs_from_commit",
+                captured_worktree_files=provided_worktree_files,
+            )
 
         raw_tree = run(
-            ["--literal-pathspecs", "ls-tree", "-r", "--name-only", "-z", commit, "--", *paths]
+            ["--literal-pathspecs", "ls-tree", "-r", "-z", commit, "--", *paths]
         )
         if raw_tree is None:
-            return None, "unavailable", "repository_commit_unavailable"
+            return result(
+                "unavailable",
+                "repository_commit_unavailable",
+                captured_worktree_files=provided_worktree_files,
+            )
         if not raw_tree.endswith(b"\0"):
-            return None, "unavailable", "repository_commit_unavailable"
+            return result(
+                "unavailable",
+                "repository_commit_unavailable",
+                captured_worktree_files=provided_worktree_files,
+            )
+        tree_objects: dict[str, str] = {}
         try:
-            tree_paths = tuple(item.decode("utf-8") for item in raw_tree[:-1].split(b"\0"))
-        except UnicodeDecodeError:
-            return None, "unavailable", "repository_commit_unavailable"
-        if len(tree_paths) != len(paths) or set(tree_paths) != set(paths):
-            return None, "unbound", "code_bundle_differs_from_commit"
+            for raw_entry in raw_tree[:-1].split(b"\0"):
+                raw_metadata, raw_path = raw_entry.split(b"\t", 1)
+                mode, object_type, raw_oid = raw_metadata.split(b" ", 2)
+                path = raw_path.decode("utf-8")
+                oid = raw_oid.decode("ascii").lower()
+                if (
+                    mode not in {b"100644", b"100755"}
+                    or object_type != b"blob"
+                    or len(oid) != len(commit)
+                    or any(character not in "0123456789abcdef" for character in oid)
+                    or path in tree_objects
+                ):
+                    return result(
+                        "unbound",
+                        "code_bundle_differs_from_commit",
+                        captured_worktree_files=provided_worktree_files,
+                    )
+                tree_objects[path] = oid
+        except (UnicodeDecodeError, ValueError):
+            return result(
+                "unavailable",
+                "repository_commit_unavailable",
+                captured_worktree_files=provided_worktree_files,
+            )
+        if len(tree_objects) != len(paths) or set(tree_objects) != set(paths):
+            return result(
+                "unbound",
+                "code_bundle_differs_from_commit",
+                captured_worktree_files=provided_worktree_files,
+            )
+
+        captured_contents: dict[str, bytes] = {}
+        captured_worktree_files = dict(provided_worktree_files)
+        for path in paths:
+            if worktree_contents is None:
+                try:
+                    content, digest = read_regular_bytes(
+                        root / Path(path),
+                        "detector probe execution worktree file",
+                        max_bytes=_MAX_CODE_BUNDLE_FILE_BYTES,
+                        trusted_root=root,
+                    )
+                except DetectorDevelopmentError:
+                    return result(
+                        "unbound",
+                        "code_bundle_differs_from_commit",
+                        captured_worktree_files=captured_worktree_files,
+                    )
+                captured_contents[path] = content
+                captured_worktree_files[path] = digest
+            else:
+                captured_contents[path] = worktree_contents[path]
+
+        blob_files: dict[str, str] = {}
+        for path in paths:
+            raw_size = run(["cat-file", "-s", tree_objects[path]])
+            if raw_size is None:
+                return result(
+                    "unavailable",
+                    "repository_commit_unavailable",
+                    captured_worktree_files=captured_worktree_files,
+                )
+            try:
+                blob_size = int(raw_size.rstrip(b"\r\n").decode("ascii"))
+            except (UnicodeDecodeError, ValueError):
+                return result(
+                    "unavailable",
+                    "repository_commit_unavailable",
+                    captured_worktree_files=captured_worktree_files,
+                )
+            if blob_size < 0 or blob_size > _MAX_CODE_BUNDLE_FILE_BYTES:
+                return result(
+                    "unavailable",
+                    "repository_commit_unavailable",
+                    captured_worktree_files=captured_worktree_files,
+                )
+            blob = run(
+                ["cat-file", "blob", tree_objects[path]],
+                max_output_bytes=_MAX_CODE_BUNDLE_FILE_BYTES,
+            )
+            if blob is None or len(blob) != blob_size:
+                return result(
+                    "unavailable",
+                    "repository_commit_unavailable",
+                    captured_worktree_files=captured_worktree_files,
+                )
+            worktree_content = captured_contents[path]
+            if (
+                worktree_content != blob
+                and worktree_content.replace(b"\r\n", b"\n") != blob
+            ):
+                return result(
+                    "unbound",
+                    "code_bundle_differs_from_commit",
+                    captured_worktree_files=captured_worktree_files,
+                )
+            blob_files[path] = hashlib.sha256(blob).hexdigest()
+
+        final_status = run(
+            [
+                "--literal-pathspecs",
+                "status",
+                "--porcelain=v1",
+                "-z",
+                "--untracked-files=all",
+                "--",
+                *paths,
+            ]
+        )
+        if final_status is None:
+            return result(
+                "unavailable",
+                "repository_commit_unavailable",
+                captured_worktree_files=captured_worktree_files,
+            )
+        if final_status:
+            return result(
+                "unbound",
+                "code_bundle_differs_from_commit",
+                captured_worktree_files=captured_worktree_files,
+            )
+        for path in paths:
+            try:
+                _content, digest = read_regular_bytes(
+                    root / Path(path),
+                    "detector probe execution worktree file",
+                    max_bytes=_MAX_CODE_BUNDLE_FILE_BYTES,
+                    trusted_root=root,
+                )
+            except DetectorDevelopmentError:
+                return result(
+                    "unbound",
+                    "code_bundle_differs_from_commit",
+                    captured_worktree_files=captured_worktree_files,
+                )
+            if digest != captured_worktree_files[path]:
+                return result(
+                    "unbound",
+                    "code_bundle_differs_from_commit",
+                    captured_worktree_files=captured_worktree_files,
+                )
 
         final_commit = run(["rev-parse", "--verify", "HEAD"])
         if final_commit != raw_commit:
-            return None, "unavailable", "repository_commit_unavailable"
-        return commit, "bound", None
+            return result(
+                "unavailable",
+                "repository_commit_unavailable",
+                captured_worktree_files=captured_worktree_files,
+            )
+        return result(
+            "bound",
+            None,
+            commit=commit,
+            captured_worktree_files=captured_worktree_files,
+            blob_files=blob_files,
+        )
 
     @staticmethod
     def _positive_int(value: Any, label: str) -> int:
@@ -3801,6 +4140,9 @@ class DetectorProbeCoordinator:
             "code_commit",
             "code_commit_status",
             "code_commit_reason",
+            "code_commit_blob_files",
+            "code_commit_blob_bundle_sha256",
+            "code_commit_binding_kind",
             "frozen_profiles_sha256",
         }
         execution_environment_keys = {
@@ -3870,6 +4212,51 @@ class DetectorProbeCoordinator:
                     "invalid_persisted_job",
                     "Detector probe frozen execution digest is invalid",
                 ) from exc
+        code_commit_blob_files = bundle.get("code_commit_blob_files")
+        code_commit_blob_bundle_sha256 = bundle.get(
+            "code_commit_blob_bundle_sha256"
+        )
+        if code_commit_blob_files is not None:
+            if (
+                not isinstance(code_commit_blob_files, dict)
+                or set(code_commit_blob_files)
+                != {f"football_tracking/{name}" for name in _CODE_BUNDLE_FILES}
+            ):
+                raise DetectorDevelopmentError(
+                    "invalid_persisted_job",
+                    "Detector probe commit blob file binding is invalid",
+                )
+            for value in code_commit_blob_files.values():
+                try:
+                    require_sha256(value, "commit blob file sha256")
+                except DetectorDevelopmentError as exc:
+                    raise DetectorDevelopmentError(
+                        "invalid_persisted_job",
+                        "Detector probe commit blob digest is invalid",
+                    ) from exc
+            try:
+                require_sha256(
+                    code_commit_blob_bundle_sha256,
+                    "commit blob bundle sha256",
+                )
+            except DetectorDevelopmentError as exc:
+                raise DetectorDevelopmentError(
+                    "invalid_persisted_job",
+                    "Detector probe commit blob bundle digest is invalid",
+                ) from exc
+            if (
+                canonical_sha256(code_commit_blob_files)
+                != code_commit_blob_bundle_sha256
+            ):
+                raise DetectorDevelopmentError(
+                    "persisted_job_digest_mismatch",
+                    "Detector probe commit blob bundle digest is inconsistent",
+                )
+        elif code_commit_blob_bundle_sha256 is not None:
+            raise DetectorDevelopmentError(
+                "invalid_persisted_job",
+                "Detector probe commit blob binding is incomplete",
+            )
         environment = bundle["execution_environment"]
         try:
             require_sha256(
@@ -3925,13 +4312,23 @@ class DetectorProbeCoordinator:
                 or len(code_commit) not in {40, 64}
                 or any(character not in "0123456789abcdef" for character in code_commit)
                 or bundle.get("code_commit_reason") is not None
+                or code_commit_blob_files is None
+                or bundle.get("code_commit_binding_kind")
+                != _CODE_COMMIT_BINDING_KIND
             ):
                 raise DetectorDevelopmentError(
                     "invalid_persisted_job",
                     "Detector probe code commit binding is invalid",
                 )
         elif bundle.get("code_commit_status") == "unbound":
-            if code_commit is not None or bundle.get("code_commit_reason") != "code_bundle_differs_from_commit":
+            if (
+                code_commit is not None
+                or bundle.get("code_commit_reason")
+                != "code_bundle_differs_from_commit"
+                or code_commit_blob_files is not None
+                or code_commit_blob_bundle_sha256 is not None
+                or bundle.get("code_commit_binding_kind") is not None
+            ):
                 raise DetectorDevelopmentError(
                     "invalid_persisted_job",
                     "Detector probe unbound code commit binding is invalid",
@@ -3940,6 +4337,9 @@ class DetectorProbeCoordinator:
             bundle.get("code_commit_status") != "unavailable"
             or code_commit is not None
             or bundle.get("code_commit_reason") != "repository_commit_unavailable"
+            or code_commit_blob_files is not None
+            or code_commit_blob_bundle_sha256 is not None
+            or bundle.get("code_commit_binding_kind") is not None
         ):
             raise DetectorDevelopmentError(
                 "invalid_persisted_job",
@@ -3953,6 +4353,8 @@ class DetectorProbeCoordinator:
             "code_commit": code_commit,
             "code_commit_status": bundle["code_commit_status"],
             "code_commit_reason": bundle["code_commit_reason"],
+            "code_commit_blob_bundle_sha256": code_commit_blob_bundle_sha256,
+            "code_commit_binding_kind": bundle["code_commit_binding_kind"],
         }
         frozen_profiles_sha256 = canonical_sha256(frozen_profiles)
         if (
