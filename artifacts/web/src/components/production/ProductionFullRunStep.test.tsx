@@ -52,6 +52,7 @@ import type {
   SourceSignature,
 } from "@/lib/productionWorkflow";
 import { ProductionFullRunStep } from "./ProductionFullRunStep";
+import { ACCEPTABLE_TRIAL_SIGNAL_GATE } from "@/test/productionTrialFixtures";
 
 const api = vi.hoisted(() => ({
   configOptions: null as unknown,
@@ -265,6 +266,14 @@ async function acceptedTrial(): Promise<ProductionTrialState> {
           audit_review_event_count: 0,
           audit_lost_gap_count: 0,
           quality_gate_status: "warn",
+          trial_signal_gate_v2: ACCEPTABLE_TRIAL_SIGNAL_GATE,
+        },
+        operator_visual_confirmation: {
+          confirmed: true,
+          confirmed_at: NOW,
+          evidence_generation: "e".repeat(64),
+          threshold_profile_sha256:
+            ACCEPTABLE_TRIAL_SIGNAL_GATE.threshold_profile.sha256,
         },
       },
     },
@@ -1273,9 +1282,9 @@ describe("ProductionFullRunStep", () => {
     expect(status).toHaveAttribute("aria-live", "polite");
     expect(status).toHaveTextContent(/verifying the requested run identity/i);
     await waitFor(() => expect(api.runsOptions.some(queryEnabled)).toBe(true));
-    expect(api.controllerInputs.every((entry) => !controllerEnabled(entry))).toBe(
-      true,
-    );
+    expect(
+      api.controllerInputs.every((entry) => !controllerEnabled(entry)),
+    ).toBe(true);
     expect(api.currentRunOptions.every((entry) => !queryEnabled(entry))).toBe(
       true,
     );
@@ -1323,9 +1332,9 @@ describe("ProductionFullRunStep", () => {
       screen.getByTestId("production-route-identity-pending"),
     ).toHaveTextContent(/verifying the requested run identity/i);
     await waitFor(() => expect(api.runsOptions.some(queryEnabled)).toBe(true));
-    expect(api.controllerInputs.every((entry) => !controllerEnabled(entry))).toBe(
-      true,
-    );
+    expect(
+      api.controllerInputs.every((entry) => !controllerEnabled(entry)),
+    ).toBe(true);
     expect(api.currentRunOptions.every((entry) => !queryEnabled(entry))).toBe(
       true,
     );
@@ -1355,9 +1364,9 @@ describe("ProductionFullRunStep", () => {
       screen.getByRole("link", { name: /production history/i }),
     ).toHaveAttribute("href", "/history?run=unknown-run&from=production");
     expect(pending.parentChange).not.toHaveBeenCalled();
-    expect(api.controllerInputs.every((entry) => !controllerEnabled(entry))).toBe(
-      true,
-    );
+    expect(
+      api.controllerInputs.every((entry) => !controllerEnabled(entry)),
+    ).toBe(true);
     expect(api.currentRunOptions.every((entry) => !queryEnabled(entry))).toBe(
       true,
     );
@@ -1380,7 +1389,9 @@ describe("ProductionFullRunStep", () => {
       }),
     ];
     const conflict = renderStep(input, existing.state, "unrelated-run");
-    expect(await screen.findByTestId("production-full-run-error")).toBeVisible();
+    expect(
+      await screen.findByTestId("production-full-run-error"),
+    ).toBeVisible();
     expect(
       screen.getByRole("link", { name: /production history/i }),
     ).toHaveAttribute("href", "/history?run=unrelated-run&from=production");

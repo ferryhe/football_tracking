@@ -436,6 +436,7 @@ export function ProductionWorkspace({
             onTrialChange={onTrialChange}
             onPendingConfigChange={onPendingConfigChange}
             onConfirmedConfigChange={onConfirmedConfigChange}
+            onReturnToFieldSetup={handleBack}
             onUsabilityChange={setTrialUsable}
             stopButtonRef={stopButtonRef}
           />

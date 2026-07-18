@@ -4,10 +4,13 @@ import base64
 import hashlib
 import json
 import os
+import re
 import subprocess
 import tempfile
 import threading
 import unittest
+from copy import deepcopy
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -38,6 +41,7 @@ from football_tracking.config import load_config
 from football_tracking.final_artifact_manifest import write_final_artifact_manifest
 from football_tracking.high_recall_windows import approved_action_windows_from_report
 from football_tracking.metrics import write_run_artifacts
+from football_tracking.trial_diagnosis import production_tuning_values_sha256
 
 
 def build_sample_config(output_dir: str = "./outputs/kept_baseline") -> dict[str, object]:
@@ -167,6 +171,215 @@ class ApiServiceSmokeTests(unittest.TestCase):
 
     def file_fingerprint(self, path: Path) -> tuple[str, int]:
         return hashlib.sha256(path.read_bytes()).hexdigest(), path.stat().st_mtime_ns
+
+    def versioned_production_trial_patch(self) -> dict[str, object]:
+        resolved = self.service.get_config("default.yaml")["resolved"]
+        controls = self.service.get_trial_tuning_schema()["controls"]
+
+        def value_at_path(path: str) -> object:
+            current: object = resolved
+            for part in path.split("."):
+                self.assertIsInstance(current, dict)
+                current = current[part]  # type: ignore[index]
+            return current
+
+        values = {control["path"]: value_at_path(control["path"]) for control in controls}
+        values["detector.confidence_threshold"] = 0.16
+        input_video = str((self.repo_root / "data" / "input.mp4").resolve())
+        return {
+            "input_video": input_video,
+            "detector": {"confidence_threshold": 0.16},
+            "filtering": {"roi": [10, 20, 600, 340]},
+            "scene_bias": {
+                "enabled": True,
+                "ground_zones": [
+                    {
+                        "name": "production_field",
+                        "points": [[10, 20], [600, 20], [600, 340], [10, 340]],
+                    }
+                ],
+                "negative_rois": [],
+            },
+            "postprocess": {"enabled": True},
+            "follow_cam": {"enabled": True},
+            "runtime": {"start_frame": 0, "max_frames": 240},
+            "metadata": {
+                "production_workflow": {"purpose": "production_trial"},
+                "production_tuning": {
+                    "schema_version": "1.0",
+                    "version_id": "tuning-v1",
+                    "parent_version_id": None,
+                    "created_at": "2026-07-17T12:00:00.000Z",
+                    "values_sha256": production_tuning_values_sha256(values),
+                    "values": values,
+                    "history": [],
+                },
+            },
+        }
+
+    def production_trial_note(
+        self,
+        *,
+        workflow_id: str = "workflow-a",
+        output_id: str = "trial-a",
+        generation: int = 1,
+        **overrides: object,
+    ) -> dict[str, object]:
+        note: dict[str, object] = {
+            "schema_version": "1.0",
+            "purpose": "production_trial",
+            "workflow_id": workflow_id,
+            "submission_id": f"submission-{output_id}",
+            "output_id": output_id,
+            "generation": generation,
+            "calibration_digest": "1" * 64,
+            "intent_sha256": "2" * 64,
+            "start_frame": 0,
+            "max_frames": 240,
+            "enable_postprocess": True,
+            "enable_follow_cam": True,
+        }
+        note.update(overrides)
+        return note
+
+    def production_trial_request(
+        self,
+        *,
+        run_id: str,
+        patch: dict[str, object] | None = None,
+        workflow_id: str = "workflow-a",
+        generation: int = 1,
+        parent_run_id: str | None = None,
+        input_video: str | None = None,
+        note_overrides: dict[str, object] | None = None,
+        config_name: str = "default.yaml",
+    ) -> dict[str, object]:
+        output_id = run_id.removeprefix("production_trial_")
+        resolved_input = input_video or str((self.repo_root / "data" / "input.mp4").resolve())
+        note = self.production_trial_note(
+            workflow_id=workflow_id,
+            output_id=output_id,
+            generation=generation,
+        )
+        note.update(note_overrides or {})
+        effective_patch = json.loads(json.dumps(patch or self.versioned_production_trial_patch()))
+        source_stat = Path(resolved_input).stat()
+        metadata = effective_patch.setdefault("metadata", {})
+        metadata["production_workflow"] = {
+            **note,
+            "source_signature": {
+                "path": resolved_input,
+                "size_bytes": source_stat.st_size,
+                "modified_at": datetime.fromtimestamp(
+                    source_stat.st_mtime,
+                    tz=timezone.utc,
+                ).isoformat(),
+            },
+            "output_dir_name": run_id,
+        }
+        return {
+            "config_name": config_name,
+            "input_video": resolved_input,
+            "output_dir_name": run_id,
+            "parent_run_id": parent_run_id,
+            "config_patch": effective_patch,
+            "enable_postprocess": True,
+            "enable_follow_cam": True,
+            "start_frame": 0,
+            "max_frames": 240,
+            "notes": json.dumps(note),
+        }
+
+    def create_passive_production_trial(
+        self,
+        *,
+        run_id: str,
+        patch: dict[str, object] | None = None,
+        workflow_id: str = "workflow-a",
+        generation: int = 1,
+        parent_run_id: str | None = None,
+        input_video: str | None = None,
+        note_overrides: dict[str, object] | None = None,
+        config_name: str = "default.yaml",
+    ) -> dict[str, object]:
+        class PassiveThread:
+            def __init__(self, *, target, args, name, daemon) -> None:
+                self._alive = False
+
+            def start(self) -> None:
+                self._alive = False
+
+            def is_alive(self) -> bool:
+                return self._alive
+
+        request = self.production_trial_request(
+            run_id=run_id,
+            patch=patch,
+            workflow_id=workflow_id,
+            generation=generation,
+            parent_run_id=parent_run_id,
+            input_video=input_video,
+            note_overrides=note_overrides,
+            config_name=config_name,
+        )
+        with mock.patch("football_tracking.api.service.threading.Thread", PassiveThread):
+            return self.service.create_run(request)
+
+    def mark_run_completed(self, run_id: str) -> None:
+        registry = self.service._read_registry()
+        run = next(item for item in registry["runs"] if item["run_id"] == run_id)
+        run["status"] = "completed"
+        run["started_at"] = "2026-07-17T12:00:00+00:00"
+        run["completed_at"] = "2026-07-17T12:01:00+00:00"
+        self.service._write_registry(registry)
+
+    def complete_production_trial_via_execute_run(
+        self,
+        run: dict[str, object],
+    ) -> dict[str, Any]:
+        class SuccessfulPipeline:
+            def __init__(self, app_config) -> None:
+                self.app_config = app_config
+
+            def run(self, progress_callback=None, should_cancel=None) -> None:
+                self.app_config.output_dir.mkdir(parents=True, exist_ok=True)
+                (self.app_config.output_dir / "ball_track.csv").write_text(
+                    "Frame,X,Y,Confidence,Status\n0,10,20,0.9000,Detected\n",
+                    encoding="utf-8",
+                )
+
+        config = load_config(Path(str(run["config_path"])))
+        with mock.patch("football_tracking.api.service.BallTrackingPipeline", SuccessfulPipeline):
+            self.service._execute_run(str(run["run_id"]), config, threading.Event())
+        return self.service.get_run(str(run["run_id"]))
+
+    def assert_failed_trial_creation_left_no_side_effects(self, run_id: str) -> None:
+        registry = self.service._read_registry()
+        self.assertNotIn(run_id, {item.get("run_id") for item in registry["runs"]})
+        self.assertNotIn(run_id, self.service._active_threads)
+        self.assertNotIn(run_id, self.service._cancel_events)
+        self.assertFalse(
+            any(self.service.generated_config_dir.glob(f"*{run_id}*.yaml")),
+        )
+        output_dir = self.service._build_run_output_dir(
+            run_id=run_id,
+            input_video=(self.repo_root / "data" / "input.mp4").resolve(),
+        )
+        self.assertFalse(output_dir.exists())
+
+    def test_production_trial_tuning_schema_is_bounded_and_localized(self) -> None:
+        schema = self.service.get_trial_tuning_schema()
+
+        self.assertEqual("1.0", schema["schema_version"])
+        controls = schema["controls"]
+        self.assertGreater(len(controls), 10)
+        self.assertNotIn("detector.model_path", {control["path"] for control in controls})
+        for control in controls:
+            self.assertTrue(control["description"])
+            self.assertTrue(control["description_zh"])
+            if control["kind"] in {"number", "integer"}:
+                self.assertLess(control["minimum"], control["maximum"])
+                self.assertGreater(control["step"], 0)
 
     def write_video(self, relative_path: str) -> Path:
         path = self.repo_root / relative_path
@@ -935,7 +1148,7 @@ class ApiServiceSmokeTests(unittest.TestCase):
     def test_materialize_run_config_writes_generated_patch_file(self) -> None:
         config_path, relative_name = self.service._resolve_config_path("default.yaml")
 
-        materialized_path, materialized_name = self.service._materialize_run_config(
+        materialized_path, materialized_name, _ = self.service._materialize_run_config(
             base_config_path=config_path,
             base_config_name=relative_name,
             run_id="run_demo1234",
@@ -2156,6 +2369,1006 @@ class ApiServiceSmokeTests(unittest.TestCase):
             Path(created_run["output_dir"]).resolve().as_posix(),
         )
         self.assertTrue(Path(created_run["output_dir"]).exists())
+
+    def test_production_trial_rejects_unsafe_patch_before_materialize_thread_or_registry(self) -> None:
+        for run_id, unsafe_patch in (
+            ("production_trial_model_path", {"detector": {"model_path": "weights/other.pt"}}),
+            ("production_trial_unknown_tuning", {"detector": {"confidence": 0.2}}),
+        ):
+            with self.subTest(run_id=run_id):
+                with (
+                    mock.patch.object(
+                        self.service,
+                        "_materialize_run_config",
+                        wraps=self.service._materialize_run_config,
+                    ) as materialize,
+                    mock.patch("football_tracking.api.service.threading.Thread") as thread,
+                ):
+                    with self.assertRaisesRegex(ValueError, "Unsupported production_trial config path"):
+                        self.service.create_run(
+                            {
+                                "config_name": "default.yaml",
+                                "output_dir_name": run_id,
+                                "config_patch": unsafe_patch,
+                                "notes": json.dumps({"purpose": "production_trial"}),
+                            }
+                        )
+                materialize.assert_not_called()
+                thread.assert_not_called()
+                self.assertFalse((self.repo_root / "config" / "generated").exists())
+                self.assertFalse(
+                    (self.repo_root / "outputs" / "runs" / "input" / run_id).exists()
+                )
+                self.assertFalse(any(run["run_id"] == run_id for run in self.service.list_runs()))
+
+    def test_production_trial_accepts_frontend_versioned_patch_preflight(self) -> None:
+        input_video = str((self.repo_root / "data" / "input.mp4").resolve())
+        created = self.create_passive_production_trial(
+            run_id="production_trial_versioned",
+        )
+
+        self.assertEqual("queued", created["status"])
+        self.assertEqual(
+            "generated/default_field_setup_production_trial_versioned.yaml",
+            created["config_name"],
+        )
+        generated = yaml.safe_load(Path(created["config_path"]).read_text(encoding="utf-8"))
+        self.assertEqual(0.16, generated["detector"]["confidence_threshold"])
+        self.assertEqual("tuning-v1", generated["metadata"]["production_tuning"]["version_id"])
+        self.assertEqual(
+            {
+                "name": "default.yaml",
+                "sha256": hashlib.sha256(
+                    (self.repo_root / "config" / "default.yaml").read_bytes()
+                ).hexdigest(),
+            },
+            generated["metadata"]["production_workflow"]["base_config_lineage"],
+        )
+        self.assertEqual(input_video, generated["input_video"])
+        self.assertEqual(created["output_dir"], generated["output_dir"])
+        self.assertTrue(generated["postprocess"]["enabled"])
+        self.assertTrue(generated["follow_cam"]["enabled"])
+        self.assertEqual(0, generated["runtime"]["start_frame"])
+        self.assertEqual(240, generated["runtime"]["max_frames"])
+        self.assertRegex(created["config_sha256"], r"^[0-9a-f]{64}$")
+        self.assertEqual(
+            hashlib.sha256(Path(created["config_path"]).read_bytes()).hexdigest(),
+            created["config_sha256"],
+        )
+
+    def test_production_trial_rejects_runtime_binding_conflicts_without_side_effects(self) -> None:
+        cases = (
+            (
+                "top_level_follow_cam",
+                {"enable_follow_cam": False},
+                {"purpose": "production_trial"},
+                "follow_cam.enabled",
+            ),
+            (
+                "top_level_max_frames",
+                {"max_frames": 10},
+                {"purpose": "production_trial"},
+                "runtime.max_frames",
+            ),
+            (
+                "machine_note_postprocess",
+                {},
+                {"purpose": "production_trial", "enable_postprocess": False},
+                "postprocess.enabled",
+            ),
+        )
+        for suffix, request_override, note, expected_path in cases:
+            run_id = f"production_trial_conflict_{suffix}"
+            with self.subTest(suffix=suffix):
+                with (
+                    mock.patch.object(
+                        self.service,
+                        "_materialize_run_config",
+                        wraps=self.service._materialize_run_config,
+                    ) as materialize,
+                    mock.patch("football_tracking.api.service.threading.Thread") as thread,
+                ):
+                    with self.assertRaisesRegex(
+                        ValueError,
+                        rf"production_trial runtime binding conflict: {re.escape(expected_path)}",
+                    ):
+                        self.service.create_run(
+                            {
+                                "config_name": "default.yaml",
+                                "input_video": str((self.repo_root / "data" / "input.mp4").resolve()),
+                                "output_dir_name": run_id,
+                                "config_patch": self.versioned_production_trial_patch(),
+                                "enable_postprocess": True,
+                                "enable_follow_cam": True,
+                                "start_frame": 0,
+                                "max_frames": 240,
+                                "notes": json.dumps(note),
+                                **request_override,
+                            }
+                        )
+                materialize.assert_not_called()
+                thread.assert_not_called()
+                self.assertFalse((self.repo_root / "config" / "generated").exists())
+                self.assertFalse(
+                    (self.repo_root / "outputs" / "runs" / "input" / run_id).exists()
+                )
+
+    def test_production_trial_parent_must_exist_and_be_completed(self) -> None:
+        with self.assertRaisesRegex(ValueError, "production_trial parent run does not exist"):
+            self.create_passive_production_trial(
+                run_id="production_trial_missing_parent_child",
+                generation=2,
+                parent_run_id="production_trial_missing",
+            )
+        self.assertFalse((self.repo_root / "config" / "generated").exists())
+
+        parent = self.create_passive_production_trial(run_id="production_trial_pending_parent")
+        with self.assertRaisesRegex(ValueError, "production_trial parent run must be terminal"):
+            self.create_passive_production_trial(
+                run_id="production_trial_pending_child",
+                generation=2,
+                parent_run_id=str(parent["run_id"]),
+            )
+        self.assertFalse(
+            (self.repo_root / "config" / "generated" / "default_field_setup_production_trial_pending_child.yaml").exists()
+        )
+
+    def test_production_trial_first_run_accepts_self_consistent_local_draft_history(self) -> None:
+        patch = self.versioned_production_trial_patch()
+        prior = patch["metadata"]["production_tuning"]  # type: ignore[index]
+        current = json.loads(json.dumps(prior))
+        current["version_id"] = "tuning-local-v2"
+        current["parent_version_id"] = prior["version_id"]
+        current["created_at"] = "2026-07-17T12:02:00.000Z"
+        current["history"] = [
+            {
+                "version_id": prior["version_id"],
+                "created_at": prior["created_at"],
+                "values_sha256": prior["values_sha256"],
+                "values": prior["values"],
+            }
+        ]
+        patch["metadata"]["production_tuning"] = current  # type: ignore[index]
+
+        created = self.create_passive_production_trial(
+            run_id="production_trial_local_history_first_run",
+            patch=patch,
+        )
+
+        self.assertIsNone(created["parent_run_id"])
+        persisted = yaml.safe_load(Path(created["config_path"]).read_text(encoding="utf-8"))
+        self.assertEqual("tuning-local-v2", persisted["metadata"]["production_tuning"]["version_id"])
+
+    def test_production_trial_root_requires_complete_note_and_source_contract(self) -> None:
+        with self.assertRaisesRegex(ValueError, "production_trial note contract is incomplete"):
+            self.service.create_run(
+                {
+                    "config_name": "default.yaml",
+                    "output_dir_name": "production_trial_incomplete_note",
+                    "config_patch": self.versioned_production_trial_patch(),
+                    "notes": json.dumps({"purpose": "production_trial"}),
+                }
+            )
+
+        request = self.production_trial_request(run_id="production_trial_missing_source_contract")
+        workflow = request["config_patch"]["metadata"]["production_workflow"]  # type: ignore[index]
+        del workflow["source_signature"]
+        with self.assertRaisesRegex(ValueError, "production_trial source identity is unavailable"):
+            self.service.create_run(request)
+
+    def test_production_trial_parent_must_match_workflow_and_source(self) -> None:
+        parent = self.create_passive_production_trial(run_id="production_trial_lineage_parent")
+        self.mark_run_completed(str(parent["run_id"]))
+
+        with self.assertRaisesRegex(ValueError, "production_trial parent workflow does not match"):
+            self.create_passive_production_trial(
+                run_id="production_trial_foreign_workflow_child",
+                workflow_id="workflow-b",
+                generation=2,
+                parent_run_id=str(parent["run_id"]),
+            )
+
+        different_input = str((self.repo_root / "data" / "clip.mov").resolve())
+        source_patch = self.versioned_production_trial_patch()
+        source_patch["input_video"] = different_input
+        with self.assertRaisesRegex(ValueError, "production_trial parent source does not match"):
+            self.create_passive_production_trial(
+                run_id="production_trial_foreign_source_child",
+                patch=source_patch,
+                generation=2,
+                parent_run_id=str(parent["run_id"]),
+                input_video=different_input,
+            )
+
+    def test_production_trial_parent_config_digest_blocks_tampered_lineage(self) -> None:
+        parent = self.create_passive_production_trial(run_id="production_trial_tamper_parent")
+        parent = self.complete_production_trial_via_execute_run(parent)
+        parent_config = Path(str(parent["config_path"]))
+        parent_config.write_text(parent_config.read_text(encoding="utf-8") + "\n# tampered\n", encoding="utf-8")
+
+        with self.assertRaisesRegex(ValueError, "production_trial parent config digest does not match"):
+            self.create_passive_production_trial(
+                run_id="production_trial_tamper_child",
+                generation=2,
+                parent_run_id=str(parent["run_id"]),
+            )
+
+    def test_production_trial_completed_lifecycle_preserves_config_digest_for_child_lineage(self) -> None:
+        parent = self.create_passive_production_trial(run_id="production_trial_completed_parent")
+        expected_digest = parent["config_sha256"]
+
+        completed_parent = self.complete_production_trial_via_execute_run(parent)
+
+        self.assertEqual("completed", completed_parent["status"])
+        self.assertEqual(expected_digest, completed_parent["config_sha256"])
+        manifest = json.loads(
+            (Path(str(completed_parent["output_dir"])) / "run_manifest.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        self.assertEqual(expected_digest, manifest["config_sha256"])
+        child = self.create_passive_production_trial(
+            run_id="production_trial_completed_child",
+            generation=2,
+            parent_run_id=str(completed_parent["run_id"]),
+        )
+        self.assertEqual(completed_parent["run_id"], child["parent_run_id"])
+
+    def test_production_trial_execution_fails_if_persisted_config_drifts(self) -> None:
+        parent = self.create_passive_production_trial(run_id="production_trial_drift_parent")
+        expected_digest = parent["config_sha256"]
+        parent_config = Path(str(parent["config_path"]))
+        parent_config.write_text(parent_config.read_text(encoding="utf-8") + "\n# drifted\n", encoding="utf-8")
+
+        failed_parent = self.complete_production_trial_via_execute_run(parent)
+
+        self.assertEqual("failed", failed_parent["status"])
+        self.assertEqual(expected_digest, failed_parent["config_sha256"])
+        self.assertIn("config digest changed during execution", failed_parent["error"])
+
+    def test_production_trial_base_snapshot_rewrite_before_materialize_fails_closed(self) -> None:
+        run_id = "production_trial_base_snapshot_rewrite"
+        base_config_path = self.repo_root / "config" / "default.yaml"
+        original_materialize = self.service._materialize_run_config
+
+        def rewrite_base_before_materialize(**kwargs):
+            base_config_path.write_bytes(base_config_path.read_bytes() + b"\n# rewritten\n")
+            return original_materialize(**kwargs)
+
+        with (
+            mock.patch.object(
+                self.service,
+                "_materialize_run_config",
+                side_effect=rewrite_base_before_materialize,
+            ),
+            self.assertRaisesRegex(
+                ValueError,
+                "production_trial base config changed during creation",
+            ),
+        ):
+            self.create_passive_production_trial(run_id=run_id)
+
+        self.assert_failed_trial_creation_left_no_side_effects(run_id)
+
+    def test_production_trial_parent_snapshot_rewrite_between_hash_and_parse_fails_closed(
+        self,
+    ) -> None:
+        parent = self.create_passive_production_trial(
+            run_id="production_trial_parent_snapshot_parent",
+            workflow_id="workflow-parent-snapshot",
+        )
+        self.mark_run_completed(str(parent["run_id"]))
+        parent_config_path = Path(str(parent["config_path"]))
+        original_parse = self.service._parse_yaml_config_bytes
+        rewritten = False
+
+        def rewrite_parent_before_parse(content: bytes, config_path: Path):
+            nonlocal rewritten
+            if config_path == parent_config_path and not rewritten:
+                rewritten = True
+                parent_config_path.write_bytes(content + b"\n# rewritten\n")
+            return original_parse(content, config_path)
+
+        run_id = "production_trial_parent_snapshot_child"
+        with (
+            mock.patch.object(
+                self.service,
+                "_parse_yaml_config_bytes",
+                side_effect=rewrite_parent_before_parse,
+            ),
+            self.assertRaisesRegex(
+                ValueError,
+                "production_trial parent config digest does not match",
+            ),
+        ):
+            self.create_passive_production_trial(
+                run_id=run_id,
+                workflow_id="workflow-parent-snapshot",
+                generation=2,
+                parent_run_id=str(parent["run_id"]),
+            )
+
+        self.assertTrue(rewritten)
+        self.assert_failed_trial_creation_left_no_side_effects(run_id)
+
+    def test_production_trial_materialized_snapshot_post_publish_drift_fails_closed(self) -> None:
+        run_id = "production_trial_materialized_snapshot_drift"
+        original_verify = self.service._verify_materialized_config_snapshot
+        drifted = False
+
+        def drift_after_first_verification(snapshot: Any) -> None:
+            nonlocal drifted
+            original_verify(snapshot)
+            if not drifted:
+                drifted = True
+                snapshot.path.write_bytes(snapshot.content + b"\n# drifted\n")
+
+        with (
+            mock.patch.object(
+                self.service,
+                "_verify_materialized_config_snapshot",
+                side_effect=drift_after_first_verification,
+            ),
+            self.assertRaisesRegex(
+                ValueError,
+                "production_trial materialized config snapshot changed",
+            ),
+        ):
+            self.create_passive_production_trial(run_id=run_id)
+
+        self.assertTrue(drifted)
+        self.assert_failed_trial_creation_left_no_side_effects(run_id)
+
+    def test_production_trial_child_cannot_mutate_parent_calibration_geometry(self) -> None:
+        mutations = {
+            "filtering.roi": lambda patch: patch["filtering"].__setitem__("roi", [11, 20, 600, 340]),
+            "scene_bias.enabled": lambda patch: patch["scene_bias"].__setitem__("enabled", False),
+            "scene_bias.ground_zones": lambda patch: patch["scene_bias"].__setitem__(
+                "ground_zones",
+                [
+                    {
+                        "name": "production_field",
+                        "points": [[11, 20], [600, 20], [600, 340], [11, 340]],
+                    }
+                ],
+            ),
+            "scene_bias.negative_rois": lambda patch: patch["scene_bias"].__setitem__(
+                "negative_rois",
+                [
+                    {
+                        "name": "scoreboard",
+                        "points": [[10, 20], [40, 20], [40, 50], [10, 50]],
+                    }
+                ],
+            ),
+        }
+        for index, (path, mutate) in enumerate(mutations.items(), start=1):
+            with self.subTest(path=path):
+                parent = self.create_passive_production_trial(
+                    run_id=f"production_trial_geometry_parent_{index}",
+                    workflow_id=f"workflow-geometry-{index}",
+                )
+                self.mark_run_completed(str(parent["run_id"]))
+                child_patch = self.versioned_production_trial_patch()
+                mutate(child_patch)
+                with self.assertRaisesRegex(
+                    ValueError,
+                    rf"production_trial parent calibration geometry does not match: {re.escape(path)}",
+                ):
+                    self.create_passive_production_trial(
+                        run_id=f"production_trial_geometry_child_{index}",
+                        patch=child_patch,
+                        workflow_id=f"workflow-geometry-{index}",
+                        generation=2,
+                        parent_run_id=str(parent["run_id"]),
+                    )
+
+    def test_production_trial_new_root_can_use_new_calibration_geometry(self) -> None:
+        previous_root = self.create_passive_production_trial(
+            run_id="production_trial_previous_calibration_root",
+            workflow_id="workflow-previous-calibration",
+        )
+        self.mark_run_completed(str(previous_root["run_id"]))
+        patch = self.versioned_production_trial_patch()
+        patch["filtering"]["roi"] = [11, 21, 601, 341]  # type: ignore[index]
+        patch["scene_bias"]["ground_zones"] = [  # type: ignore[index]
+            {
+                "name": "new_calibration_field",
+                "points": [[11, 21], [601, 21], [601, 341], [11, 341]],
+            }
+        ]
+        patch["scene_bias"]["negative_rois"] = [  # type: ignore[index]
+            {
+                "name": "new_calibration_exclusion",
+                "points": [[20, 30], [50, 30], [50, 60], [20, 60]],
+            }
+        ]
+
+        root = self.create_passive_production_trial(
+            run_id="production_trial_new_calibration_root",
+            patch=patch,
+            workflow_id="workflow-new-calibration",
+            note_overrides={"calibration_digest": "3" * 64},
+        )
+
+        persisted = yaml.safe_load(Path(str(root["config_path"])).read_text(encoding="utf-8"))
+        self.assertEqual([11, 21, 601, 341], persisted["filtering"]["roi"])
+        self.assertEqual("new_calibration_field", persisted["scene_bias"]["ground_zones"][0]["name"])
+        self.assertEqual(
+            "new_calibration_exclusion",
+            persisted["scene_bias"]["negative_rois"][0]["name"],
+        )
+
+    def test_production_trial_failed_parent_can_continue_linear_rerun(self) -> None:
+        parent = self.create_passive_production_trial(
+            run_id="production_trial_failed_parent",
+            workflow_id="workflow-failed-rerun",
+        )
+        registry = self.service._read_registry()
+        parent_record = next(item for item in registry["runs"] if item["run_id"] == parent["run_id"])
+        parent_record["status"] = "failed"
+        parent_record["started_at"] = "2026-07-17T12:00:00+00:00"
+        parent_record["completed_at"] = "2026-07-17T12:01:00+00:00"
+        parent_record["error"] = "decoder failed"
+        self.service._write_registry(registry)
+
+        child = self.create_passive_production_trial(
+            run_id="production_trial_failed_child",
+            workflow_id="workflow-failed-rerun",
+            generation=2,
+            parent_run_id=str(parent["run_id"]),
+        )
+
+        self.assertEqual(parent["run_id"], child["parent_run_id"])
+
+    def test_production_trial_existing_modern_workflow_rejects_dropped_parent(self) -> None:
+        with self.assertRaisesRegex(ValueError, "production_trial root generation must be 1"):
+            self.create_passive_production_trial(
+                run_id="production_trial_disguised_later_root",
+                workflow_id="workflow-disguised-root",
+                generation=2,
+            )
+        parent = self.create_passive_production_trial(
+            run_id="production_trial_modern_root",
+            workflow_id="workflow-modern-root",
+        )
+        self.mark_run_completed(str(parent["run_id"]))
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "production_trial existing workflow requires parent_run_id",
+        ):
+            self.create_passive_production_trial(
+                run_id="production_trial_duplicate_modern_root",
+                workflow_id="workflow-modern-root",
+            )
+
+    def test_production_trial_legacy_restart_is_explicit_unique_and_workflow_bound(self) -> None:
+        legacy = self.create_passive_production_trial(
+            run_id="production_trial_legacy_all_lost",
+            workflow_id="workflow-legacy-restart",
+        )
+        registry = self.service._read_registry()
+        legacy_record = next(item for item in registry["runs"] if item["run_id"] == legacy["run_id"])
+        legacy_record["status"] = "completed"
+        legacy_record["started_at"] = "2026-07-17T12:00:00+00:00"
+        legacy_record["completed_at"] = "2026-07-17T12:01:00+00:00"
+        legacy_record.pop("config_sha256")
+        self.service._write_registry(registry)
+
+        with self.assertRaisesRegex(ValueError, "production_trial legacy restart must be explicit"):
+            self.create_passive_production_trial(
+                run_id="production_trial_silent_legacy_root",
+                workflow_id="workflow-legacy-restart",
+            )
+        with self.assertRaisesRegex(ValueError, "production_trial legacy restart workflow does not match"):
+            self.create_passive_production_trial(
+                run_id="production_trial_forged_legacy_root",
+                workflow_id="workflow-forged-legacy-restart",
+                note_overrides={"legacy_restart_run_id": legacy["run_id"]},
+            )
+        with self.assertRaisesRegex(
+            ValueError,
+            "production_trial legacy restart base config lineage does not match",
+        ):
+            self.create_passive_production_trial(
+                run_id="production_trial_legacy_base_switch",
+                workflow_id="workflow-legacy-restart",
+                note_overrides={"legacy_restart_run_id": legacy["run_id"]},
+                config_name="alt.yaml",
+            )
+
+        restarted = self.create_passive_production_trial(
+            run_id="production_trial_explicit_legacy_root",
+            workflow_id="workflow-legacy-restart",
+            generation=1,
+            note_overrides={"legacy_restart_run_id": legacy["run_id"]},
+        )
+        self.assertIsNone(restarted["parent_run_id"])
+        self.assertRegex(str(restarted["config_sha256"]), r"^[0-9a-f]{64}$")
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "production_trial existing workflow requires parent_run_id",
+        ):
+            self.create_passive_production_trial(
+                run_id="production_trial_duplicate_legacy_restart",
+                workflow_id="workflow-legacy-restart",
+                generation=1,
+                note_overrides={"legacy_restart_run_id": legacy["run_id"]},
+            )
+
+    def test_production_trial_legacy_restart_requires_chain_tip_and_allows_unique_tip(self) -> None:
+        workflow_id = "workflow-legacy-chain-tip"
+        parent = self.create_passive_production_trial(
+            run_id="production_trial_legacy_chain_parent",
+            workflow_id=workflow_id,
+        )
+        self.mark_run_completed(str(parent["run_id"]))
+        child = self.create_passive_production_trial(
+            run_id="production_trial_legacy_chain_tip",
+            workflow_id=workflow_id,
+            generation=2,
+            parent_run_id=str(parent["run_id"]),
+        )
+        self.mark_run_completed(str(child["run_id"]))
+        registry = self.service._read_registry()
+        for record in registry["runs"]:
+            if record.get("run_id") in {parent["run_id"], child["run_id"]}:
+                record.pop("config_sha256", None)
+        self.service._write_registry(registry)
+
+        rejected_run_id = "production_trial_legacy_non_tip_restart"
+        with self.assertRaisesRegex(
+            ValueError,
+            "production_trial legacy restart target is not the unique authoritative terminal tip",
+        ):
+            self.create_passive_production_trial(
+                run_id=rejected_run_id,
+                workflow_id=workflow_id,
+                note_overrides={"legacy_restart_run_id": parent["run_id"]},
+            )
+        self.assert_failed_trial_creation_left_no_side_effects(rejected_run_id)
+
+        restarted = self.create_passive_production_trial(
+            run_id="production_trial_legacy_unique_tip_restart",
+            workflow_id=workflow_id,
+            note_overrides={"legacy_restart_run_id": child["run_id"]},
+        )
+        self.assertIsNone(restarted["parent_run_id"])
+        self.assertRegex(str(restarted["config_sha256"]), r"^[0-9a-f]{64}$")
+
+    def test_production_trial_legacy_restart_rejects_multiple_terminal_leaves(self) -> None:
+        workflow_id = "workflow-legacy-multiple-leaves"
+        legacy = self.create_passive_production_trial(
+            run_id="production_trial_legacy_leaf_a",
+            workflow_id=workflow_id,
+        )
+        self.mark_run_completed(str(legacy["run_id"]))
+        registry = self.service._read_registry()
+        first = next(item for item in registry["runs"] if item["run_id"] == legacy["run_id"])
+        first.pop("config_sha256", None)
+        second = deepcopy(first)
+        second["run_id"] = "production_trial_legacy_leaf_b"
+        second["parent_run_id"] = None
+        second_note = json.loads(str(second["notes"]))
+        second_note["output_id"] = "legacy_leaf_b"
+        second_note["submission_id"] = "submission-legacy_leaf_b"
+        second["notes"] = json.dumps(second_note)
+        registry["runs"].append(second)
+        self.service._write_registry(registry)
+
+        run_id = "production_trial_legacy_multiple_leaves_restart"
+        with self.assertRaisesRegex(
+            ValueError,
+            "production_trial legacy restart target is not the unique authoritative terminal tip",
+        ):
+            self.create_passive_production_trial(
+                run_id=run_id,
+                workflow_id=workflow_id,
+                note_overrides={"legacy_restart_run_id": legacy["run_id"]},
+            )
+        self.assert_failed_trial_creation_left_no_side_effects(run_id)
+
+    def test_production_trial_legacy_restart_rejects_ambiguous_parent_topology(self) -> None:
+        workflow_id = "workflow-legacy-ambiguous-topology"
+        legacy = self.create_passive_production_trial(
+            run_id="production_trial_legacy_ambiguous_root",
+            workflow_id=workflow_id,
+        )
+        self.mark_run_completed(str(legacy["run_id"]))
+        registry = self.service._read_registry()
+        root = next(item for item in registry["runs"] if item["run_id"] == legacy["run_id"])
+        root.pop("config_sha256", None)
+        ambiguous = deepcopy(root)
+        ambiguous["run_id"] = "production_trial_legacy_orphan"
+        ambiguous["parent_run_id"] = "production_trial_missing_parent"
+        ambiguous_note = json.loads(str(ambiguous["notes"]))
+        ambiguous_note["generation"] = 2
+        ambiguous_note["output_id"] = "legacy_orphan"
+        ambiguous_note["submission_id"] = "submission-legacy_orphan"
+        ambiguous["notes"] = json.dumps(ambiguous_note)
+        registry["runs"].append(ambiguous)
+        self.service._write_registry(registry)
+
+        run_id = "production_trial_legacy_ambiguous_restart"
+        with self.assertRaisesRegex(
+            ValueError,
+            "production_trial legacy restart target is not the unique authoritative terminal tip",
+        ):
+            self.create_passive_production_trial(
+                run_id=run_id,
+                workflow_id=workflow_id,
+                note_overrides={"legacy_restart_run_id": legacy["run_id"]},
+            )
+        self.assert_failed_trial_creation_left_no_side_effects(run_id)
+
+    def test_production_trial_child_cannot_switch_immutable_base_config_lineage(self) -> None:
+        parent = self.create_passive_production_trial(
+            run_id="production_trial_base_parent",
+            workflow_id="workflow-base-lineage",
+        )
+        self.mark_run_completed(str(parent["run_id"]))
+        self.write_text("weights/other.pt", "different model")
+        model_config = build_sample_config("./outputs/model_alt")
+        model_config["detector"] = {"model_path": "./weights/other.pt"}
+        self.write_yaml("config/model_alt.yaml", model_config)
+
+        for index, config_name in enumerate(("alt.yaml", "model_alt.yaml"), start=1):
+            with self.subTest(config_name=config_name):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "production_trial parent base config lineage does not match",
+                ):
+                    self.create_passive_production_trial(
+                        run_id=f"production_trial_base_child_{index}",
+                        workflow_id="workflow-base-lineage",
+                        generation=2,
+                        parent_run_id=str(parent["run_id"]),
+                        config_name=config_name,
+                    )
+
+        default_config = self.repo_root / "config" / "default.yaml"
+        default_config.write_text(
+            default_config.read_text(encoding="utf-8") + "\n# modified in place\n",
+            encoding="utf-8",
+        )
+        with self.assertRaisesRegex(
+            ValueError,
+            "production_trial parent base config lineage does not match",
+        ):
+            self.create_passive_production_trial(
+                run_id="production_trial_base_child_modified_in_place",
+                workflow_id="workflow-base-lineage",
+                generation=2,
+                parent_run_id=str(parent["run_id"]),
+            )
+
+    def test_production_trial_rejects_stale_source_signature_before_materialization(self) -> None:
+        patch = self.versioned_production_trial_patch()
+        patch["metadata"]["production_workflow"] = {  # type: ignore[index]
+            "purpose": "production_trial",
+            "source_signature": {
+                "path": str((self.repo_root / "data" / "input.mp4").resolve()),
+                "size_bytes": 999,
+                "modified_at": "2026-07-17T12:00:00+00:00",
+            },
+        }
+        with mock.patch.object(
+            self.service,
+            "_materialize_run_config",
+            wraps=self.service._materialize_run_config,
+        ) as materialize:
+            with self.assertRaisesRegex(ValueError, "production_trial source signature is stale or invalid"):
+                self.service.create_run(
+                    {
+                        "config_name": "default.yaml",
+                        "input_video": str((self.repo_root / "data" / "input.mp4").resolve()),
+                        "output_dir_name": "production_trial_stale_source",
+                        "config_patch": patch,
+                        "enable_postprocess": True,
+                        "enable_follow_cam": True,
+                        "start_frame": 0,
+                        "max_frames": 240,
+                        "notes": json.dumps({"purpose": "production_trial"}),
+                    }
+                )
+        materialize.assert_not_called()
+
+    def test_production_trial_rejects_hybrid_mode_before_materialization(self) -> None:
+        with mock.patch.object(
+            self.service,
+            "_materialize_run_config",
+            wraps=self.service._materialize_run_config,
+        ) as materialize:
+            with self.assertRaisesRegex(ValueError, "production_trial requires pipeline_mode=standard"):
+                self.service.create_run(
+                    {
+                        "config_name": "default.yaml",
+                        "output_dir_name": "production_trial_hybrid",
+                        "pipeline_mode": "broadcast_hybrid",
+                        "config_patch": self.versioned_production_trial_patch(),
+                        "notes": json.dumps({"purpose": "production_trial"}),
+                    }
+                )
+        materialize.assert_not_called()
+
+    def test_production_trial_parent_accepts_identical_tuning_envelope(self) -> None:
+        parent = self.create_passive_production_trial(run_id="production_trial_identical_parent")
+        self.mark_run_completed(str(parent["run_id"]))
+
+        child = self.create_passive_production_trial(
+            run_id="production_trial_identical_child",
+            generation=2,
+            parent_run_id=str(parent["run_id"]),
+        )
+
+        self.assertEqual(parent["run_id"], child["parent_run_id"])
+
+    def test_production_trial_parent_rejects_replay_calibration_change_and_fork(self) -> None:
+        parent = self.create_passive_production_trial(run_id="production_trial_linear_parent")
+        self.mark_run_completed(str(parent["run_id"]))
+
+        with self.assertRaisesRegex(ValueError, "production_trial parent generation does not match"):
+            self.create_passive_production_trial(
+                run_id="production_trial_replayed_generation",
+                generation=1,
+                parent_run_id=str(parent["run_id"]),
+            )
+        with self.assertRaisesRegex(ValueError, "production_trial parent calibration does not match"):
+            self.create_passive_production_trial(
+                run_id="production_trial_changed_calibration",
+                generation=2,
+                parent_run_id=str(parent["run_id"]),
+                note_overrides={"calibration_digest": "3" * 64},
+            )
+
+        child = self.create_passive_production_trial(
+            run_id="production_trial_linear_child",
+            generation=2,
+            parent_run_id=str(parent["run_id"]),
+        )
+        self.mark_run_completed(str(child["run_id"]))
+        with self.assertRaisesRegex(ValueError, "production_trial parent run already has a child"):
+            self.create_passive_production_trial(
+                run_id="production_trial_forked_sibling",
+                generation=2,
+                parent_run_id=str(parent["run_id"]),
+            )
+
+    def test_production_trial_parent_accepts_only_strictly_appended_tuning_history(self) -> None:
+        parent_patch = self.versioned_production_trial_patch()
+        parent = self.create_passive_production_trial(
+            run_id="production_trial_append_parent",
+            patch=parent_patch,
+        )
+        self.mark_run_completed(str(parent["run_id"]))
+
+        child_patch = json.loads(json.dumps(parent_patch))
+        parent_tuning = parent_patch["metadata"]["production_tuning"]  # type: ignore[index]
+        child_tuning = child_patch["metadata"]["production_tuning"]
+        child_values = child_tuning["values"]
+        child_values["detector.confidence_threshold"] = 0.17
+        child_tuning["version_id"] = "tuning-v2"
+        child_tuning["parent_version_id"] = parent_tuning["version_id"]
+        child_tuning["created_at"] = "2026-07-17T12:02:00.000Z"
+        child_tuning["values_sha256"] = production_tuning_values_sha256(child_values)
+        child_tuning["history"] = [
+            {
+                "version_id": parent_tuning["version_id"],
+                "created_at": parent_tuning["created_at"],
+                "values_sha256": parent_tuning["values_sha256"],
+                "values": parent_tuning["values"],
+            }
+        ]
+        child_patch["detector"]["confidence_threshold"] = 0.17
+
+        child = self.create_passive_production_trial(
+            run_id="production_trial_append_child",
+            patch=child_patch,
+            generation=2,
+            parent_run_id=str(parent["run_id"]),
+        )
+        self.assertEqual(parent["run_id"], child["parent_run_id"])
+
+        self.mark_run_completed(str(child["run_id"]))
+        forged_patch = json.loads(json.dumps(child_patch))
+        forged_tuning = forged_patch["metadata"]["production_tuning"]
+        forged_tuning["version_id"] = "tuning-v3"
+        forged_tuning["parent_version_id"] = "forged-v2"
+        forged_tuning["history"][-1]["version_id"] = "forged-v2"
+        with self.assertRaisesRegex(ValueError, "production_trial tuning history must append parent"):
+            self.create_passive_production_trial(
+                run_id="production_trial_forged_child",
+                patch=forged_patch,
+                generation=3,
+                parent_run_id=str(child["run_id"]),
+            )
+
+    def test_production_trial_parent_accepts_multiple_local_tuning_drafts_as_strict_prefix(self) -> None:
+        parent_patch = self.versioned_production_trial_patch()
+        parent = self.create_passive_production_trial(
+            run_id="production_trial_multi_draft_parent",
+            patch=parent_patch,
+            workflow_id="workflow-multi-draft",
+        )
+        self.mark_run_completed(str(parent["run_id"]))
+        parent_tuning = parent_patch["metadata"]["production_tuning"]  # type: ignore[index]
+        parent_snapshot = {
+            "version_id": parent_tuning["version_id"],
+            "created_at": parent_tuning["created_at"],
+            "values_sha256": parent_tuning["values_sha256"],
+            "values": parent_tuning["values"],
+        }
+        v2_values = json.loads(json.dumps(parent_tuning["values"]))
+        v2_values["detector.confidence_threshold"] = 0.17
+        v2 = {
+            "schema_version": "1.0",
+            "version_id": "tuning-local-v2",
+            "parent_version_id": parent_tuning["version_id"],
+            "created_at": "2026-07-17T12:02:00.000Z",
+            "values_sha256": production_tuning_values_sha256(v2_values),
+            "values": v2_values,
+            "history": [parent_snapshot],
+        }
+        v2_snapshot = {
+            "version_id": v2["version_id"],
+            "created_at": v2["created_at"],
+            "values_sha256": v2["values_sha256"],
+            "values": v2["values"],
+        }
+        v3_values = json.loads(json.dumps(v2_values))
+        v3_values["detector.confidence_threshold"] = 0.18
+        valid_patch = json.loads(json.dumps(parent_patch))
+        valid_patch["detector"]["confidence_threshold"] = 0.18
+        valid_patch["metadata"]["production_tuning"] = {
+            "schema_version": "1.0",
+            "version_id": "tuning-local-v3",
+            "parent_version_id": v2["version_id"],
+            "created_at": "2026-07-17T12:03:00.000Z",
+            "values_sha256": production_tuning_values_sha256(v3_values),
+            "values": v3_values,
+            "history": [parent_snapshot, v2_snapshot],
+        }
+
+        omitted_parent = json.loads(json.dumps(valid_patch))
+        omitted_parent["metadata"]["production_tuning"]["history"] = [v2_snapshot]
+        with self.assertRaisesRegex(ValueError, "production_trial tuning history must append parent"):
+            self.create_passive_production_trial(
+                run_id="production_trial_multi_draft_omitted_parent",
+                patch=omitted_parent,
+                workflow_id="workflow-multi-draft",
+                generation=2,
+                parent_run_id=str(parent["run_id"]),
+            )
+
+        rewritten_parent = json.loads(json.dumps(valid_patch))
+        rewritten_parent["metadata"]["production_tuning"]["history"][0]["created_at"] = (
+            "2026-07-17T11:59:00.000Z"
+        )
+        with self.assertRaisesRegex(ValueError, "production_trial tuning history must append parent"):
+            self.create_passive_production_trial(
+                run_id="production_trial_multi_draft_rewritten_parent",
+                patch=rewritten_parent,
+                workflow_id="workflow-multi-draft",
+                generation=2,
+                parent_run_id=str(parent["run_id"]),
+            )
+
+        tampered_local = json.loads(json.dumps(valid_patch))
+        tampered_local["metadata"]["production_tuning"]["history"][1]["values"][
+            "detector.confidence_threshold"
+        ] = 0.19
+        with self.assertRaisesRegex(ValueError, "values_sha256 does not match values"):
+            self.create_passive_production_trial(
+                run_id="production_trial_multi_draft_tampered_local",
+                patch=tampered_local,
+                workflow_id="workflow-multi-draft",
+                generation=2,
+                parent_run_id=str(parent["run_id"]),
+            )
+
+        child = self.create_passive_production_trial(
+            run_id="production_trial_multi_draft_child",
+            patch=valid_patch,
+            workflow_id="workflow-multi-draft",
+            generation=2,
+            parent_run_id=str(parent["run_id"]),
+        )
+        self.assertEqual(parent["run_id"], child["parent_run_id"])
+
+    def test_production_trial_normalizes_bounded_legacy_tuning_before_persistence(self) -> None:
+        patch = self.versioned_production_trial_patch()
+        del patch["metadata"]["production_tuning"]  # type: ignore[index]
+        created = self.create_passive_production_trial(
+            run_id="production_trial_legacy_tuning",
+            patch=patch,
+            workflow_id="workflow-legacy-tuning",
+        )
+
+        generated = yaml.safe_load(Path(created["config_path"]).read_text(encoding="utf-8"))
+        tuning = generated["metadata"]["production_tuning"]
+        self.assertEqual(0.16, tuning["values"]["detector.confidence_threshold"])
+        self.assertEqual(
+            production_tuning_values_sha256(tuning["values"]),
+            tuning["values_sha256"],
+        )
+        self.assertTrue(tuning["version_id"].startswith("legacy-"))
+        self.assertIsNone(tuning["parent_version_id"])
+        self.assertEqual([], tuning["history"])
+
+    def test_production_trial_output_collision_precedes_config_materialization(self) -> None:
+        run_id = "production_trial_output_collision"
+        output_dir = self.repo_root / "outputs" / "runs" / "input" / run_id
+        output_dir.mkdir(parents=True)
+        (output_dir / "existing.txt").write_text("keep", encoding="utf-8")
+
+        with mock.patch.object(
+            self.service,
+            "_materialize_run_config",
+            wraps=self.service._materialize_run_config,
+        ) as materialize:
+            with self.assertRaises(FileExistsError):
+                self.service.create_run(
+                    {
+                        "config_name": "default.yaml",
+                        "output_dir_name": run_id,
+                        "config_patch": self.versioned_production_trial_patch(),
+                        "notes": json.dumps({"purpose": "production_trial"}),
+                    }
+                )
+
+        materialize.assert_not_called()
+        self.assertEqual("keep", (output_dir / "existing.txt").read_text(encoding="utf-8"))
+
+    def test_production_trial_active_run_collision_has_no_persistent_side_effects(self) -> None:
+        active_output = self.repo_root / "outputs" / "runs" / "input" / "active_run"
+        self.service._write_registry(
+            {
+                "runs": [
+                    {
+                        "run_id": "active_run",
+                        "source": "api",
+                        "status": "running",
+                        "created_at": "2026-07-17T12:00:00+00:00",
+                        "output_dir": str(active_output),
+                        "modules_enabled": {},
+                    }
+                ]
+            }
+        )
+        run_id = "production_trial_blocked_active"
+        generated = (
+            self.repo_root
+            / "config"
+            / "generated"
+            / f"default_field_setup_{run_id}.yaml"
+        )
+        output_dir = self.repo_root / "outputs" / "runs" / "input" / run_id
+
+        with mock.patch("football_tracking.api.service.threading.Thread") as thread:
+            with self.assertRaisesRegex(RuntimeError, "Another run is already active: active_run"):
+                self.service.create_run(self.production_trial_request(run_id=run_id))
+
+        thread.assert_not_called()
+        self.assertFalse(generated.exists())
+        self.assertFalse(output_dir.exists())
+        self.assertEqual(["active_run"], [run["run_id"] for run in self.service.list_runs()])
+        self.assertNotIn(run_id, self.service._active_threads)
+        self.assertNotIn(run_id, self.service._cancel_events)
+
+    def test_production_trial_generated_config_collision_is_never_overwritten(self) -> None:
+        run_id = "production_trial_config_collision"
+        generated = self.repo_root / "config" / "generated" / f"default_field_setup_{run_id}.yaml"
+        generated.parent.mkdir(parents=True)
+        generated.write_text("sentinel: keep\n", encoding="utf-8")
+
+        with mock.patch("football_tracking.api.service.threading.Thread") as thread:
+            with self.assertRaises(FileExistsError):
+                self.service.create_run(self.production_trial_request(run_id=run_id))
+
+        thread.assert_not_called()
+        self.assertEqual("sentinel: keep\n", generated.read_text(encoding="utf-8"))
 
     def test_create_run_thread_start_failure_cleans_reservation_registry_and_output(self) -> None:
         class FailingStartThread:

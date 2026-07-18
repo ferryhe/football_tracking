@@ -172,7 +172,13 @@ class TrackResult:
     lost_frames: int
     raw_candidate_count: int
     filtered_candidate_count: int
+    detector_stage_schema_version: str | None = None
+    detector_output_count: int | None = None
+    class_mapped_candidate_count: int | None = None
+    class_rejection_counts: dict[str, int] = field(default_factory=dict)
+    frame_exception: bool = False
     raw_candidates: list[Candidate] = field(default_factory=list)
+    selected_candidate_count: int = 0
     selected_score: float = 0.0
     selected_candidate_scores: list[CandidateScore] = field(default_factory=list)
     filter_rejection_counts: dict[str, int] = field(default_factory=dict)
@@ -212,6 +218,12 @@ class TrackResult:
             "lost_frames": self.lost_frames,
             "raw_candidate_count": self.raw_candidate_count,
             "filtered_candidate_count": self.filtered_candidate_count,
+            "detector_stage_schema_version": self.detector_stage_schema_version,
+            "detector_output_count": self.detector_output_count,
+            "class_mapped_candidate_count": self.class_mapped_candidate_count,
+            "class_rejection_counts": self.class_rejection_counts,
+            "frame_exception": self.frame_exception,
+            "selected_candidate_count": self.selected_candidate_count,
             "selected_score": round(self.selected_score, 4),
             "candidate_scores": [item.to_debug_dict() for item in self.selected_candidate_scores],
             "filter_rejection_counts": self.filter_rejection_counts,

@@ -1019,8 +1019,109 @@ export const CheckInputQualityResponse = zod.object({
 });
 
 /**
+ * @summary Get Production Trial Tuning Schema
+ */
+export const getProductionTrialTuningSchemaResponseSchemaVersionDefault = `1.0`;
+export const getProductionTrialTuningSchemaResponsePatchSchemaVersionDefault = `1.0`;
+export const getProductionTrialTuningSchemaResponseActionsItemAffectedPathsMin = 3;
+export const getProductionTrialTuningSchemaResponseActionsItemAffectedPathsMax = 3;
+
+export const getProductionTrialTuningSchemaResponseActionsMax = 1;
+
+export const GetProductionTrialTuningSchemaResponse = zod.object({
+  schema_version: zod
+    .literal("1.0")
+    .default(getProductionTrialTuningSchemaResponseSchemaVersionDefault),
+  patch_schema_version: zod
+    .literal("1.0")
+    .default(getProductionTrialTuningSchemaResponsePatchSchemaVersionDefault),
+  controls: zod
+    .array(
+      zod.object({
+        path: zod.string(),
+        section: zod.enum([
+          "detector",
+          "sahi",
+          "filtering",
+          "selection",
+          "tracking",
+          "postprocess",
+        ]),
+        kind: zod.enum([
+          "number",
+          "integer",
+          "boolean",
+          "select",
+          "multi_select",
+        ]),
+        minimum: zod.union([zod.number(), zod.null()]).optional(),
+        maximum: zod.union([zod.number(), zod.null()]).optional(),
+        step: zod.union([zod.number(), zod.null()]).optional(),
+        options: zod.union([zod.array(zod.string()), zod.null()]).optional(),
+        runtime_impact: zod.enum(["low", "medium", "high"]),
+        description: zod.string(),
+        description_zh: zod.string(),
+      }),
+    )
+    .min(1),
+  actions: zod
+    .array(
+      zod.object({
+        action_code: zod.literal("return_to_field_setup"),
+        target_step: zod.literal("field_setup"),
+        reason_code: zod.literal("field_geometry_requires_new_calibration"),
+        affected_paths: zod
+          .array(
+            zod.enum([
+              "filtering.roi",
+              "scene_bias.ground_zones",
+              "scene_bias.negative_rois",
+            ]),
+          )
+          .min(
+            getProductionTrialTuningSchemaResponseActionsItemAffectedPathsMin,
+          )
+          .max(
+            getProductionTrialTuningSchemaResponseActionsItemAffectedPathsMax,
+          ),
+        lineage_constraint: zod.literal(
+          "invalidate_trial_and_downstream_then_create_new_calibration_version",
+        ),
+      }),
+    )
+    .min(1)
+    .max(getProductionTrialTuningSchemaResponseActionsMax),
+});
+
+/**
  * @summary List Runs
  */
+export const listRunsResponseConfigSha256OneRegExp = new RegExp(
+  "^[0-9a-f]{64}$",
+);
+export const listRunsResponseTrialSignalGateV2OneSchemaVersionDefault = `2.0`;
+export const listRunsResponseTrialSignalGateV2OneOperatorConfirmationRequiredDefault = true;
+export const listRunsResponseTrialSignalGateV2OneThresholdProfileSha256RegExp =
+  new RegExp("^[0-9a-f]{64}$");
+export const listRunsResponseTrialSignalGateV2OneStageCountsOneSchemaVersionDefault = `2.0`;
+export const listRunsResponseTrialSignalGateV2OneStageCountsOneEvaluatedFramesValueOneMin = 0;
+
+export const listRunsResponseTrialSignalGateV2OneStageCountsOneDetectedFramesValueOneMin = 0;
+
+export const listRunsResponseTrialSignalGateV2OneStageCountsOnePredictedFramesValueOneMin = 0;
+
+export const listRunsResponseTrialSignalGateV2OneStageCountsOneLostFramesValueOneMin = 0;
+
+export const listRunsResponseTrialSignalGateV2OneStageCountsOneRawCandidatesValueOneMin = 0;
+
+export const listRunsResponseTrialSignalGateV2OneStageCountsOneClassMappedCandidatesValueOneMin = 0;
+
+export const listRunsResponseTrialSignalGateV2OneStageCountsOneFilteredCandidatesValueOneMin = 0;
+
+export const listRunsResponseTrialSignalGateV2OneStageCountsOneSelectedCandidatesValueOneMin = 0;
+
+export const listRunsResponseTrialSignalGateV2OneStageCountsOneTrackletsValueOneMin = 0;
+
 export const listRunsResponseBroadcastMaxManualReviewWindowsOneMax = 30;
 
 export const listRunsResponseBroadcastPreflightOneCalibrationOneFieldPolygonMin = 3;
@@ -1060,6 +1161,12 @@ export const ListRunsResponseItem = zod.object({
   completed_at: zod.union([zod.string(), zod.null()]).optional(),
   config_name: zod.union([zod.string(), zod.null()]).optional(),
   config_path: zod.union([zod.string(), zod.null()]).optional(),
+  config_sha256: zod
+    .union([
+      zod.string().regex(listRunsResponseConfigSha256OneRegExp),
+      zod.null(),
+    ])
+    .optional(),
   input_video: zod.union([zod.string(), zod.null()]).optional(),
   parent_run_id: zod.union([zod.string(), zod.null()]).optional(),
   output_dir: zod.string(),
@@ -1077,6 +1184,385 @@ export const ListRunsResponseItem = zod.object({
     )
     .optional(),
   stats: zod.record(zod.string(), zod.unknown()).optional(),
+  trial_signal_gate_v2: zod
+    .union([
+      zod.object({
+        schema_version: zod
+          .literal("2.0")
+          .default(listRunsResponseTrialSignalGateV2OneSchemaVersionDefault),
+        status: zod.enum([
+          "insufficient_evidence",
+          "retune_required",
+          "acceptable",
+        ]),
+        coverage_complete: zod.boolean(),
+        evidence_available: zod.boolean(),
+        trajectory_acceptable: zod.boolean(),
+        signal_acceptable: zod.boolean(),
+        acceptance_metrics_complete: zod.boolean(),
+        acceptance_contract_complete: zod.boolean(),
+        quality_acceptable: zod.boolean(),
+        operator_confirmation_required: zod
+          .boolean()
+          .default(
+            listRunsResponseTrialSignalGateV2OneOperatorConfirmationRequiredDefault,
+          ),
+        reason_codes: zod.array(zod.string()).optional(),
+        failure_classification: zod.object({
+          code: zod.enum([
+            "insufficient_evidence",
+            "decode_failure",
+            "no_raw_candidates",
+            "all_candidates_class_rejected",
+            "all_candidates_filtered",
+            "no_tracklets",
+            "all_lost",
+            "wrong_or_noisy_candidates",
+            "unstable_tracking",
+            "acceptable",
+          ]),
+          severity: zod.enum(["none", "high", "blocking"]),
+          summary: zod.string(),
+          recommended_action: zod.string(),
+        }),
+        threshold_profile: zod.object({
+          profile_id: zod.string(),
+          version: zod.string(),
+          algorithm_version: zod.string(),
+          matching_rules: zod.record(zod.string(), zod.unknown()),
+          sha256: zod
+            .string()
+            .regex(
+              listRunsResponseTrialSignalGateV2OneThresholdProfileSha256RegExp,
+            ),
+          thresholds: zod.record(zod.string(), zod.number()),
+        }),
+        stage_counts: zod
+          .union([
+            zod.object({
+              schema_version: zod
+                .literal("2.0")
+                .default(
+                  listRunsResponseTrialSignalGateV2OneStageCountsOneSchemaVersionDefault,
+                ),
+              coverage_status: zod.enum([
+                "complete",
+                "invalid",
+                "not_collected",
+              ]),
+              evaluated_frames: zod.object({
+                value: zod
+                  .union([
+                    zod
+                      .number()
+                      .min(
+                        listRunsResponseTrialSignalGateV2OneStageCountsOneEvaluatedFramesValueOneMin,
+                      ),
+                    zod.null(),
+                  ])
+                  .optional(),
+                status: zod.enum(["collected", "not_collected", "invalid"]),
+              }),
+              detected_frames: zod.object({
+                value: zod
+                  .union([
+                    zod
+                      .number()
+                      .min(
+                        listRunsResponseTrialSignalGateV2OneStageCountsOneDetectedFramesValueOneMin,
+                      ),
+                    zod.null(),
+                  ])
+                  .optional(),
+                status: zod.enum(["collected", "not_collected", "invalid"]),
+              }),
+              predicted_frames: zod.object({
+                value: zod
+                  .union([
+                    zod
+                      .number()
+                      .min(
+                        listRunsResponseTrialSignalGateV2OneStageCountsOnePredictedFramesValueOneMin,
+                      ),
+                    zod.null(),
+                  ])
+                  .optional(),
+                status: zod.enum(["collected", "not_collected", "invalid"]),
+              }),
+              lost_frames: zod.object({
+                value: zod
+                  .union([
+                    zod
+                      .number()
+                      .min(
+                        listRunsResponseTrialSignalGateV2OneStageCountsOneLostFramesValueOneMin,
+                      ),
+                    zod.null(),
+                  ])
+                  .optional(),
+                status: zod.enum(["collected", "not_collected", "invalid"]),
+              }),
+              raw_candidates: zod.object({
+                value: zod
+                  .union([
+                    zod
+                      .number()
+                      .min(
+                        listRunsResponseTrialSignalGateV2OneStageCountsOneRawCandidatesValueOneMin,
+                      ),
+                    zod.null(),
+                  ])
+                  .optional(),
+                status: zod.enum(["collected", "not_collected", "invalid"]),
+              }),
+              class_mapped_candidates: zod.object({
+                value: zod
+                  .union([
+                    zod
+                      .number()
+                      .min(
+                        listRunsResponseTrialSignalGateV2OneStageCountsOneClassMappedCandidatesValueOneMin,
+                      ),
+                    zod.null(),
+                  ])
+                  .optional(),
+                status: zod.enum(["collected", "not_collected", "invalid"]),
+              }),
+              filtered_candidates: zod.object({
+                value: zod
+                  .union([
+                    zod
+                      .number()
+                      .min(
+                        listRunsResponseTrialSignalGateV2OneStageCountsOneFilteredCandidatesValueOneMin,
+                      ),
+                    zod.null(),
+                  ])
+                  .optional(),
+                status: zod.enum(["collected", "not_collected", "invalid"]),
+              }),
+              selected_candidates: zod.object({
+                value: zod
+                  .union([
+                    zod
+                      .number()
+                      .min(
+                        listRunsResponseTrialSignalGateV2OneStageCountsOneSelectedCandidatesValueOneMin,
+                      ),
+                    zod.null(),
+                  ])
+                  .optional(),
+                status: zod.enum(["collected", "not_collected", "invalid"]),
+              }),
+              tracklets: zod.object({
+                value: zod
+                  .union([
+                    zod
+                      .number()
+                      .min(
+                        listRunsResponseTrialSignalGateV2OneStageCountsOneTrackletsValueOneMin,
+                      ),
+                    zod.null(),
+                  ])
+                  .optional(),
+                status: zod.enum(["collected", "not_collected", "invalid"]),
+              }),
+              rejection_reasons: zod
+                .record(zod.string(), zod.number())
+                .optional(),
+              reconciliation: zod.object({
+                status: zod.enum(["reconciled", "mismatch", "not_collected"]),
+                reason_codes: zod.array(zod.string()).optional(),
+              }),
+            }),
+            zod.null(),
+          ])
+          .optional(),
+        trajectory: zod.record(zod.string(), zod.unknown()),
+        diagnostics: zod.object({
+          raw_track: zod.object({
+            status: zod.enum(["collected", "not_collected", "invalid"]),
+            frame_count: zod.object({
+              status: zod.enum(["collected", "not_collected", "invalid"]),
+              value: zod
+                .union([zod.number(), zod.number(), zod.null()])
+                .optional(),
+            }),
+            detected: zod.object({
+              status: zod.enum(["collected", "not_collected", "invalid"]),
+              value: zod
+                .union([zod.number(), zod.number(), zod.null()])
+                .optional(),
+            }),
+            predicted: zod.object({
+              status: zod.enum(["collected", "not_collected", "invalid"]),
+              value: zod
+                .union([zod.number(), zod.number(), zod.null()])
+                .optional(),
+            }),
+            lost: zod.object({
+              status: zod.enum(["collected", "not_collected", "invalid"]),
+              value: zod
+                .union([zod.number(), zod.number(), zod.null()])
+                .optional(),
+            }),
+            detected_ratio: zod.object({
+              status: zod.enum(["collected", "not_collected", "invalid"]),
+              value: zod
+                .union([zod.number(), zod.number(), zod.null()])
+                .optional(),
+            }),
+            predicted_ratio: zod.object({
+              status: zod.enum(["collected", "not_collected", "invalid"]),
+              value: zod
+                .union([zod.number(), zod.number(), zod.null()])
+                .optional(),
+            }),
+            lost_ratio: zod.object({
+              status: zod.enum(["collected", "not_collected", "invalid"]),
+              value: zod
+                .union([zod.number(), zod.number(), zod.null()])
+                .optional(),
+            }),
+            longest_lost_streak: zod.object({
+              status: zod.enum(["collected", "not_collected", "invalid"]),
+              value: zod
+                .union([zod.number(), zod.number(), zod.null()])
+                .optional(),
+            }),
+            false_positive_island_count: zod.object({
+              status: zod.enum(["collected", "not_collected", "invalid"]),
+              value: zod
+                .union([zod.number(), zod.number(), zod.null()])
+                .optional(),
+            }),
+            max_step_px: zod.object({
+              status: zod.enum(["collected", "not_collected", "invalid"]),
+              value: zod
+                .union([zod.number(), zod.number(), zod.null()])
+                .optional(),
+            }),
+          }),
+          cleaned_track: zod.object({
+            status: zod.enum(["collected", "not_collected", "invalid"]),
+            frame_count: zod.object({
+              status: zod.enum(["collected", "not_collected", "invalid"]),
+              value: zod
+                .union([zod.number(), zod.number(), zod.null()])
+                .optional(),
+            }),
+            detected: zod.object({
+              status: zod.enum(["collected", "not_collected", "invalid"]),
+              value: zod
+                .union([zod.number(), zod.number(), zod.null()])
+                .optional(),
+            }),
+            predicted: zod.object({
+              status: zod.enum(["collected", "not_collected", "invalid"]),
+              value: zod
+                .union([zod.number(), zod.number(), zod.null()])
+                .optional(),
+            }),
+            lost: zod.object({
+              status: zod.enum(["collected", "not_collected", "invalid"]),
+              value: zod
+                .union([zod.number(), zod.number(), zod.null()])
+                .optional(),
+            }),
+            detected_ratio: zod.object({
+              status: zod.enum(["collected", "not_collected", "invalid"]),
+              value: zod
+                .union([zod.number(), zod.number(), zod.null()])
+                .optional(),
+            }),
+            predicted_ratio: zod.object({
+              status: zod.enum(["collected", "not_collected", "invalid"]),
+              value: zod
+                .union([zod.number(), zod.number(), zod.null()])
+                .optional(),
+            }),
+            lost_ratio: zod.object({
+              status: zod.enum(["collected", "not_collected", "invalid"]),
+              value: zod
+                .union([zod.number(), zod.number(), zod.null()])
+                .optional(),
+            }),
+            longest_lost_streak: zod.object({
+              status: zod.enum(["collected", "not_collected", "invalid"]),
+              value: zod
+                .union([zod.number(), zod.number(), zod.null()])
+                .optional(),
+            }),
+            false_positive_island_count: zod.object({
+              status: zod.enum(["collected", "not_collected", "invalid"]),
+              value: zod
+                .union([zod.number(), zod.number(), zod.null()])
+                .optional(),
+            }),
+            max_step_px: zod.object({
+              status: zod.enum(["collected", "not_collected", "invalid"]),
+              value: zod
+                .union([zod.number(), zod.number(), zod.null()])
+                .optional(),
+            }),
+          }),
+          rejection_reasons: zod.object({
+            status: zod.enum(["collected", "not_collected", "invalid"]),
+            value: zod
+              .union([zod.record(zod.string(), zod.number()), zod.null()])
+              .optional(),
+          }),
+          ai_review_trigger_count: zod.object({
+            status: zod.enum(["collected", "not_collected", "invalid"]),
+            value: zod
+              .union([zod.number(), zod.number(), zod.null()])
+              .optional(),
+          }),
+          ai_review_triggers_per_100_frames: zod.object({
+            status: zod.enum(["collected", "not_collected", "invalid"]),
+            value: zod
+              .union([zod.number(), zod.number(), zod.null()])
+              .optional(),
+          }),
+          event_candidate_count: zod.object({
+            status: zod.enum(["collected", "not_collected", "invalid"]),
+            value: zod
+              .union([zod.number(), zod.number(), zod.null()])
+              .optional(),
+          }),
+          event_candidates_per_100_frames: zod.object({
+            status: zod.enum(["collected", "not_collected", "invalid"]),
+            value: zod
+              .union([zod.number(), zod.number(), zod.null()])
+              .optional(),
+          }),
+          follow_cam: zod.object({
+            status: zod.enum(["collected", "not_collected", "invalid"]),
+            max_pan_step_px: zod.object({
+              status: zod.enum(["collected", "not_collected", "invalid"]),
+              value: zod
+                .union([zod.number(), zod.number(), zod.null()])
+                .optional(),
+            }),
+            max_pan_accel_px: zod.object({
+              status: zod.enum(["collected", "not_collected", "invalid"]),
+              value: zod
+                .union([zod.number(), zod.number(), zod.null()])
+                .optional(),
+            }),
+            max_zoom_step_ratio: zod.object({
+              status: zod.enum(["collected", "not_collected", "invalid"]),
+              value: zod
+                .union([zod.number(), zod.number(), zod.null()])
+                .optional(),
+            }),
+          }),
+        }),
+        evidence: zod.record(zod.string(), zod.string()),
+      }),
+      zod.null(),
+    ])
+    .optional(),
   broadcast: zod
     .object({
       status: zod.union([zod.string(), zod.null()]).optional(),
@@ -1522,6 +2008,32 @@ export const CreateRunBody = zod.object({
 export const listAssetGroupsResponseRunCountDefault = 0;
 export const listAssetGroupsResponseConfigCountDefault = 0;
 export const listAssetGroupsResponseOutputCountDefault = 0;
+export const listAssetGroupsResponseRunsItemConfigSha256OneRegExp = new RegExp(
+  "^[0-9a-f]{64}$",
+);
+export const listAssetGroupsResponseRunsItemTrialSignalGateV2OneSchemaVersionDefault = `2.0`;
+export const listAssetGroupsResponseRunsItemTrialSignalGateV2OneOperatorConfirmationRequiredDefault = true;
+export const listAssetGroupsResponseRunsItemTrialSignalGateV2OneThresholdProfileSha256RegExp =
+  new RegExp("^[0-9a-f]{64}$");
+export const listAssetGroupsResponseRunsItemTrialSignalGateV2OneStageCountsOneSchemaVersionDefault = `2.0`;
+export const listAssetGroupsResponseRunsItemTrialSignalGateV2OneStageCountsOneEvaluatedFramesValueOneMin = 0;
+
+export const listAssetGroupsResponseRunsItemTrialSignalGateV2OneStageCountsOneDetectedFramesValueOneMin = 0;
+
+export const listAssetGroupsResponseRunsItemTrialSignalGateV2OneStageCountsOnePredictedFramesValueOneMin = 0;
+
+export const listAssetGroupsResponseRunsItemTrialSignalGateV2OneStageCountsOneLostFramesValueOneMin = 0;
+
+export const listAssetGroupsResponseRunsItemTrialSignalGateV2OneStageCountsOneRawCandidatesValueOneMin = 0;
+
+export const listAssetGroupsResponseRunsItemTrialSignalGateV2OneStageCountsOneClassMappedCandidatesValueOneMin = 0;
+
+export const listAssetGroupsResponseRunsItemTrialSignalGateV2OneStageCountsOneFilteredCandidatesValueOneMin = 0;
+
+export const listAssetGroupsResponseRunsItemTrialSignalGateV2OneStageCountsOneSelectedCandidatesValueOneMin = 0;
+
+export const listAssetGroupsResponseRunsItemTrialSignalGateV2OneStageCountsOneTrackletsValueOneMin = 0;
+
 export const listAssetGroupsResponseRunsItemBroadcastMaxManualReviewWindowsOneMax = 30;
 
 export const listAssetGroupsResponseRunsItemBroadcastPreflightOneCalibrationOneFieldPolygonMin = 3;
@@ -1550,6 +2062,31 @@ export const listAssetGroupsResponseRunsItemAiCandidateLifecycleCandidatesItemCo
 export const listAssetGroupsResponseRunsItemAiCandidateLifecycleCandidatesItemPromotionStatusDefault = `not_promoted`;
 export const listAssetGroupsResponseRunsItemAiCandidateLifecycleCandidatesItemResolutionStatusDefault = `none`;
 export const listAssetGroupsResponseRunsItemProgressOnePercentDefault = 0;
+export const listAssetGroupsResponseOutputsItemConfigSha256OneRegExp =
+  new RegExp("^[0-9a-f]{64}$");
+export const listAssetGroupsResponseOutputsItemTrialSignalGateV2OneSchemaVersionDefault = `2.0`;
+export const listAssetGroupsResponseOutputsItemTrialSignalGateV2OneOperatorConfirmationRequiredDefault = true;
+export const listAssetGroupsResponseOutputsItemTrialSignalGateV2OneThresholdProfileSha256RegExp =
+  new RegExp("^[0-9a-f]{64}$");
+export const listAssetGroupsResponseOutputsItemTrialSignalGateV2OneStageCountsOneSchemaVersionDefault = `2.0`;
+export const listAssetGroupsResponseOutputsItemTrialSignalGateV2OneStageCountsOneEvaluatedFramesValueOneMin = 0;
+
+export const listAssetGroupsResponseOutputsItemTrialSignalGateV2OneStageCountsOneDetectedFramesValueOneMin = 0;
+
+export const listAssetGroupsResponseOutputsItemTrialSignalGateV2OneStageCountsOnePredictedFramesValueOneMin = 0;
+
+export const listAssetGroupsResponseOutputsItemTrialSignalGateV2OneStageCountsOneLostFramesValueOneMin = 0;
+
+export const listAssetGroupsResponseOutputsItemTrialSignalGateV2OneStageCountsOneRawCandidatesValueOneMin = 0;
+
+export const listAssetGroupsResponseOutputsItemTrialSignalGateV2OneStageCountsOneClassMappedCandidatesValueOneMin = 0;
+
+export const listAssetGroupsResponseOutputsItemTrialSignalGateV2OneStageCountsOneFilteredCandidatesValueOneMin = 0;
+
+export const listAssetGroupsResponseOutputsItemTrialSignalGateV2OneStageCountsOneSelectedCandidatesValueOneMin = 0;
+
+export const listAssetGroupsResponseOutputsItemTrialSignalGateV2OneStageCountsOneTrackletsValueOneMin = 0;
+
 export const listAssetGroupsResponseOutputsItemBroadcastMaxManualReviewWindowsOneMax = 30;
 
 export const listAssetGroupsResponseOutputsItemBroadcastPreflightOneCalibrationOneFieldPolygonMin = 3;
@@ -1615,6 +2152,14 @@ export const ListAssetGroupsResponseItem = zod.object({
         completed_at: zod.union([zod.string(), zod.null()]).optional(),
         config_name: zod.union([zod.string(), zod.null()]).optional(),
         config_path: zod.union([zod.string(), zod.null()]).optional(),
+        config_sha256: zod
+          .union([
+            zod
+              .string()
+              .regex(listAssetGroupsResponseRunsItemConfigSha256OneRegExp),
+            zod.null(),
+          ])
+          .optional(),
         input_video: zod.union([zod.string(), zod.null()]).optional(),
         parent_run_id: zod.union([zod.string(), zod.null()]).optional(),
         output_dir: zod.string(),
@@ -1632,6 +2177,427 @@ export const ListAssetGroupsResponseItem = zod.object({
           )
           .optional(),
         stats: zod.record(zod.string(), zod.unknown()).optional(),
+        trial_signal_gate_v2: zod
+          .union([
+            zod.object({
+              schema_version: zod
+                .literal("2.0")
+                .default(
+                  listAssetGroupsResponseRunsItemTrialSignalGateV2OneSchemaVersionDefault,
+                ),
+              status: zod.enum([
+                "insufficient_evidence",
+                "retune_required",
+                "acceptable",
+              ]),
+              coverage_complete: zod.boolean(),
+              evidence_available: zod.boolean(),
+              trajectory_acceptable: zod.boolean(),
+              signal_acceptable: zod.boolean(),
+              acceptance_metrics_complete: zod.boolean(),
+              acceptance_contract_complete: zod.boolean(),
+              quality_acceptable: zod.boolean(),
+              operator_confirmation_required: zod
+                .boolean()
+                .default(
+                  listAssetGroupsResponseRunsItemTrialSignalGateV2OneOperatorConfirmationRequiredDefault,
+                ),
+              reason_codes: zod.array(zod.string()).optional(),
+              failure_classification: zod.object({
+                code: zod.enum([
+                  "insufficient_evidence",
+                  "decode_failure",
+                  "no_raw_candidates",
+                  "all_candidates_class_rejected",
+                  "all_candidates_filtered",
+                  "no_tracklets",
+                  "all_lost",
+                  "wrong_or_noisy_candidates",
+                  "unstable_tracking",
+                  "acceptable",
+                ]),
+                severity: zod.enum(["none", "high", "blocking"]),
+                summary: zod.string(),
+                recommended_action: zod.string(),
+              }),
+              threshold_profile: zod.object({
+                profile_id: zod.string(),
+                version: zod.string(),
+                algorithm_version: zod.string(),
+                matching_rules: zod.record(zod.string(), zod.unknown()),
+                sha256: zod
+                  .string()
+                  .regex(
+                    listAssetGroupsResponseRunsItemTrialSignalGateV2OneThresholdProfileSha256RegExp,
+                  ),
+                thresholds: zod.record(zod.string(), zod.number()),
+              }),
+              stage_counts: zod
+                .union([
+                  zod.object({
+                    schema_version: zod
+                      .literal("2.0")
+                      .default(
+                        listAssetGroupsResponseRunsItemTrialSignalGateV2OneStageCountsOneSchemaVersionDefault,
+                      ),
+                    coverage_status: zod.enum([
+                      "complete",
+                      "invalid",
+                      "not_collected",
+                    ]),
+                    evaluated_frames: zod.object({
+                      value: zod
+                        .union([
+                          zod
+                            .number()
+                            .min(
+                              listAssetGroupsResponseRunsItemTrialSignalGateV2OneStageCountsOneEvaluatedFramesValueOneMin,
+                            ),
+                          zod.null(),
+                        ])
+                        .optional(),
+                      status: zod.enum([
+                        "collected",
+                        "not_collected",
+                        "invalid",
+                      ]),
+                    }),
+                    detected_frames: zod.object({
+                      value: zod
+                        .union([
+                          zod
+                            .number()
+                            .min(
+                              listAssetGroupsResponseRunsItemTrialSignalGateV2OneStageCountsOneDetectedFramesValueOneMin,
+                            ),
+                          zod.null(),
+                        ])
+                        .optional(),
+                      status: zod.enum([
+                        "collected",
+                        "not_collected",
+                        "invalid",
+                      ]),
+                    }),
+                    predicted_frames: zod.object({
+                      value: zod
+                        .union([
+                          zod
+                            .number()
+                            .min(
+                              listAssetGroupsResponseRunsItemTrialSignalGateV2OneStageCountsOnePredictedFramesValueOneMin,
+                            ),
+                          zod.null(),
+                        ])
+                        .optional(),
+                      status: zod.enum([
+                        "collected",
+                        "not_collected",
+                        "invalid",
+                      ]),
+                    }),
+                    lost_frames: zod.object({
+                      value: zod
+                        .union([
+                          zod
+                            .number()
+                            .min(
+                              listAssetGroupsResponseRunsItemTrialSignalGateV2OneStageCountsOneLostFramesValueOneMin,
+                            ),
+                          zod.null(),
+                        ])
+                        .optional(),
+                      status: zod.enum([
+                        "collected",
+                        "not_collected",
+                        "invalid",
+                      ]),
+                    }),
+                    raw_candidates: zod.object({
+                      value: zod
+                        .union([
+                          zod
+                            .number()
+                            .min(
+                              listAssetGroupsResponseRunsItemTrialSignalGateV2OneStageCountsOneRawCandidatesValueOneMin,
+                            ),
+                          zod.null(),
+                        ])
+                        .optional(),
+                      status: zod.enum([
+                        "collected",
+                        "not_collected",
+                        "invalid",
+                      ]),
+                    }),
+                    class_mapped_candidates: zod.object({
+                      value: zod
+                        .union([
+                          zod
+                            .number()
+                            .min(
+                              listAssetGroupsResponseRunsItemTrialSignalGateV2OneStageCountsOneClassMappedCandidatesValueOneMin,
+                            ),
+                          zod.null(),
+                        ])
+                        .optional(),
+                      status: zod.enum([
+                        "collected",
+                        "not_collected",
+                        "invalid",
+                      ]),
+                    }),
+                    filtered_candidates: zod.object({
+                      value: zod
+                        .union([
+                          zod
+                            .number()
+                            .min(
+                              listAssetGroupsResponseRunsItemTrialSignalGateV2OneStageCountsOneFilteredCandidatesValueOneMin,
+                            ),
+                          zod.null(),
+                        ])
+                        .optional(),
+                      status: zod.enum([
+                        "collected",
+                        "not_collected",
+                        "invalid",
+                      ]),
+                    }),
+                    selected_candidates: zod.object({
+                      value: zod
+                        .union([
+                          zod
+                            .number()
+                            .min(
+                              listAssetGroupsResponseRunsItemTrialSignalGateV2OneStageCountsOneSelectedCandidatesValueOneMin,
+                            ),
+                          zod.null(),
+                        ])
+                        .optional(),
+                      status: zod.enum([
+                        "collected",
+                        "not_collected",
+                        "invalid",
+                      ]),
+                    }),
+                    tracklets: zod.object({
+                      value: zod
+                        .union([
+                          zod
+                            .number()
+                            .min(
+                              listAssetGroupsResponseRunsItemTrialSignalGateV2OneStageCountsOneTrackletsValueOneMin,
+                            ),
+                          zod.null(),
+                        ])
+                        .optional(),
+                      status: zod.enum([
+                        "collected",
+                        "not_collected",
+                        "invalid",
+                      ]),
+                    }),
+                    rejection_reasons: zod
+                      .record(zod.string(), zod.number())
+                      .optional(),
+                    reconciliation: zod.object({
+                      status: zod.enum([
+                        "reconciled",
+                        "mismatch",
+                        "not_collected",
+                      ]),
+                      reason_codes: zod.array(zod.string()).optional(),
+                    }),
+                  }),
+                  zod.null(),
+                ])
+                .optional(),
+              trajectory: zod.record(zod.string(), zod.unknown()),
+              diagnostics: zod.object({
+                raw_track: zod.object({
+                  status: zod.enum(["collected", "not_collected", "invalid"]),
+                  frame_count: zod.object({
+                    status: zod.enum(["collected", "not_collected", "invalid"]),
+                    value: zod
+                      .union([zod.number(), zod.number(), zod.null()])
+                      .optional(),
+                  }),
+                  detected: zod.object({
+                    status: zod.enum(["collected", "not_collected", "invalid"]),
+                    value: zod
+                      .union([zod.number(), zod.number(), zod.null()])
+                      .optional(),
+                  }),
+                  predicted: zod.object({
+                    status: zod.enum(["collected", "not_collected", "invalid"]),
+                    value: zod
+                      .union([zod.number(), zod.number(), zod.null()])
+                      .optional(),
+                  }),
+                  lost: zod.object({
+                    status: zod.enum(["collected", "not_collected", "invalid"]),
+                    value: zod
+                      .union([zod.number(), zod.number(), zod.null()])
+                      .optional(),
+                  }),
+                  detected_ratio: zod.object({
+                    status: zod.enum(["collected", "not_collected", "invalid"]),
+                    value: zod
+                      .union([zod.number(), zod.number(), zod.null()])
+                      .optional(),
+                  }),
+                  predicted_ratio: zod.object({
+                    status: zod.enum(["collected", "not_collected", "invalid"]),
+                    value: zod
+                      .union([zod.number(), zod.number(), zod.null()])
+                      .optional(),
+                  }),
+                  lost_ratio: zod.object({
+                    status: zod.enum(["collected", "not_collected", "invalid"]),
+                    value: zod
+                      .union([zod.number(), zod.number(), zod.null()])
+                      .optional(),
+                  }),
+                  longest_lost_streak: zod.object({
+                    status: zod.enum(["collected", "not_collected", "invalid"]),
+                    value: zod
+                      .union([zod.number(), zod.number(), zod.null()])
+                      .optional(),
+                  }),
+                  false_positive_island_count: zod.object({
+                    status: zod.enum(["collected", "not_collected", "invalid"]),
+                    value: zod
+                      .union([zod.number(), zod.number(), zod.null()])
+                      .optional(),
+                  }),
+                  max_step_px: zod.object({
+                    status: zod.enum(["collected", "not_collected", "invalid"]),
+                    value: zod
+                      .union([zod.number(), zod.number(), zod.null()])
+                      .optional(),
+                  }),
+                }),
+                cleaned_track: zod.object({
+                  status: zod.enum(["collected", "not_collected", "invalid"]),
+                  frame_count: zod.object({
+                    status: zod.enum(["collected", "not_collected", "invalid"]),
+                    value: zod
+                      .union([zod.number(), zod.number(), zod.null()])
+                      .optional(),
+                  }),
+                  detected: zod.object({
+                    status: zod.enum(["collected", "not_collected", "invalid"]),
+                    value: zod
+                      .union([zod.number(), zod.number(), zod.null()])
+                      .optional(),
+                  }),
+                  predicted: zod.object({
+                    status: zod.enum(["collected", "not_collected", "invalid"]),
+                    value: zod
+                      .union([zod.number(), zod.number(), zod.null()])
+                      .optional(),
+                  }),
+                  lost: zod.object({
+                    status: zod.enum(["collected", "not_collected", "invalid"]),
+                    value: zod
+                      .union([zod.number(), zod.number(), zod.null()])
+                      .optional(),
+                  }),
+                  detected_ratio: zod.object({
+                    status: zod.enum(["collected", "not_collected", "invalid"]),
+                    value: zod
+                      .union([zod.number(), zod.number(), zod.null()])
+                      .optional(),
+                  }),
+                  predicted_ratio: zod.object({
+                    status: zod.enum(["collected", "not_collected", "invalid"]),
+                    value: zod
+                      .union([zod.number(), zod.number(), zod.null()])
+                      .optional(),
+                  }),
+                  lost_ratio: zod.object({
+                    status: zod.enum(["collected", "not_collected", "invalid"]),
+                    value: zod
+                      .union([zod.number(), zod.number(), zod.null()])
+                      .optional(),
+                  }),
+                  longest_lost_streak: zod.object({
+                    status: zod.enum(["collected", "not_collected", "invalid"]),
+                    value: zod
+                      .union([zod.number(), zod.number(), zod.null()])
+                      .optional(),
+                  }),
+                  false_positive_island_count: zod.object({
+                    status: zod.enum(["collected", "not_collected", "invalid"]),
+                    value: zod
+                      .union([zod.number(), zod.number(), zod.null()])
+                      .optional(),
+                  }),
+                  max_step_px: zod.object({
+                    status: zod.enum(["collected", "not_collected", "invalid"]),
+                    value: zod
+                      .union([zod.number(), zod.number(), zod.null()])
+                      .optional(),
+                  }),
+                }),
+                rejection_reasons: zod.object({
+                  status: zod.enum(["collected", "not_collected", "invalid"]),
+                  value: zod
+                    .union([zod.record(zod.string(), zod.number()), zod.null()])
+                    .optional(),
+                }),
+                ai_review_trigger_count: zod.object({
+                  status: zod.enum(["collected", "not_collected", "invalid"]),
+                  value: zod
+                    .union([zod.number(), zod.number(), zod.null()])
+                    .optional(),
+                }),
+                ai_review_triggers_per_100_frames: zod.object({
+                  status: zod.enum(["collected", "not_collected", "invalid"]),
+                  value: zod
+                    .union([zod.number(), zod.number(), zod.null()])
+                    .optional(),
+                }),
+                event_candidate_count: zod.object({
+                  status: zod.enum(["collected", "not_collected", "invalid"]),
+                  value: zod
+                    .union([zod.number(), zod.number(), zod.null()])
+                    .optional(),
+                }),
+                event_candidates_per_100_frames: zod.object({
+                  status: zod.enum(["collected", "not_collected", "invalid"]),
+                  value: zod
+                    .union([zod.number(), zod.number(), zod.null()])
+                    .optional(),
+                }),
+                follow_cam: zod.object({
+                  status: zod.enum(["collected", "not_collected", "invalid"]),
+                  max_pan_step_px: zod.object({
+                    status: zod.enum(["collected", "not_collected", "invalid"]),
+                    value: zod
+                      .union([zod.number(), zod.number(), zod.null()])
+                      .optional(),
+                  }),
+                  max_pan_accel_px: zod.object({
+                    status: zod.enum(["collected", "not_collected", "invalid"]),
+                    value: zod
+                      .union([zod.number(), zod.number(), zod.null()])
+                      .optional(),
+                  }),
+                  max_zoom_step_ratio: zod.object({
+                    status: zod.enum(["collected", "not_collected", "invalid"]),
+                    value: zod
+                      .union([zod.number(), zod.number(), zod.null()])
+                      .optional(),
+                  }),
+                }),
+              }),
+              evidence: zod.record(zod.string(), zod.string()),
+            }),
+            zod.null(),
+          ])
+          .optional(),
         broadcast: zod
           .object({
             status: zod.union([zod.string(), zod.null()]).optional(),
@@ -2076,6 +3042,14 @@ export const ListAssetGroupsResponseItem = zod.object({
         completed_at: zod.union([zod.string(), zod.null()]).optional(),
         config_name: zod.union([zod.string(), zod.null()]).optional(),
         config_path: zod.union([zod.string(), zod.null()]).optional(),
+        config_sha256: zod
+          .union([
+            zod
+              .string()
+              .regex(listAssetGroupsResponseOutputsItemConfigSha256OneRegExp),
+            zod.null(),
+          ])
+          .optional(),
         input_video: zod.union([zod.string(), zod.null()]).optional(),
         parent_run_id: zod.union([zod.string(), zod.null()]).optional(),
         output_dir: zod.string(),
@@ -2093,6 +3067,427 @@ export const ListAssetGroupsResponseItem = zod.object({
           )
           .optional(),
         stats: zod.record(zod.string(), zod.unknown()).optional(),
+        trial_signal_gate_v2: zod
+          .union([
+            zod.object({
+              schema_version: zod
+                .literal("2.0")
+                .default(
+                  listAssetGroupsResponseOutputsItemTrialSignalGateV2OneSchemaVersionDefault,
+                ),
+              status: zod.enum([
+                "insufficient_evidence",
+                "retune_required",
+                "acceptable",
+              ]),
+              coverage_complete: zod.boolean(),
+              evidence_available: zod.boolean(),
+              trajectory_acceptable: zod.boolean(),
+              signal_acceptable: zod.boolean(),
+              acceptance_metrics_complete: zod.boolean(),
+              acceptance_contract_complete: zod.boolean(),
+              quality_acceptable: zod.boolean(),
+              operator_confirmation_required: zod
+                .boolean()
+                .default(
+                  listAssetGroupsResponseOutputsItemTrialSignalGateV2OneOperatorConfirmationRequiredDefault,
+                ),
+              reason_codes: zod.array(zod.string()).optional(),
+              failure_classification: zod.object({
+                code: zod.enum([
+                  "insufficient_evidence",
+                  "decode_failure",
+                  "no_raw_candidates",
+                  "all_candidates_class_rejected",
+                  "all_candidates_filtered",
+                  "no_tracklets",
+                  "all_lost",
+                  "wrong_or_noisy_candidates",
+                  "unstable_tracking",
+                  "acceptable",
+                ]),
+                severity: zod.enum(["none", "high", "blocking"]),
+                summary: zod.string(),
+                recommended_action: zod.string(),
+              }),
+              threshold_profile: zod.object({
+                profile_id: zod.string(),
+                version: zod.string(),
+                algorithm_version: zod.string(),
+                matching_rules: zod.record(zod.string(), zod.unknown()),
+                sha256: zod
+                  .string()
+                  .regex(
+                    listAssetGroupsResponseOutputsItemTrialSignalGateV2OneThresholdProfileSha256RegExp,
+                  ),
+                thresholds: zod.record(zod.string(), zod.number()),
+              }),
+              stage_counts: zod
+                .union([
+                  zod.object({
+                    schema_version: zod
+                      .literal("2.0")
+                      .default(
+                        listAssetGroupsResponseOutputsItemTrialSignalGateV2OneStageCountsOneSchemaVersionDefault,
+                      ),
+                    coverage_status: zod.enum([
+                      "complete",
+                      "invalid",
+                      "not_collected",
+                    ]),
+                    evaluated_frames: zod.object({
+                      value: zod
+                        .union([
+                          zod
+                            .number()
+                            .min(
+                              listAssetGroupsResponseOutputsItemTrialSignalGateV2OneStageCountsOneEvaluatedFramesValueOneMin,
+                            ),
+                          zod.null(),
+                        ])
+                        .optional(),
+                      status: zod.enum([
+                        "collected",
+                        "not_collected",
+                        "invalid",
+                      ]),
+                    }),
+                    detected_frames: zod.object({
+                      value: zod
+                        .union([
+                          zod
+                            .number()
+                            .min(
+                              listAssetGroupsResponseOutputsItemTrialSignalGateV2OneStageCountsOneDetectedFramesValueOneMin,
+                            ),
+                          zod.null(),
+                        ])
+                        .optional(),
+                      status: zod.enum([
+                        "collected",
+                        "not_collected",
+                        "invalid",
+                      ]),
+                    }),
+                    predicted_frames: zod.object({
+                      value: zod
+                        .union([
+                          zod
+                            .number()
+                            .min(
+                              listAssetGroupsResponseOutputsItemTrialSignalGateV2OneStageCountsOnePredictedFramesValueOneMin,
+                            ),
+                          zod.null(),
+                        ])
+                        .optional(),
+                      status: zod.enum([
+                        "collected",
+                        "not_collected",
+                        "invalid",
+                      ]),
+                    }),
+                    lost_frames: zod.object({
+                      value: zod
+                        .union([
+                          zod
+                            .number()
+                            .min(
+                              listAssetGroupsResponseOutputsItemTrialSignalGateV2OneStageCountsOneLostFramesValueOneMin,
+                            ),
+                          zod.null(),
+                        ])
+                        .optional(),
+                      status: zod.enum([
+                        "collected",
+                        "not_collected",
+                        "invalid",
+                      ]),
+                    }),
+                    raw_candidates: zod.object({
+                      value: zod
+                        .union([
+                          zod
+                            .number()
+                            .min(
+                              listAssetGroupsResponseOutputsItemTrialSignalGateV2OneStageCountsOneRawCandidatesValueOneMin,
+                            ),
+                          zod.null(),
+                        ])
+                        .optional(),
+                      status: zod.enum([
+                        "collected",
+                        "not_collected",
+                        "invalid",
+                      ]),
+                    }),
+                    class_mapped_candidates: zod.object({
+                      value: zod
+                        .union([
+                          zod
+                            .number()
+                            .min(
+                              listAssetGroupsResponseOutputsItemTrialSignalGateV2OneStageCountsOneClassMappedCandidatesValueOneMin,
+                            ),
+                          zod.null(),
+                        ])
+                        .optional(),
+                      status: zod.enum([
+                        "collected",
+                        "not_collected",
+                        "invalid",
+                      ]),
+                    }),
+                    filtered_candidates: zod.object({
+                      value: zod
+                        .union([
+                          zod
+                            .number()
+                            .min(
+                              listAssetGroupsResponseOutputsItemTrialSignalGateV2OneStageCountsOneFilteredCandidatesValueOneMin,
+                            ),
+                          zod.null(),
+                        ])
+                        .optional(),
+                      status: zod.enum([
+                        "collected",
+                        "not_collected",
+                        "invalid",
+                      ]),
+                    }),
+                    selected_candidates: zod.object({
+                      value: zod
+                        .union([
+                          zod
+                            .number()
+                            .min(
+                              listAssetGroupsResponseOutputsItemTrialSignalGateV2OneStageCountsOneSelectedCandidatesValueOneMin,
+                            ),
+                          zod.null(),
+                        ])
+                        .optional(),
+                      status: zod.enum([
+                        "collected",
+                        "not_collected",
+                        "invalid",
+                      ]),
+                    }),
+                    tracklets: zod.object({
+                      value: zod
+                        .union([
+                          zod
+                            .number()
+                            .min(
+                              listAssetGroupsResponseOutputsItemTrialSignalGateV2OneStageCountsOneTrackletsValueOneMin,
+                            ),
+                          zod.null(),
+                        ])
+                        .optional(),
+                      status: zod.enum([
+                        "collected",
+                        "not_collected",
+                        "invalid",
+                      ]),
+                    }),
+                    rejection_reasons: zod
+                      .record(zod.string(), zod.number())
+                      .optional(),
+                    reconciliation: zod.object({
+                      status: zod.enum([
+                        "reconciled",
+                        "mismatch",
+                        "not_collected",
+                      ]),
+                      reason_codes: zod.array(zod.string()).optional(),
+                    }),
+                  }),
+                  zod.null(),
+                ])
+                .optional(),
+              trajectory: zod.record(zod.string(), zod.unknown()),
+              diagnostics: zod.object({
+                raw_track: zod.object({
+                  status: zod.enum(["collected", "not_collected", "invalid"]),
+                  frame_count: zod.object({
+                    status: zod.enum(["collected", "not_collected", "invalid"]),
+                    value: zod
+                      .union([zod.number(), zod.number(), zod.null()])
+                      .optional(),
+                  }),
+                  detected: zod.object({
+                    status: zod.enum(["collected", "not_collected", "invalid"]),
+                    value: zod
+                      .union([zod.number(), zod.number(), zod.null()])
+                      .optional(),
+                  }),
+                  predicted: zod.object({
+                    status: zod.enum(["collected", "not_collected", "invalid"]),
+                    value: zod
+                      .union([zod.number(), zod.number(), zod.null()])
+                      .optional(),
+                  }),
+                  lost: zod.object({
+                    status: zod.enum(["collected", "not_collected", "invalid"]),
+                    value: zod
+                      .union([zod.number(), zod.number(), zod.null()])
+                      .optional(),
+                  }),
+                  detected_ratio: zod.object({
+                    status: zod.enum(["collected", "not_collected", "invalid"]),
+                    value: zod
+                      .union([zod.number(), zod.number(), zod.null()])
+                      .optional(),
+                  }),
+                  predicted_ratio: zod.object({
+                    status: zod.enum(["collected", "not_collected", "invalid"]),
+                    value: zod
+                      .union([zod.number(), zod.number(), zod.null()])
+                      .optional(),
+                  }),
+                  lost_ratio: zod.object({
+                    status: zod.enum(["collected", "not_collected", "invalid"]),
+                    value: zod
+                      .union([zod.number(), zod.number(), zod.null()])
+                      .optional(),
+                  }),
+                  longest_lost_streak: zod.object({
+                    status: zod.enum(["collected", "not_collected", "invalid"]),
+                    value: zod
+                      .union([zod.number(), zod.number(), zod.null()])
+                      .optional(),
+                  }),
+                  false_positive_island_count: zod.object({
+                    status: zod.enum(["collected", "not_collected", "invalid"]),
+                    value: zod
+                      .union([zod.number(), zod.number(), zod.null()])
+                      .optional(),
+                  }),
+                  max_step_px: zod.object({
+                    status: zod.enum(["collected", "not_collected", "invalid"]),
+                    value: zod
+                      .union([zod.number(), zod.number(), zod.null()])
+                      .optional(),
+                  }),
+                }),
+                cleaned_track: zod.object({
+                  status: zod.enum(["collected", "not_collected", "invalid"]),
+                  frame_count: zod.object({
+                    status: zod.enum(["collected", "not_collected", "invalid"]),
+                    value: zod
+                      .union([zod.number(), zod.number(), zod.null()])
+                      .optional(),
+                  }),
+                  detected: zod.object({
+                    status: zod.enum(["collected", "not_collected", "invalid"]),
+                    value: zod
+                      .union([zod.number(), zod.number(), zod.null()])
+                      .optional(),
+                  }),
+                  predicted: zod.object({
+                    status: zod.enum(["collected", "not_collected", "invalid"]),
+                    value: zod
+                      .union([zod.number(), zod.number(), zod.null()])
+                      .optional(),
+                  }),
+                  lost: zod.object({
+                    status: zod.enum(["collected", "not_collected", "invalid"]),
+                    value: zod
+                      .union([zod.number(), zod.number(), zod.null()])
+                      .optional(),
+                  }),
+                  detected_ratio: zod.object({
+                    status: zod.enum(["collected", "not_collected", "invalid"]),
+                    value: zod
+                      .union([zod.number(), zod.number(), zod.null()])
+                      .optional(),
+                  }),
+                  predicted_ratio: zod.object({
+                    status: zod.enum(["collected", "not_collected", "invalid"]),
+                    value: zod
+                      .union([zod.number(), zod.number(), zod.null()])
+                      .optional(),
+                  }),
+                  lost_ratio: zod.object({
+                    status: zod.enum(["collected", "not_collected", "invalid"]),
+                    value: zod
+                      .union([zod.number(), zod.number(), zod.null()])
+                      .optional(),
+                  }),
+                  longest_lost_streak: zod.object({
+                    status: zod.enum(["collected", "not_collected", "invalid"]),
+                    value: zod
+                      .union([zod.number(), zod.number(), zod.null()])
+                      .optional(),
+                  }),
+                  false_positive_island_count: zod.object({
+                    status: zod.enum(["collected", "not_collected", "invalid"]),
+                    value: zod
+                      .union([zod.number(), zod.number(), zod.null()])
+                      .optional(),
+                  }),
+                  max_step_px: zod.object({
+                    status: zod.enum(["collected", "not_collected", "invalid"]),
+                    value: zod
+                      .union([zod.number(), zod.number(), zod.null()])
+                      .optional(),
+                  }),
+                }),
+                rejection_reasons: zod.object({
+                  status: zod.enum(["collected", "not_collected", "invalid"]),
+                  value: zod
+                    .union([zod.record(zod.string(), zod.number()), zod.null()])
+                    .optional(),
+                }),
+                ai_review_trigger_count: zod.object({
+                  status: zod.enum(["collected", "not_collected", "invalid"]),
+                  value: zod
+                    .union([zod.number(), zod.number(), zod.null()])
+                    .optional(),
+                }),
+                ai_review_triggers_per_100_frames: zod.object({
+                  status: zod.enum(["collected", "not_collected", "invalid"]),
+                  value: zod
+                    .union([zod.number(), zod.number(), zod.null()])
+                    .optional(),
+                }),
+                event_candidate_count: zod.object({
+                  status: zod.enum(["collected", "not_collected", "invalid"]),
+                  value: zod
+                    .union([zod.number(), zod.number(), zod.null()])
+                    .optional(),
+                }),
+                event_candidates_per_100_frames: zod.object({
+                  status: zod.enum(["collected", "not_collected", "invalid"]),
+                  value: zod
+                    .union([zod.number(), zod.number(), zod.null()])
+                    .optional(),
+                }),
+                follow_cam: zod.object({
+                  status: zod.enum(["collected", "not_collected", "invalid"]),
+                  max_pan_step_px: zod.object({
+                    status: zod.enum(["collected", "not_collected", "invalid"]),
+                    value: zod
+                      .union([zod.number(), zod.number(), zod.null()])
+                      .optional(),
+                  }),
+                  max_pan_accel_px: zod.object({
+                    status: zod.enum(["collected", "not_collected", "invalid"]),
+                    value: zod
+                      .union([zod.number(), zod.number(), zod.null()])
+                      .optional(),
+                  }),
+                  max_zoom_step_ratio: zod.object({
+                    status: zod.enum(["collected", "not_collected", "invalid"]),
+                    value: zod
+                      .union([zod.number(), zod.number(), zod.null()])
+                      .optional(),
+                  }),
+                }),
+              }),
+              evidence: zod.record(zod.string(), zod.string()),
+            }),
+            zod.null(),
+          ])
+          .optional(),
         broadcast: zod
           .object({
             status: zod.union([zod.string(), zod.null()]).optional(),
@@ -2516,6 +3911,30 @@ export const GetRunParams = zod.object({
   run_id: zod.coerce.string(),
 });
 
+export const getRunResponseConfigSha256OneRegExp = new RegExp("^[0-9a-f]{64}$");
+export const getRunResponseTrialSignalGateV2OneSchemaVersionDefault = `2.0`;
+export const getRunResponseTrialSignalGateV2OneOperatorConfirmationRequiredDefault = true;
+export const getRunResponseTrialSignalGateV2OneThresholdProfileSha256RegExp =
+  new RegExp("^[0-9a-f]{64}$");
+export const getRunResponseTrialSignalGateV2OneStageCountsOneSchemaVersionDefault = `2.0`;
+export const getRunResponseTrialSignalGateV2OneStageCountsOneEvaluatedFramesValueOneMin = 0;
+
+export const getRunResponseTrialSignalGateV2OneStageCountsOneDetectedFramesValueOneMin = 0;
+
+export const getRunResponseTrialSignalGateV2OneStageCountsOnePredictedFramesValueOneMin = 0;
+
+export const getRunResponseTrialSignalGateV2OneStageCountsOneLostFramesValueOneMin = 0;
+
+export const getRunResponseTrialSignalGateV2OneStageCountsOneRawCandidatesValueOneMin = 0;
+
+export const getRunResponseTrialSignalGateV2OneStageCountsOneClassMappedCandidatesValueOneMin = 0;
+
+export const getRunResponseTrialSignalGateV2OneStageCountsOneFilteredCandidatesValueOneMin = 0;
+
+export const getRunResponseTrialSignalGateV2OneStageCountsOneSelectedCandidatesValueOneMin = 0;
+
+export const getRunResponseTrialSignalGateV2OneStageCountsOneTrackletsValueOneMin = 0;
+
 export const getRunResponseBroadcastMaxManualReviewWindowsOneMax = 30;
 
 export const getRunResponseBroadcastPreflightOneCalibrationOneFieldPolygonMin = 3;
@@ -2556,6 +3975,12 @@ export const GetRunResponse = zod.object({
   completed_at: zod.union([zod.string(), zod.null()]).optional(),
   config_name: zod.union([zod.string(), zod.null()]).optional(),
   config_path: zod.union([zod.string(), zod.null()]).optional(),
+  config_sha256: zod
+    .union([
+      zod.string().regex(getRunResponseConfigSha256OneRegExp),
+      zod.null(),
+    ])
+    .optional(),
   input_video: zod.union([zod.string(), zod.null()]).optional(),
   parent_run_id: zod.union([zod.string(), zod.null()]).optional(),
   output_dir: zod.string(),
@@ -2573,6 +3998,385 @@ export const GetRunResponse = zod.object({
     )
     .optional(),
   stats: zod.record(zod.string(), zod.unknown()).optional(),
+  trial_signal_gate_v2: zod
+    .union([
+      zod.object({
+        schema_version: zod
+          .literal("2.0")
+          .default(getRunResponseTrialSignalGateV2OneSchemaVersionDefault),
+        status: zod.enum([
+          "insufficient_evidence",
+          "retune_required",
+          "acceptable",
+        ]),
+        coverage_complete: zod.boolean(),
+        evidence_available: zod.boolean(),
+        trajectory_acceptable: zod.boolean(),
+        signal_acceptable: zod.boolean(),
+        acceptance_metrics_complete: zod.boolean(),
+        acceptance_contract_complete: zod.boolean(),
+        quality_acceptable: zod.boolean(),
+        operator_confirmation_required: zod
+          .boolean()
+          .default(
+            getRunResponseTrialSignalGateV2OneOperatorConfirmationRequiredDefault,
+          ),
+        reason_codes: zod.array(zod.string()).optional(),
+        failure_classification: zod.object({
+          code: zod.enum([
+            "insufficient_evidence",
+            "decode_failure",
+            "no_raw_candidates",
+            "all_candidates_class_rejected",
+            "all_candidates_filtered",
+            "no_tracklets",
+            "all_lost",
+            "wrong_or_noisy_candidates",
+            "unstable_tracking",
+            "acceptable",
+          ]),
+          severity: zod.enum(["none", "high", "blocking"]),
+          summary: zod.string(),
+          recommended_action: zod.string(),
+        }),
+        threshold_profile: zod.object({
+          profile_id: zod.string(),
+          version: zod.string(),
+          algorithm_version: zod.string(),
+          matching_rules: zod.record(zod.string(), zod.unknown()),
+          sha256: zod
+            .string()
+            .regex(
+              getRunResponseTrialSignalGateV2OneThresholdProfileSha256RegExp,
+            ),
+          thresholds: zod.record(zod.string(), zod.number()),
+        }),
+        stage_counts: zod
+          .union([
+            zod.object({
+              schema_version: zod
+                .literal("2.0")
+                .default(
+                  getRunResponseTrialSignalGateV2OneStageCountsOneSchemaVersionDefault,
+                ),
+              coverage_status: zod.enum([
+                "complete",
+                "invalid",
+                "not_collected",
+              ]),
+              evaluated_frames: zod.object({
+                value: zod
+                  .union([
+                    zod
+                      .number()
+                      .min(
+                        getRunResponseTrialSignalGateV2OneStageCountsOneEvaluatedFramesValueOneMin,
+                      ),
+                    zod.null(),
+                  ])
+                  .optional(),
+                status: zod.enum(["collected", "not_collected", "invalid"]),
+              }),
+              detected_frames: zod.object({
+                value: zod
+                  .union([
+                    zod
+                      .number()
+                      .min(
+                        getRunResponseTrialSignalGateV2OneStageCountsOneDetectedFramesValueOneMin,
+                      ),
+                    zod.null(),
+                  ])
+                  .optional(),
+                status: zod.enum(["collected", "not_collected", "invalid"]),
+              }),
+              predicted_frames: zod.object({
+                value: zod
+                  .union([
+                    zod
+                      .number()
+                      .min(
+                        getRunResponseTrialSignalGateV2OneStageCountsOnePredictedFramesValueOneMin,
+                      ),
+                    zod.null(),
+                  ])
+                  .optional(),
+                status: zod.enum(["collected", "not_collected", "invalid"]),
+              }),
+              lost_frames: zod.object({
+                value: zod
+                  .union([
+                    zod
+                      .number()
+                      .min(
+                        getRunResponseTrialSignalGateV2OneStageCountsOneLostFramesValueOneMin,
+                      ),
+                    zod.null(),
+                  ])
+                  .optional(),
+                status: zod.enum(["collected", "not_collected", "invalid"]),
+              }),
+              raw_candidates: zod.object({
+                value: zod
+                  .union([
+                    zod
+                      .number()
+                      .min(
+                        getRunResponseTrialSignalGateV2OneStageCountsOneRawCandidatesValueOneMin,
+                      ),
+                    zod.null(),
+                  ])
+                  .optional(),
+                status: zod.enum(["collected", "not_collected", "invalid"]),
+              }),
+              class_mapped_candidates: zod.object({
+                value: zod
+                  .union([
+                    zod
+                      .number()
+                      .min(
+                        getRunResponseTrialSignalGateV2OneStageCountsOneClassMappedCandidatesValueOneMin,
+                      ),
+                    zod.null(),
+                  ])
+                  .optional(),
+                status: zod.enum(["collected", "not_collected", "invalid"]),
+              }),
+              filtered_candidates: zod.object({
+                value: zod
+                  .union([
+                    zod
+                      .number()
+                      .min(
+                        getRunResponseTrialSignalGateV2OneStageCountsOneFilteredCandidatesValueOneMin,
+                      ),
+                    zod.null(),
+                  ])
+                  .optional(),
+                status: zod.enum(["collected", "not_collected", "invalid"]),
+              }),
+              selected_candidates: zod.object({
+                value: zod
+                  .union([
+                    zod
+                      .number()
+                      .min(
+                        getRunResponseTrialSignalGateV2OneStageCountsOneSelectedCandidatesValueOneMin,
+                      ),
+                    zod.null(),
+                  ])
+                  .optional(),
+                status: zod.enum(["collected", "not_collected", "invalid"]),
+              }),
+              tracklets: zod.object({
+                value: zod
+                  .union([
+                    zod
+                      .number()
+                      .min(
+                        getRunResponseTrialSignalGateV2OneStageCountsOneTrackletsValueOneMin,
+                      ),
+                    zod.null(),
+                  ])
+                  .optional(),
+                status: zod.enum(["collected", "not_collected", "invalid"]),
+              }),
+              rejection_reasons: zod
+                .record(zod.string(), zod.number())
+                .optional(),
+              reconciliation: zod.object({
+                status: zod.enum(["reconciled", "mismatch", "not_collected"]),
+                reason_codes: zod.array(zod.string()).optional(),
+              }),
+            }),
+            zod.null(),
+          ])
+          .optional(),
+        trajectory: zod.record(zod.string(), zod.unknown()),
+        diagnostics: zod.object({
+          raw_track: zod.object({
+            status: zod.enum(["collected", "not_collected", "invalid"]),
+            frame_count: zod.object({
+              status: zod.enum(["collected", "not_collected", "invalid"]),
+              value: zod
+                .union([zod.number(), zod.number(), zod.null()])
+                .optional(),
+            }),
+            detected: zod.object({
+              status: zod.enum(["collected", "not_collected", "invalid"]),
+              value: zod
+                .union([zod.number(), zod.number(), zod.null()])
+                .optional(),
+            }),
+            predicted: zod.object({
+              status: zod.enum(["collected", "not_collected", "invalid"]),
+              value: zod
+                .union([zod.number(), zod.number(), zod.null()])
+                .optional(),
+            }),
+            lost: zod.object({
+              status: zod.enum(["collected", "not_collected", "invalid"]),
+              value: zod
+                .union([zod.number(), zod.number(), zod.null()])
+                .optional(),
+            }),
+            detected_ratio: zod.object({
+              status: zod.enum(["collected", "not_collected", "invalid"]),
+              value: zod
+                .union([zod.number(), zod.number(), zod.null()])
+                .optional(),
+            }),
+            predicted_ratio: zod.object({
+              status: zod.enum(["collected", "not_collected", "invalid"]),
+              value: zod
+                .union([zod.number(), zod.number(), zod.null()])
+                .optional(),
+            }),
+            lost_ratio: zod.object({
+              status: zod.enum(["collected", "not_collected", "invalid"]),
+              value: zod
+                .union([zod.number(), zod.number(), zod.null()])
+                .optional(),
+            }),
+            longest_lost_streak: zod.object({
+              status: zod.enum(["collected", "not_collected", "invalid"]),
+              value: zod
+                .union([zod.number(), zod.number(), zod.null()])
+                .optional(),
+            }),
+            false_positive_island_count: zod.object({
+              status: zod.enum(["collected", "not_collected", "invalid"]),
+              value: zod
+                .union([zod.number(), zod.number(), zod.null()])
+                .optional(),
+            }),
+            max_step_px: zod.object({
+              status: zod.enum(["collected", "not_collected", "invalid"]),
+              value: zod
+                .union([zod.number(), zod.number(), zod.null()])
+                .optional(),
+            }),
+          }),
+          cleaned_track: zod.object({
+            status: zod.enum(["collected", "not_collected", "invalid"]),
+            frame_count: zod.object({
+              status: zod.enum(["collected", "not_collected", "invalid"]),
+              value: zod
+                .union([zod.number(), zod.number(), zod.null()])
+                .optional(),
+            }),
+            detected: zod.object({
+              status: zod.enum(["collected", "not_collected", "invalid"]),
+              value: zod
+                .union([zod.number(), zod.number(), zod.null()])
+                .optional(),
+            }),
+            predicted: zod.object({
+              status: zod.enum(["collected", "not_collected", "invalid"]),
+              value: zod
+                .union([zod.number(), zod.number(), zod.null()])
+                .optional(),
+            }),
+            lost: zod.object({
+              status: zod.enum(["collected", "not_collected", "invalid"]),
+              value: zod
+                .union([zod.number(), zod.number(), zod.null()])
+                .optional(),
+            }),
+            detected_ratio: zod.object({
+              status: zod.enum(["collected", "not_collected", "invalid"]),
+              value: zod
+                .union([zod.number(), zod.number(), zod.null()])
+                .optional(),
+            }),
+            predicted_ratio: zod.object({
+              status: zod.enum(["collected", "not_collected", "invalid"]),
+              value: zod
+                .union([zod.number(), zod.number(), zod.null()])
+                .optional(),
+            }),
+            lost_ratio: zod.object({
+              status: zod.enum(["collected", "not_collected", "invalid"]),
+              value: zod
+                .union([zod.number(), zod.number(), zod.null()])
+                .optional(),
+            }),
+            longest_lost_streak: zod.object({
+              status: zod.enum(["collected", "not_collected", "invalid"]),
+              value: zod
+                .union([zod.number(), zod.number(), zod.null()])
+                .optional(),
+            }),
+            false_positive_island_count: zod.object({
+              status: zod.enum(["collected", "not_collected", "invalid"]),
+              value: zod
+                .union([zod.number(), zod.number(), zod.null()])
+                .optional(),
+            }),
+            max_step_px: zod.object({
+              status: zod.enum(["collected", "not_collected", "invalid"]),
+              value: zod
+                .union([zod.number(), zod.number(), zod.null()])
+                .optional(),
+            }),
+          }),
+          rejection_reasons: zod.object({
+            status: zod.enum(["collected", "not_collected", "invalid"]),
+            value: zod
+              .union([zod.record(zod.string(), zod.number()), zod.null()])
+              .optional(),
+          }),
+          ai_review_trigger_count: zod.object({
+            status: zod.enum(["collected", "not_collected", "invalid"]),
+            value: zod
+              .union([zod.number(), zod.number(), zod.null()])
+              .optional(),
+          }),
+          ai_review_triggers_per_100_frames: zod.object({
+            status: zod.enum(["collected", "not_collected", "invalid"]),
+            value: zod
+              .union([zod.number(), zod.number(), zod.null()])
+              .optional(),
+          }),
+          event_candidate_count: zod.object({
+            status: zod.enum(["collected", "not_collected", "invalid"]),
+            value: zod
+              .union([zod.number(), zod.number(), zod.null()])
+              .optional(),
+          }),
+          event_candidates_per_100_frames: zod.object({
+            status: zod.enum(["collected", "not_collected", "invalid"]),
+            value: zod
+              .union([zod.number(), zod.number(), zod.null()])
+              .optional(),
+          }),
+          follow_cam: zod.object({
+            status: zod.enum(["collected", "not_collected", "invalid"]),
+            max_pan_step_px: zod.object({
+              status: zod.enum(["collected", "not_collected", "invalid"]),
+              value: zod
+                .union([zod.number(), zod.number(), zod.null()])
+                .optional(),
+            }),
+            max_pan_accel_px: zod.object({
+              status: zod.enum(["collected", "not_collected", "invalid"]),
+              value: zod
+                .union([zod.number(), zod.number(), zod.null()])
+                .optional(),
+            }),
+            max_zoom_step_ratio: zod.object({
+              status: zod.enum(["collected", "not_collected", "invalid"]),
+              value: zod
+                .union([zod.number(), zod.number(), zod.null()])
+                .optional(),
+            }),
+          }),
+        }),
+        evidence: zod.record(zod.string(), zod.string()),
+      }),
+      zod.null(),
+    ])
+    .optional(),
   broadcast: zod
     .object({
       status: zod.union([zod.string(), zod.null()]).optional(),
@@ -4180,6 +5984,32 @@ export const CancelRunParams = zod.object({
   run_id: zod.coerce.string(),
 });
 
+export const cancelRunResponseConfigSha256OneRegExp = new RegExp(
+  "^[0-9a-f]{64}$",
+);
+export const cancelRunResponseTrialSignalGateV2OneSchemaVersionDefault = `2.0`;
+export const cancelRunResponseTrialSignalGateV2OneOperatorConfirmationRequiredDefault = true;
+export const cancelRunResponseTrialSignalGateV2OneThresholdProfileSha256RegExp =
+  new RegExp("^[0-9a-f]{64}$");
+export const cancelRunResponseTrialSignalGateV2OneStageCountsOneSchemaVersionDefault = `2.0`;
+export const cancelRunResponseTrialSignalGateV2OneStageCountsOneEvaluatedFramesValueOneMin = 0;
+
+export const cancelRunResponseTrialSignalGateV2OneStageCountsOneDetectedFramesValueOneMin = 0;
+
+export const cancelRunResponseTrialSignalGateV2OneStageCountsOnePredictedFramesValueOneMin = 0;
+
+export const cancelRunResponseTrialSignalGateV2OneStageCountsOneLostFramesValueOneMin = 0;
+
+export const cancelRunResponseTrialSignalGateV2OneStageCountsOneRawCandidatesValueOneMin = 0;
+
+export const cancelRunResponseTrialSignalGateV2OneStageCountsOneClassMappedCandidatesValueOneMin = 0;
+
+export const cancelRunResponseTrialSignalGateV2OneStageCountsOneFilteredCandidatesValueOneMin = 0;
+
+export const cancelRunResponseTrialSignalGateV2OneStageCountsOneSelectedCandidatesValueOneMin = 0;
+
+export const cancelRunResponseTrialSignalGateV2OneStageCountsOneTrackletsValueOneMin = 0;
+
 export const cancelRunResponseBroadcastMaxManualReviewWindowsOneMax = 30;
 
 export const cancelRunResponseBroadcastPreflightOneCalibrationOneFieldPolygonMin = 3;
@@ -4219,6 +6049,12 @@ export const CancelRunResponse = zod.object({
   completed_at: zod.union([zod.string(), zod.null()]).optional(),
   config_name: zod.union([zod.string(), zod.null()]).optional(),
   config_path: zod.union([zod.string(), zod.null()]).optional(),
+  config_sha256: zod
+    .union([
+      zod.string().regex(cancelRunResponseConfigSha256OneRegExp),
+      zod.null(),
+    ])
+    .optional(),
   input_video: zod.union([zod.string(), zod.null()]).optional(),
   parent_run_id: zod.union([zod.string(), zod.null()]).optional(),
   output_dir: zod.string(),
@@ -4236,6 +6072,385 @@ export const CancelRunResponse = zod.object({
     )
     .optional(),
   stats: zod.record(zod.string(), zod.unknown()).optional(),
+  trial_signal_gate_v2: zod
+    .union([
+      zod.object({
+        schema_version: zod
+          .literal("2.0")
+          .default(cancelRunResponseTrialSignalGateV2OneSchemaVersionDefault),
+        status: zod.enum([
+          "insufficient_evidence",
+          "retune_required",
+          "acceptable",
+        ]),
+        coverage_complete: zod.boolean(),
+        evidence_available: zod.boolean(),
+        trajectory_acceptable: zod.boolean(),
+        signal_acceptable: zod.boolean(),
+        acceptance_metrics_complete: zod.boolean(),
+        acceptance_contract_complete: zod.boolean(),
+        quality_acceptable: zod.boolean(),
+        operator_confirmation_required: zod
+          .boolean()
+          .default(
+            cancelRunResponseTrialSignalGateV2OneOperatorConfirmationRequiredDefault,
+          ),
+        reason_codes: zod.array(zod.string()).optional(),
+        failure_classification: zod.object({
+          code: zod.enum([
+            "insufficient_evidence",
+            "decode_failure",
+            "no_raw_candidates",
+            "all_candidates_class_rejected",
+            "all_candidates_filtered",
+            "no_tracklets",
+            "all_lost",
+            "wrong_or_noisy_candidates",
+            "unstable_tracking",
+            "acceptable",
+          ]),
+          severity: zod.enum(["none", "high", "blocking"]),
+          summary: zod.string(),
+          recommended_action: zod.string(),
+        }),
+        threshold_profile: zod.object({
+          profile_id: zod.string(),
+          version: zod.string(),
+          algorithm_version: zod.string(),
+          matching_rules: zod.record(zod.string(), zod.unknown()),
+          sha256: zod
+            .string()
+            .regex(
+              cancelRunResponseTrialSignalGateV2OneThresholdProfileSha256RegExp,
+            ),
+          thresholds: zod.record(zod.string(), zod.number()),
+        }),
+        stage_counts: zod
+          .union([
+            zod.object({
+              schema_version: zod
+                .literal("2.0")
+                .default(
+                  cancelRunResponseTrialSignalGateV2OneStageCountsOneSchemaVersionDefault,
+                ),
+              coverage_status: zod.enum([
+                "complete",
+                "invalid",
+                "not_collected",
+              ]),
+              evaluated_frames: zod.object({
+                value: zod
+                  .union([
+                    zod
+                      .number()
+                      .min(
+                        cancelRunResponseTrialSignalGateV2OneStageCountsOneEvaluatedFramesValueOneMin,
+                      ),
+                    zod.null(),
+                  ])
+                  .optional(),
+                status: zod.enum(["collected", "not_collected", "invalid"]),
+              }),
+              detected_frames: zod.object({
+                value: zod
+                  .union([
+                    zod
+                      .number()
+                      .min(
+                        cancelRunResponseTrialSignalGateV2OneStageCountsOneDetectedFramesValueOneMin,
+                      ),
+                    zod.null(),
+                  ])
+                  .optional(),
+                status: zod.enum(["collected", "not_collected", "invalid"]),
+              }),
+              predicted_frames: zod.object({
+                value: zod
+                  .union([
+                    zod
+                      .number()
+                      .min(
+                        cancelRunResponseTrialSignalGateV2OneStageCountsOnePredictedFramesValueOneMin,
+                      ),
+                    zod.null(),
+                  ])
+                  .optional(),
+                status: zod.enum(["collected", "not_collected", "invalid"]),
+              }),
+              lost_frames: zod.object({
+                value: zod
+                  .union([
+                    zod
+                      .number()
+                      .min(
+                        cancelRunResponseTrialSignalGateV2OneStageCountsOneLostFramesValueOneMin,
+                      ),
+                    zod.null(),
+                  ])
+                  .optional(),
+                status: zod.enum(["collected", "not_collected", "invalid"]),
+              }),
+              raw_candidates: zod.object({
+                value: zod
+                  .union([
+                    zod
+                      .number()
+                      .min(
+                        cancelRunResponseTrialSignalGateV2OneStageCountsOneRawCandidatesValueOneMin,
+                      ),
+                    zod.null(),
+                  ])
+                  .optional(),
+                status: zod.enum(["collected", "not_collected", "invalid"]),
+              }),
+              class_mapped_candidates: zod.object({
+                value: zod
+                  .union([
+                    zod
+                      .number()
+                      .min(
+                        cancelRunResponseTrialSignalGateV2OneStageCountsOneClassMappedCandidatesValueOneMin,
+                      ),
+                    zod.null(),
+                  ])
+                  .optional(),
+                status: zod.enum(["collected", "not_collected", "invalid"]),
+              }),
+              filtered_candidates: zod.object({
+                value: zod
+                  .union([
+                    zod
+                      .number()
+                      .min(
+                        cancelRunResponseTrialSignalGateV2OneStageCountsOneFilteredCandidatesValueOneMin,
+                      ),
+                    zod.null(),
+                  ])
+                  .optional(),
+                status: zod.enum(["collected", "not_collected", "invalid"]),
+              }),
+              selected_candidates: zod.object({
+                value: zod
+                  .union([
+                    zod
+                      .number()
+                      .min(
+                        cancelRunResponseTrialSignalGateV2OneStageCountsOneSelectedCandidatesValueOneMin,
+                      ),
+                    zod.null(),
+                  ])
+                  .optional(),
+                status: zod.enum(["collected", "not_collected", "invalid"]),
+              }),
+              tracklets: zod.object({
+                value: zod
+                  .union([
+                    zod
+                      .number()
+                      .min(
+                        cancelRunResponseTrialSignalGateV2OneStageCountsOneTrackletsValueOneMin,
+                      ),
+                    zod.null(),
+                  ])
+                  .optional(),
+                status: zod.enum(["collected", "not_collected", "invalid"]),
+              }),
+              rejection_reasons: zod
+                .record(zod.string(), zod.number())
+                .optional(),
+              reconciliation: zod.object({
+                status: zod.enum(["reconciled", "mismatch", "not_collected"]),
+                reason_codes: zod.array(zod.string()).optional(),
+              }),
+            }),
+            zod.null(),
+          ])
+          .optional(),
+        trajectory: zod.record(zod.string(), zod.unknown()),
+        diagnostics: zod.object({
+          raw_track: zod.object({
+            status: zod.enum(["collected", "not_collected", "invalid"]),
+            frame_count: zod.object({
+              status: zod.enum(["collected", "not_collected", "invalid"]),
+              value: zod
+                .union([zod.number(), zod.number(), zod.null()])
+                .optional(),
+            }),
+            detected: zod.object({
+              status: zod.enum(["collected", "not_collected", "invalid"]),
+              value: zod
+                .union([zod.number(), zod.number(), zod.null()])
+                .optional(),
+            }),
+            predicted: zod.object({
+              status: zod.enum(["collected", "not_collected", "invalid"]),
+              value: zod
+                .union([zod.number(), zod.number(), zod.null()])
+                .optional(),
+            }),
+            lost: zod.object({
+              status: zod.enum(["collected", "not_collected", "invalid"]),
+              value: zod
+                .union([zod.number(), zod.number(), zod.null()])
+                .optional(),
+            }),
+            detected_ratio: zod.object({
+              status: zod.enum(["collected", "not_collected", "invalid"]),
+              value: zod
+                .union([zod.number(), zod.number(), zod.null()])
+                .optional(),
+            }),
+            predicted_ratio: zod.object({
+              status: zod.enum(["collected", "not_collected", "invalid"]),
+              value: zod
+                .union([zod.number(), zod.number(), zod.null()])
+                .optional(),
+            }),
+            lost_ratio: zod.object({
+              status: zod.enum(["collected", "not_collected", "invalid"]),
+              value: zod
+                .union([zod.number(), zod.number(), zod.null()])
+                .optional(),
+            }),
+            longest_lost_streak: zod.object({
+              status: zod.enum(["collected", "not_collected", "invalid"]),
+              value: zod
+                .union([zod.number(), zod.number(), zod.null()])
+                .optional(),
+            }),
+            false_positive_island_count: zod.object({
+              status: zod.enum(["collected", "not_collected", "invalid"]),
+              value: zod
+                .union([zod.number(), zod.number(), zod.null()])
+                .optional(),
+            }),
+            max_step_px: zod.object({
+              status: zod.enum(["collected", "not_collected", "invalid"]),
+              value: zod
+                .union([zod.number(), zod.number(), zod.null()])
+                .optional(),
+            }),
+          }),
+          cleaned_track: zod.object({
+            status: zod.enum(["collected", "not_collected", "invalid"]),
+            frame_count: zod.object({
+              status: zod.enum(["collected", "not_collected", "invalid"]),
+              value: zod
+                .union([zod.number(), zod.number(), zod.null()])
+                .optional(),
+            }),
+            detected: zod.object({
+              status: zod.enum(["collected", "not_collected", "invalid"]),
+              value: zod
+                .union([zod.number(), zod.number(), zod.null()])
+                .optional(),
+            }),
+            predicted: zod.object({
+              status: zod.enum(["collected", "not_collected", "invalid"]),
+              value: zod
+                .union([zod.number(), zod.number(), zod.null()])
+                .optional(),
+            }),
+            lost: zod.object({
+              status: zod.enum(["collected", "not_collected", "invalid"]),
+              value: zod
+                .union([zod.number(), zod.number(), zod.null()])
+                .optional(),
+            }),
+            detected_ratio: zod.object({
+              status: zod.enum(["collected", "not_collected", "invalid"]),
+              value: zod
+                .union([zod.number(), zod.number(), zod.null()])
+                .optional(),
+            }),
+            predicted_ratio: zod.object({
+              status: zod.enum(["collected", "not_collected", "invalid"]),
+              value: zod
+                .union([zod.number(), zod.number(), zod.null()])
+                .optional(),
+            }),
+            lost_ratio: zod.object({
+              status: zod.enum(["collected", "not_collected", "invalid"]),
+              value: zod
+                .union([zod.number(), zod.number(), zod.null()])
+                .optional(),
+            }),
+            longest_lost_streak: zod.object({
+              status: zod.enum(["collected", "not_collected", "invalid"]),
+              value: zod
+                .union([zod.number(), zod.number(), zod.null()])
+                .optional(),
+            }),
+            false_positive_island_count: zod.object({
+              status: zod.enum(["collected", "not_collected", "invalid"]),
+              value: zod
+                .union([zod.number(), zod.number(), zod.null()])
+                .optional(),
+            }),
+            max_step_px: zod.object({
+              status: zod.enum(["collected", "not_collected", "invalid"]),
+              value: zod
+                .union([zod.number(), zod.number(), zod.null()])
+                .optional(),
+            }),
+          }),
+          rejection_reasons: zod.object({
+            status: zod.enum(["collected", "not_collected", "invalid"]),
+            value: zod
+              .union([zod.record(zod.string(), zod.number()), zod.null()])
+              .optional(),
+          }),
+          ai_review_trigger_count: zod.object({
+            status: zod.enum(["collected", "not_collected", "invalid"]),
+            value: zod
+              .union([zod.number(), zod.number(), zod.null()])
+              .optional(),
+          }),
+          ai_review_triggers_per_100_frames: zod.object({
+            status: zod.enum(["collected", "not_collected", "invalid"]),
+            value: zod
+              .union([zod.number(), zod.number(), zod.null()])
+              .optional(),
+          }),
+          event_candidate_count: zod.object({
+            status: zod.enum(["collected", "not_collected", "invalid"]),
+            value: zod
+              .union([zod.number(), zod.number(), zod.null()])
+              .optional(),
+          }),
+          event_candidates_per_100_frames: zod.object({
+            status: zod.enum(["collected", "not_collected", "invalid"]),
+            value: zod
+              .union([zod.number(), zod.number(), zod.null()])
+              .optional(),
+          }),
+          follow_cam: zod.object({
+            status: zod.enum(["collected", "not_collected", "invalid"]),
+            max_pan_step_px: zod.object({
+              status: zod.enum(["collected", "not_collected", "invalid"]),
+              value: zod
+                .union([zod.number(), zod.number(), zod.null()])
+                .optional(),
+            }),
+            max_pan_accel_px: zod.object({
+              status: zod.enum(["collected", "not_collected", "invalid"]),
+              value: zod
+                .union([zod.number(), zod.number(), zod.null()])
+                .optional(),
+            }),
+            max_zoom_step_ratio: zod.object({
+              status: zod.enum(["collected", "not_collected", "invalid"]),
+              value: zod
+                .union([zod.number(), zod.number(), zod.null()])
+                .optional(),
+            }),
+          }),
+        }),
+        evidence: zod.record(zod.string(), zod.string()),
+      }),
+      zod.null(),
+    ])
+    .optional(),
   broadcast: zod
     .object({
       status: zod.union([zod.string(), zod.null()]).optional(),
@@ -4922,6 +7137,364 @@ export const GetPlayerTracksReportResponse = zod.object({
       }),
     )
     .optional(),
+});
+
+/**
+ * @summary Get Trial Diagnosis
+ */
+export const GetTrialDiagnosisParams = zod.object({
+  run_id: zod.coerce.string(),
+});
+
+export const getTrialDiagnosisResponseSchemaVersionDefault = `1.0`;
+export const getTrialDiagnosisResponseTrialSignalGateV2SchemaVersionDefault = `2.0`;
+export const getTrialDiagnosisResponseTrialSignalGateV2OperatorConfirmationRequiredDefault = true;
+export const getTrialDiagnosisResponseTrialSignalGateV2ThresholdProfileSha256RegExp =
+  new RegExp("^[0-9a-f]{64}$");
+export const getTrialDiagnosisResponseTrialSignalGateV2StageCountsOneSchemaVersionDefault = `2.0`;
+export const getTrialDiagnosisResponseTrialSignalGateV2StageCountsOneEvaluatedFramesValueOneMin = 0;
+
+export const getTrialDiagnosisResponseTrialSignalGateV2StageCountsOneDetectedFramesValueOneMin = 0;
+
+export const getTrialDiagnosisResponseTrialSignalGateV2StageCountsOnePredictedFramesValueOneMin = 0;
+
+export const getTrialDiagnosisResponseTrialSignalGateV2StageCountsOneLostFramesValueOneMin = 0;
+
+export const getTrialDiagnosisResponseTrialSignalGateV2StageCountsOneRawCandidatesValueOneMin = 0;
+
+export const getTrialDiagnosisResponseTrialSignalGateV2StageCountsOneClassMappedCandidatesValueOneMin = 0;
+
+export const getTrialDiagnosisResponseTrialSignalGateV2StageCountsOneFilteredCandidatesValueOneMin = 0;
+
+export const getTrialDiagnosisResponseTrialSignalGateV2StageCountsOneSelectedCandidatesValueOneMin = 0;
+
+export const getTrialDiagnosisResponseTrialSignalGateV2StageCountsOneTrackletsValueOneMin = 0;
+
+export const getTrialDiagnosisResponseTuningSchemaVersionDefault = `1.0`;
+
+export const GetTrialDiagnosisResponse = zod.object({
+  schema_version: zod
+    .literal("1.0")
+    .default(getTrialDiagnosisResponseSchemaVersionDefault),
+  run_id: zod.string(),
+  legacy_quality_gate_status: zod.union([zod.string(), zod.null()]).optional(),
+  trial_signal_gate_v2: zod.object({
+    schema_version: zod
+      .literal("2.0")
+      .default(getTrialDiagnosisResponseTrialSignalGateV2SchemaVersionDefault),
+    status: zod.enum([
+      "insufficient_evidence",
+      "retune_required",
+      "acceptable",
+    ]),
+    coverage_complete: zod.boolean(),
+    evidence_available: zod.boolean(),
+    trajectory_acceptable: zod.boolean(),
+    signal_acceptable: zod.boolean(),
+    acceptance_metrics_complete: zod.boolean(),
+    acceptance_contract_complete: zod.boolean(),
+    quality_acceptable: zod.boolean(),
+    operator_confirmation_required: zod
+      .boolean()
+      .default(
+        getTrialDiagnosisResponseTrialSignalGateV2OperatorConfirmationRequiredDefault,
+      ),
+    reason_codes: zod.array(zod.string()).optional(),
+    failure_classification: zod.object({
+      code: zod.enum([
+        "insufficient_evidence",
+        "decode_failure",
+        "no_raw_candidates",
+        "all_candidates_class_rejected",
+        "all_candidates_filtered",
+        "no_tracklets",
+        "all_lost",
+        "wrong_or_noisy_candidates",
+        "unstable_tracking",
+        "acceptable",
+      ]),
+      severity: zod.enum(["none", "high", "blocking"]),
+      summary: zod.string(),
+      recommended_action: zod.string(),
+    }),
+    threshold_profile: zod.object({
+      profile_id: zod.string(),
+      version: zod.string(),
+      algorithm_version: zod.string(),
+      matching_rules: zod.record(zod.string(), zod.unknown()),
+      sha256: zod
+        .string()
+        .regex(
+          getTrialDiagnosisResponseTrialSignalGateV2ThresholdProfileSha256RegExp,
+        ),
+      thresholds: zod.record(zod.string(), zod.number()),
+    }),
+    stage_counts: zod
+      .union([
+        zod.object({
+          schema_version: zod
+            .literal("2.0")
+            .default(
+              getTrialDiagnosisResponseTrialSignalGateV2StageCountsOneSchemaVersionDefault,
+            ),
+          coverage_status: zod.enum(["complete", "invalid", "not_collected"]),
+          evaluated_frames: zod.object({
+            value: zod
+              .union([
+                zod
+                  .number()
+                  .min(
+                    getTrialDiagnosisResponseTrialSignalGateV2StageCountsOneEvaluatedFramesValueOneMin,
+                  ),
+                zod.null(),
+              ])
+              .optional(),
+            status: zod.enum(["collected", "not_collected", "invalid"]),
+          }),
+          detected_frames: zod.object({
+            value: zod
+              .union([
+                zod
+                  .number()
+                  .min(
+                    getTrialDiagnosisResponseTrialSignalGateV2StageCountsOneDetectedFramesValueOneMin,
+                  ),
+                zod.null(),
+              ])
+              .optional(),
+            status: zod.enum(["collected", "not_collected", "invalid"]),
+          }),
+          predicted_frames: zod.object({
+            value: zod
+              .union([
+                zod
+                  .number()
+                  .min(
+                    getTrialDiagnosisResponseTrialSignalGateV2StageCountsOnePredictedFramesValueOneMin,
+                  ),
+                zod.null(),
+              ])
+              .optional(),
+            status: zod.enum(["collected", "not_collected", "invalid"]),
+          }),
+          lost_frames: zod.object({
+            value: zod
+              .union([
+                zod
+                  .number()
+                  .min(
+                    getTrialDiagnosisResponseTrialSignalGateV2StageCountsOneLostFramesValueOneMin,
+                  ),
+                zod.null(),
+              ])
+              .optional(),
+            status: zod.enum(["collected", "not_collected", "invalid"]),
+          }),
+          raw_candidates: zod.object({
+            value: zod
+              .union([
+                zod
+                  .number()
+                  .min(
+                    getTrialDiagnosisResponseTrialSignalGateV2StageCountsOneRawCandidatesValueOneMin,
+                  ),
+                zod.null(),
+              ])
+              .optional(),
+            status: zod.enum(["collected", "not_collected", "invalid"]),
+          }),
+          class_mapped_candidates: zod.object({
+            value: zod
+              .union([
+                zod
+                  .number()
+                  .min(
+                    getTrialDiagnosisResponseTrialSignalGateV2StageCountsOneClassMappedCandidatesValueOneMin,
+                  ),
+                zod.null(),
+              ])
+              .optional(),
+            status: zod.enum(["collected", "not_collected", "invalid"]),
+          }),
+          filtered_candidates: zod.object({
+            value: zod
+              .union([
+                zod
+                  .number()
+                  .min(
+                    getTrialDiagnosisResponseTrialSignalGateV2StageCountsOneFilteredCandidatesValueOneMin,
+                  ),
+                zod.null(),
+              ])
+              .optional(),
+            status: zod.enum(["collected", "not_collected", "invalid"]),
+          }),
+          selected_candidates: zod.object({
+            value: zod
+              .union([
+                zod
+                  .number()
+                  .min(
+                    getTrialDiagnosisResponseTrialSignalGateV2StageCountsOneSelectedCandidatesValueOneMin,
+                  ),
+                zod.null(),
+              ])
+              .optional(),
+            status: zod.enum(["collected", "not_collected", "invalid"]),
+          }),
+          tracklets: zod.object({
+            value: zod
+              .union([
+                zod
+                  .number()
+                  .min(
+                    getTrialDiagnosisResponseTrialSignalGateV2StageCountsOneTrackletsValueOneMin,
+                  ),
+                zod.null(),
+              ])
+              .optional(),
+            status: zod.enum(["collected", "not_collected", "invalid"]),
+          }),
+          rejection_reasons: zod.record(zod.string(), zod.number()).optional(),
+          reconciliation: zod.object({
+            status: zod.enum(["reconciled", "mismatch", "not_collected"]),
+            reason_codes: zod.array(zod.string()).optional(),
+          }),
+        }),
+        zod.null(),
+      ])
+      .optional(),
+    trajectory: zod.record(zod.string(), zod.unknown()),
+    diagnostics: zod.object({
+      raw_track: zod.object({
+        status: zod.enum(["collected", "not_collected", "invalid"]),
+        frame_count: zod.object({
+          status: zod.enum(["collected", "not_collected", "invalid"]),
+          value: zod.union([zod.number(), zod.number(), zod.null()]).optional(),
+        }),
+        detected: zod.object({
+          status: zod.enum(["collected", "not_collected", "invalid"]),
+          value: zod.union([zod.number(), zod.number(), zod.null()]).optional(),
+        }),
+        predicted: zod.object({
+          status: zod.enum(["collected", "not_collected", "invalid"]),
+          value: zod.union([zod.number(), zod.number(), zod.null()]).optional(),
+        }),
+        lost: zod.object({
+          status: zod.enum(["collected", "not_collected", "invalid"]),
+          value: zod.union([zod.number(), zod.number(), zod.null()]).optional(),
+        }),
+        detected_ratio: zod.object({
+          status: zod.enum(["collected", "not_collected", "invalid"]),
+          value: zod.union([zod.number(), zod.number(), zod.null()]).optional(),
+        }),
+        predicted_ratio: zod.object({
+          status: zod.enum(["collected", "not_collected", "invalid"]),
+          value: zod.union([zod.number(), zod.number(), zod.null()]).optional(),
+        }),
+        lost_ratio: zod.object({
+          status: zod.enum(["collected", "not_collected", "invalid"]),
+          value: zod.union([zod.number(), zod.number(), zod.null()]).optional(),
+        }),
+        longest_lost_streak: zod.object({
+          status: zod.enum(["collected", "not_collected", "invalid"]),
+          value: zod.union([zod.number(), zod.number(), zod.null()]).optional(),
+        }),
+        false_positive_island_count: zod.object({
+          status: zod.enum(["collected", "not_collected", "invalid"]),
+          value: zod.union([zod.number(), zod.number(), zod.null()]).optional(),
+        }),
+        max_step_px: zod.object({
+          status: zod.enum(["collected", "not_collected", "invalid"]),
+          value: zod.union([zod.number(), zod.number(), zod.null()]).optional(),
+        }),
+      }),
+      cleaned_track: zod.object({
+        status: zod.enum(["collected", "not_collected", "invalid"]),
+        frame_count: zod.object({
+          status: zod.enum(["collected", "not_collected", "invalid"]),
+          value: zod.union([zod.number(), zod.number(), zod.null()]).optional(),
+        }),
+        detected: zod.object({
+          status: zod.enum(["collected", "not_collected", "invalid"]),
+          value: zod.union([zod.number(), zod.number(), zod.null()]).optional(),
+        }),
+        predicted: zod.object({
+          status: zod.enum(["collected", "not_collected", "invalid"]),
+          value: zod.union([zod.number(), zod.number(), zod.null()]).optional(),
+        }),
+        lost: zod.object({
+          status: zod.enum(["collected", "not_collected", "invalid"]),
+          value: zod.union([zod.number(), zod.number(), zod.null()]).optional(),
+        }),
+        detected_ratio: zod.object({
+          status: zod.enum(["collected", "not_collected", "invalid"]),
+          value: zod.union([zod.number(), zod.number(), zod.null()]).optional(),
+        }),
+        predicted_ratio: zod.object({
+          status: zod.enum(["collected", "not_collected", "invalid"]),
+          value: zod.union([zod.number(), zod.number(), zod.null()]).optional(),
+        }),
+        lost_ratio: zod.object({
+          status: zod.enum(["collected", "not_collected", "invalid"]),
+          value: zod.union([zod.number(), zod.number(), zod.null()]).optional(),
+        }),
+        longest_lost_streak: zod.object({
+          status: zod.enum(["collected", "not_collected", "invalid"]),
+          value: zod.union([zod.number(), zod.number(), zod.null()]).optional(),
+        }),
+        false_positive_island_count: zod.object({
+          status: zod.enum(["collected", "not_collected", "invalid"]),
+          value: zod.union([zod.number(), zod.number(), zod.null()]).optional(),
+        }),
+        max_step_px: zod.object({
+          status: zod.enum(["collected", "not_collected", "invalid"]),
+          value: zod.union([zod.number(), zod.number(), zod.null()]).optional(),
+        }),
+      }),
+      rejection_reasons: zod.object({
+        status: zod.enum(["collected", "not_collected", "invalid"]),
+        value: zod
+          .union([zod.record(zod.string(), zod.number()), zod.null()])
+          .optional(),
+      }),
+      ai_review_trigger_count: zod.object({
+        status: zod.enum(["collected", "not_collected", "invalid"]),
+        value: zod.union([zod.number(), zod.number(), zod.null()]).optional(),
+      }),
+      ai_review_triggers_per_100_frames: zod.object({
+        status: zod.enum(["collected", "not_collected", "invalid"]),
+        value: zod.union([zod.number(), zod.number(), zod.null()]).optional(),
+      }),
+      event_candidate_count: zod.object({
+        status: zod.enum(["collected", "not_collected", "invalid"]),
+        value: zod.union([zod.number(), zod.number(), zod.null()]).optional(),
+      }),
+      event_candidates_per_100_frames: zod.object({
+        status: zod.enum(["collected", "not_collected", "invalid"]),
+        value: zod.union([zod.number(), zod.number(), zod.null()]).optional(),
+      }),
+      follow_cam: zod.object({
+        status: zod.enum(["collected", "not_collected", "invalid"]),
+        max_pan_step_px: zod.object({
+          status: zod.enum(["collected", "not_collected", "invalid"]),
+          value: zod.union([zod.number(), zod.number(), zod.null()]).optional(),
+        }),
+        max_pan_accel_px: zod.object({
+          status: zod.enum(["collected", "not_collected", "invalid"]),
+          value: zod.union([zod.number(), zod.number(), zod.null()]).optional(),
+        }),
+        max_zoom_step_ratio: zod.object({
+          status: zod.enum(["collected", "not_collected", "invalid"]),
+          value: zod.union([zod.number(), zod.number(), zod.null()]).optional(),
+        }),
+      }),
+    }),
+    evidence: zod.record(zod.string(), zod.string()),
+  }),
+  tuning_schema_version: zod
+    .literal("1.0")
+    .default(getTrialDiagnosisResponseTuningSchemaVersionDefault),
 });
 
 /**

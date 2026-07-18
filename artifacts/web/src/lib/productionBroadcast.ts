@@ -22,6 +22,7 @@ import {
   canonicalJson,
   isProductionTrialState,
   materializedProductionTrialConfigName,
+  productionTrialAcceptanceIsValid,
   productionTrialArtifactContract,
   productionTrialMatchesContext,
   sha256Text,
@@ -179,15 +180,10 @@ function saveTrackingContractEnabled(
 }
 
 function acceptedTrialAttempt(trial: ProductionTrialState) {
-  const accepted = trial.accepted;
-  if (!accepted) throw new TypeError("An accepted trial is required");
-  const attempt = trial.attempts.find(
-    (item) => item.run_id === accepted.run_id,
-  );
-  if (!attempt || attempt.last_observed.status !== "completed") {
-    throw new TypeError("The accepted trial attempt is not completed");
+  if (!productionTrialAcceptanceIsValid(trial)) {
+    throw new TypeError("An accepted trial is required");
   }
-  return { accepted, attempt };
+  return { accepted: trial.accepted, attempt: trial.attempts.at(-1)! };
 }
 
 function calibrationConfirmation(calibration: ProductionCalibrationDraft) {
@@ -249,6 +245,7 @@ function contextIsReady(context: ProductionFullRunContext): boolean {
   ) {
     return false;
   }
+  if (!productionTrialAcceptanceIsValid(context.trial)) return false;
   const accepted = context.trial.accepted;
   return Boolean(
     accepted &&
@@ -457,13 +454,13 @@ export async function productionFullRunAuthoritativeContextMatches(input: {
   accepted_trial_run: RunRecord;
   accepted_trial_artifacts: readonly ArtifactSummary[];
 }): Promise<boolean> {
-  if (!isProductionTrialState(input.trial)) return false;
+  if (
+    !isProductionTrialState(input.trial) ||
+    !productionTrialAcceptanceIsValid(input.trial)
+  )
+    return false;
   const accepted = input.trial.accepted;
-  if (!accepted) return false;
-  const attempt = input.trial.attempts.find(
-    (candidate) => candidate.run_id === accepted.run_id,
-  );
-  if (!attempt) return false;
+  const attempt = input.trial.attempts.at(-1)!;
 
   const sourceMatches = (input.input_catalog.videos ?? []).filter(
     (candidate) => candidate.path === input.source.path,

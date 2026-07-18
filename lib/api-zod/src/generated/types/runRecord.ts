@@ -11,6 +11,7 @@ import type { RunProgress } from "./runProgress";
 import type { RunRecordModulesEnabled } from "./runRecordModulesEnabled";
 import type { RunRecordStats } from "./runRecordStats";
 import type { RunRecordStatus } from "./runRecordStatus";
+import type { TrialSignalGateV2 } from "./trialSignalGateV2";
 
 export interface RunRecord {
   run_id: string;
@@ -21,12 +22,14 @@ export interface RunRecord {
   completed_at?: string | null;
   config_name?: string | null;
   config_path?: string | null;
+  config_sha256?: string | null;
   input_video?: string | null;
   parent_run_id?: string | null;
   output_dir: string;
   modules_enabled?: RunRecordModulesEnabled;
   artifacts?: ArtifactSummary[];
   stats?: RunRecordStats;
+  trial_signal_gate_v2?: TrialSignalGateV2 | null;
   broadcast?: BroadcastRunState;
   ai_candidate_lifecycle?: AICandidateLifecycleReport;
   progress?: RunProgress | null;

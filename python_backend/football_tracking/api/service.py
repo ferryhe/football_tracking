@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import csv
 import hashlib
+import hmac
 import inspect
 import json
 import math
@@ -140,6 +141,11 @@ from football_tracking.review_evidence_bundle import (
     revoke_review_evidence_activation,
 )
 from football_tracking.tracking_contracts import TRACKING_CONTRACT_REPORT_NAME, normalize_tracking_contract_payload
+from football_tracking.trial_diagnosis import (
+    build_trial_diagnosis,
+    normalize_production_trial_config_patch,
+    trial_tuning_schema,
+)
 
 _WINDOWS_RESERVED_NAMES = {
     "CON",
@@ -189,6 +195,14 @@ class _ReadyBroadcastFileLease:
     stat_token: tuple[int, int, int, int, int]
 
 
+@dataclass(frozen=True)
+class _YamlConfigSnapshot:
+    path: Path
+    content: bytes
+    sha256: str
+    raw: dict[str, Any]
+
+
 @dataclass
 class _ArtifactResponseLease:
     path: Path
@@ -232,6 +246,30 @@ def _deep_merge(base: dict[str, Any], patch: dict[str, Any]) -> dict[str, Any]:
         else:
             merged[key] = deepcopy(value)
     return merged
+
+
+_MISSING_VALUE = object()
+
+
+def _value_at_dotted_path(value: Any, path: str) -> Any:
+    current = value
+    for part in path.split("."):
+        if not isinstance(current, dict) or part not in current:
+            return _MISSING_VALUE
+        current = current[part]
+    return current
+
+
+def _set_dotted_path(value: dict[str, Any], path: str, item: Any) -> None:
+    current = value
+    parts = path.split(".")
+    for part in parts[:-1]:
+        nested = current.get(part)
+        if not isinstance(nested, dict):
+            nested = {}
+            current[part] = nested
+        current = nested
+    current[parts[-1]] = deepcopy(item)
 
 
 def _flatten_patch_lines(patch: dict[str, Any], prefix: str = "") -> list[str]:
@@ -1076,6 +1114,7 @@ class ApiService:
                 reverse=True,
             )
         for run in runs:
+            self._attach_trial_signal_gate(run)
             if not self._is_ready_broadcast_run(run):
                 continue
             # The dedicated artifacts endpoint seals and validates ready delivery.
@@ -1226,8 +1265,34 @@ class ApiService:
             else:
                 snapshot["artifacts"] = self._collect_artifacts(output_dir)
             snapshot["stats"] = self._collect_stats(output_dir)
+            self._attach_trial_signal_gate(snapshot)
             self._attach_ai_candidate_lifecycle(snapshot)
         return snapshot
+
+    def get_trial_diagnosis(self, run_id: str) -> dict[str, Any]:
+        run = self.get_run(run_id)
+        note = self._machine_run_note(run.get("notes"))
+        if not isinstance(note, dict) or note.get("purpose") != "production_trial":
+            raise ValueError("Trial diagnosis is available only for production_trial runs")
+        output_dir_raw = run.get("output_dir")
+        if not isinstance(output_dir_raw, str) or not output_dir_raw:
+            raise FileNotFoundError(f"Run output is unavailable: {run_id}")
+        output_dir = self._resolve_safe_run_output(Path(output_dir_raw))
+        metrics_report = self._read_safe_direct_json(output_dir, "metrics_report.json")
+        return build_trial_diagnosis(output_dir, run, metrics_report=metrics_report)
+
+    def get_trial_tuning_schema(self) -> dict[str, Any]:
+        schema = trial_tuning_schema()
+        controls = schema.get("controls")
+        if not isinstance(controls, list):
+            raise RuntimeError("Production trial tuning schema is unavailable")
+        for control in controls:
+            if not isinstance(control, dict) or not isinstance(control.get("path"), str):
+                raise RuntimeError("Production trial tuning schema is invalid")
+            path = control["path"]
+            control["description"] = _describe_config_path(path, None, "en")
+            control["description_zh"] = _describe_config_path(path, None, "zh")
+        return schema
 
     def list_artifacts(
         self,
@@ -3551,6 +3616,10 @@ class ApiService:
     def create_run(self, request: dict[str, Any]) -> dict[str, Any]:
         self._assert_service_open()
         pipeline_mode = str(request.get("pipeline_mode") or "standard")
+        machine_note = self._machine_run_note(request.get("notes"))
+        is_production_trial = machine_note is not None and machine_note.get("purpose") == "production_trial"
+        if is_production_trial and pipeline_mode != "standard":
+            raise ValueError("production_trial requires pipeline_mode=standard")
         broadcast_preflight = None
         if pipeline_mode == "broadcast_hybrid":
             broadcast_preflight = self._preflight_broadcast_request(request)
@@ -3567,106 +3636,187 @@ class ApiService:
             run_id = f"run_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid4().hex[:8]}"
 
         config_path, relative_name = self._resolve_config_path(request["config_name"])
-        config_patch = request.get("config_patch") or {}
-        if config_patch:
-            config_path, relative_name = self._materialize_run_config(
-                base_config_path=config_path,
-                base_config_name=relative_name,
-                run_id=run_id,
-                patch=config_patch,
-                suffix="field_setup",
+        raw_config_patch = request.get("config_patch")
+        config_patch = raw_config_patch if raw_config_patch is not None else {}
+        base_config_snapshot: _YamlConfigSnapshot | None = None
+        if is_production_trial:
+            base_config_snapshot = self._capture_yaml_config_snapshot(config_path)
+            base_config = load_config(
+                config_path,
+                raw_config=base_config_snapshot.raw,
             )
-        config = load_config(config_path)
-
-        if request.get("input_video"):
-            config.input_video = Path(request["input_video"]).resolve()
-        if request.get("enable_postprocess") is not None:
-            config.postprocess.enabled = bool(request["enable_postprocess"])
-        if request.get("enable_follow_cam") is not None:
-            config.follow_cam.enabled = bool(request["enable_follow_cam"])
-        if request.get("start_frame") is not None:
-            config.runtime.start_frame = int(request["start_frame"])
-        if request.get("max_frames") is not None:
-            config.runtime.max_frames = int(request["max_frames"])
-        if pipeline_mode == "broadcast_hybrid":
-            # The hybrid workflow publishes its own audited camera generation and render.
-            # Running the legacy follow-cam here would create a second, misleading deliverable.
-            config.follow_cam.enabled = False
-
-        config.output_dir = self._build_run_output_dir(run_id=run_id, input_video=config.input_video)
-        if config.output_dir.exists() and any(config.output_dir.iterdir()):
-            raise FileExistsError(str(config.output_dir))
-        output_created = not config.output_dir.exists()
-        config.output_dir.mkdir(parents=True, exist_ok=True)
-
-        run_record = {
-            "run_id": run_id,
-            "source": pipeline_mode if pipeline_mode == "broadcast_hybrid" else "api",
-            "status": "queued",
-            "created_at": _utc_now_iso(),
-            "started_at": None,
-            "completed_at": None,
-            "config_name": relative_name,
-            "config_path": str(config_path),
-            "input_video": str(config.input_video),
-            "parent_run_id": request.get("parent_run_id"),
-            "output_dir": str(config.output_dir),
-            "modules_enabled": {
-                "postprocess": bool(config.postprocess.enabled),
-                "follow_cam": bool(config.follow_cam.enabled),
-                "temporal_chunks": bool(config.temporal_chunks.enabled),
-            },
-            "artifacts": [],
-            "stats": {},
-            "broadcast": (
-                {
-                    "status": "tracking",
-                    "quality_profile": "stable_broadcast",
-                    "max_manual_review_windows": int(request.get("max_manual_review_windows") or 30),
-                    "preflight": broadcast_preflight,
-                    "owner_pid": os.getpid(),
-                    "owner_instance_id": self._instance_id,
-                }
-                if broadcast_preflight is not None
-                else {}
-            ),
-            "progress": self._initial_progress(),
-            "notes": request.get("notes"),
-            "error": None,
-        }
-        self._attach_ai_candidate_lifecycle(run_record)
-
+            config_patch = normalize_production_trial_config_patch(
+                config_patch,
+                base_config=_jsonable(base_config),
+                legacy_created_at=_utc_now_iso(),
+            )
+            config_patch, preflight_output_dir = self._prepare_production_trial_config_patch(
+                request=request,
+                note=machine_note,
+                patch=config_patch,
+                base_config=base_config,
+                base_config_name=relative_name,
+                base_config_sha256=base_config_snapshot.sha256,
+                run_id=run_id,
+            )
+            if preflight_output_dir.exists() and any(preflight_output_dir.iterdir()):
+                raise FileExistsError(str(preflight_output_dir))
+        output_created = False
+        materialized_config_path: Path | None = None
+        materialized_config_snapshot: _YamlConfigSnapshot | None = None
+        config: AppConfig | None = None
+        run_record: dict[str, Any] | None = None
         try:
+            # Hold both the in-process lock and the cross-process registry lock
+            # from collision preflight through registration. No generated YAML
+            # or output directory can be created by a losing concurrent request.
             with self._lock:
                 self._assert_service_open_locked()
-                with self._registry_transaction() as registry:
+                with self._registry_file_lock():
+                    registry = self._read_registry()
+                    if is_production_trial:
+                        assert machine_note is not None
+                        assert base_config_snapshot is not None
+                        self._validate_production_trial_parent_lineage(
+                            request=request,
+                            note=machine_note,
+                            patch=config_patch,
+                            base_config_snapshot=base_config_snapshot,
+                            registry=registry,
+                        )
                     active = next(
                         (item for item in registry["runs"] if item.get("status") in {"queued", "running"}),
                         None,
                     )
                     if active is not None:
                         raise RuntimeError(f"Another run is already active: {active.get('run_id')}")
+
+                    if config_patch:
+                        materialized_config = self._materialize_run_config(
+                            base_config_path=config_path,
+                            base_config_name=relative_name,
+                            run_id=run_id,
+                            patch=config_patch,
+                            suffix="field_setup",
+                            exclusive=is_production_trial,
+                            base_config_snapshot=base_config_snapshot,
+                        )
+                        config_path, relative_name, materialized_config_snapshot = (
+                            materialized_config
+                        )
+                        if is_production_trial:
+                            materialized_config_path = config_path
+                    config = load_config(
+                        config_path,
+                        raw_config=(
+                            materialized_config_snapshot.raw
+                            if materialized_config_snapshot is not None
+                            else None
+                        ),
+                    )
+
+                    if not is_production_trial:
+                        if request.get("input_video"):
+                            config.input_video = Path(request["input_video"]).resolve()
+                        if request.get("enable_postprocess") is not None:
+                            config.postprocess.enabled = bool(request["enable_postprocess"])
+                        if request.get("enable_follow_cam") is not None:
+                            config.follow_cam.enabled = bool(request["enable_follow_cam"])
+                        if request.get("start_frame") is not None:
+                            config.runtime.start_frame = int(request["start_frame"])
+                        if request.get("max_frames") is not None:
+                            config.runtime.max_frames = int(request["max_frames"])
+                    if pipeline_mode == "broadcast_hybrid":
+                        # The hybrid workflow publishes its own audited camera generation and render.
+                        # Running the legacy follow-cam here would create a second, misleading deliverable.
+                        config.follow_cam.enabled = False
+
+                    expected_output_dir = self._build_run_output_dir(
+                        run_id=run_id, input_video=config.input_video
+                    )
+                    if is_production_trial and config.output_dir.resolve() != expected_output_dir.resolve():
+                        raise ValueError("production_trial persisted output_dir does not match effective run")
+                    config.output_dir = expected_output_dir
+                    if config.output_dir.exists() and any(config.output_dir.iterdir()):
+                        raise FileExistsError(str(config.output_dir))
+                    output_created = not config.output_dir.exists()
+                    config.output_dir.mkdir(parents=True, exist_ok=True)
+
+                    if is_production_trial:
+                        assert materialized_config_snapshot is not None
+                        self._verify_materialized_config_snapshot(materialized_config_snapshot)
+
+                    run_record = {
+                        "run_id": run_id,
+                        "source": pipeline_mode if pipeline_mode == "broadcast_hybrid" else "api",
+                        "status": "queued",
+                        "created_at": _utc_now_iso(),
+                        "started_at": None,
+                        "completed_at": None,
+                        "config_name": relative_name,
+                        "config_path": str(config_path),
+                        "config_sha256": (
+                            materialized_config_snapshot.sha256 if is_production_trial else None
+                        ),
+                        "input_video": str(config.input_video),
+                        "parent_run_id": request.get("parent_run_id"),
+                        "output_dir": str(config.output_dir),
+                        "modules_enabled": {
+                            "postprocess": bool(config.postprocess.enabled),
+                            "follow_cam": bool(config.follow_cam.enabled),
+                            "temporal_chunks": bool(config.temporal_chunks.enabled),
+                        },
+                        "artifacts": [],
+                        "stats": {},
+                        "broadcast": (
+                            {
+                                "status": "tracking",
+                                "quality_profile": "stable_broadcast",
+                                "max_manual_review_windows": int(
+                                    request.get("max_manual_review_windows") or 30
+                                ),
+                                "preflight": broadcast_preflight,
+                                "owner_pid": os.getpid(),
+                                "owner_instance_id": self._instance_id,
+                            }
+                            if broadcast_preflight is not None
+                            else {}
+                        ),
+                        "progress": self._initial_progress(),
+                        "notes": request.get("notes"),
+                        "error": None,
+                    }
+                    self._attach_ai_candidate_lifecycle(run_record)
+                    cancel_event = threading.Event()
+                    thread = threading.Thread(
+                        target=self._execute_run,
+                        args=(run_id, config, cancel_event, run_record["source"]),
+                        name=f"football-tracking-run-{run_id}",
+                        daemon=True,
+                    )
                     registry["runs"] = [run for run in registry["runs"] if run["run_id"] != run_id]
                     registry["runs"].append(run_record)
-                cancel_event = threading.Event()
-                thread = threading.Thread(
-                    target=self._execute_run,
-                    args=(run_id, config, cancel_event, run_record["source"]),
-                    name=f"football-tracking-run-{run_id}",
-                    daemon=True,
-                )
-                self._active_threads[run_id] = thread
-                self._cancel_events[run_id] = cancel_event
+                    self._write_registry_under_file_lock(registry)
+                    self._active_threads[run_id] = thread
+                    self._cancel_events[run_id] = cancel_event
         except BaseException:
-            if output_created:
+            if output_created and config is not None:
                 shutil.rmtree(config.output_dir, ignore_errors=True)
+            if materialized_config_path is not None:
+                materialized_config_path.unlink(missing_ok=True)
             raise
-        self._start_thread_or_cleanup(
-            run_id,
-            thread,
-            output_dir=config.output_dir,
-            remove_output=output_created,
-        )
+        assert config is not None and run_record is not None
+        try:
+            self._start_thread_or_cleanup(
+                run_id,
+                thread,
+                output_dir=config.output_dir,
+                remove_output=output_created,
+            )
+        except BaseException:
+            if materialized_config_path is not None:
+                materialized_config_path.unlink(missing_ok=True)
+            raise
         return run_record
 
     def _is_approved_child_run_request(self, request: dict[str, Any]) -> bool:
@@ -3683,6 +3833,508 @@ class ApiService:
         except (TypeError, ValueError):
             return None
         return parsed if isinstance(parsed, dict) else None
+
+    def _prepare_production_trial_config_patch(
+        self,
+        *,
+        request: dict[str, Any],
+        note: dict[str, Any],
+        patch: dict[str, Any],
+        base_config: AppConfig,
+        base_config_name: str,
+        base_config_sha256: str,
+        run_id: str,
+    ) -> tuple[dict[str, Any], Path]:
+        """Bind every runtime override to the one YAML that will be executed."""
+
+        prepared = deepcopy(patch)
+        workflow = _value_at_dotted_path(prepared, "metadata.production_workflow")
+        if workflow is _MISSING_VALUE:
+            workflow = {}
+        if not isinstance(workflow, dict):
+            raise ValueError("metadata.production_workflow must be an object")
+
+        for key in sorted(set(note).intersection(workflow)):
+            if _jsonable(note[key]) != _jsonable(workflow[key]):
+                raise ValueError(f"production_trial workflow metadata conflict: {key}")
+
+        base_config_lineage = {
+            "name": base_config_name,
+            "sha256": base_config_sha256,
+        }
+        provided_base_lineage = workflow.get("base_config_lineage")
+        if provided_base_lineage is not None and provided_base_lineage != base_config_lineage:
+            raise ValueError("production_trial workflow metadata conflict: base_config_lineage")
+        workflow["base_config_lineage"] = base_config_lineage
+        _set_dotted_path(prepared, "metadata.production_workflow", workflow)
+
+        workflow_output_name = workflow.get("output_dir_name")
+        if workflow_output_name is not None and workflow_output_name != run_id:
+            raise ValueError("production_trial workflow metadata conflict: output_dir_name")
+        note_output_id = note.get("output_id")
+        if isinstance(note_output_id, str) and note_output_id.strip():
+            if run_id != f"production_trial_{note_output_id.strip()}":
+                raise ValueError("production_trial workflow metadata conflict: output_id")
+
+        binding_specs: tuple[tuple[str, str, str, Any], ...] = (
+            ("input_video", "input_video", "source_path", str(base_config.input_video)),
+            (
+                "postprocess.enabled",
+                "enable_postprocess",
+                "enable_postprocess",
+                base_config.postprocess.enabled,
+            ),
+            (
+                "follow_cam.enabled",
+                "enable_follow_cam",
+                "enable_follow_cam",
+                base_config.follow_cam.enabled,
+            ),
+            ("runtime.start_frame", "start_frame", "start_frame", base_config.runtime.start_frame),
+            ("runtime.max_frames", "max_frames", "max_frames", base_config.runtime.max_frames),
+        )
+
+        effective: dict[str, Any] = {}
+        for config_path, request_key, note_key, fallback in binding_specs:
+            candidates: list[Any] = []
+            if request_key in request and request[request_key] is not None:
+                candidates.append(request[request_key])
+            patch_value = _value_at_dotted_path(prepared, config_path)
+            if patch_value is not _MISSING_VALUE:
+                candidates.append(patch_value)
+            if note_key in note:
+                candidates.append(note[note_key])
+            if note_key in workflow:
+                candidates.append(workflow[note_key])
+            if config_path == "input_video":
+                source_signature = workflow.get("source_signature")
+                if isinstance(source_signature, dict) and "path" in source_signature:
+                    candidates.append(source_signature["path"])
+            normalized = [
+                self._normalize_production_trial_runtime_binding(config_path, value)
+                for value in candidates
+            ]
+            if normalized and any(value != normalized[0] for value in normalized[1:]):
+                raise ValueError(f"production_trial runtime binding conflict: {config_path}")
+            effective[config_path] = normalized[0] if normalized else self._normalize_production_trial_runtime_binding(
+                config_path, fallback
+            )
+
+        input_video = Path(effective["input_video"])
+        source_signature = workflow.get("source_signature")
+        if source_signature is not None:
+            try:
+                source_stat = input_video.stat()
+            except OSError as exc:
+                raise ValueError("production_trial source signature cannot be verified") from exc
+            actual_source_signature = {
+                "path": str(input_video),
+                "size_bytes": source_stat.st_size,
+                "modified_at": datetime.fromtimestamp(
+                    source_stat.st_mtime,
+                    tz=timezone.utc,
+                ).isoformat(),
+            }
+            if source_signature != actual_source_signature:
+                raise ValueError("production_trial source signature is stale or invalid")
+        output_dir = self._build_run_output_dir(run_id=run_id, input_video=input_video)
+        for path, value in effective.items():
+            _set_dotted_path(prepared, path, value)
+        prepared["output_dir"] = str(output_dir)
+        return prepared, output_dir
+
+    @staticmethod
+    def _normalize_production_trial_runtime_binding(path: str, value: Any) -> Any:
+        if path == "input_video":
+            if not isinstance(value, (str, Path)) or not str(value).strip():
+                raise ValueError("production_trial runtime binding input_video must be a path")
+            return str(Path(value).resolve())
+        if path in {"postprocess.enabled", "follow_cam.enabled"}:
+            if not isinstance(value, bool):
+                raise ValueError(f"production_trial runtime binding {path} must be boolean")
+            return value
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise ValueError(f"production_trial runtime binding {path} must be an integer")
+        if path == "runtime.start_frame" and value < 0:
+            raise ValueError("production_trial runtime binding runtime.start_frame must be non-negative")
+        if path == "runtime.max_frames" and value <= 0:
+            raise ValueError("production_trial runtime binding runtime.max_frames must be positive")
+        return value
+
+    @staticmethod
+    def _validate_production_trial_note_contract(note: dict[str, Any]) -> None:
+        required_strings = (
+            "workflow_id",
+            "submission_id",
+            "output_id",
+        )
+        if note.get("schema_version") != "1.0" or note.get("purpose") != "production_trial":
+            raise ValueError("production_trial note contract is incomplete")
+        if any(not isinstance(note.get(key), str) or not str(note[key]).strip() for key in required_strings):
+            raise ValueError("production_trial note contract is incomplete")
+        for key in ("calibration_digest", "intent_sha256"):
+            value = note.get(key)
+            if not isinstance(value, str) or re.fullmatch(r"[0-9a-f]{64}", value) is None:
+                raise ValueError("production_trial note contract is incomplete")
+        generation = note.get("generation")
+        start_frame = note.get("start_frame")
+        max_frames = note.get("max_frames")
+        if (
+            isinstance(generation, bool)
+            or not isinstance(generation, int)
+            or generation < 1
+            or isinstance(start_frame, bool)
+            or not isinstance(start_frame, int)
+            or start_frame < 0
+            or isinstance(max_frames, bool)
+            or not isinstance(max_frames, int)
+            or max_frames <= 0
+            or not isinstance(note.get("enable_postprocess"), bool)
+            or not isinstance(note.get("enable_follow_cam"), bool)
+        ):
+            raise ValueError("production_trial note contract is incomplete")
+        legacy_restart_run_id = note.get("legacy_restart_run_id")
+        if legacy_restart_run_id is not None and (
+            not isinstance(legacy_restart_run_id, str) or not legacy_restart_run_id.strip()
+        ):
+            raise ValueError("production_trial legacy_restart_run_id is invalid")
+
+    def _validate_production_trial_parent_lineage(
+        self,
+        *,
+        request: dict[str, Any],
+        note: dict[str, Any],
+        patch: dict[str, Any],
+        base_config_snapshot: _YamlConfigSnapshot,
+        registry: dict[str, Any],
+    ) -> None:
+        self._validate_production_trial_note_contract(note)
+        parent_run_id = str(request.get("parent_run_id") or "").strip()
+        current_tuning = _value_at_dotted_path(patch, "metadata.production_tuning")
+        if current_tuning is _MISSING_VALUE:
+            current_tuning = None
+        current_workflow = _value_at_dotted_path(patch, "metadata.production_workflow")
+        current_signature = (
+            current_workflow.get("source_signature") if isinstance(current_workflow, dict) else None
+        )
+        if not isinstance(current_workflow, dict) or not isinstance(current_signature, dict):
+            raise ValueError("production_trial source identity is unavailable")
+        current_input = _value_at_dotted_path(patch, "input_video")
+        if not isinstance(current_input, str):
+            raise ValueError("production_trial source identity is unavailable")
+        if not parent_run_id:
+            if note.get("generation") != 1:
+                raise ValueError("production_trial root generation must be 1")
+            workflow_id = note["workflow_id"]
+            workflow_runs: list[tuple[dict[str, Any], dict[str, Any]]] = []
+            for candidate in registry.get("runs", []):
+                candidate_note = self._machine_run_note(candidate.get("notes"))
+                if (
+                    isinstance(candidate_note, dict)
+                    and candidate_note.get("purpose") == "production_trial"
+                    and candidate_note.get("workflow_id") == workflow_id
+                ):
+                    workflow_runs.append((candidate, candidate_note))
+            if any(candidate.get("config_sha256") is not None for candidate, _ in workflow_runs):
+                raise ValueError("production_trial existing workflow requires parent_run_id")
+
+            legacy_restart_run_id = note.get("legacy_restart_run_id")
+            legacy_runs = [candidate for candidate, _ in workflow_runs if candidate.get("config_sha256") is None]
+            if legacy_runs and legacy_restart_run_id is None:
+                raise ValueError("production_trial legacy restart must be explicit")
+            if legacy_restart_run_id is None:
+                return
+            legacy = next(
+                (
+                    candidate
+                    for candidate in registry.get("runs", [])
+                    if candidate.get("run_id") == legacy_restart_run_id
+                ),
+                None,
+            )
+            if legacy is None:
+                raise ValueError("production_trial legacy restart target does not exist")
+            if legacy.get("config_sha256") is not None:
+                raise ValueError("production_trial legacy restart target has an immutable config digest")
+            if legacy.get("status") not in {"completed", "failed", "cancelled"}:
+                raise ValueError("production_trial legacy restart target must be terminal")
+            legacy_note = self._machine_run_note(legacy.get("notes"))
+            if (
+                not isinstance(legacy_note, dict)
+                or legacy_note.get("purpose") != "production_trial"
+                or legacy_note.get("workflow_id") != workflow_id
+            ):
+                raise ValueError("production_trial legacy restart workflow does not match")
+            self._validate_legacy_restart_topology(
+                workflow_runs=workflow_runs,
+                target_run_id=legacy_restart_run_id,
+            )
+            if legacy_note.get("calibration_digest") != note.get("calibration_digest"):
+                raise ValueError("production_trial legacy restart calibration does not match")
+            legacy_input = legacy.get("input_video")
+            if (
+                not isinstance(legacy_input, str)
+                or Path(legacy_input).resolve() != Path(current_input).resolve()
+            ):
+                raise ValueError("production_trial legacy restart source does not match")
+            legacy_config_name = legacy.get("config_name")
+            if not isinstance(legacy_config_name, str) or not legacy_config_name:
+                raise ValueError("production_trial legacy restart source identity is unavailable")
+            try:
+                legacy_config_path, _ = self._resolve_config_path(legacy_config_name)
+                legacy_config_snapshot = self._capture_yaml_config_snapshot(legacy_config_path)
+                legacy_raw = legacy_config_snapshot.raw
+                self._verify_source_config_snapshot(
+                    legacy_config_snapshot,
+                    error="production_trial legacy restart source identity is unavailable",
+                )
+            except (FileNotFoundError, ValueError, RuntimeError) as exc:
+                raise ValueError("production_trial legacy restart source identity is unavailable") from exc
+            legacy_workflow = _value_at_dotted_path(legacy_raw, "metadata.production_workflow")
+            legacy_signature = (
+                legacy_workflow.get("source_signature") if isinstance(legacy_workflow, dict) else None
+            )
+            if not isinstance(legacy_signature, dict) or legacy_signature != current_signature:
+                raise ValueError("production_trial legacy restart source does not match")
+            legacy_base_lineage = (
+                legacy_workflow.get("base_config_lineage")
+                if isinstance(legacy_workflow, dict)
+                else None
+            )
+            if legacy_base_lineage is not None and (
+                not isinstance(legacy_base_lineage, dict)
+                or legacy_base_lineage != current_workflow.get("base_config_lineage")
+            ):
+                raise ValueError("production_trial legacy restart base config lineage does not match")
+            return
+
+        parent = next(
+            (item for item in registry.get("runs", []) if item.get("run_id") == parent_run_id),
+            None,
+        )
+        if parent is None:
+            raise ValueError("production_trial parent run does not exist")
+        if parent.get("status") not in {"completed", "failed", "cancelled"}:
+            raise ValueError("production_trial parent run must be terminal")
+        if parent.get("source") != "api":
+            raise ValueError("production_trial parent run has the wrong source")
+        parent_note = self._machine_run_note(parent.get("notes"))
+        if not isinstance(parent_note, dict) or parent_note.get("purpose") != "production_trial":
+            raise ValueError("production_trial parent run has the wrong purpose")
+        if note.get("legacy_restart_run_id") is not None:
+            raise ValueError("production_trial child cannot declare legacy_restart_run_id")
+
+        generation = note.get("generation")
+        parent_generation = parent_note.get("generation")
+        if (
+            note.get("schema_version") != "1.0"
+            or parent_note.get("schema_version") != "1.0"
+            or isinstance(generation, bool)
+            or not isinstance(generation, int)
+            or isinstance(parent_generation, bool)
+            or not isinstance(parent_generation, int)
+            or generation != parent_generation + 1
+        ):
+            raise ValueError("production_trial parent generation does not match")
+        calibration_digest = note.get("calibration_digest")
+        if (
+            not isinstance(calibration_digest, str)
+            or re.fullmatch(r"[0-9a-f]{64}", calibration_digest) is None
+            or calibration_digest != parent_note.get("calibration_digest")
+        ):
+            raise ValueError("production_trial parent calibration does not match")
+        parent_output_id = parent_note.get("output_id")
+        if (
+            not isinstance(parent_output_id, str)
+            or not parent_output_id.strip()
+            or parent_run_id != f"production_trial_{parent_output_id}"
+        ):
+            raise ValueError("production_trial parent identity does not match")
+        existing_child = next(
+            (
+                item
+                for item in registry.get("runs", [])
+                if item.get("parent_run_id") == parent_run_id
+            ),
+            None,
+        )
+        if existing_child is not None:
+            raise ValueError("production_trial parent run already has a child")
+
+        workflow_id = note.get("workflow_id")
+        parent_workflow_id = parent_note.get("workflow_id")
+        if (
+            not isinstance(workflow_id, str)
+            or not workflow_id.strip()
+            or workflow_id != parent_workflow_id
+        ):
+            raise ValueError("production_trial parent workflow does not match")
+
+        parent_input = parent.get("input_video")
+        if (
+            not isinstance(current_input, str)
+            or not isinstance(parent_input, str)
+            or Path(current_input).resolve() != Path(parent_input).resolve()
+        ):
+            raise ValueError("production_trial parent source does not match")
+
+        parent_config_name = parent.get("config_name")
+        if not isinstance(parent_config_name, str) or not parent_config_name:
+            raise ValueError("production_trial parent config is unavailable")
+        try:
+            parent_config_path, _ = self._resolve_config_path(parent_config_name)
+            parent_config_snapshot = self._capture_yaml_config_snapshot(parent_config_path)
+            parent_config_sha256 = parent.get("config_sha256")
+            if (
+                not isinstance(parent_config_sha256, str)
+                or re.fullmatch(r"[0-9a-f]{64}", parent_config_sha256) is None
+                or parent_config_snapshot.sha256 != parent_config_sha256
+            ):
+                raise ValueError("production_trial parent config digest does not match")
+            parent_raw = parent_config_snapshot.raw
+            self._verify_source_config_snapshot(
+                parent_config_snapshot,
+                error="production_trial parent config digest does not match",
+            )
+        except ValueError as exc:
+            if str(exc) == "production_trial parent config digest does not match":
+                raise
+            raise ValueError("production_trial parent config is unavailable") from exc
+        except (FileNotFoundError, ValueError, RuntimeError) as exc:
+            raise ValueError("production_trial parent config is unavailable") from exc
+
+        parent_workflow = _value_at_dotted_path(parent_raw, "metadata.production_workflow")
+        current_base_lineage = current_workflow.get("base_config_lineage")
+        parent_base_lineage = (
+            parent_workflow.get("base_config_lineage") if isinstance(parent_workflow, dict) else None
+        )
+        if (
+            not isinstance(current_base_lineage, dict)
+            or current_base_lineage != parent_base_lineage
+        ):
+            raise ValueError("production_trial parent base config lineage does not match")
+        parent_signature = (
+            parent_workflow.get("source_signature") if isinstance(parent_workflow, dict) else None
+        )
+        if not isinstance(current_signature, dict) or not isinstance(parent_signature, dict):
+            raise ValueError("production_trial parent source identity is unavailable")
+        if current_signature != parent_signature:
+            raise ValueError("production_trial parent source does not match")
+
+        current_raw = _deep_merge(base_config_snapshot.raw, patch)
+        for protected_path in (
+            "filtering.roi",
+            "scene_bias.enabled",
+            "scene_bias.ground_zones",
+            "scene_bias.negative_rois",
+        ):
+            if _value_at_dotted_path(current_raw, protected_path) != _value_at_dotted_path(
+                parent_raw,
+                protected_path,
+            ):
+                raise ValueError(
+                    "production_trial parent calibration geometry does not match: "
+                    f"{protected_path}"
+                )
+
+        parent_tuning = _value_at_dotted_path(parent_raw, "metadata.production_tuning")
+        if parent_tuning is _MISSING_VALUE:
+            parent_tuning = None
+        if current_tuning == parent_tuning:
+            return
+        if parent_tuning is None:
+            if isinstance(current_tuning, dict) and (
+                current_tuning.get("parent_version_id") is None
+                and current_tuning.get("history") == []
+            ):
+                return
+            raise ValueError("production_trial tuning history must append parent")
+        if not isinstance(parent_tuning, dict) or not isinstance(current_tuning, dict):
+            raise ValueError("production_trial tuning history must append parent")
+        parent_snapshot = {
+            "version_id": parent_tuning.get("version_id"),
+            "created_at": parent_tuning.get("created_at"),
+            "values_sha256": parent_tuning.get("values_sha256"),
+            "values": parent_tuning.get("values"),
+        }
+        expected_history = [*(parent_tuning.get("history") or []), parent_snapshot]
+        current_history = current_tuning.get("history")
+        if (
+            not isinstance(current_history, list)
+            or len(current_history) < len(expected_history)
+            or current_history[: len(expected_history)] != expected_history
+            or not current_history
+            or current_tuning.get("parent_version_id") != current_history[-1].get("version_id")
+        ):
+            raise ValueError("production_trial tuning history must append parent")
+
+    def _validate_legacy_restart_topology(
+        self,
+        *,
+        workflow_runs: list[tuple[dict[str, Any], dict[str, Any]]],
+        target_run_id: str,
+    ) -> None:
+        error = "production_trial legacy restart target is not the unique authoritative terminal tip"
+        runs_by_id: dict[str, tuple[dict[str, Any], dict[str, Any]]] = {}
+        for candidate, candidate_note in workflow_runs:
+            run_id = candidate.get("run_id")
+            if (
+                not isinstance(run_id, str)
+                or not run_id.strip()
+                or run_id in runs_by_id
+                or candidate.get("config_sha256") is not None
+            ):
+                raise ValueError(error)
+            runs_by_id[run_id] = (candidate, candidate_note)
+        if target_run_id not in runs_by_id:
+            raise ValueError(error)
+
+        children: dict[str, list[str]] = {run_id: [] for run_id in runs_by_id}
+        roots: list[str] = []
+        for run_id, (candidate, candidate_note) in runs_by_id.items():
+            generation = candidate_note.get("generation")
+            if isinstance(generation, bool) or not isinstance(generation, int) or generation < 1:
+                raise ValueError(error)
+            parent_run_id = str(candidate.get("parent_run_id") or "").strip()
+            if not parent_run_id:
+                roots.append(run_id)
+                if generation != 1:
+                    raise ValueError(error)
+                continue
+            if parent_run_id not in runs_by_id:
+                raise ValueError(error)
+            parent_generation = runs_by_id[parent_run_id][1].get("generation")
+            if (
+                isinstance(parent_generation, bool)
+                or not isinstance(parent_generation, int)
+                or generation != parent_generation + 1
+            ):
+                raise ValueError(error)
+            children[parent_run_id].append(run_id)
+
+        if len(roots) != 1 or any(len(child_ids) > 1 for child_ids in children.values()):
+            raise ValueError(error)
+        leaves = [run_id for run_id, child_ids in children.items() if not child_ids]
+        if len(leaves) != 1:
+            raise ValueError(error)
+        tip_run_id = leaves[0]
+        visited: set[str] = set()
+        cursor = roots[0]
+        while cursor not in visited:
+            visited.add(cursor)
+            child_ids = children[cursor]
+            if not child_ids:
+                break
+            cursor = child_ids[0]
+        if visited != set(runs_by_id) or cursor != tip_run_id:
+            raise ValueError(error)
+        tip = runs_by_id[tip_run_id][0]
+        if tip_run_id != target_run_id or tip.get("status") not in {
+            "completed",
+            "failed",
+            "cancelled",
+        }:
+            raise ValueError(error)
 
     def _preflight_production_full_parent(
         self,
@@ -3935,6 +4587,73 @@ class ApiService:
             confirmed_workflow.get(key) != value for key, value in expected_confirmed_lineage.items()
         ):
             raise RuntimeError("Confirmed configuration lineage does not bind the accepted production trial")
+
+        parent_output_raw = parent.get("output_dir")
+        if not isinstance(parent_output_raw, str) or not parent_output_raw:
+            raise RuntimeError("Accepted production trial diagnosis evidence is unavailable")
+        try:
+            parent_output = self._resolve_safe_run_output(Path(parent_output_raw))
+            parent_metrics = self._read_safe_direct_json(parent_output, "metrics_report.json")
+            parent_diagnosis = build_trial_diagnosis(
+                parent_output,
+                parent,
+                metrics_report=parent_metrics,
+            )
+        except (OSError, RuntimeError, ValueError) as exc:
+            raise RuntimeError("Accepted production trial diagnosis evidence is unavailable") from exc
+        parent_gate = parent_diagnosis.get("trial_signal_gate_v2")
+        gate_profile = parent_gate.get("threshold_profile") if isinstance(parent_gate, dict) else None
+        gate_failure = parent_gate.get("failure_classification") if isinstance(parent_gate, dict) else None
+        gate_profile_sha = str(gate_profile.get("sha256") or "") if isinstance(gate_profile, dict) else ""
+        gate_profile_payload = (
+            {key: value for key, value in gate_profile.items() if key != "sha256"}
+            if isinstance(gate_profile, dict)
+            else {}
+        )
+        expected_gate_profile_sha = hashlib.sha256(
+            json.dumps(
+                gate_profile_payload,
+                ensure_ascii=True,
+                allow_nan=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            ).encode("utf-8")
+        ).hexdigest()
+        required_gate_flags = (
+            "coverage_complete",
+            "evidence_available",
+            "trajectory_acceptable",
+            "signal_acceptable",
+            "acceptance_metrics_complete",
+            "acceptance_contract_complete",
+            "quality_acceptable",
+        )
+        if (
+            not isinstance(parent_gate, dict)
+            or parent_gate.get("schema_version") != "2.0"
+            or parent_gate.get("status") != "acceptable"
+            or any(parent_gate.get(name) is not True for name in required_gate_flags)
+            or parent_gate.get("operator_confirmation_required") is not True
+            or not isinstance(gate_profile, dict)
+            or not isinstance(gate_profile.get("profile_id"), str)
+            or not gate_profile["profile_id"]
+            or not isinstance(gate_profile.get("version"), str)
+            or not gate_profile["version"]
+            or not isinstance(gate_profile.get("algorithm_version"), str)
+            or not gate_profile["algorithm_version"]
+            or not isinstance(gate_profile.get("matching_rules"), dict)
+            or not gate_profile["matching_rules"]
+            or not isinstance(gate_profile.get("thresholds"), dict)
+            or not gate_profile["thresholds"]
+            or re.fullmatch(r"[0-9a-f]{64}", gate_profile_sha) is None
+            or not hmac.compare_digest(gate_profile_sha, expected_gate_profile_sha)
+            or not isinstance(gate_failure, dict)
+            or gate_failure.get("code") != "acceptable"
+            or gate_failure.get("severity") != "none"
+        ):
+            raise RuntimeError(
+                "Accepted production trial does not have a complete server-verified acceptance contract"
+            )
 
     def _preflight_broadcast_request(self, request: dict[str, Any]) -> dict[str, Any]:
         if self._is_approved_child_run_request(request):
@@ -8048,6 +8767,7 @@ class ApiService:
                 started_at=existing.get("started_at"),
                 completed_at=_utc_now_iso(),
                 progress=self._completed_progress(existing.get("progress"), existing.get("started_at")),
+                config_sha256=existing.get("config_sha256"),
             )
             if broadcast_report is not None:
                 previous_broadcast = existing.get("broadcast", {})
@@ -8207,6 +8927,7 @@ class ApiService:
                 started_at=existing.get("started_at"),
                 completed_at=_utc_now_iso(),
                 progress=self._completed_progress(existing.get("progress"), existing.get("started_at")),
+                config_sha256=existing.get("config_sha256"),
                 write_artifacts=False,
             )
             artifact_error = self._write_run_manifest_and_metrics_preserving_candidate_audit(config.output_dir, updated)
@@ -8485,6 +9206,7 @@ class ApiService:
                 started_at=existing.get("started_at"),
                 completed_at=_utc_now_iso(),
                 progress=self._completed_progress(existing.get("progress"), existing.get("started_at")),
+                config_sha256=existing.get("config_sha256"),
             )
             self._replace_run(run_id, updated)
         except CancelledError:
@@ -8604,6 +9326,7 @@ class ApiService:
                 started_at=existing.get("started_at"),
                 completed_at=_utc_now_iso(),
                 progress=self._completed_progress(existing.get("progress"), existing.get("started_at")),
+                config_sha256=existing.get("config_sha256"),
             )
             self._replace_run(run_id, updated)
         except CancelledError:
@@ -10137,6 +10860,7 @@ class ApiService:
         started_at: str | None = None,
         completed_at: str | None = None,
         progress: dict[str, Any] | None = None,
+        config_sha256: str | None = None,
         write_artifacts: bool = True,
     ) -> dict[str, Any]:
         normalized_created_at = _normalize_iso_timestamp(created_at) or created_at
@@ -10144,6 +10868,19 @@ class ApiService:
         normalized_completed_at = _normalize_iso_timestamp(completed_at) if completed_at else None
         if status in {"completed", "failed", "cancelled"} and normalized_completed_at is None:
             normalized_completed_at = normalized_started_at or normalized_created_at
+        if config_sha256 is not None:
+            if (
+                re.fullmatch(r"[0-9a-f]{64}", config_sha256) is None
+                or not isinstance(config_path, str)
+                or not config_path
+            ):
+                raise ValueError("Run config digest is invalid")
+            try:
+                current_config_sha256 = sha256_file(Path(config_path))
+            except OSError as exc:
+                raise ValueError("Run config digest cannot be verified") from exc
+            if current_config_sha256 != config_sha256:
+                raise ValueError("Run config digest changed during execution")
         snapshot = {
             "run_id": run_id,
             "source": source,
@@ -10153,6 +10890,7 @@ class ApiService:
             "completed_at": normalized_completed_at,
             "config_name": config_name,
             "config_path": config_path,
+            "config_sha256": config_sha256,
             "input_video": input_video,
             "parent_run_id": parent_run_id,
             "output_dir": str(output_dir.resolve()),
@@ -11150,14 +11888,113 @@ class ApiService:
         run_id: str,
         patch: dict[str, Any],
         suffix: str,
-    ) -> tuple[Path, str]:
-        merged = _deep_merge(self._load_raw_yaml(base_config_path), patch)
+        exclusive: bool = False,
+        base_config_snapshot: _YamlConfigSnapshot | None = None,
+    ) -> tuple[Path, str, _YamlConfigSnapshot]:
         output_name = f"{Path(base_config_name).stem}_{suffix}_{run_id}.yaml"
         self.generated_config_dir.mkdir(parents=True, exist_ok=True)
         output_path = self.generated_config_dir / output_name
-        with output_path.open("w", encoding="utf-8") as handle:
-            yaml.safe_dump(merged, handle, sort_keys=False, allow_unicode=False)
-        return output_path, output_path.relative_to(self.config_dir).as_posix()
+        if exclusive and output_path.exists():
+            raise FileExistsError(str(output_path))
+        source_snapshot = base_config_snapshot or self._capture_yaml_config_snapshot(
+            base_config_path
+        )
+        if base_config_snapshot is not None:
+            self._verify_source_config_snapshot(
+                source_snapshot,
+                error="production_trial base config changed during creation",
+            )
+        merged = _deep_merge(source_snapshot.raw, patch)
+        content = yaml.safe_dump(
+            merged,
+            sort_keys=False,
+            allow_unicode=False,
+        ).encode("utf-8")
+        snapshot = _YamlConfigSnapshot(
+            path=output_path,
+            content=content,
+            sha256=hashlib.sha256(content).hexdigest(),
+            raw=self._parse_yaml_config_bytes(content, output_path),
+        )
+        published = False
+        temporary_path: Path | None = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="wb",
+                dir=self.generated_config_dir,
+                prefix=f".{output_name}.",
+                suffix=".tmp",
+                delete=False,
+            ) as handle:
+                temporary_path = Path(handle.name)
+                handle.write(content)
+                handle.flush()
+                os.fsync(handle.fileno())
+            if exclusive:
+                os.link(temporary_path, output_path)
+                published = True
+                temporary_path.unlink()
+            else:
+                os.replace(temporary_path, output_path)
+                published = True
+            temporary_path = None
+            self._verify_materialized_config_snapshot(snapshot)
+        except BaseException:
+            if published:
+                output_path.unlink(missing_ok=True)
+            raise
+        finally:
+            if temporary_path is not None:
+                temporary_path.unlink(missing_ok=True)
+        return (
+            output_path,
+            output_path.relative_to(self.config_dir).as_posix(),
+            snapshot,
+        )
+
+    def _capture_yaml_config_snapshot(self, config_path: Path) -> _YamlConfigSnapshot:
+        try:
+            content = config_path.read_bytes()
+        except OSError as exc:
+            raise ValueError(f"Config snapshot is unavailable: {config_path}") from exc
+        return _YamlConfigSnapshot(
+            path=config_path,
+            content=content,
+            sha256=hashlib.sha256(content).hexdigest(),
+            raw=self._parse_yaml_config_bytes(content, config_path),
+        )
+
+    @staticmethod
+    def _parse_yaml_config_bytes(content: bytes, config_path: Path) -> dict[str, Any]:
+        try:
+            loaded = yaml.safe_load(content.decode("utf-8")) or {}
+        except (UnicodeDecodeError, yaml.YAMLError) as exc:
+            raise ValueError(f"Invalid config YAML in {config_path}") from exc
+        if not isinstance(loaded, dict):
+            raise ValueError(f"Invalid config root in {config_path}")
+        return loaded
+
+    @staticmethod
+    def _verify_source_config_snapshot(
+        snapshot: _YamlConfigSnapshot,
+        *,
+        error: str,
+    ) -> None:
+        try:
+            current_sha256 = sha256_file(snapshot.path)
+        except OSError as exc:
+            raise ValueError(error) from exc
+        if current_sha256 != snapshot.sha256:
+            raise ValueError(error)
+
+    @staticmethod
+    def _verify_materialized_config_snapshot(snapshot: _YamlConfigSnapshot) -> None:
+        try:
+            persisted = snapshot.path.read_bytes()
+        except OSError as exc:
+            raise ValueError("production_trial materialized config snapshot changed") from exc
+        if persisted != snapshot.content or hashlib.sha256(persisted).hexdigest() != snapshot.sha256:
+            raise ValueError("production_trial materialized config snapshot changed")
 
     def _build_run_output_dir(self, *, run_id: str, input_video: Path | None) -> Path:
         input_group = self._input_group_slug(input_video)
@@ -11761,6 +12598,12 @@ class ApiService:
         stats = run.get("stats") if isinstance(run.get("stats"), dict) else {}
         stats["ai_candidate_lifecycle"] = lifecycle["summary"]
         run["stats"] = stats
+
+    @staticmethod
+    def _attach_trial_signal_gate(run: dict[str, Any]) -> None:
+        stats = run.get("stats")
+        gate = stats.get("trial_signal_gate_v2") if isinstance(stats, dict) else None
+        run["trial_signal_gate_v2"] = deepcopy(gate) if isinstance(gate, dict) else None
 
     def _collect_ai_candidate_lifecycle(self, output_dir: Path) -> dict[str, Any]:
         return build_ai_candidate_lifecycle(output_dir)

@@ -3,6 +3,10 @@ import type {
   BallAuditReport,
   CreateRunRequest,
   RunRecord,
+  TrialNumericObservation,
+  TrialSignalGateV2,
+  TrialTuningAction as ApiTrialTuningAction,
+  TrialTuningControl as ApiTrialTuningControl,
 } from "@workspace/api-client-react";
 
 import {
@@ -13,6 +17,46 @@ import { validatePolygon, type FieldPoint } from "./fieldGeometry";
 import type { SourceSignature } from "./productionWorkflow";
 
 export const PRODUCTION_TRIAL_METADATA_VERSION = "1.0" as const;
+export const PRODUCTION_TUNING_PATCH_VERSION = "1.0" as const;
+
+export type ProductionTuningValue = number | string | boolean | string[];
+
+export type ProductionTrialTuningControl = ApiTrialTuningControl;
+export type ProductionTrialTuningAction = ApiTrialTuningAction;
+
+export interface ProductionTrialTuningSchema {
+  schema_version: "1.0";
+  patch_schema_version: "1.0";
+  controls: ProductionTrialTuningControl[];
+  actions: ProductionTrialTuningAction[];
+}
+
+export type TrialDiagnosticStatus = TrialNumericObservation["status"];
+export type TrialDiagnosticObservation = TrialNumericObservation;
+export type ProductionTrialDiagnostics = TrialSignalGateV2["diagnostics"];
+export type ProductionTrialDetectionStages = NonNullable<
+  TrialSignalGateV2["stage_counts"]
+>;
+export type ProductionTrialSignalGateV2 = TrialSignalGateV2;
+
+export interface ProductionTuningVersionSnapshot {
+  version_id: string;
+  created_at: string;
+  values_sha256: string;
+  values: Record<string, ProductionTuningValue>;
+}
+
+export interface ProductionTuningVersion extends ProductionTuningVersionSnapshot {
+  schema_version: typeof PRODUCTION_TUNING_PATCH_VERSION;
+  parent_version_id: string | null;
+  history: ProductionTuningVersionSnapshot[];
+}
+
+export interface ProductionTuningDiff {
+  path: string;
+  previous_value: ProductionTuningValue | null;
+  next_value: ProductionTuningValue;
+}
 
 export interface ProductionTrialSettings {
   base_config_name: string;
@@ -59,6 +103,14 @@ export interface ProductionTrialReadinessSummary {
   video_artifact_name: string;
   artifact_names: string[];
   quality: ProductionTrialQualitySignals;
+  operator_visual_confirmation?: ProductionTrialVisualConfirmation;
+}
+
+export interface ProductionTrialVisualConfirmation {
+  confirmed: true;
+  confirmed_at: string;
+  evidence_generation: string;
+  threshold_profile_sha256: string;
 }
 
 export function productionTrialArtifactContract(input: {
@@ -126,6 +178,14 @@ export interface ProductionTrialSubmission {
   intent: ProductionTrialIntent;
 }
 
+export interface ProductionTrialSubmissionLineage {
+  state: ProductionTrialState;
+  parent_run_id: string | null;
+  generation: number;
+  legacy_restart_run_id: string | null;
+  base_config_locked: boolean;
+}
+
 export interface ProductionTrialQualitySignals {
   frame_count: number;
   detected: number;
@@ -142,6 +202,7 @@ export interface ProductionTrialQualitySignals {
   audit_review_event_count: number;
   audit_lost_gap_count: number;
   quality_gate_status: string | null;
+  trial_signal_gate_v2?: ProductionTrialSignalGateV2 | null;
 }
 
 export type ProductionTrialEvidenceResult =
@@ -250,6 +311,390 @@ export async function sha256Text(value: string): Promise<string> {
   return Array.from(new Uint8Array(digest), (byte) =>
     byte.toString(16).padStart(2, "0"),
   ).join("");
+}
+
+function valueAtPath(value: unknown, path: string): unknown {
+  return path
+    .split(".")
+    .reduce<unknown>(
+      (current, key) => (isRecord(current) ? current[key] : undefined),
+      value,
+    );
+}
+
+function setValueAtPath(
+  target: Record<string, unknown>,
+  path: string,
+  value: unknown,
+) {
+  const keys = path.split(".");
+  let current = target;
+  for (const key of keys.slice(0, -1)) {
+    const nested = current[key];
+    if (!isRecord(nested)) current[key] = {};
+    current = current[key] as Record<string, unknown>;
+  }
+  current[keys.at(-1)!] = value;
+}
+
+function validStoredTuningValue(
+  value: unknown,
+): value is ProductionTuningValue {
+  return (
+    typeof value === "string" ||
+    typeof value === "boolean" ||
+    finite(value) ||
+    (Array.isArray(value) &&
+      value.length > 0 &&
+      new Set(value).size === value.length &&
+      value.every(nonEmpty))
+  );
+}
+
+function cloneTuningValue(value: ProductionTuningValue): ProductionTuningValue {
+  return Array.isArray(value) ? [...value] : value;
+}
+
+function sameTuningValue(left: unknown, right: unknown): boolean {
+  if (!Array.isArray(left) || !Array.isArray(right))
+    return Object.is(left, right);
+  return (
+    left.length === right.length &&
+    left.every((value, index) => value === right[index])
+  );
+}
+
+function validTuningValue(
+  control: ProductionTrialTuningControl,
+  value: unknown,
+): value is ProductionTuningValue {
+  if (control.kind === "boolean") return typeof value === "boolean";
+  if (control.kind === "select") {
+    return (
+      typeof value === "string" && Boolean(control.options?.includes(value))
+    );
+  }
+  if (control.kind === "multi_select") {
+    return (
+      Array.isArray(value) &&
+      value.length > 0 &&
+      new Set(value).size === value.length &&
+      value.every(
+        (item) =>
+          typeof item === "string" && Boolean(control.options?.includes(item)),
+      )
+    );
+  }
+  if (!finite(value)) return false;
+  if (control.kind === "integer" && !Number.isInteger(value)) return false;
+  const minimum = control.minimum;
+  const maximum = control.maximum;
+  const step = control.step;
+  if (
+    !finite(minimum) ||
+    !finite(maximum) ||
+    !finite(step) ||
+    step <= 0 ||
+    value < minimum ||
+    value > maximum
+  )
+    return false;
+  const steps = (value - minimum) / step;
+  return Math.abs(steps - Math.round(steps)) <= 1e-7;
+}
+
+function validTuningControlPath(path: string): boolean {
+  const segments = path.split(".");
+  return (
+    segments.length >= 2 &&
+    segments.every(
+      (segment) =>
+        /^[a-z][a-z0-9_]*$/.test(segment) &&
+        !["__proto__", "prototype", "constructor"].includes(segment),
+    )
+  );
+}
+
+const TUNING_CONTROL_KINDS = new Set([
+  "number",
+  "integer",
+  "boolean",
+  "select",
+  "multi_select",
+]);
+const TUNING_CONTROL_SECTIONS = new Set([
+  "detector",
+  "sahi",
+  "filtering",
+  "selection",
+  "tracking",
+  "postprocess",
+]);
+const TUNING_RUNTIME_IMPACTS = new Set(["low", "medium", "high"]);
+const FIELD_SETUP_AFFECTED_PATHS = new Set([
+  "filtering.roi",
+  "scene_bias.ground_zones",
+  "scene_bias.negative_rois",
+]);
+
+function validTuningControl(value: unknown): boolean {
+  if (
+    !isRecord(value) ||
+    !nonEmpty(value.path) ||
+    !validTuningControlPath(value.path) ||
+    !TUNING_CONTROL_KINDS.has(String(value.kind)) ||
+    !TUNING_CONTROL_SECTIONS.has(String(value.section)) ||
+    !TUNING_RUNTIME_IMPACTS.has(String(value.runtime_impact)) ||
+    !nonEmpty(value.description) ||
+    !nonEmpty(value.description_zh)
+  ) {
+    return false;
+  }
+  if (value.kind === "select" || value.kind === "multi_select") {
+    return (
+      Array.isArray(value.options) &&
+      value.options.length > 0 &&
+      new Set(value.options).size === value.options.length &&
+      value.options.every(nonEmpty)
+    );
+  }
+  if (value.kind === "number" || value.kind === "integer") {
+    return (
+      finite(value.minimum) &&
+      finite(value.maximum) &&
+      finite(value.step) &&
+      value.minimum < value.maximum &&
+      value.step > 0
+    );
+  }
+  return value.kind === "boolean";
+}
+
+function validTuningAction(value: unknown): boolean {
+  return (
+    isRecord(value) &&
+    value.action_code === "return_to_field_setup" &&
+    value.target_step === "field_setup" &&
+    value.reason_code === "field_geometry_requires_new_calibration" &&
+    Array.isArray(value.affected_paths) &&
+    value.affected_paths.length === FIELD_SETUP_AFFECTED_PATHS.size &&
+    new Set(value.affected_paths).size === value.affected_paths.length &&
+    value.affected_paths.every(
+      (path) => nonEmpty(path) && FIELD_SETUP_AFFECTED_PATHS.has(path),
+    ) &&
+    value.lineage_constraint ===
+      "invalidate_trial_and_downstream_then_create_new_calibration_version"
+  );
+}
+
+export function productionTrialTuningSchema(
+  value: unknown,
+): ProductionTrialTuningSchema | null {
+  if (
+    !isRecord(value) ||
+    value.schema_version !== "1.0" ||
+    value.patch_schema_version !== PRODUCTION_TUNING_PATCH_VERSION ||
+    !Array.isArray(value.controls) ||
+    value.controls.length === 0 ||
+    !value.controls.every(validTuningControl) ||
+    new Set(
+      value.controls.map((control) =>
+        isRecord(control) ? control.path : undefined,
+      ),
+    ).size !== value.controls.length ||
+    !Array.isArray(value.actions) ||
+    value.actions.length !== 1 ||
+    !value.actions.every(validTuningAction)
+  ) {
+    return null;
+  }
+  return cloneJsonObject(value) as unknown as ProductionTrialTuningSchema;
+}
+
+function tuningVersion(value: unknown): ProductionTuningVersion | null {
+  if (
+    !isRecord(value) ||
+    value.schema_version !== PRODUCTION_TUNING_PATCH_VERSION ||
+    !nonEmpty(value.version_id) ||
+    !(value.parent_version_id === null || nonEmpty(value.parent_version_id)) ||
+    !nonEmpty(value.created_at) ||
+    !sha256String(value.values_sha256) ||
+    !isRecord(value.values) ||
+    !Array.isArray(value.history)
+  )
+    return null;
+  const values = value.values as Record<string, ProductionTuningValue>;
+  const validValues = Object.values(values).every(validStoredTuningValue);
+  const validHistory = value.history.every(
+    (item) =>
+      isRecord(item) &&
+      nonEmpty(item.version_id) &&
+      nonEmpty(item.created_at) &&
+      sha256String(item.values_sha256) &&
+      isRecord(item.values) &&
+      Object.values(item.values).every(validStoredTuningValue),
+  );
+  return validValues && validHistory
+    ? (cloneJsonObject(value) as unknown as ProductionTuningVersion)
+    : null;
+}
+
+export function productionTuningVersion(
+  patch: Record<string, unknown>,
+): ProductionTuningVersion | null {
+  return tuningVersion(valueAtPath(patch, "metadata.production_tuning"));
+}
+
+export function productionTuningHistory(
+  patch: Record<string, unknown>,
+): ProductionTuningVersionSnapshot[] {
+  return productionTuningVersion(patch)?.history ?? [];
+}
+
+export function productionTuningDraft(input: {
+  base_config: Record<string, unknown>;
+  patch: Record<string, unknown>;
+  controls: readonly ProductionTrialTuningControl[];
+}): Record<string, ProductionTuningValue> {
+  const version = productionTuningVersion(input.patch);
+  const result: Record<string, ProductionTuningValue> = {};
+  for (const control of input.controls) {
+    const candidates = [
+      version?.values[control.path],
+      valueAtPath(input.patch, control.path),
+      valueAtPath(input.base_config, control.path),
+    ];
+    const selected = candidates.find((candidate) =>
+      validTuningValue(control, candidate),
+    );
+    if (selected !== undefined) result[control.path] = selected;
+  }
+  return result;
+}
+
+function validateTuningRelations(
+  values: Record<string, ProductionTuningValue>,
+) {
+  for (const [minimumPath, maximumPath] of [
+    ["filtering.min_width", "filtering.max_width"],
+    ["filtering.min_height", "filtering.max_height"],
+    ["filtering.min_aspect_ratio", "filtering.max_aspect_ratio"],
+  ]) {
+    const minimum = values[minimumPath];
+    const maximum = values[maximumPath];
+    if (
+      typeof minimum === "number" &&
+      typeof maximum === "number" &&
+      minimum > maximum
+    ) {
+      throw new TypeError(`${minimumPath} must not exceed ${maximumPath}`);
+    }
+  }
+}
+
+export async function buildVersionedProductionTuningPatch(input: {
+  base_config: Record<string, unknown>;
+  previous_patch: Record<string, unknown>;
+  controls: readonly ProductionTrialTuningControl[];
+  values: Record<string, unknown>;
+  version_id: string;
+  created_at: string;
+}): Promise<{
+  patch: Record<string, unknown>;
+  version: ProductionTuningVersion;
+  diff: ProductionTuningDiff[];
+}> {
+  if (!nonEmpty(input.version_id) || !nonEmpty(input.created_at)) {
+    throw new TypeError("Tuning version identity is required");
+  }
+  if (
+    input.controls.some((control) => !validTuningControlPath(control.path)) ||
+    new Set(input.controls.map((control) => control.path)).size !==
+      input.controls.length
+  ) {
+    throw new TypeError("Tuning controls must have unique safe paths");
+  }
+  const controlsByPath = new Map(
+    input.controls.map((control) => [control.path, control]),
+  );
+  const unexpected = Object.keys(input.values).filter(
+    (path) => !controlsByPath.has(path),
+  );
+  if (unexpected.length > 0) {
+    throw new TypeError(
+      `Unsupported tuning controls: ${unexpected.join(", ")}`,
+    );
+  }
+  const values: Record<string, ProductionTuningValue> = {};
+  for (const control of input.controls) {
+    const value = input.values[control.path];
+    if (!validTuningValue(control, value)) {
+      throw new TypeError(`Invalid tuning value: ${control.path}`);
+    }
+    values[control.path] = cloneTuningValue(value);
+  }
+  validateTuningRelations(values);
+
+  const previousVersion = productionTuningVersion(input.previous_patch);
+  const previousValues = productionTuningDraft({
+    base_config: input.base_config,
+    patch: input.previous_patch,
+    controls: input.controls,
+  });
+  const diff: ProductionTuningDiff[] = input.controls.flatMap((control) => {
+    const previous = previousValues[control.path];
+    const next = values[control.path];
+    return sameTuningValue(previous, next)
+      ? []
+      : [
+          {
+            path: control.path,
+            previous_value:
+              previous === undefined ? null : cloneTuningValue(previous),
+            next_value: cloneTuningValue(next),
+          },
+        ];
+  });
+  const valuesSha256 = await sha256Text(canonicalJson(values));
+  const history = previousVersion
+    ? [
+        ...previousVersion.history,
+        {
+          version_id: previousVersion.version_id,
+          created_at: previousVersion.created_at,
+          values_sha256: previousVersion.values_sha256,
+          values: Object.fromEntries(
+            Object.entries(previousVersion.values).map(([path, value]) => [
+              path,
+              cloneTuningValue(value),
+            ]),
+          ),
+        },
+      ]
+    : [];
+  const version: ProductionTuningVersion = {
+    schema_version: PRODUCTION_TUNING_PATCH_VERSION,
+    version_id: input.version_id,
+    parent_version_id: previousVersion?.version_id ?? null,
+    created_at: input.created_at,
+    values_sha256: valuesSha256,
+    values: Object.fromEntries(
+      Object.entries(values).map(([path, value]) => [
+        path,
+        cloneTuningValue(value),
+      ]),
+    ),
+    history,
+  };
+  const patch: Record<string, unknown> = {};
+  for (const control of input.controls) {
+    const baseValue = valueAtPath(input.base_config, control.path);
+    const value = values[control.path];
+    if (!sameTuningValue(baseValue, value))
+      setValueAtPath(patch, control.path, cloneTuningValue(value));
+  }
+  setValueAtPath(patch, "metadata.production_tuning", version);
+  return { patch, version, diff };
 }
 
 export function isProductionTrialSettings(
@@ -440,6 +885,7 @@ export async function buildProductionTrialSubmission(input: {
   calibration: ProductionCalibrationDraft;
   settings: ProductionTrialSettings;
   parent_run_id: string | null;
+  legacy_restart_run_id?: string | null;
   submission_id: string;
   output_id: string;
   generation: number;
@@ -450,6 +896,20 @@ export async function buildProductionTrialSubmission(input: {
   }
   if (!positiveInteger(input.generation)) {
     throw new TypeError("generation must be a positive integer");
+  }
+  if (input.parent_run_id === null && input.generation !== 1) {
+    throw new TypeError("root production trials must use generation 1");
+  }
+  if (
+    input.legacy_restart_run_id !== undefined &&
+    input.legacy_restart_run_id !== null &&
+    (!nonEmpty(input.legacy_restart_run_id) ||
+      input.parent_run_id !== null ||
+      input.generation !== 1)
+  ) {
+    throw new TypeError(
+      "legacy trial restarts require a named generation-1 root",
+    );
   }
   const intent = buildProductionTrialIntent(input);
   const intent_sha256 = await sha256Text(canonicalJson(intent));
@@ -467,6 +927,9 @@ export async function buildProductionTrialSubmission(input: {
     max_frames: input.settings.max_frames,
     enable_postprocess: input.settings.enable_postprocess,
     enable_follow_cam: input.settings.enable_follow_cam,
+    ...(input.legacy_restart_run_id
+      ? { legacy_restart_run_id: input.legacy_restart_run_id }
+      : {}),
   };
   const protectedPatch = protectedTrialPatch({
     source: input.source,
@@ -743,6 +1206,7 @@ export function productionTrialMatchesContext(
 ): boolean {
   if (
     !isProductionTrialState(state) ||
+    (state.accepted !== null && !productionTrialAcceptanceIsValid(state)) ||
     !calibrationIsComplete(context.calibration, context.source.path)
   ) {
     return false;
@@ -1105,10 +1569,363 @@ function qualityGateStatus(stats: Record<string, unknown>): string | null {
   return isRecord(gate) && nonEmpty(gate.status) ? gate.status : null;
 }
 
+const TRIAL_SIGNAL_STATUSES = new Set([
+  "insufficient_evidence",
+  "retune_required",
+  "acceptable",
+]);
+const TRIAL_FAILURE_CODES = new Set([
+  "insufficient_evidence",
+  "decode_failure",
+  "no_raw_candidates",
+  "all_candidates_class_rejected",
+  "all_candidates_filtered",
+  "no_tracklets",
+  "all_lost",
+  "wrong_or_noisy_candidates",
+  "unstable_tracking",
+  "acceptable",
+]);
+const TRIAL_FAILURE_SEVERITIES = new Set(["none", "high", "blocking"]);
+const TRIAL_REQUIRED_THRESHOLDS = [
+  "minimum_detected_ratio",
+  "maximum_predicted_ratio",
+  "maximum_lost_ratio",
+  "maximum_longest_lost_streak",
+  "maximum_false_positive_islands_per_100_frames",
+  "maximum_suspicious_tracklet_ratio",
+  "maximum_step_px",
+  "maximum_follow_cam_pan_step_px",
+  "maximum_follow_cam_pan_accel_px",
+  "maximum_follow_cam_zoom_step_ratio",
+  "maximum_ai_review_triggers_per_100_frames",
+  "maximum_event_candidates_per_100_frames",
+] as const;
+
+function validTrialMatchingRules(value: unknown): boolean {
+  return (
+    isRecord(value) &&
+    nonEmpty(value.stage_counter_reconciliation) &&
+    nonEmpty(value.track_metric_scope) &&
+    nonEmpty(value.follow_cam_scope) &&
+    Array.isArray(value.required_visual_evidence) &&
+    value.required_visual_evidence.length > 0 &&
+    value.required_visual_evidence.every(nonEmpty) &&
+    Array.isArray(value.required_integrity) &&
+    value.required_integrity.length > 0 &&
+    value.required_integrity.every(nonEmpty) &&
+    nonEmpty(value.acceptance_contract)
+  );
+}
+
+function validTrialThresholdProfile(value: unknown): boolean {
+  if (
+    !isRecord(value) ||
+    !nonEmpty(value.profile_id) ||
+    !nonEmpty(value.version) ||
+    !nonEmpty(value.algorithm_version) ||
+    !validTrialMatchingRules(value.matching_rules) ||
+    !sha256String(value.sha256) ||
+    !isRecord(value.thresholds) ||
+    !Object.values(value.thresholds).every(finite)
+  ) {
+    return false;
+  }
+  const thresholds = value.thresholds;
+  return TRIAL_REQUIRED_THRESHOLDS.every((name) => finite(thresholds[name]));
+}
+
+function validCollectedCount(value: unknown): boolean {
+  if (
+    !isRecord(value) ||
+    !["collected", "not_collected", "invalid"].includes(String(value.status))
+  ) {
+    return false;
+  }
+  return value.status === "collected"
+    ? nonNegativeInteger(value.value)
+    : value.value === undefined || value.value === null;
+}
+
+function validDetectionStages(value: unknown): boolean {
+  if (
+    !isRecord(value) ||
+    value.schema_version !== "2.0" ||
+    !["complete", "invalid", "not_collected"].includes(
+      String(value.coverage_status),
+    ) ||
+    !validCollectedCount(value.evaluated_frames) ||
+    !validCollectedCount(value.detected_frames) ||
+    !validCollectedCount(value.predicted_frames) ||
+    !validCollectedCount(value.lost_frames) ||
+    !validCollectedCount(value.raw_candidates) ||
+    !validCollectedCount(value.class_mapped_candidates) ||
+    !validCollectedCount(value.filtered_candidates) ||
+    !validCollectedCount(value.selected_candidates) ||
+    !validCollectedCount(value.tracklets) ||
+    !isRecord(value.reconciliation) ||
+    !["reconciled", "mismatch", "not_collected"].includes(
+      String(value.reconciliation.status),
+    )
+  ) {
+    return false;
+  }
+  if (
+    value.reconciliation.reason_codes !== undefined &&
+    (!Array.isArray(value.reconciliation.reason_codes) ||
+      !value.reconciliation.reason_codes.every(nonEmpty))
+  ) {
+    return false;
+  }
+  return (
+    isRecord(value.rejection_reasons) &&
+    Object.values(value.rejection_reasons).every(nonNegativeInteger)
+  );
+}
+
+const TRIAL_DIAGNOSTIC_STATUSES = new Set([
+  "collected",
+  "not_collected",
+  "invalid",
+]);
+const TRACK_DIAGNOSTIC_METRICS = [
+  "frame_count",
+  "detected",
+  "predicted",
+  "lost",
+  "detected_ratio",
+  "predicted_ratio",
+  "lost_ratio",
+  "longest_lost_streak",
+  "false_positive_island_count",
+  "max_step_px",
+] as const;
+
+function validDiagnosticObservation(value: unknown): boolean {
+  if (
+    !isRecord(value) ||
+    !TRIAL_DIAGNOSTIC_STATUSES.has(String(value.status))
+  ) {
+    return false;
+  }
+  return value.status === "collected"
+    ? finite(value.value) && value.value >= 0
+    : value.value === null;
+}
+
+function validTrackDiagnostics(value: unknown): boolean {
+  return (
+    isRecord(value) &&
+    TRIAL_DIAGNOSTIC_STATUSES.has(String(value.status)) &&
+    TRACK_DIAGNOSTIC_METRICS.every((metric) =>
+      validDiagnosticObservation(value[metric]),
+    )
+  );
+}
+
+function validRejectionReasonDiagnostics(value: unknown): boolean {
+  if (
+    !isRecord(value) ||
+    !TRIAL_DIAGNOSTIC_STATUSES.has(String(value.status))
+  ) {
+    return false;
+  }
+  return value.status === "collected"
+    ? isRecord(value.value) &&
+        Object.values(value.value).every(nonNegativeInteger)
+    : value.value === null;
+}
+
+function validTrialDiagnostics(value: unknown): boolean {
+  return (
+    isRecord(value) &&
+    validTrackDiagnostics(value.raw_track) &&
+    validTrackDiagnostics(value.cleaned_track) &&
+    validRejectionReasonDiagnostics(value.rejection_reasons) &&
+    validDiagnosticObservation(value.ai_review_trigger_count) &&
+    validDiagnosticObservation(value.ai_review_triggers_per_100_frames) &&
+    validDiagnosticObservation(value.event_candidate_count) &&
+    validDiagnosticObservation(value.event_candidates_per_100_frames) &&
+    isRecord(value.follow_cam) &&
+    TRIAL_DIAGNOSTIC_STATUSES.has(String(value.follow_cam.status)) &&
+    validDiagnosticObservation(value.follow_cam.max_pan_step_px) &&
+    validDiagnosticObservation(value.follow_cam.max_pan_accel_px) &&
+    validDiagnosticObservation(value.follow_cam.max_zoom_step_ratio)
+  );
+}
+
+export function isTrialSignalGateV2(
+  value: unknown,
+): value is ProductionTrialSignalGateV2 {
+  if (
+    !isRecord(value) ||
+    value.schema_version !== "2.0" ||
+    !TRIAL_SIGNAL_STATUSES.has(String(value.status)) ||
+    ![
+      "coverage_complete",
+      "evidence_available",
+      "trajectory_acceptable",
+      "signal_acceptable",
+      "acceptance_metrics_complete",
+      "acceptance_contract_complete",
+      "quality_acceptable",
+    ].every((key) => typeof value[key] === "boolean") ||
+    value.operator_confirmation_required !== true ||
+    (value.reason_codes !== undefined &&
+      (!Array.isArray(value.reason_codes) ||
+        !value.reason_codes.every(nonEmpty))) ||
+    !isRecord(value.failure_classification) ||
+    !TRIAL_FAILURE_CODES.has(String(value.failure_classification.code)) ||
+    !TRIAL_FAILURE_SEVERITIES.has(
+      String(value.failure_classification.severity),
+    ) ||
+    !nonEmpty(value.failure_classification.summary) ||
+    !nonEmpty(value.failure_classification.recommended_action) ||
+    !validTrialThresholdProfile(value.threshold_profile) ||
+    !(
+      value.stage_counts === null || validDetectionStages(value.stage_counts)
+    ) ||
+    !isRecord(value.trajectory) ||
+    !validTrialDiagnostics(value.diagnostics) ||
+    !isRecord(value.evidence) ||
+    !Object.values(value.evidence).every(nonEmpty)
+  ) {
+    return false;
+  }
+  return true;
+}
+
+function collectedPositiveStage(
+  stages: ProductionTrialSignalGateV2["stage_counts"],
+  name:
+    | "evaluated_frames"
+    | "raw_candidates"
+    | "class_mapped_candidates"
+    | "filtered_candidates"
+    | "selected_candidates"
+    | "tracklets",
+): boolean {
+  if (!stages) return false;
+  const count = stages[name];
+  return (
+    count.status === "collected" &&
+    nonNegativeInteger(count.value) &&
+    count.value > 0
+  );
+}
+
+function collectedStage(
+  stages: ProductionTrialSignalGateV2["stage_counts"],
+  name: "detected_frames" | "predicted_frames" | "lost_frames",
+): boolean {
+  if (!stages) return false;
+  const count = stages[name];
+  return count.status === "collected" && nonNegativeInteger(count.value);
+}
+
+function reconciledDetectionStages(
+  stages: ProductionTrialSignalGateV2["stage_counts"],
+): boolean {
+  if (!stages) return false;
+  const names = [
+    "evaluated_frames",
+    "detected_frames",
+    "predicted_frames",
+    "lost_frames",
+    "raw_candidates",
+    "class_mapped_candidates",
+    "filtered_candidates",
+    "selected_candidates",
+    "tracklets",
+  ] as const;
+  const counts = Object.fromEntries(
+    names.map((name) => [
+      name,
+      stages[name].status === "collected" &&
+      nonNegativeInteger(stages[name].value)
+        ? stages[name].value
+        : null,
+    ]),
+  ) as Record<(typeof names)[number], number | null>;
+  if (Object.values(counts).some((count) => count === null)) return false;
+  return (
+    counts.detected_frames! + counts.predicted_frames! + counts.lost_frames! ===
+      counts.evaluated_frames &&
+    counts.selected_candidates === counts.detected_frames &&
+    counts.class_mapped_candidates! <= counts.raw_candidates! &&
+    counts.filtered_candidates! <= counts.class_mapped_candidates! &&
+    counts.selected_candidates! <= counts.filtered_candidates! &&
+    counts.tracklets! <= counts.selected_candidates!
+  );
+}
+
+export function productionTrialSignalGateAcceptable(
+  value: unknown,
+): value is ProductionTrialSignalGateV2 {
+  if (!isTrialSignalGateV2(value)) return false;
+  const evidence = value.evidence;
+  return (
+    value.status === "acceptable" &&
+    value.coverage_complete === true &&
+    value.evidence_available === true &&
+    value.trajectory_acceptable === true &&
+    value.signal_acceptable === true &&
+    value.acceptance_metrics_complete === true &&
+    value.acceptance_contract_complete === true &&
+    value.quality_acceptable === true &&
+    value.failure_classification.code === "acceptable" &&
+    value.failure_classification.severity === "none" &&
+    value.stage_counts?.coverage_status === "complete" &&
+    value.stage_counts.reconciliation.status === "reconciled" &&
+    collectedPositiveStage(value.stage_counts, "evaluated_frames") &&
+    collectedStage(value.stage_counts, "detected_frames") &&
+    collectedStage(value.stage_counts, "predicted_frames") &&
+    collectedStage(value.stage_counts, "lost_frames") &&
+    collectedPositiveStage(value.stage_counts, "raw_candidates") &&
+    collectedPositiveStage(value.stage_counts, "class_mapped_candidates") &&
+    collectedPositiveStage(value.stage_counts, "filtered_candidates") &&
+    collectedPositiveStage(value.stage_counts, "selected_candidates") &&
+    collectedPositiveStage(value.stage_counts, "tracklets") &&
+    reconciledDetectionStages(value.stage_counts) &&
+    evidence.wide_context === "available" &&
+    evidence.tight_crop === "available" &&
+    (evidence.follow_cam === "available" ||
+      evidence.follow_cam === "not_applicable") &&
+    (evidence.follow_cam_action_retention === "complete" ||
+      evidence.follow_cam_action_retention === "not_applicable") &&
+    evidence.scale_strata === "complete" &&
+    evidence.lighting_strata === "complete" &&
+    evidence.attack_transition_windows === "complete" &&
+    evidence.media_integrity === "complete" &&
+    evidence.identity_binding === "complete"
+  );
+}
+
+function resolveTrialSignalGate(
+  ...values: unknown[]
+): ProductionTrialSignalGateV2 | null {
+  const present = values.filter(
+    (value) => value !== undefined && value !== null,
+  );
+  if (present.some((value) => !isTrialSignalGateV2(value))) return null;
+  const gates = present as ProductionTrialSignalGateV2[];
+  if (gates.length === 0) return null;
+  const identity = canonicalJson(gates[0]);
+  return gates.every((gate) => canonicalJson(gate) === identity)
+    ? gates[0]
+    : null;
+}
+
 export function assessProductionTrialEvidence(input: {
   run: Pick<
     RunRecord,
-    "run_id" | "status" | "input_video" | "config_name" | "stats" | "notes"
+    | "run_id"
+    | "status"
+    | "input_video"
+    | "config_name"
+    | "stats"
+    | "notes"
+    | "trial_signal_gate_v2"
   >;
   artifacts: readonly ArtifactSummary[];
   manifest: unknown;
@@ -1120,6 +1937,7 @@ export function assessProductionTrialEvidence(input: {
   enable_postprocess: boolean;
   enable_follow_cam: boolean;
   video_loaded: boolean;
+  trial_signal_gate_v2?: unknown;
 }): ProductionTrialEvidenceResult {
   const reasons: string[] = [];
   if (input.run.status !== "completed") reasons.push("run_not_completed");
@@ -1152,6 +1970,12 @@ export function assessProductionTrialEvidence(input: {
     reasons.push("manifest_mismatch");
   }
   const stats = input.run.stats;
+  const gate = resolveTrialSignalGate(
+    input.trial_signal_gate_v2,
+    input.run.trial_signal_gate_v2,
+    isRecord(stats) ? stats.trial_signal_gate_v2 : undefined,
+    isRecord(input.metrics) ? input.metrics.trial_signal_gate_v2 : undefined,
+  );
   const raw = isRecord(stats) ? stats.raw : null;
   if (!validTrackStats(raw)) reasons.push("raw_stats_unreadable");
   const cleaned = isRecord(stats) ? stats.cleaned : null;
@@ -1207,6 +2031,7 @@ export function assessProductionTrialEvidence(input: {
       audit_review_event_count: input.audit.summary.review_event_count,
       audit_lost_gap_count: input.audit.summary.lost_gap_count,
       quality_gate_status: isRecord(stats) ? qualityGateStatus(stats) : null,
+      trial_signal_gate_v2: gate,
     },
   };
 }
@@ -1314,20 +2139,27 @@ export function acceptProductionTrial(
     accepted_at: string;
   },
 ): ProductionTrialState {
-  const attempt = state.attempts.find(
-    (candidate) => candidate.run_id === input.run.run_id,
-  );
+  const attempt = state.attempts.at(-1);
+  const gate = input.readiness.quality.trial_signal_gate_v2;
+  const confirmation = input.readiness.operator_visual_confirmation;
   if (
     !attempt ||
+    attempt.run_id !== input.run.run_id ||
     input.run.status !== "completed" ||
     attempt.intent_sha256 !== input.current_intent_sha256 ||
     input.readiness.run_id !== attempt.run_id ||
     input.readiness.request_sha256 !== attempt.request_sha256 ||
-    !sha256String(input.readiness.evidence_generation)
+    !sha256String(input.readiness.evidence_generation) ||
+    !productionTrialSignalGateAcceptable(gate) ||
+    !confirmation ||
+    confirmation.confirmed !== true ||
+    !nonEmpty(confirmation.confirmed_at) ||
+    confirmation.evidence_generation !== input.readiness.evidence_generation ||
+    confirmation.threshold_profile_sha256 !== gate.threshold_profile.sha256
   ) {
     throw new Error("Trial is not eligible for acceptance");
   }
-  return {
+  const accepted: ProductionTrialState = {
     ...state,
     active_run_id: null,
     attempts: state.attempts.map((candidate) =>
@@ -1349,6 +2181,10 @@ export function acceptProductionTrial(
       readiness: input.readiness,
     },
   };
+  if (!productionTrialAcceptanceIsValid(accepted)) {
+    throw new Error("Trial is not eligible for acceptance");
+  }
+  return accepted;
 }
 
 export function invalidateProductionTrialAcceptance(
@@ -1366,6 +2202,50 @@ export function nextProductionTrialGeneration(
       ...(state?.attempts.map((attempt) => attempt.generation) ?? [0]),
     ) + 1
   );
+}
+
+const TERMINAL_TRIAL_STATUSES = new Set(["completed", "failed", "cancelled"]);
+
+export function productionTrialSubmissionLineage(
+  state: ProductionTrialState,
+  authoritativeRun: Pick<
+    RunRecord,
+    "run_id" | "status" | "config_sha256"
+  > | null,
+): ProductionTrialSubmissionLineage | null {
+  const latest = state.attempts.at(-1);
+  if (!latest) {
+    return {
+      state,
+      parent_run_id: null,
+      generation: 1,
+      legacy_restart_run_id: null,
+      base_config_locked: false,
+    };
+  }
+  if (
+    !authoritativeRun ||
+    authoritativeRun.run_id !== latest.run_id ||
+    !TERMINAL_TRIAL_STATUSES.has(authoritativeRun.status)
+  ) {
+    return null;
+  }
+  if (sha256String(authoritativeRun.config_sha256)) {
+    return {
+      state,
+      parent_run_id: latest.run_id,
+      generation: nextProductionTrialGeneration(state),
+      legacy_restart_run_id: null,
+      base_config_locked: true,
+    };
+  }
+  return {
+    state: createProductionTrialState(state.settings),
+    parent_run_id: null,
+    generation: 1,
+    legacy_restart_run_id: latest.run_id,
+    base_config_locked: true,
+  };
 }
 
 function validTrialRequestSnapshot(
@@ -1436,7 +2316,73 @@ function validQualitySummary(
     (value.false_positive_island_count === null ||
       nonNegativeInteger(value.false_positive_island_count)) &&
     (value.max_step_px === null || finite(value.max_step_px)) &&
-    (value.quality_gate_status === null || nonEmpty(value.quality_gate_status))
+    (value.quality_gate_status === null ||
+      nonEmpty(value.quality_gate_status)) &&
+    (value.trial_signal_gate_v2 === undefined ||
+      value.trial_signal_gate_v2 === null ||
+      isTrialSignalGateV2(value.trial_signal_gate_v2))
+  );
+}
+
+function validVisualConfirmation(
+  value: unknown,
+  readiness: Record<string, unknown>,
+): boolean {
+  if (
+    !isRecord(value) ||
+    value.confirmed !== true ||
+    !nonEmpty(value.confirmed_at) ||
+    !sha256String(value.evidence_generation) ||
+    !sha256String(value.threshold_profile_sha256) ||
+    value.evidence_generation !== readiness.evidence_generation
+  ) {
+    return false;
+  }
+  const quality = readiness.quality;
+  const gate = isRecord(quality) ? quality.trial_signal_gate_v2 : null;
+  return (
+    isTrialSignalGateV2(gate) &&
+    value.threshold_profile_sha256 === gate.threshold_profile.sha256
+  );
+}
+
+export function productionTrialAcceptanceIsValid(
+  state: ProductionTrialState,
+): state is ProductionTrialState & {
+  accepted: ProductionTrialAcceptance;
+} {
+  const accepted = state.accepted;
+  const attempt = state.attempts.at(-1);
+  if (!accepted || !attempt || accepted.run_id !== attempt.run_id) return false;
+  const readiness = accepted.readiness;
+  return Boolean(
+    attempt.last_observed.status === "completed" &&
+    accepted.intent_sha256 === attempt.intent_sha256 &&
+    accepted.request_sha256 === attempt.request_sha256 &&
+    nonEmpty(accepted.accepted_at) &&
+    attempt.last_observed.evidence_generation ===
+      readiness.evidence_generation &&
+    readiness.run_id === accepted.run_id &&
+    readiness.request_sha256 === accepted.request_sha256 &&
+    sha256String(readiness.evidence_generation) &&
+    nonEmpty(readiness.verified_at) &&
+    nonEmpty(readiness.video_artifact_name) &&
+    Array.isArray(readiness.artifact_names) &&
+    productionTrialArtifactContract({
+      enable_postprocess: Boolean(attempt.request.enable_postprocess),
+      video_artifact_name: readiness.video_artifact_name,
+      artifact_names: readiness.artifact_names,
+    }).matches === true &&
+    validQualitySummary(readiness.quality) &&
+    productionTrialSignalGateAcceptable(
+      readiness.quality.trial_signal_gate_v2,
+    ) &&
+    validVisualConfirmation(
+      readiness.operator_visual_confirmation,
+      readiness as unknown as Record<string, unknown>,
+    ) &&
+    state.active_run_id === null &&
+    state.pending_submission === null,
   );
 }
 
@@ -1564,41 +2510,11 @@ export function isProductionTrialState(
     }
   }
   if (value.accepted !== null) {
-    const accepted = value.accepted;
-    if (!isRecord(accepted) || !nonEmpty(accepted.run_id)) return false;
-    const attempt = attempts.find(
-      (candidate): candidate is Record<string, unknown> =>
-        isRecord(candidate) && candidate.run_id === accepted.run_id,
-    );
-    const lastObserved = attempt?.last_observed;
     if (
-      !attempt ||
-      !isRecord(lastObserved) ||
-      lastObserved.status !== "completed" ||
-      accepted.intent_sha256 !== attempt.intent_sha256 ||
-      accepted.request_sha256 !== attempt.request_sha256 ||
-      !nonEmpty(accepted.accepted_at) ||
-      !isRecord(accepted.readiness) ||
-      lastObserved.evidence_generation !==
-        accepted.readiness.evidence_generation ||
-      accepted.readiness.run_id !== accepted.run_id ||
-      accepted.readiness.request_sha256 !== accepted.request_sha256 ||
-      !sha256String(accepted.readiness.evidence_generation) ||
-      !nonEmpty(accepted.readiness.verified_at) ||
-      !nonEmpty(accepted.readiness.video_artifact_name) ||
-      !Array.isArray(accepted.readiness.artifact_names) ||
-      productionTrialArtifactContract({
-        enable_postprocess: Boolean(
-          (attempt.request as CreateRunRequest).enable_postprocess,
-        ),
-        video_artifact_name: String(accepted.readiness.video_artifact_name),
-        artifact_names: accepted.readiness.artifact_names,
-      }).matches !== true ||
-      !validQualitySummary(accepted.readiness.quality)
+      !productionTrialAcceptanceIsValid(
+        value as unknown as ProductionTrialState,
+      )
     ) {
-      return false;
-    }
-    if (value.active_run_id !== null || value.pending_submission !== null) {
       return false;
     }
   }

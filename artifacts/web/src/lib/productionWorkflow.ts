@@ -8,6 +8,7 @@ import {
 import type { FieldPoint, FieldResolution } from "./fieldGeometry";
 import {
   isProductionTrialState,
+  productionTrialAcceptanceIsValid,
   productionTrialMatchesContext,
   type ProductionTrialState,
 } from "./productionTrial";
@@ -28,7 +29,7 @@ import {
   type ProductionProductEvidence,
 } from "./broadcastDelivery";
 
-export const PRODUCTION_DRAFT_SCHEMA_VERSION = 4 as const;
+export const PRODUCTION_DRAFT_SCHEMA_VERSION = 5 as const;
 export const PRODUCTION_DRAFT_STORAGE_KEY =
   "football-tracking.production-draft.v1";
 
@@ -400,19 +401,39 @@ function migrateV3Draft(
     source && isCalibrationEvidence(value.calibration)
       ? value.calibration
       : null;
-  const trial =
+  let trial: ProductionTrialState | null = null;
+  let acceptancePreserved = false;
+  if (
     source &&
     calibration &&
     calibrationIsComplete(calibration, source.path) &&
-    isProductionTrialState(value.trial) &&
-    productionTrialMatchesContext(value.trial, {
-      workflow_id: value.workflow_id,
-      source,
-      calibration,
-    })
-      ? value.trial
-      : null;
+    isRecord(value.trial)
+  ) {
+    const rawTrial = value.trial;
+    const strictTrial = isProductionTrialState(rawTrial)
+      ? rawTrial
+      : isProductionTrialState({ ...rawTrial, accepted: null })
+        ? ({ ...rawTrial, accepted: null } as ProductionTrialState)
+        : null;
+    if (
+      strictTrial &&
+      productionTrialMatchesContext(strictTrial, {
+        workflow_id: value.workflow_id,
+        source,
+        calibration,
+      })
+    ) {
+      trial = strictTrial;
+      acceptancePreserved = productionTrialAcceptanceIsValid(strictTrial);
+    }
+  }
+  const hadUntrustedAcceptance =
+    isRecord(value.trial) &&
+    value.trial.accepted !== null &&
+    value.trial.accepted !== undefined &&
+    !acceptancePreserved;
   const confirmedConfig =
+    acceptancePreserved &&
     trial?.accepted &&
     isProductionConfigEvidence(value.confirmed_config) &&
     value.confirmed_config.workflow_id === value.workflow_id &&
@@ -430,7 +451,10 @@ function migrateV3Draft(
     workflow_id: value.workflow_id,
     created_at: value.created_at,
     updated_at: value.updated_at,
-    status: value.status === "archived" ? "archived" : "active",
+    status:
+      !hadUntrustedAcceptance && value.status === "archived"
+        ? "archived"
+        : "active",
     source,
     calibration,
     trial,
@@ -442,6 +466,86 @@ function migrateV3Draft(
   return isProductionDraft(migrated) ? migrated : null;
 }
 
+function migrateV4Draft(
+  value: Record<string, unknown>,
+): ProductionDraft | null {
+  if (
+    !isNonEmptyString(value.workflow_id) ||
+    !isNonEmptyString(value.created_at) ||
+    !isNonEmptyString(value.updated_at) ||
+    !isNullable(value.source, isSourceSignature) ||
+    typeof value.status !== "string" ||
+    !DRAFT_STATUSES.has(value.status as ProductionDraftStatus)
+  ) {
+    return null;
+  }
+
+  const source = value.source;
+  const calibration =
+    source && isCalibrationEvidence(value.calibration)
+      ? value.calibration
+      : value.calibration === null
+        ? null
+        : undefined;
+  if (calibration === undefined) return null;
+
+  let trial: ProductionTrialState | null = null;
+  let acceptancePreserved = false;
+  if (value.trial !== null) {
+    if (
+      !source ||
+      !calibration ||
+      !calibrationIsComplete(calibration, source.path) ||
+      !isRecord(value.trial)
+    ) {
+      return null;
+    }
+    const rawTrial = value.trial;
+    const strictTrial = isProductionTrialState(rawTrial)
+      ? rawTrial
+      : isProductionTrialState({ ...rawTrial, accepted: null })
+        ? ({ ...rawTrial, accepted: null } as ProductionTrialState)
+        : null;
+    if (
+      !strictTrial ||
+      !productionTrialMatchesContext(strictTrial, {
+        workflow_id: value.workflow_id,
+        source,
+        calibration,
+      })
+    ) {
+      return null;
+    }
+    trial = strictTrial;
+    acceptancePreserved = productionTrialAcceptanceIsValid(strictTrial);
+  }
+
+  if (!acceptancePreserved) {
+    const migrated: ProductionDraft = {
+      schema_version: PRODUCTION_DRAFT_SCHEMA_VERSION,
+      workflow_id: value.workflow_id,
+      created_at: value.created_at,
+      updated_at: value.updated_at,
+      status: value.status === "archived" ? "archived" : "active",
+      source,
+      calibration,
+      trial,
+      pending_config_confirmation: null,
+      confirmed_config: null,
+      full_run: null,
+      verified_product: null,
+    };
+    return isProductionDraft(migrated) ? migrated : null;
+  }
+
+  const migrated = {
+    ...value,
+    schema_version: PRODUCTION_DRAFT_SCHEMA_VERSION,
+    trial,
+  };
+  return isProductionDraft(migrated) ? migrated : null;
+}
+
 function hasConfirmedCalibration(draft: ProductionDraft): boolean {
   return Boolean(
     draft.source && calibrationIsComplete(draft.calibration, draft.source.path),
@@ -449,7 +553,7 @@ function hasConfirmedCalibration(draft: ProductionDraft): boolean {
 }
 
 function hasAcceptedTrial(draft: ProductionDraft): boolean {
-  return Boolean(draft.trial?.accepted?.run_id);
+  return Boolean(draft.trial && productionTrialAcceptanceIsValid(draft.trial));
 }
 
 function hasConfirmedConfig(draft: ProductionDraft): boolean {
@@ -675,9 +779,29 @@ export function invalidateProductionDraft(
     | "config_confirmation"
     | "full_tracking",
   now = new Date().toISOString(),
+  createWorkflowId: () => string = createProductionWorkflowId,
 ): ProductionDraft {
+  const invalidatesWorkflowRoot = from === "source" || from === "calibration";
+  const trialHasLineage = Boolean(
+    draft.trial &&
+    (draft.trial.attempts.length > 0 ||
+      draft.trial.pending_submission ||
+      draft.trial.active_run_id ||
+      draft.trial.accepted),
+  );
+  const hasDownstreamLineage = Boolean(
+    trialHasLineage ||
+    draft.pending_config_confirmation ||
+    draft.confirmed_config ||
+    draft.full_run ||
+    draft.verified_product,
+  );
   const updated: ProductionDraft = {
     ...draft,
+    workflow_id:
+      invalidatesWorkflowRoot && hasDownstreamLineage
+        ? createWorkflowId()
+        : draft.workflow_id,
     updated_at: now,
     status: "active",
   };
@@ -712,10 +836,11 @@ export function updateProductionSource(
   draft: ProductionDraft,
   source: SourceSignature,
   now = new Date().toISOString(),
+  createWorkflowId: () => string = createProductionWorkflowId,
 ): ProductionDraft {
   if (sourceSignaturesMatch(draft.source, source)) return draft;
   return {
-    ...invalidateProductionDraft(draft, "calibration", now),
+    ...invalidateProductionDraft(draft, "calibration", now, createWorkflowId),
     source,
   };
 }
@@ -724,6 +849,7 @@ export function updateProductionCalibration(
   draft: ProductionDraft,
   calibration: ProductionCalibrationDraft,
   now = new Date().toISOString(),
+  createWorkflowId: () => string = createProductionWorkflowId,
 ): ProductionDraft {
   const approvedChanged =
     draft.calibration?.polygon_digest !== calibration.polygon_digest ||
@@ -735,18 +861,14 @@ export function updateProductionCalibration(
       JSON.stringify(calibration.approved_polygon) ||
     JSON.stringify(draft.calibration?.exclusions ?? []) !==
       JSON.stringify(calibration.exclusions);
+  const current = approvedChanged
+    ? invalidateProductionDraft(draft, "calibration", now, createWorkflowId)
+    : draft;
   return {
-    ...draft,
+    ...current,
     updated_at: now,
     status: "active",
     calibration,
-    trial: approvedChanged ? null : draft.trial,
-    pending_config_confirmation: approvedChanged
-      ? null
-      : draft.pending_config_confirmation,
-    confirmed_config: approvedChanged ? null : draft.confirmed_config,
-    full_run: approvedChanged ? null : draft.full_run,
-    verified_product: approvedChanged ? null : draft.verified_product,
   };
 }
 
@@ -1056,6 +1178,12 @@ export function loadProductionDraft(
     return migrated
       ? { status: "restored", draft: migrated, migrated: true }
       : { status: "corrupt", message: "Version 3 draft is invalid." };
+  }
+  if (value.schema_version === 4) {
+    const migrated = migrateV4Draft(value);
+    return migrated
+      ? { status: "restored", draft: migrated, migrated: true }
+      : { status: "corrupt", message: "Version 4 draft is invalid." };
   }
   if (!isProductionDraft(value)) {
     return { status: "corrupt", message: "Draft data is invalid." };

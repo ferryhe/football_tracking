@@ -1,3 +1,34 @@
+# Step 3 Tiny-Ball Managed PR Status
+
+- Program: Step 3 Tiny-Ball Detection, Tuning, and Camera Adaptation
+- Canonical plan: docs/superpowers/plans/2026-07-17-step-3-tiny-ball-detection-and-camera-adaptation-plan.md
+- Program status: active · five managed PRs authorized
+- Current PR: PR-T1 · Fail-Closed Trial Diagnosis and Recovery Actions
+- Current branch: codex/tiny-ball-trial-diagnosis
+- Current phase: specification APPROVE · quality/security APPROVE · ready to submit PR
+- Approval: the user authorized the final independently reviewed plan and the established managed-PR operating method on 2026-07-17.
+- Checks: the latest official Python route passed 1,748 tests with 64 skipped in 465.219 seconds. Prior post-correction gates passed API 156 with 2 skipped and 14 subtests; config/provider/OpenAPI 34 with 6 subtests; Web Vitest 538/538; Chromium 43/43; application/test TypeScript; Ruff; production build and cutover bundle inspection; `git diff --check`; and two byte-identical OpenAPI/React/Zod generations. Test-only ports are closed and the user's existing 5173 service remains running.
+- Blockers: none. Final specification and quality/security reviews both APPROVE. Mount-scoped operation epochs invalidate every stale post-await path; real unmount/remount and post-POST durable-pending regressions pass.
+- Next: complete selective staging and boundary checks; open the PR; observe the complete 10-minute remote-feedback window; then merge before PR-T2
+- Heartbeat: ACTIVE
+- Heartbeat automation id: tiny-ball-step3-managed-pr-heartbeat
+- Heartbeat interval: every 15 minutes
+- Heartbeat scope: PR-T1 through PR-T5, including checks, feedback windows, merges, and cleanup
+- Dirty-baseline preservation: the pre-existing line-ending-only modification to `docs/superpowers/plans/2026-07-14-production-workflow-final-managed-pr-plan.md` is unrelated user state and must not be staged or changed by this program
+- Last updated: 2026-07-17 ET
+
+## Current Program PR Ledger
+
+| PR | Branch | Status | Pull request | Remote feedback started | Merge |
+| --- | --- | --- | --- | --- | --- |
+| PR-T1 | codex/tiny-ball-trial-diagnosis | ready to submit · spec APPROVE · quality/security APPROVE | pending | not started | pending |
+| PR-T2 | pending | not started | pending | not started | pending |
+| PR-T3 | pending | not started | pending | not started | pending |
+| PR-T4 | pending | not started | pending | not started | pending |
+| PR-T5 | pending | not started | pending | not started | pending |
+
+---
+
 # Production Workflow Managed PR Status
 
 - Program: Production Workflow, review-evidence provisioning, target audit, and configuration-lineage reconfirmation

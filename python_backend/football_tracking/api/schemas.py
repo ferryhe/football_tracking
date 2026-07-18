@@ -636,6 +636,213 @@ class BroadcastRunState(BaseModel):
     metadata_warnings: list[str] = Field(default_factory=list)
 
 
+class TrialFailureClassification(BaseModel):
+    code: Literal[
+        "insufficient_evidence",
+        "decode_failure",
+        "no_raw_candidates",
+        "all_candidates_class_rejected",
+        "all_candidates_filtered",
+        "no_tracklets",
+        "all_lost",
+        "wrong_or_noisy_candidates",
+        "unstable_tracking",
+        "acceptable",
+    ]
+    severity: Literal["none", "high", "blocking"]
+    summary: str
+    recommended_action: str
+
+
+class TrialCollectedCount(BaseModel):
+    value: int | None = Field(default=None, ge=0)
+    status: Literal["collected", "not_collected", "invalid"]
+
+
+class TrialStageReconciliation(BaseModel):
+    status: Literal["reconciled", "mismatch", "not_collected"]
+    reason_codes: list[str] = Field(default_factory=list)
+
+
+class TrialDetectionStages(BaseModel):
+    schema_version: Literal["2.0"] = "2.0"
+    coverage_status: Literal["complete", "invalid", "not_collected"]
+    evaluated_frames: TrialCollectedCount
+    detected_frames: TrialCollectedCount
+    predicted_frames: TrialCollectedCount
+    lost_frames: TrialCollectedCount
+    raw_candidates: TrialCollectedCount
+    class_mapped_candidates: TrialCollectedCount
+    filtered_candidates: TrialCollectedCount
+    selected_candidates: TrialCollectedCount
+    tracklets: TrialCollectedCount
+    rejection_reasons: dict[str, int] = Field(default_factory=dict)
+    reconciliation: TrialStageReconciliation
+
+
+class TrialThresholdProfile(BaseModel):
+    profile_id: str
+    version: str
+    algorithm_version: str
+    matching_rules: dict[str, Any]
+    sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    thresholds: dict[str, float]
+
+
+class TrialNumericObservation(BaseModel):
+    status: Literal["collected", "not_collected", "invalid"]
+    value: int | float | None = None
+
+    @model_validator(mode="after")
+    def validate_status_value(self) -> "TrialNumericObservation":
+        if self.status == "collected" and self.value is None:
+            raise ValueError("collected observations require a value")
+        if self.status != "collected" and self.value is not None:
+            raise ValueError("unavailable observations cannot expose a value")
+        return self
+
+
+class TrialTrackDiagnostics(BaseModel):
+    status: Literal["collected", "not_collected", "invalid"]
+    frame_count: TrialNumericObservation
+    detected: TrialNumericObservation
+    predicted: TrialNumericObservation
+    lost: TrialNumericObservation
+    detected_ratio: TrialNumericObservation
+    predicted_ratio: TrialNumericObservation
+    lost_ratio: TrialNumericObservation
+    longest_lost_streak: TrialNumericObservation
+    false_positive_island_count: TrialNumericObservation
+    max_step_px: TrialNumericObservation
+
+
+class TrialRejectionReasonsObservation(BaseModel):
+    status: Literal["collected", "not_collected", "invalid"]
+    value: dict[str, int] | None = None
+
+    @model_validator(mode="after")
+    def validate_status_value(self) -> "TrialRejectionReasonsObservation":
+        if self.status == "collected" and self.value is None:
+            raise ValueError("collected rejection reasons require a value")
+        if self.status != "collected" and self.value is not None:
+            raise ValueError("unavailable rejection reasons cannot expose a value")
+        return self
+
+
+class TrialFollowCamDiagnostics(BaseModel):
+    status: Literal["collected", "not_collected", "invalid"]
+    max_pan_step_px: TrialNumericObservation
+    max_pan_accel_px: TrialNumericObservation
+    max_zoom_step_ratio: TrialNumericObservation
+
+
+class TrialGateDiagnostics(BaseModel):
+    raw_track: TrialTrackDiagnostics
+    cleaned_track: TrialTrackDiagnostics
+    rejection_reasons: TrialRejectionReasonsObservation
+    ai_review_trigger_count: TrialNumericObservation
+    ai_review_triggers_per_100_frames: TrialNumericObservation
+    event_candidate_count: TrialNumericObservation
+    event_candidates_per_100_frames: TrialNumericObservation
+    follow_cam: TrialFollowCamDiagnostics
+
+
+class TrialSignalGateV2(BaseModel):
+    schema_version: Literal["2.0"] = "2.0"
+    status: Literal["insufficient_evidence", "retune_required", "acceptable"]
+    coverage_complete: bool
+    evidence_available: bool
+    trajectory_acceptable: bool
+    signal_acceptable: bool
+    acceptance_metrics_complete: bool
+    acceptance_contract_complete: bool
+    quality_acceptable: bool
+    operator_confirmation_required: Literal[True] = True
+    reason_codes: list[str] = Field(default_factory=list)
+    failure_classification: TrialFailureClassification
+    threshold_profile: TrialThresholdProfile
+    stage_counts: TrialDetectionStages | None = None
+    trajectory: dict[str, Any]
+    diagnostics: TrialGateDiagnostics
+    evidence: dict[str, str]
+
+
+class TrialDiagnosisResponse(BaseModel):
+    schema_version: Literal["1.0"] = "1.0"
+    run_id: str
+    legacy_quality_gate_status: str | None = None
+    trial_signal_gate_v2: TrialSignalGateV2
+    tuning_schema_version: Literal["1.0"] = "1.0"
+
+
+class TrialTuningControl(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    path: str
+    section: Literal["detector", "sahi", "filtering", "selection", "tracking", "postprocess"]
+    kind: Literal["number", "integer", "boolean", "select", "multi_select"]
+    minimum: float | None = None
+    maximum: float | None = None
+    step: float | None = None
+    options: list[str] | None = None
+    runtime_impact: Literal["low", "medium", "high"]
+    description: str
+    description_zh: str
+
+    @model_validator(mode="after")
+    def validate_bounds(self) -> "TrialTuningControl":
+        if self.kind in {"number", "integer"}:
+            if self.minimum is None or self.maximum is None or self.step is None:
+                raise ValueError("numeric tuning controls require minimum, maximum, and step")
+            if self.minimum >= self.maximum or self.step <= 0:
+                raise ValueError("numeric tuning control bounds are invalid")
+            if self.options is not None:
+                raise ValueError("numeric tuning controls cannot define options")
+        elif self.kind in {"select", "multi_select"}:
+            if not self.options:
+                raise ValueError("select tuning controls require options")
+            if self.minimum is not None or self.maximum is not None or self.step is not None:
+                raise ValueError("select tuning controls cannot define numeric bounds")
+        elif any(value is not None for value in (self.minimum, self.maximum, self.step, self.options)):
+            raise ValueError("boolean tuning controls cannot define bounds or options")
+        return self
+
+
+class TrialTuningAction(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    action_code: Literal["return_to_field_setup"]
+    target_step: Literal["field_setup"]
+    reason_code: Literal["field_geometry_requires_new_calibration"]
+    affected_paths: list[
+        Literal[
+            "filtering.roi",
+            "scene_bias.ground_zones",
+            "scene_bias.negative_rois",
+        ]
+    ] = Field(min_length=3, max_length=3)
+    lineage_constraint: Literal[
+        "invalidate_trial_and_downstream_then_create_new_calibration_version"
+    ]
+
+    @model_validator(mode="after")
+    def validate_affected_paths(self) -> "TrialTuningAction":
+        if set(self.affected_paths) != {
+            "filtering.roi",
+            "scene_bias.ground_zones",
+            "scene_bias.negative_rois",
+        }:
+            raise ValueError("field setup action must declare every affected geometry path")
+        return self
+
+
+class TrialTuningSchemaResponse(BaseModel):
+    schema_version: Literal["1.0"] = "1.0"
+    patch_schema_version: Literal["1.0"] = "1.0"
+    controls: list[TrialTuningControl] = Field(min_length=1)
+    actions: list[TrialTuningAction] = Field(min_length=1, max_length=1)
+
+
 class RunRecord(BaseModel):
     run_id: str
     source: str
@@ -645,12 +852,14 @@ class RunRecord(BaseModel):
     completed_at: str | None = None
     config_name: str | None = None
     config_path: str | None = None
+    config_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     input_video: str | None = None
     parent_run_id: str | None = None
     output_dir: str
     modules_enabled: dict[str, bool] = Field(default_factory=dict)
     artifacts: list[ArtifactSummary] = Field(default_factory=list)
     stats: dict[str, Any] = Field(default_factory=dict)
+    trial_signal_gate_v2: TrialSignalGateV2 | None = None
     broadcast: BroadcastRunState = Field(default_factory=BroadcastRunState)
     ai_candidate_lifecycle: AICandidateLifecycleReport = Field(default_factory=AICandidateLifecycleReport)
     progress: RunProgress | None = None

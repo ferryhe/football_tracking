@@ -115,6 +115,7 @@ export function ProductionPageContent({
       ? initialLoad.draft
       : createProductionDraft(),
   );
+  const [workspaceKey, setWorkspaceKey] = useState(draft.workflow_id);
   const draftRef = useRef(draft);
   draftRef.current = draft;
   const [notice, setNotice] = useState<ProductionNotice | null>(() => {
@@ -257,6 +258,7 @@ export function ProductionPageContent({
     if (blockActiveWorkDiscard()) return;
     const result = clearProductionDraft(storage);
     draftRef.current = nextDraft;
+    setWorkspaceKey(nextDraft.workflow_id);
     setDraft(nextDraft);
     setReplacement(null);
     setRecovery(null);
@@ -438,7 +440,7 @@ export function ProductionPageContent({
   return (
     <>
       <ProductionWorkspace
-        key={draft.workflow_id}
+        key={workspaceKey}
         draft={draft}
         videos={videos}
         sourceIssue={sourceIssue}

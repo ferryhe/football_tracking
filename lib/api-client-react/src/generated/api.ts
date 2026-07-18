@@ -72,6 +72,8 @@ import type {
   PlayerTracksReport,
   RevokeBroadcastReviewEvidenceParams,
   RunRecord,
+  TrialDiagnosisResponse,
+  TrialTuningSchemaResponse,
   UpdateConfigRequest,
 } from "./api.schemas";
 
@@ -1448,6 +1450,86 @@ export const useCheckInputQuality = <
 > => {
   return useMutation(getCheckInputQualityMutationOptions(options));
 };
+
+/**
+ * @summary Get Production Trial Tuning Schema
+ */
+export const getGetProductionTrialTuningSchemaUrl = () => {
+  return `/api/production-trials/tuning-schema`;
+};
+
+export const getProductionTrialTuningSchema = async (
+  options?: RequestInit,
+): Promise<TrialTuningSchemaResponse> => {
+  return customFetch<TrialTuningSchemaResponse>(
+    getGetProductionTrialTuningSchemaUrl(),
+    {
+      ...options,
+      method: "GET",
+    },
+  );
+};
+
+export const getGetProductionTrialTuningSchemaQueryKey = () => {
+  return [`/api/production-trials/tuning-schema`] as const;
+};
+
+export const getGetProductionTrialTuningSchemaQueryOptions = <
+  TData = Awaited<ReturnType<typeof getProductionTrialTuningSchema>>,
+  TError = ErrorType<unknown>,
+>(options?: {
+  query?: UseQueryOptions<
+    Awaited<ReturnType<typeof getProductionTrialTuningSchema>>,
+    TError,
+    TData
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}) => {
+  const { query: queryOptions, request: requestOptions } = options ?? {};
+
+  const queryKey =
+    queryOptions?.queryKey ?? getGetProductionTrialTuningSchemaQueryKey();
+
+  const queryFn: QueryFunction<
+    Awaited<ReturnType<typeof getProductionTrialTuningSchema>>
+  > = ({ signal }) =>
+    getProductionTrialTuningSchema({ signal, ...requestOptions });
+
+  return { queryKey, queryFn, ...queryOptions } as UseQueryOptions<
+    Awaited<ReturnType<typeof getProductionTrialTuningSchema>>,
+    TError,
+    TData
+  > & { queryKey: QueryKey };
+};
+
+export type GetProductionTrialTuningSchemaQueryResult = NonNullable<
+  Awaited<ReturnType<typeof getProductionTrialTuningSchema>>
+>;
+export type GetProductionTrialTuningSchemaQueryError = ErrorType<unknown>;
+
+/**
+ * @summary Get Production Trial Tuning Schema
+ */
+
+export function useGetProductionTrialTuningSchema<
+  TData = Awaited<ReturnType<typeof getProductionTrialTuningSchema>>,
+  TError = ErrorType<unknown>,
+>(options?: {
+  query?: UseQueryOptions<
+    Awaited<ReturnType<typeof getProductionTrialTuningSchema>>,
+    TError,
+    TData
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}): UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+  const queryOptions = getGetProductionTrialTuningSchemaQueryOptions(options);
+
+  const query = useQuery(queryOptions) as UseQueryResult<TData, TError> & {
+    queryKey: QueryKey;
+  };
+
+  return { ...query, queryKey: queryOptions.queryKey };
+}
 
 /**
  * @summary List Runs
@@ -3984,6 +4066,96 @@ export function useGetPlayerTracksReport<
   },
 ): UseQueryResult<TData, TError> & { queryKey: QueryKey } {
   const queryOptions = getGetPlayerTracksReportQueryOptions(runId, options);
+
+  const query = useQuery(queryOptions) as UseQueryResult<TData, TError> & {
+    queryKey: QueryKey;
+  };
+
+  return { ...query, queryKey: queryOptions.queryKey };
+}
+
+/**
+ * @summary Get Trial Diagnosis
+ */
+export const getGetTrialDiagnosisUrl = (runId: string) => {
+  return `/api/runs/${encodePathSegmented(runId)}/trial-diagnosis`;
+};
+
+export const getTrialDiagnosis = async (
+  runId: string,
+  options?: RequestInit,
+): Promise<TrialDiagnosisResponse> => {
+  return customFetch<TrialDiagnosisResponse>(getGetTrialDiagnosisUrl(runId), {
+    ...options,
+    method: "GET",
+  });
+};
+
+export const getGetTrialDiagnosisQueryKey = (runId: string) => {
+  return [`/api/runs/${encodePathSegmented(runId)}/trial-diagnosis`] as const;
+};
+
+export const getGetTrialDiagnosisQueryOptions = <
+  TData = Awaited<ReturnType<typeof getTrialDiagnosis>>,
+  TError = ErrorType<ApiErrorResponse | HTTPValidationError>,
+>(
+  runId: string,
+  options?: {
+    query?: UseQueryOptions<
+      Awaited<ReturnType<typeof getTrialDiagnosis>>,
+      TError,
+      TData
+    >;
+    request?: SecondParameter<typeof customFetch>;
+  },
+) => {
+  const { query: queryOptions, request: requestOptions } = options ?? {};
+
+  const queryKey =
+    queryOptions?.queryKey ?? getGetTrialDiagnosisQueryKey(runId);
+
+  const queryFn: QueryFunction<
+    Awaited<ReturnType<typeof getTrialDiagnosis>>
+  > = ({ signal }) => getTrialDiagnosis(runId, { signal, ...requestOptions });
+
+  return {
+    queryKey,
+    queryFn,
+    enabled: !!runId,
+    ...queryOptions,
+  } as UseQueryOptions<
+    Awaited<ReturnType<typeof getTrialDiagnosis>>,
+    TError,
+    TData
+  > & { queryKey: QueryKey };
+};
+
+export type GetTrialDiagnosisQueryResult = NonNullable<
+  Awaited<ReturnType<typeof getTrialDiagnosis>>
+>;
+export type GetTrialDiagnosisQueryError = ErrorType<
+  ApiErrorResponse | HTTPValidationError
+>;
+
+/**
+ * @summary Get Trial Diagnosis
+ */
+
+export function useGetTrialDiagnosis<
+  TData = Awaited<ReturnType<typeof getTrialDiagnosis>>,
+  TError = ErrorType<ApiErrorResponse | HTTPValidationError>,
+>(
+  runId: string,
+  options?: {
+    query?: UseQueryOptions<
+      Awaited<ReturnType<typeof getTrialDiagnosis>>,
+      TError,
+      TData
+    >;
+    request?: SecondParameter<typeof customFetch>;
+  },
+): UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+  const queryOptions = getGetTrialDiagnosisQueryOptions(runId, options);
 
   const query = useQuery(queryOptions) as UseQueryResult<TData, TError> & {
     queryKey: QueryKey;

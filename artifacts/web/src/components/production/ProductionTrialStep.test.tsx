@@ -9,9 +9,14 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import userEvent from "@testing-library/user-event";
 import { useRef, useState } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { BallAuditReport, RunRecord } from "@workspace/api-client-react";
+import type {
+  BallAuditReport,
+  RunRecord,
+  TrialDiagnosisResponse,
+} from "@workspace/api-client-react";
 
 import { LanguageProvider } from "@/contexts/LanguageContext";
+import { translations } from "@/lib/i18n";
 import type { ProductionCalibrationDraft } from "@/lib/productionCalibration";
 import {
   buildProductionConfigConfirmation,
@@ -29,7 +34,10 @@ import {
   productionTrialEvidenceGeneration,
   selectProductionTrialVideo,
   setPendingProductionTrial,
+  type ProductionTrialSignalGateV2,
   type ProductionTrialState,
+  type ProductionTrialTuningSchema,
+  type TrialDiagnosticObservation,
 } from "@/lib/productionTrial";
 import type { SourceSignature } from "@/lib/productionWorkflow";
 
@@ -41,6 +49,7 @@ const runsRefetch = vi.fn();
 const runRefetch = vi.fn();
 const artifactsRefetch = vi.fn();
 const artifactRefetch = vi.fn();
+const diagnosisRefetch = vi.fn();
 const artifactQueryRequests: Array<{
   name: string;
   request: Record<string, unknown> | undefined;
@@ -48,12 +57,195 @@ const artifactQueryRequests: Array<{
 const auditRefetch = vi.fn();
 let runsData: RunRecord[] = [];
 let runData: RunRecord | undefined;
+let runQueryPending = false;
+let runQueryError: unknown = null;
 let artifactsData: Array<Record<string, unknown>> = [];
 let artifactBodies: Record<string, unknown> = {};
 let auditData: BallAuditReport | undefined;
 let configData: Record<string, unknown> | undefined;
 let configError: unknown = null;
 let configPending = false;
+type TrialDiagnosisFixture = Omit<
+  TrialDiagnosisResponse,
+  "trial_signal_gate_v2"
+> & { trial_signal_gate_v2: ProductionTrialSignalGateV2 };
+
+let diagnosisData: TrialDiagnosisFixture | undefined;
+let tuningSchemaData: ProductionTrialTuningSchema;
+let tuningBaseConfigData: Record<string, unknown> | undefined;
+
+const collected = (value: number): TrialDiagnosticObservation => ({
+  status: "collected",
+  value,
+});
+
+const notCollected = (): TrialDiagnosticObservation => ({
+  status: "not_collected",
+  value: null,
+});
+
+const trackDiagnostics = (input: {
+  detected: number;
+  predicted: number;
+  lost: number;
+}) => {
+  const frameCount = input.detected + input.predicted + input.lost;
+  return {
+    status: "collected" as const,
+    frame_count: collected(frameCount),
+    detected: collected(input.detected),
+    predicted: collected(input.predicted),
+    lost: collected(input.lost),
+    detected_ratio: collected(input.detected / frameCount),
+    predicted_ratio: collected(input.predicted / frameCount),
+    lost_ratio: collected(input.lost / frameCount),
+    longest_lost_streak: collected(4),
+    false_positive_island_count: collected(1),
+    max_step_px: collected(20),
+  };
+};
+
+const ACCEPTABLE_GATE: ProductionTrialSignalGateV2 = {
+  schema_version: "2.0",
+  status: "acceptable",
+  coverage_complete: true,
+  evidence_available: true,
+  trajectory_acceptable: true,
+  signal_acceptable: true,
+  acceptance_metrics_complete: true,
+  acceptance_contract_complete: true,
+  quality_acceptable: true,
+  operator_confirmation_required: true,
+  reason_codes: ["quality_thresholds_passed"],
+  failure_classification: {
+    code: "acceptable",
+    severity: "none",
+    summary: "Ball signal is usable.",
+    recommended_action: "Review the videos and confirm.",
+  },
+  threshold_profile: {
+    profile_id: "tiny-ball-trial",
+    version: "1.1",
+    algorithm_version: "trial-signal-gate-v2.1",
+    matching_rules: {
+      stage_counter_reconciliation:
+        "all_required_counters_present_and_reconciled",
+      track_metric_scope: "raw_and_cleaned_when_postprocess_enabled",
+      follow_cam_scope: "motion_and_action_retention_when_enabled",
+      required_visual_evidence: [
+        "wide_context",
+        "tight_crop",
+        "follow_cam_when_enabled",
+        "scale_strata",
+        "lighting_strata",
+        "attack_transition_windows",
+      ],
+      required_integrity: ["media_integrity", "identity_binding"],
+      acceptance_contract: "server_verified_bundle_required",
+    },
+    sha256: "a".repeat(64),
+    thresholds: {
+      minimum_detected_ratio: 0.5,
+      maximum_predicted_ratio: 0.35,
+      maximum_lost_ratio: 0.25,
+      maximum_longest_lost_streak: 30,
+      maximum_false_positive_islands_per_100_frames: 8,
+      maximum_suspicious_tracklet_ratio: 0.35,
+      maximum_step_px: 600,
+      maximum_follow_cam_pan_step_px: 90,
+      maximum_follow_cam_pan_accel_px: 120,
+      maximum_follow_cam_zoom_step_ratio: 0.1,
+      maximum_ai_review_triggers_per_100_frames: 10,
+      maximum_event_candidates_per_100_frames: 25,
+    },
+  },
+  stage_counts: {
+    schema_version: "2.0",
+    coverage_status: "complete",
+    evaluated_frames: { value: 300, status: "collected" },
+    detected_frames: { value: 200, status: "collected" },
+    predicted_frames: { value: 50, status: "collected" },
+    lost_frames: { value: 50, status: "collected" },
+    raw_candidates: { value: 240, status: "collected" },
+    class_mapped_candidates: { value: 240, status: "collected" },
+    filtered_candidates: { value: 220, status: "collected" },
+    selected_candidates: { value: 200, status: "collected" },
+    tracklets: { value: 2, status: "collected" },
+    rejection_reasons: { too_small: 20 },
+    reconciliation: { status: "reconciled", reason_codes: [] },
+  },
+  trajectory: { raw_lost_ratio: 1 / 6 },
+  diagnostics: {
+    raw_track: trackDiagnostics({ detected: 200, predicted: 50, lost: 50 }),
+    cleaned_track: trackDiagnostics({
+      detected: 210,
+      predicted: 50,
+      lost: 40,
+    }),
+    rejection_reasons: {
+      status: "collected",
+      value: { too_small: 20 },
+    },
+    ai_review_trigger_count: collected(1),
+    ai_review_triggers_per_100_frames: collected(1 / 3),
+    event_candidate_count: collected(2),
+    event_candidates_per_100_frames: collected(2 / 3),
+    follow_cam: {
+      status: "collected",
+      max_pan_step_px: collected(20),
+      max_pan_accel_px: collected(30),
+      max_zoom_step_ratio: collected(0.02),
+    },
+  },
+  evidence: {
+    wide_context: "available",
+    tight_crop: "available",
+    follow_cam: "available",
+    follow_cam_action_retention: "complete",
+    scale_strata: "complete",
+    lighting_strata: "complete",
+    attack_transition_windows: "complete",
+    media_integrity: "complete",
+    identity_binding: "complete",
+  },
+};
+
+const ALL_LOST_GATE: ProductionTrialSignalGateV2 = {
+  ...ACCEPTABLE_GATE,
+  status: "retune_required",
+  trajectory_acceptable: false,
+  signal_acceptable: false,
+  acceptance_contract_complete: false,
+  quality_acceptable: false,
+  reason_codes: [
+    "zero_candidate",
+    "zero_tracklet",
+    "all_lost",
+    "acceptance_contract_not_collected",
+  ],
+  failure_classification: {
+    code: "no_raw_candidates",
+    severity: "blocking",
+    summary: "No raw ball candidates were found.",
+    recommended_action: "Lower the detector threshold and rerun.",
+  },
+  stage_counts: {
+    ...ACCEPTABLE_GATE.stage_counts!,
+    detected_frames: { value: 0, status: "collected" },
+    predicted_frames: { value: 0, status: "collected" },
+    lost_frames: { value: 300, status: "collected" },
+    raw_candidates: { value: 0, status: "collected" },
+    class_mapped_candidates: { value: 0, status: "collected" },
+    filtered_candidates: { value: 0, status: "collected" },
+    selected_candidates: { value: 0, status: "collected" },
+    tracklets: { value: 0, status: "collected" },
+  },
+  diagnostics: {
+    ...ACCEPTABLE_GATE.diagnostics,
+    raw_track: trackDiagnostics({ detected: 0, predicted: 0, lost: 300 }),
+    cleaned_track: trackDiagnostics({ detected: 0, predicted: 0, lost: 300 }),
+  },
+};
 
 const queryBase = {
   dataUpdatedAt: 1,
@@ -83,6 +275,8 @@ vi.mock("@workspace/api-client-react", () => ({
   }),
   getGetHealthQueryKey: () => ["health"],
   getGetRunQueryKey: (runId: string) => ["run", runId],
+  getGetTrialDiagnosisQueryKey: (runId: string) => [runId, "diagnosis"],
+  getGetProductionTrialTuningSchemaQueryKey: () => ["trial-tuning-schema"],
   getListArtifactsQueryKey: (runId: string) => ["artifacts", runId],
   getListRunsQueryKey: () => ["runs"],
   useListConfigs: () => ({
@@ -91,6 +285,13 @@ vi.mock("@workspace/api-client-react", () => ({
       {
         name: "default.yaml",
         path: "configs/default.yaml",
+        postprocess_enabled: true,
+        follow_cam_enabled: true,
+        exists: { yaml: true },
+      },
+      {
+        name: "alternate.yaml",
+        path: "configs/alternate.yaml",
         postprocess_enabled: true,
         follow_cam_enabled: true,
         exists: { yaml: true },
@@ -108,7 +309,23 @@ vi.mock("@workspace/api-client-react", () => ({
     refetch: healthRefetch,
   }),
   useListRuns: () => ({ ...queryBase, data: runsData, refetch: runsRefetch }),
-  useGetRun: () => ({ ...queryBase, data: runData, refetch: runRefetch }),
+  useGetRun: () => ({
+    ...queryBase,
+    data: runQueryPending || runQueryError ? undefined : runData,
+    isPending: runQueryPending,
+    isError: runQueryError !== null,
+    error: runQueryError,
+    refetch: runRefetch,
+  }),
+  useGetTrialDiagnosis: () => ({
+    ...queryBase,
+    data: diagnosisData,
+    refetch: diagnosisRefetch,
+  }),
+  useGetProductionTrialTuningSchema: () => ({
+    ...queryBase,
+    data: tuningSchemaData,
+  }),
   useListArtifacts: () => ({
     ...queryBase,
     data: artifactsData,
@@ -132,13 +349,16 @@ vi.mock("@workspace/api-client-react", () => ({
     data: auditData,
     refetch: auditRefetch,
   }),
-  useGetConfig: () => ({
-    ...queryBase,
-    data: configData,
-    isPending: configPending,
-    isError: configError !== null,
-    error: configError,
-  }),
+  useGetConfig: (name: string) => {
+    const tuningBase = name === "default.yaml";
+    return {
+      ...queryBase,
+      data: tuningBase ? tuningBaseConfigData : configData,
+      isPending: tuningBase ? false : configPending,
+      isError: tuningBase ? false : configError !== null,
+      error: tuningBase ? null : configError,
+    };
+  },
   useCreateRun: () => ({ isPending: false, mutateAsync: createMutate }),
   useCancelRun: () => ({ isPending: false, mutateAsync: cancelMutate }),
   useDeriveConfig: () => ({ isPending: false, mutateAsync: deriveMutate }),
@@ -330,6 +550,13 @@ async function acceptedTrial(): Promise<ProductionTrialState> {
           audit_review_event_count: 1,
           audit_lost_gap_count: 1,
           quality_gate_status: null,
+          trial_signal_gate_v2: ACCEPTABLE_GATE,
+        },
+        operator_visual_confirmation: {
+          confirmed: true,
+          confirmed_at: NOW,
+          evidence_generation: evidenceGeneration,
+          threshold_profile_sha256: ACCEPTABLE_GATE.threshold_profile.sha256,
         },
       },
     },
@@ -349,6 +576,7 @@ function renderStep(
   const onConfirmedConfigChange = vi.fn(
     (_confirmed: ProductionConfigEvidence) => true,
   );
+  const onReturnToFieldSetup = vi.fn();
   const onUsabilityChange = vi.fn((_usable: boolean) => undefined);
   const props: React.ComponentProps<typeof ProductionTrialStep> = {
     workflowId: "workflow-a",
@@ -360,6 +588,7 @@ function renderStep(
     onTrialChange,
     onPendingConfigChange,
     onConfirmedConfigChange,
+    onReturnToFieldSetup,
     onUsabilityChange,
     ...changes,
   };
@@ -384,6 +613,7 @@ function renderStep(
     onTrialChange,
     onPendingConfigChange,
     onConfirmedConfigChange,
+    onReturnToFieldSetup,
     onUsabilityChange,
   };
 }
@@ -418,14 +648,87 @@ beforeEach(() => {
     isError: false,
     dataUpdatedAt: 2,
   }));
+  diagnosisRefetch.mockReset().mockImplementation(async () => ({
+    data: diagnosisData,
+    isError: false,
+    dataUpdatedAt: 2,
+  }));
   runsData = [];
   runData = undefined;
+  runQueryPending = false;
+  runQueryError = null;
   artifactsData = [];
   artifactBodies = {};
   auditData = undefined;
   configData = undefined;
   configError = null;
   configPending = false;
+  diagnosisData = undefined;
+  tuningSchemaData = {
+    schema_version: "1.0",
+    patch_schema_version: "1.0",
+    controls: [
+      {
+        path: "detector.allowed_labels",
+        section: "detector",
+        kind: "multi_select",
+        options: ["sports ball", "ball"],
+        runtime_impact: "low",
+        description: "Detector labels accepted as a football.",
+        description_zh: "允许作为足球候选的检测类别。",
+      },
+      {
+        path: "detector.confidence_threshold",
+        section: "detector",
+        kind: "number",
+        minimum: 0.01,
+        maximum: 0.9,
+        step: 0.01,
+        runtime_impact: "low",
+        description: "Minimum detector confidence.",
+        description_zh: "检测器最低置信度。",
+      },
+    ],
+    actions: [
+      {
+        action_code: "return_to_field_setup",
+        target_step: "field_setup",
+        reason_code: "field_geometry_requires_new_calibration",
+        affected_paths: [
+          "filtering.roi",
+          "scene_bias.ground_zones",
+          "scene_bias.negative_rois",
+        ],
+        lineage_constraint:
+          "invalidate_trial_and_downstream_then_create_new_calibration_version",
+      },
+    ],
+  };
+  tuningBaseConfigData = {
+    name: "default.yaml",
+    path: "configs/default.yaml",
+    text: "detector:\n  allowed_labels: [sports ball]\n  confidence_threshold: 0.25\n",
+    raw: {
+      detector: {
+        allowed_labels: ["sports ball"],
+        confidence_threshold: 0.25,
+      },
+    },
+    resolved: {
+      detector: {
+        allowed_labels: ["sports ball"],
+        confidence_threshold: 0.25,
+      },
+    },
+    summary: {
+      name: "default.yaml",
+      path: "configs/default.yaml",
+      input_video: SOURCE.path,
+      postprocess_enabled: true,
+      follow_cam_enabled: true,
+      exists: { yaml: true },
+    },
+  };
   vi.spyOn(globalThis.crypto, "randomUUID")
     .mockReturnValueOnce("11111111-1111-4111-8111-111111111111")
     .mockReturnValueOnce("22222222-2222-4222-8222-222222222222")
@@ -433,6 +736,151 @@ beforeEach(() => {
 });
 
 describe("ProductionTrialStep mutation safety", () => {
+  it("locks every request and tuning control while a submission is pending", async () => {
+    const settings = {
+      base_config_name: "default.yaml",
+      start_frame: 0,
+      max_frames: 300,
+      enable_postprocess: true,
+      enable_follow_cam: true,
+      tuning_patch: {},
+    };
+    const submission = await buildProductionTrialSubmission({
+      workflow_id: "workflow-a",
+      source: SOURCE,
+      calibration: CALIBRATION,
+      settings,
+      parent_run_id: null,
+      submission_id: "submission-pending-lock",
+      output_id: "output-pending-lock",
+      generation: 1,
+      created_at: NOW,
+    });
+    const pending = setPendingProductionTrial(
+      createProductionTrialState(settings),
+      submission.pending,
+    );
+    renderStep({ trial: pending });
+
+    expect(screen.getByLabelText("Base configuration")).toBeDisabled();
+    expect(screen.getByLabelText("Start frame")).toBeDisabled();
+    expect(screen.getByLabelText("Frame count")).toBeDisabled();
+    expect(
+      screen.getByLabelText("Clean the ball track after the trial"),
+    ).toBeDisabled();
+    expect(
+      screen.getByLabelText("Generate follow-camera evidence"),
+    ).toBeDisabled();
+    expect(
+      await screen.findByLabelText("detector.confidence_threshold"),
+    ).toBeDisabled();
+    expect(
+      screen.getByRole("button", { name: "Save adjustments" }),
+    ).toBeDisabled();
+    expect(
+      screen.getByRole("button", { name: "Save and rerun" }),
+    ).toBeDisabled();
+    expect(
+      screen.getByRole("button", { name: "Return to field setup" }),
+    ).toBeDisabled();
+    expect(
+      screen.getByRole("button", { name: "Retry as a new trial" }),
+    ).toBeEnabled();
+  });
+
+  it("discards a deferred tuning mutation when a pending submission appears", async () => {
+    const settings = {
+      base_config_name: "default.yaml",
+      start_frame: 0,
+      max_frames: 300,
+      enable_postprocess: true,
+      enable_follow_cam: true,
+      tuning_patch: {},
+    };
+    const initial = createProductionTrialState(settings);
+    const submission = await buildProductionTrialSubmission({
+      workflow_id: "workflow-a",
+      source: SOURCE,
+      calibration: CALIBRATION,
+      settings,
+      parent_run_id: null,
+      submission_id: "submission-deferred-lock",
+      output_id: "output-deferred-lock",
+      generation: 1,
+      created_at: NOW,
+    });
+    const pending = setPendingProductionTrial(initial, submission.pending);
+    const originalDigest = globalThis.crypto.subtle.digest.bind(
+      globalThis.crypto.subtle,
+    );
+    let release!: () => void;
+    const pause = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const digest = vi
+      .spyOn(globalThis.crypto.subtle, "digest")
+      .mockImplementationOnce(async (...args) => {
+        await pause;
+        return originalDigest(...args);
+      });
+    const view = renderStep({ trial: initial });
+    const threshold = await screen.findByLabelText(
+      "detector.confidence_threshold",
+    );
+    await view.user.clear(threshold);
+    await view.user.type(threshold, "0.15");
+    await view.user.click(
+      screen.getByRole("button", { name: "Save adjustments" }),
+    );
+    await waitFor(() => expect(digest).toHaveBeenCalledOnce());
+
+    view.rerenderStep({ trial: pending });
+    release();
+    await act(async () => undefined);
+
+    expect(view.onTrialChange).not.toHaveBeenCalled();
+    digest.mockRestore();
+  });
+
+  it("locks restored base selection before lineage lookup and corrects it from the authoritative latest attempt", async () => {
+    const { state } = await trialWithAttempt("completed");
+    const restored = {
+      ...state,
+      settings: { ...state.settings, base_config_name: "alternate.yaml" },
+    };
+    runQueryPending = true;
+    const view = renderStep({ trial: restored });
+    const select = screen.getByLabelText("Base configuration");
+    expect(select).toBeDisabled();
+    expect(select).toHaveValue("alternate.yaml");
+
+    runQueryPending = false;
+    runData = run("completed", {
+      run_id: state.attempts.at(-1)!.run_id,
+      config_sha256: "b".repeat(64),
+    });
+    view.rerenderStep({});
+
+    await waitFor(() => expect(select).toHaveValue("default.yaml"));
+    expect(view.onTrialChange).toHaveBeenCalledWith(
+      expect.objectContaining({
+        settings: expect.objectContaining({
+          base_config_name: "default.yaml",
+        }),
+      }),
+      restored,
+    );
+  });
+
+  it("keeps a restored base selection locked when lineage lookup fails", async () => {
+    const { state } = await trialWithAttempt("failed");
+    runQueryError = new Error("offline");
+    const { onTrialChange } = renderStep({ trial: state });
+
+    expect(screen.getByLabelText("Base configuration")).toBeDisabled();
+    expect(onTrialChange).not.toHaveBeenCalled();
+  });
+
   it("settles after an active run is restored with a newer server status", async () => {
     const { state } = await trialWithAttempt("queued");
     runData = run("running");
@@ -472,6 +920,7 @@ describe("ProductionTrialStep mutation safety", () => {
           }}
           onPendingConfigChange={() => true}
           onConfirmedConfigChange={() => true}
+          onReturnToFieldSetup={() => undefined}
           onUsabilityChange={() => undefined}
         />
       );
@@ -589,6 +1038,101 @@ describe("ProductionTrialStep mutation safety", () => {
     releaseHealth({ data: { status: "ok", active_run_id: null } });
   });
 
+  it("keeps the original pending request while health is deferred and retry is attempted", async () => {
+    let releaseHealth!: (value: {
+      data: { status: string; active_run_id: null };
+    }) => void;
+    healthRefetch.mockReturnValueOnce(
+      new Promise((resolve) => {
+        releaseHealth = resolve;
+      }),
+    );
+    createMutate.mockResolvedValue(run("queued"));
+    const view = renderStep();
+    await view.user.click(
+      await screen.findByRole("button", { name: "Start bounded trial" }),
+    );
+    await waitFor(() => expect(view.onTrialChange).toHaveBeenCalledOnce());
+    const originalPending = view.onTrialChange.mock.calls[0][0] as
+      | ProductionTrialState
+      | undefined;
+    expect(originalPending?.pending_submission).not.toBeNull();
+
+    view.rerenderStep({ trial: originalPending });
+    const retry = screen.getByRole("button", {
+      name: "Retry as a new trial",
+    });
+    expect(retry).toBeDisabled();
+    await view.user.click(retry);
+    expect(healthRefetch).toHaveBeenCalledOnce();
+    expect(createMutate).not.toHaveBeenCalled();
+
+    releaseHealth({ data: { status: "ok", active_run_id: null } });
+    await waitFor(() => expect(createMutate).toHaveBeenCalledOnce());
+    expect(createMutate).toHaveBeenCalledWith({
+      data: originalPending?.pending_submission?.request,
+    });
+    const pendingWrites = view.onTrialChange.mock.calls
+      .map(([state]) => state as ProductionTrialState)
+      .filter((state) => state.pending_submission);
+    expect(pendingWrites).toHaveLength(1);
+    expect(pendingWrites[0].pending_submission?.submission_id).toBe(
+      originalPending?.pending_submission?.submission_id,
+    );
+  });
+
+  it("invalidates a deferred start after unmount and lets the remounted pending trial retry once", async () => {
+    let releaseOldHealth!: (value: {
+      data: { status: string; active_run_id: null };
+    }) => void;
+    healthRefetch.mockReturnValueOnce(
+      new Promise((resolve) => {
+        releaseOldHealth = resolve;
+      }),
+    );
+    createMutate.mockResolvedValue(run("queued"));
+    const oldOnTrialChange = vi.fn(
+      (_trial: ProductionTrialState, _expected: ProductionTrialState | null) =>
+        true,
+    );
+    const oldView = renderStep({ onTrialChange: oldOnTrialChange });
+    await oldView.user.click(
+      await screen.findByRole("button", { name: "Start bounded trial" }),
+    );
+    await waitFor(() => expect(oldOnTrialChange).toHaveBeenCalledOnce());
+    const durablePending = oldOnTrialChange.mock.calls[0][0] as
+      | ProductionTrialState
+      | undefined;
+    expect(durablePending?.pending_submission).not.toBeNull();
+    oldView.unmount();
+
+    const newOnTrialChange = vi.fn(
+      (_trial: ProductionTrialState, _expected: ProductionTrialState | null) =>
+        true,
+    );
+    const newView = renderStep({
+      trial: durablePending,
+      onTrialChange: newOnTrialChange,
+    });
+    const retry = await screen.findByRole("button", {
+      name: "Retry as a new trial",
+    });
+    await newView.user.dblClick(retry);
+    await waitFor(() => expect(createMutate).toHaveBeenCalledOnce());
+
+    await act(async () => {
+      releaseOldHealth({ data: { status: "ok", active_run_id: null } });
+      await Promise.resolve();
+    });
+    expect(createMutate).toHaveBeenCalledOnce();
+    expect(oldOnTrialChange).toHaveBeenCalledOnce();
+    expect(
+      newOnTrialChange.mock.calls.filter(
+        ([state]) => (state as ProductionTrialState).pending_submission,
+      ),
+    ).toHaveLength(1);
+  });
+
   it("keeps the pending snapshot while the create response is slow", async () => {
     let releaseCreate!: (value: RunRecord) => void;
     createMutate.mockReturnValueOnce(
@@ -605,6 +1149,56 @@ describe("ProductionTrialStep mutation safety", () => {
     expect(persisted.pending_submission).not.toBeNull();
     expect(onTrialChange).toHaveBeenCalledTimes(1);
     releaseCreate(run("queued"));
+  });
+
+  it("does not write back a POST response after unmount and reconciles the durable pending trial on remount", async () => {
+    let releaseCreate!: (value: RunRecord) => void;
+    createMutate.mockReturnValueOnce(
+      new Promise((resolve) => {
+        releaseCreate = resolve;
+      }),
+    );
+    const oldOnTrialChange = vi.fn(
+      (_trial: ProductionTrialState, _expected: ProductionTrialState | null) =>
+        true,
+    );
+    const oldView = renderStep({ onTrialChange: oldOnTrialChange });
+    await oldView.user.click(
+      await screen.findByRole("button", { name: "Start bounded trial" }),
+    );
+    await waitFor(() => expect(createMutate).toHaveBeenCalledOnce());
+    const durablePending = oldOnTrialChange.mock.calls[0][0] as
+      | ProductionTrialState
+      | undefined;
+    expect(durablePending?.pending_submission).not.toBeNull();
+    oldView.unmount();
+
+    await act(async () => {
+      releaseCreate(run("queued"));
+      await Promise.resolve();
+    });
+    expect(oldOnTrialChange).toHaveBeenCalledOnce();
+
+    runsData = [recoveredRun(durablePending!.pending_submission!, "queued")];
+    const newOnTrialChange = vi.fn(
+      (_trial: ProductionTrialState, _expected: ProductionTrialState | null) =>
+        true,
+    );
+    renderStep({
+      trial: durablePending,
+      onTrialChange: newOnTrialChange,
+    });
+    await waitFor(() =>
+      expect(newOnTrialChange).toHaveBeenCalledWith(
+        expect.objectContaining({
+          pending_submission: null,
+          active_run_id: `production_trial_${durablePending!.pending_submission!.output_id}`,
+        }),
+        durablePending,
+      ),
+    );
+    expect(createMutate).toHaveBeenCalledOnce();
+    expect(oldOnTrialChange).toHaveBeenCalledOnce();
   });
 
   it("ignores a stale create response after the workflow context changes", async () => {
@@ -769,9 +1363,11 @@ describe("ProductionTrialStep mutation safety", () => {
     createMutate.mockResolvedValue(run("queued"));
     const { user, onTrialChange } = renderStep({ trial: pending });
     expect(createMutate).not.toHaveBeenCalled();
-    await user.click(
-      screen.getByRole("button", { name: "Retry as a new trial" }),
-    );
+    const retry = screen.getByRole("button", {
+      name: "Retry as a new trial",
+    });
+    await waitFor(() => expect(retry).toBeEnabled());
+    await user.dblClick(retry);
     await waitFor(() => expect(createMutate).toHaveBeenCalledOnce());
     const pendingWrites = onTrialChange.mock.calls
       .map(([state]) => state as ProductionTrialState)
@@ -829,6 +1425,13 @@ function componentTrackCsv(detected: number, predicted: number, lost: number) {
 }
 
 function installReadableEvidence() {
+  diagnosisData = {
+    schema_version: "1.0",
+    run_id: "trial-1",
+    legacy_quality_gate_status: "warn",
+    trial_signal_gate_v2: ACCEPTABLE_GATE,
+    tuning_schema_version: "1.0",
+  };
   artifactsData = [
     {
       name: "run_manifest.json",
@@ -941,7 +1544,9 @@ function installReadableEvidence() {
         lost_ratio: 2 / 15,
       },
       quality_gate: { status: "warn" },
+      trial_signal_gate_v2: ACCEPTABLE_GATE,
     },
+    trial_signal_gate_v2: ACCEPTABLE_GATE,
   });
   artifactBodies["metrics_report.json"] = {
     schema_version: "1.0",
@@ -951,7 +1556,35 @@ function installReadableEvidence() {
       cleaned: (runData.stats as Record<string, unknown>).cleaned,
     },
     quality_gate: (runData.stats as Record<string, unknown>).quality_gate,
+    trial_signal_gate_v2: ACCEPTABLE_GATE,
   };
+}
+
+function installTrialGate(gate: ProductionTrialSignalGateV2 | null) {
+  diagnosisData = gate
+    ? {
+        schema_version: "1.0",
+        run_id: "trial-1",
+        legacy_quality_gate_status: "warn",
+        trial_signal_gate_v2: gate,
+        tuning_schema_version: "1.0",
+      }
+    : undefined;
+  if (!runData) return;
+  const stats = runData.stats as Record<string, unknown>;
+  const metrics = artifactBodies["metrics_report.json"] as Record<
+    string,
+    unknown
+  >;
+  if (gate) {
+    stats.trial_signal_gate_v2 = gate;
+    runData.trial_signal_gate_v2 = gate;
+    metrics.trial_signal_gate_v2 = gate;
+  } else {
+    delete stats.trial_signal_gate_v2;
+    delete runData.trial_signal_gate_v2;
+    delete metrics.trial_signal_gate_v2;
+  }
 }
 
 async function makeLiveEvidenceReady() {
@@ -970,7 +1603,9 @@ describe("ProductionTrialStep evidence and configuration", () => {
     installReadableEvidence();
     const { user, onTrialChange } = renderStep({ trial: state });
     expect(
-      artifactQueryRequests.map(({ name, request }) => ({ name, request })),
+      artifactQueryRequests
+        .slice(0, 4)
+        .map(({ name, request }) => ({ name, request })),
     ).toEqual([
       {
         name: "run_manifest.json",
@@ -1017,6 +1652,14 @@ describe("ProductionTrialStep evidence and configuration", () => {
       screen.queryByRole("button", { name: "Accept this trial" }),
     ).not.toBeInTheDocument();
     fireEvent.canPlay(video);
+    expect(
+      screen.queryByRole("button", { name: "Accept this trial" }),
+    ).not.toBeInTheDocument();
+    await user.click(
+      await screen.findByLabelText(
+        /I visually reviewed this evidence and confirm/i,
+      ),
+    );
     const accept = await screen.findByRole("button", {
       name: "Accept this trial",
     });
@@ -1090,6 +1733,9 @@ describe("ProductionTrialStep evidence and configuration", () => {
     });
     const { user, onTrialChange } = renderStep({ trial: state });
     await makeLiveEvidenceReady();
+    await user.click(
+      screen.getByLabelText(/I visually reviewed this evidence and confirm/i),
+    );
     const accept = screen.getByRole("button", { name: "Accept this trial" });
     await user.click(accept);
     await waitFor(() => expect(accept).toBeDisabled());
@@ -1108,6 +1754,9 @@ describe("ProductionTrialStep evidence and configuration", () => {
     installReadableEvidence();
     const { user, onTrialChange } = renderStep({ trial: state });
     await makeLiveEvidenceReady();
+    await user.click(
+      screen.getByLabelText(/I visually reviewed this evidence and confirm/i),
+    );
     artifactBodies["ball_track.csv"] = String(
       artifactBodies["ball_track.csv"],
     ).replace("0,1,2,0.9,Detected", "0,2,2,0.8,Detected");
@@ -1137,14 +1786,393 @@ describe("ProductionTrialStep evidence and configuration", () => {
     ).not.toBeInTheDocument();
   });
 
+  it("shows an all-lost diagnosis and offers bounded adjustment instead of acceptance", async () => {
+    const { state } = await trialWithAttempt("completed");
+    installReadableEvidence();
+    installTrialGate(ALL_LOST_GATE);
+    renderStep({ trial: state });
+    await makeLiveEvidenceReady();
+
+    expect(screen.getByTestId("trial-diagnosis-code")).toHaveTextContent(
+      "no_raw_candidates",
+    );
+    expect(
+      screen.getByText("No raw ball candidates were found."),
+    ).toBeVisible();
+    expect(screen.getByText("Raw candidates")).toBeVisible();
+    expect(screen.getByTestId("trial-debug-status-counts")).toHaveTextContent(
+      /Detected frames \(debug\)[\s\S]*0 · Collected[\s\S]*Lost frames \(debug\)[\s\S]*300 · Collected/,
+    );
+    expect(screen.getAllByText("0 · Collected").length).toBeGreaterThan(0);
+    expect(
+      screen.queryByRole("button", { name: "Accept this trial" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Save and rerun" }),
+    ).toBeVisible();
+  });
+
+  it("shows the model-to-class rejection boundary when every candidate class is rejected", async () => {
+    const { state } = await trialWithAttempt("completed");
+    installReadableEvidence();
+    const filteringReasons = {
+      "class_not_allowed:person": 12,
+      confidence_below_min: 7,
+      width_out_of_range: 6,
+      height_out_of_range: 5,
+      aspect_ratio_too_small: 4,
+      aspect_ratio_too_large: 3,
+      outside_filtering_roi: 2,
+      "negative_zone:bench": 1,
+      outside_ground_and_positive_zones: 1,
+    };
+    const classRejectedGate: ProductionTrialSignalGateV2 = {
+      ...ALL_LOST_GATE,
+      reason_codes: ["all_candidates_class_rejected", "zero_tracklet"],
+      failure_classification: {
+        code: "all_candidates_class_rejected",
+        severity: "blocking",
+        summary: "Backend summary",
+        recommended_action: "Backend action",
+      },
+      stage_counts: {
+        ...ALL_LOST_GATE.stage_counts!,
+        raw_candidates: { value: 12, status: "collected" },
+        class_mapped_candidates: { value: 0, status: "collected" },
+        rejection_reasons: filteringReasons,
+      },
+      diagnostics: {
+        ...ALL_LOST_GATE.diagnostics,
+        rejection_reasons: {
+          status: "collected",
+          value: filteringReasons,
+        },
+      },
+    };
+    installTrialGate(classRejectedGate);
+    renderStep({ trial: state });
+
+    expect(await screen.findByTestId("trial-diagnosis-code")).toHaveTextContent(
+      "all_candidates_class_rejected",
+    );
+    expect(screen.getByTestId("trial-detection-stage-chain")).toHaveTextContent(
+      /Raw candidates[\s\S]*12[\s\S]*Class-mapped candidates[\s\S]*0/,
+    );
+    expect(
+      screen.getByTestId("trial-stage-rejection-reasons"),
+    ).toHaveTextContent("Class not allowed: person: 12");
+    const reasons = screen.getByTestId("trial-stage-rejection-reasons");
+    expect(reasons).toHaveTextContent(
+      "Confidence below the configured minimum",
+    );
+    expect(reasons).toHaveTextContent(
+      "Candidate width is outside the allowed range",
+    );
+    expect(reasons).toHaveTextContent(
+      "Candidate height is outside the allowed range",
+    );
+    expect(reasons).toHaveTextContent("Candidate aspect ratio is too small");
+    expect(reasons).toHaveTextContent("Candidate aspect ratio is too large");
+    expect(reasons).toHaveTextContent(
+      "Candidate is outside the filtering area",
+    );
+    expect(reasons).toHaveTextContent(
+      "Candidate is inside an excluded zone: bench",
+    );
+    expect(reasons).toHaveTextContent(
+      "Candidate is outside the field and every positive zone",
+    );
+    expect(reasons).toHaveTextContent("(negative_zone:bench)");
+  });
+
+  it("maps real filtering codes to friendly English and Chinese labels", () => {
+    const codes = [
+      "confidence_below_min",
+      "width_out_of_range",
+      "height_out_of_range",
+      "aspect_ratio_too_small",
+      "aspect_ratio_too_large",
+      "outside_filtering_roi",
+      "negative_zone:bench",
+      "outside_ground_and_positive_zones",
+    ];
+    for (const code of codes) {
+      expect(
+        translations.en.production.trialDiagnosisRejectionReason(code),
+      ).not.toBe(code);
+      expect(
+        translations.zh.production.trialDiagnosisRejectionReason(code),
+      ).not.toBe(code);
+    }
+    expect(
+      translations.en.production.trialDiagnosisReason(
+        "cleaned_frame_count_mismatch",
+      ),
+    ).toContain("Cleaned-track");
+    expect(
+      translations.zh.production.trialDiagnosisReason(
+        "cleaned_frame_count_mismatch",
+      ),
+    ).toContain("清洗后轨迹");
+  });
+
+  it("renders missing budgets and follow-camera motion as not collected instead of zero", async () => {
+    const { state } = await trialWithAttempt("completed");
+    installReadableEvidence();
+    const missingDiagnosticsGate: ProductionTrialSignalGateV2 = {
+      ...ALL_LOST_GATE,
+      status: "insufficient_evidence",
+      reason_codes: [
+        "ai_review_trigger_budget_not_collected",
+        "event_candidate_budget_not_collected",
+        "follow_cam_motion_not_collected",
+      ],
+      failure_classification: {
+        code: "insufficient_evidence",
+        severity: "blocking",
+        summary: "Backend summary",
+        recommended_action: "Backend action",
+      },
+      diagnostics: {
+        ...ALL_LOST_GATE.diagnostics,
+        ai_review_trigger_count: notCollected(),
+        ai_review_triggers_per_100_frames: notCollected(),
+        event_candidate_count: notCollected(),
+        event_candidates_per_100_frames: notCollected(),
+        follow_cam: {
+          status: "not_collected",
+          max_pan_step_px: notCollected(),
+          max_pan_accel_px: notCollected(),
+          max_zoom_step_ratio: notCollected(),
+        },
+      },
+    };
+    installTrialGate(missingDiagnosticsGate);
+    renderStep({ trial: state });
+
+    const diagnostics = await screen.findByTestId("trial-typed-diagnostics");
+    expect(diagnostics).toHaveTextContent("AI review triggers / 100 frames");
+    expect(diagnostics).toHaveTextContent("Follow-camera maximum pan step");
+    expect(diagnostics).toHaveTextContent("— · Not collected");
+    expect(diagnostics).not.toHaveTextContent("0 · Not collected");
+  });
+
+  it("renders operational and stage reconciliation reasons as readable prose with raw codes", async () => {
+    const { state } = await trialWithAttempt("completed");
+    installReadableEvidence();
+    const reconciliationGate: ProductionTrialSignalGateV2 = {
+      ...ALL_LOST_GATE,
+      status: "insufficient_evidence",
+      coverage_complete: false,
+      reason_codes: [
+        "trial_option_conflict:postprocess",
+        "frame_exception",
+        "cleaned_frame_count_mismatch",
+        "stage_counter_not_collected:lost_frames",
+        "filtered_candidate_count_exceeds_class_mapped",
+        "rejection_reasons_not_collected",
+        "raw_audit_tracklet_count_not_collected",
+      ],
+      failure_classification: {
+        code: "insufficient_evidence",
+        severity: "blocking",
+        summary: "Backend summary",
+        recommended_action: "Backend action",
+      },
+      stage_counts: {
+        ...ALL_LOST_GATE.stage_counts!,
+        coverage_status: "invalid",
+        lost_frames: { value: null, status: "not_collected" },
+        reconciliation: {
+          status: "mismatch",
+          reason_codes: ["debug_frame_exception:1"],
+        },
+      },
+    };
+    installTrialGate(reconciliationGate);
+    renderStep({ trial: state });
+
+    const diagnosis = await screen.findByTestId("trial-diagnosis");
+    expect(diagnosis).toHaveTextContent(
+      "The saved trial option conflicts with the executed module state: post-processing.",
+    );
+    expect(diagnosis).toHaveTextContent(
+      "At least one debug frame ended with an execution exception.",
+    );
+    expect(diagnosis).toHaveTextContent(
+      "Cleaned-track and evaluated-frame counts disagree.",
+    );
+    expect(diagnosis).toHaveTextContent(
+      "Required stage counter was not collected: debug Lost frames.",
+    );
+    expect(diagnosis).toHaveTextContent(
+      "Filtered candidates exceed class-mapped candidates.",
+    );
+    expect(diagnosis).toHaveTextContent(
+      "Stage rejection-reason counters were not collected.",
+    );
+    expect(diagnosis).toHaveTextContent(
+      "The raw-track tracklet count was not collected from the full ball audit.",
+    );
+    expect(diagnosis).toHaveTextContent("(trial_option_conflict:postprocess)");
+  });
+
+  it("exposes the versioned field-setup action and invokes Step 2 navigation", async () => {
+    const { user, onReturnToFieldSetup } = renderStep();
+
+    const action = await screen.findByTestId("trial-field-setup-action");
+    expect(action).toHaveTextContent(
+      "invalidates this trial and every downstream result",
+    );
+    await user.click(
+      screen.getByRole("button", { name: "Return to field setup" }),
+    );
+    expect(onReturnToFieldSetup).toHaveBeenCalledTimes(1);
+  });
+
+  it("saves only selected backend-approved detector labels", async () => {
+    const { user, onTrialChange } = renderStep();
+    const labels = await screen.findByLabelText("detector.allowed_labels");
+
+    await user.selectOptions(labels, ["sports ball", "ball"]);
+    await user.click(screen.getByRole("button", { name: "Save adjustments" }));
+
+    await waitFor(() => expect(onTrialChange).toHaveBeenCalled());
+    const next = onTrialChange.mock.calls.at(-1)?.[0] as ProductionTrialState;
+    expect(next.settings.tuning_patch).toMatchObject({
+      detector: { allowed_labels: ["sports ball", "ball"] },
+      metadata: {
+        production_tuning: {
+          values: {
+            "detector.allowed_labels": ["sports ball", "ball"],
+          },
+        },
+      },
+    });
+    expect(next.settings.tuning_patch).not.toHaveProperty(
+      "detector.model_path",
+    );
+  });
+
+  it("keeps acceptance blocked when the v2 diagnosis gate is missing", async () => {
+    const { state } = await trialWithAttempt("completed");
+    installReadableEvidence();
+    installTrialGate(null);
+    renderStep({ trial: state });
+    await makeLiveEvidenceReady();
+
+    expect(
+      screen.getByText(
+        "The trial diagnosis is unavailable, so acceptance remains blocked.",
+      ),
+    ).toBeVisible();
+    expect(
+      screen.queryByLabelText(/I visually reviewed this evidence/i),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Accept this trial" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("localizes blocking diagnosis prose and evidence states in Chinese", async () => {
+    localStorage.setItem("app-language", "zh");
+    const { state } = await trialWithAttempt("completed");
+    installReadableEvidence();
+    const insufficientGate: ProductionTrialSignalGateV2 = {
+      ...ALL_LOST_GATE,
+      status: "insufficient_evidence",
+      trajectory_acceptable: true,
+      signal_acceptable: true,
+      acceptance_metrics_complete: true,
+      reason_codes: ["evidence_not_collected:tight_crop"],
+      failure_classification: {
+        code: "insufficient_evidence",
+        severity: "blocking",
+        summary: "Backend English summary must not be shown.",
+        recommended_action: "Backend English action must not be shown.",
+      },
+      evidence: {
+        ...ALL_LOST_GATE.evidence,
+        tight_crop: "not_collected",
+      },
+    };
+    installTrialGate(insufficientGate);
+    renderStep({ trial: state });
+
+    expect(
+      screen.getByText("必需的证据或指标尚不完整。", { exact: false }),
+    ).toBeVisible();
+    expect(screen.getByText(/补齐列出的证据或指标后重新检查/)).toBeVisible();
+    expect(screen.getByText("局部裁剪证据")).toBeVisible();
+    expect(screen.getByText("未采集")).toBeVisible();
+    expect(
+      screen.queryByText(/Backend English (summary|action)/),
+    ).not.toBeInTheDocument();
+  });
+
+  it("saves only schema-approved tuning values as a versioned patch before rerun", async () => {
+    createMutate.mockResolvedValue(run("queued"));
+    const { user, onTrialChange } = renderStep();
+    const threshold = await screen.findByLabelText(
+      "detector.confidence_threshold",
+    );
+    expect(threshold).toHaveValue(0.25);
+    await user.clear(threshold);
+    await user.type(threshold, "0.15");
+    await user.click(screen.getByRole("button", { name: "Save and rerun" }));
+
+    await waitFor(() => expect(createMutate).toHaveBeenCalledOnce());
+    const saved = onTrialChange.mock.calls
+      .map(([next]) => next as ProductionTrialState)
+      .find(
+        (next) =>
+          (next.settings.tuning_patch.detector as Record<string, unknown>)
+            ?.confidence_threshold === 0.15,
+      );
+    expect(saved).toBeDefined();
+    expect(saved?.settings.tuning_patch).toMatchObject({
+      detector: { confidence_threshold: 0.15 },
+      metadata: {
+        production_tuning: {
+          schema_version: "1.0",
+          values: { "detector.confidence_threshold": 0.15 },
+        },
+      },
+    });
+    expect(createMutate.mock.calls[0][0].data.config_patch).toMatchObject({
+      detector: { confidence_threshold: 0.15 },
+      metadata: { production_tuning: { schema_version: "1.0" } },
+    });
+  });
+
+  it("rejects a tuning value outside the backend-approved range", async () => {
+    const { user, onTrialChange } = renderStep();
+    const threshold = await screen.findByLabelText(
+      "detector.confidence_threshold",
+    );
+    await user.clear(threshold);
+    await user.type(threshold, "0.95");
+    await user.click(screen.getByRole("button", { name: "Save adjustments" }));
+
+    expect(
+      await screen.findByText(/outside the approved range/i),
+    ).toBeVisible();
+    expect(onTrialChange).not.toHaveBeenCalled();
+    expect(createMutate).not.toHaveBeenCalled();
+  });
+
   it("localizes trial status, quality labels, evidence reasons, and actions in Chinese", async () => {
     localStorage.setItem("app-language", "zh");
     const { state } = await trialWithAttempt("completed");
     installReadableEvidence();
-    renderStep({ trial: state });
+    const { user } = renderStep({ trial: state });
     expect(screen.getByTestId("trial-run-status")).toHaveTextContent("已完成");
     await makeLiveEvidenceReady();
     expect(screen.getByText(/系统识别:/)).toBeVisible();
+    expect(
+      screen.queryByRole("button", { name: "接受本次试跑" }),
+    ).not.toBeInTheDocument();
+    await user.click(screen.getByLabelText(/我已目视检查本次证据/));
     expect(screen.getByRole("button", { name: "接受本次试跑" })).toBeVisible();
   });
 

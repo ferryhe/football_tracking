@@ -79,6 +79,81 @@ class ExportOpenApiTests(unittest.TestCase):
         for field in ("camera_motion_event_id", "camera_motion_severity"):
             self.assertIn(field, zod_action)
 
+    def test_openapi_exposes_fail_closed_trial_diagnosis_and_tuning_contracts(self) -> None:
+        document = build_openapi_document()
+        paths = document["paths"]
+
+        self.assertIn("/runs/{run_id}/trial-diagnosis", paths)
+        self.assertIn("/production-trials/tuning-schema", paths)
+        diagnosis = document["components"]["schemas"]["TrialDiagnosisResponse"]
+        self.assertEqual(
+            "#/components/schemas/TrialSignalGateV2",
+            diagnosis["properties"]["trial_signal_gate_v2"]["$ref"],
+        )
+        gate = document["components"]["schemas"]["TrialSignalGateV2"]
+        for field in (
+            "coverage_complete",
+            "evidence_available",
+            "quality_acceptable",
+            "operator_confirmation_required",
+            "reason_codes",
+            "failure_classification",
+            "stage_counts",
+            "threshold_profile",
+            "diagnostics",
+        ):
+            self.assertIn(field, gate["properties"])
+        stages = document["components"]["schemas"]["TrialDetectionStages"]
+        for field in ("detected_frames", "predicted_frames", "lost_frames"):
+            self.assertIn(field, stages["properties"])
+            self.assertIn(field, stages["required"])
+        failure = document["components"]["schemas"]["TrialFailureClassification"]
+        self.assertIn("no_raw_candidates", failure["properties"]["code"]["enum"])
+        self.assertIn("all_candidates_class_rejected", failure["properties"]["code"]["enum"])
+        self.assertIn("acceptable", failure["properties"]["code"]["enum"])
+        tuning = document["components"]["schemas"]["TrialTuningControl"]
+        self.assertFalse(tuning.get("additionalProperties", True))
+        self.assertIn("multi_select", tuning["properties"]["kind"]["enum"])
+        for field in ("minimum", "maximum", "step", "options", "description", "description_zh"):
+            self.assertIn(field, tuning["properties"])
+        tuning_schema = document["components"]["schemas"]["TrialTuningSchemaResponse"]
+        self.assertIn("actions", tuning_schema["properties"])
+        action = document["components"]["schemas"]["TrialTuningAction"]
+        self.assertEqual(
+            "return_to_field_setup",
+            action["properties"]["action_code"]["const"],
+        )
+        run_record = document["components"]["schemas"]["RunRecord"]
+        self.assertEqual(
+            "#/components/schemas/TrialSignalGateV2",
+            run_record["properties"]["trial_signal_gate_v2"]["anyOf"][0]["$ref"],
+        )
+        self.assertIn("config_sha256", run_record["properties"])
+
+    def test_generated_clients_expose_trial_diagnosis_and_tuning_contracts(self) -> None:
+        react_api = Path("lib/api-client-react/src/generated/api.ts").read_text(encoding="utf-8")
+        react_schemas = Path("lib/api-client-react/src/generated/api.schemas.ts").read_text(encoding="utf-8")
+        zod_api = Path("lib/api-zod/src/generated/api.ts").read_text(encoding="utf-8")
+
+        for operation in ("getTrialDiagnosis", "getProductionTrialTuningSchema"):
+            self.assertIn(operation, react_api)
+        for schema in (
+            "TrialDiagnosisResponse",
+            "TrialFailureClassification",
+            "TrialSignalGateV2",
+            "TrialGateDiagnostics",
+            "TrialNumericObservation",
+            "TrialTuningControl",
+            "TrialTuningAction",
+            "TrialTuningSchemaResponse",
+        ):
+            self.assertIn(schema, react_schemas)
+        for field in ("detected_frames", "predicted_frames", "lost_frames"):
+            self.assertIn(f"{field}: TrialCollectedCount", react_schemas)
+            self.assertIn(field, zod_api)
+        self.assertIn("getTrialDiagnosisResponse", zod_api)
+        self.assertIn("getProductionTrialTuningSchemaResponse", zod_api)
+
     def test_generated_clients_expose_highlight_boundary_contracts(self) -> None:
         react_schemas = Path("lib/api-client-react/src/generated/api.schemas.ts").read_text(encoding="utf-8")
         zod_api = Path("lib/api-zod/src/generated/api.ts").read_text(encoding="utf-8")
