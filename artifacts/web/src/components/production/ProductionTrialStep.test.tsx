@@ -55,6 +55,7 @@ const artifactQueryRequests: Array<{
   request: Record<string, unknown> | undefined;
 }> = [];
 const auditRefetch = vi.fn();
+const detectorControllerRender = vi.hoisted(() => vi.fn());
 let runsData: RunRecord[] = [];
 let runData: RunRecord | undefined;
 let runQueryPending = false;
@@ -364,6 +365,13 @@ vi.mock("@workspace/api-client-react", () => ({
   useDeriveConfig: () => ({ isPending: false, mutateAsync: deriveMutate }),
 }));
 
+vi.mock("./ProductionDetectorProbeController", () => ({
+  ProductionDetectorProbeController: (props: unknown) => {
+    detectorControllerRender(props);
+    return <div data-testid="detector-probe-controller" />;
+  },
+}));
+
 import { ProductionTrialStep } from "./ProductionTrialStep";
 
 const SOURCE: SourceSignature = {
@@ -653,6 +661,7 @@ beforeEach(() => {
     isError: false,
     dataUpdatedAt: 2,
   }));
+  detectorControllerRender.mockReset();
   runsData = [];
   runData = undefined;
   runQueryPending = false;
@@ -1810,6 +1819,11 @@ describe("ProductionTrialStep evidence and configuration", () => {
     expect(
       screen.getByRole("button", { name: "Save and rerun" }),
     ).toBeVisible();
+    expect(screen.getByTestId("detector-probe-controller")).toBeVisible();
+    expect(detectorControllerRender).toHaveBeenLastCalledWith({
+      workflowId: "workflow-a",
+      parentTrialId: "trial-1",
+    });
   });
 
   it("shows the model-to-class rejection boundary when every candidate class is rejected", async () => {
@@ -1883,6 +1897,10 @@ describe("ProductionTrialStep evidence and configuration", () => {
       "Candidate is outside the field and every positive zone",
     );
     expect(reasons).toHaveTextContent("(negative_zone:bench)");
+    expect(detectorControllerRender).toHaveBeenLastCalledWith({
+      workflowId: "workflow-a",
+      parentTrialId: "trial-1",
+    });
   });
 
   it("maps real filtering codes to friendly English and Chinese labels", () => {

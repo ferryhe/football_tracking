@@ -94,6 +94,15 @@ from football_tracking.config_lineage import (
     load_config_lineage_reconfirmation,
     reconfirm_config_lineage,
 )
+from football_tracking.detector_development import DetectorDevelopmentService
+from football_tracking.detector_development_common import (
+    DetectorDevelopmentError,
+    canonical_sha256,
+    json_object_from_bytes,
+    read_regular_bytes,
+    require_safe_id,
+    require_sha256,
+)
 from football_tracking.events import compact_event_candidate_summary
 from football_tracking.final_artifact_manifest import finalize_ai_candidate
 from football_tracking.follow_cam import FollowCamGenerator
@@ -164,6 +173,7 @@ _MAX_READY_BROADCAST_DELIVERY_CACHE_ENTRIES = 2
 _READY_BROADCAST_COPY_CHUNK_BYTES = 1024 * 1024
 _READY_BROADCAST_STRONG_OUTPUT_ROOTS = frozenset({"broadcast_generations", "broadcast_status"})
 _ReadyIdentityToken = tuple[int, int, int, int, int, int]
+_MAX_DETECTOR_CONTRACT_BYTES = 32 * 1024 * 1024
 
 _CONFIRMED_CONFIG_CHANGED_AFTER_CONFIRMATION = "confirmed_config_changed_after_confirmation"
 _CONFIG_LINEAGE_BLOCKERS = frozenset(
@@ -559,6 +569,8 @@ class ApiService:
         self.service_lease_dir = repo_root / "data" / "service_leases"
         self.generated_config_dir = self.config_dir / "generated"
         self._lock = threading.Lock()
+        self._detector_development_lock = threading.Lock()
+        self._detector_development: DetectorDevelopmentService | None = None
         self._instance_id = uuid4().hex
         self._service_lease_path = self.service_lease_dir / f"{self._instance_id}.lock"
         self._service_lease_handle = self._acquire_service_lease()
@@ -607,6 +619,11 @@ class ApiService:
             for cancel_event in self._cancel_events.values():
                 cancel_event.set()
             registered_threads = list(self._active_threads.values())
+        with self._detector_development_lock:
+            detector_development = self._detector_development
+            self._detector_development = None
+        if detector_development is not None:
+            detector_development.close()
         current_thread = threading.current_thread()
         for thread in registered_threads:
             if thread is not current_thread and thread.is_alive():
@@ -746,6 +763,506 @@ class ApiService:
             "config_count": len(self.list_configs()),
             "run_count": len(runs),
         }
+
+    def list_detector_models(self) -> dict[str, Any]:
+        return self._detector_development_service().list_models()
+
+    def import_detector_model(self, request: dict[str, Any]) -> dict[str, Any]:
+        return self._detector_development_service().import_model(request)
+
+    def create_detector_probe(self, request: dict[str, Any]) -> dict[str, Any]:
+        """Resolve all probe authority from one completed production-trial record."""
+
+        allowed_request_fields = {
+            "parent_trial_id",
+            "profile_ids",
+            "frame_indices",
+            "top_k",
+            "retry_from_job_id",
+        }
+        unexpected_fields = sorted(set(request) - allowed_request_fields)
+        if unexpected_fields:
+            raise DetectorDevelopmentError(
+                "forged_probe_authority",
+                "Public detector probe requests cannot provide source, contract, config, or runtime authority",
+                status_code=400,
+            )
+        if request.get("top_k", 5) != 5:
+            raise DetectorDevelopmentError(
+                "invalid_top_k", "Detector probe top_k is fixed at 5", status_code=400
+            )
+        parent_trial_id = require_safe_id(request.get("parent_trial_id"), "parent_trial_id")
+        try:
+            parent = self.get_run(parent_trial_id)
+        except KeyError:
+            raise
+        if parent.get("status") != "completed":
+            raise DetectorDevelopmentError(
+                "parent_trial_not_completed",
+                "Detector probes require a completed parent production trial",
+                status_code=409,
+            )
+        if parent.get("source") != "api":
+            raise DetectorDevelopmentError(
+                "invalid_parent_trial_source",
+                "Detector probes require an API-owned production trial",
+                status_code=400,
+            )
+        note = self._machine_run_note(parent.get("notes"))
+        if not isinstance(note, dict) or note.get("purpose") != "production_trial":
+            raise DetectorDevelopmentError(
+                "invalid_parent_trial_purpose",
+                "Detector probes require a production_trial parent",
+                status_code=400,
+            )
+        try:
+            self._validate_production_trial_note_contract(note)
+        except ValueError as exc:
+            raise DetectorDevelopmentError(
+                "invalid_parent_trial_lineage",
+                "The parent production trial lineage is incomplete",
+                status_code=409,
+            ) from exc
+        if parent_trial_id != f"production_trial_{note['output_id']}":
+            raise DetectorDevelopmentError(
+                "parent_trial_identity_mismatch",
+                "The parent production trial ID does not match its immutable lineage",
+                status_code=409,
+            )
+
+        source_path = self._detector_probe_source_path(parent)
+        config_snapshot = self._detector_probe_config_snapshot(parent, note, source_path)
+        base_config_sha256, base_config_path = self._detector_probe_base_config_binding(
+            config_snapshot.raw
+        )
+        tuning_patch_binding, tuning_patch_sha256 = self._detector_probe_tuning_binding(
+            config_snapshot.raw
+        )
+        output_dir = self._detector_probe_output_dir(parent)
+        contract_path = self._detector_probe_contract_path(output_dir)
+        try:
+            contract_bytes, contract_sha256 = read_regular_bytes(
+                contract_path,
+                "production trial tracking contract",
+                max_bytes=_MAX_DETECTOR_CONTRACT_BYTES,
+                trusted_root=output_dir,
+            )
+            raw_contract = json_object_from_bytes(
+                contract_bytes, "production trial tracking contract"
+            )
+            raw_summary = raw_contract.get("summary")
+            contract = normalize_tracking_contract_payload(
+                raw_contract,
+                path=contract_path,
+            )
+        except (DetectorDevelopmentError, OSError, ValueError) as exc:
+            raise DetectorDevelopmentError(
+                "invalid_parent_tracking_contract",
+                "The parent production trial tracking contract is unavailable or invalid",
+                status_code=409,
+            ) from exc
+        source_binding = contract.get("source")
+        summary = contract.get("summary")
+        if (
+            contract.get("schema_version") != "2.0"
+            or not isinstance(source_binding, dict)
+            or not isinstance(summary, dict)
+            or summary.get("status") != "ok"
+        ):
+            raise DetectorDevelopmentError(
+                "invalid_parent_tracking_contract",
+                "The parent production trial tracking contract is not a successful V2 contract",
+                status_code=409,
+            )
+        source_sha256 = require_sha256(
+            source_binding.get("video_sha256"), "tracking contract source video_sha256"
+        )
+        source_signature = self._detector_probe_source_signature(config_snapshot.raw)
+        try:
+            source_stat = source_path.stat()
+        except OSError as exc:
+            raise DetectorDevelopmentError(
+                "parent_source_unavailable",
+                "The parent production trial source is unavailable",
+                status_code=409,
+            ) from exc
+        if (
+            Path(source_signature["path"]).resolve() != source_path
+            or source_signature["size_bytes"] != source_stat.st_size
+        ):
+            raise DetectorDevelopmentError(
+                "parent_source_signature_mismatch",
+                "The parent production trial source signature is stale",
+                status_code=409,
+            )
+
+        contract_frames = contract.get("frames")
+        if not isinstance(contract_frames, list):
+            raise DetectorDevelopmentError(
+                "invalid_parent_tracking_contract",
+                "The parent tracking contract has no authoritative frame set",
+                status_code=409,
+            )
+        authoritative_frames: list[int] = []
+        for item in contract_frames:
+            frame_index = item.get("frame_index") if isinstance(item, dict) else None
+            if isinstance(frame_index, bool) or not isinstance(frame_index, int) or frame_index < 0:
+                raise DetectorDevelopmentError(
+                    "invalid_parent_tracking_contract",
+                    "The parent tracking contract frame set is invalid",
+                    status_code=409,
+                )
+            authoritative_frames.append(frame_index)
+        expected_trial_frames = list(
+            range(note["start_frame"], note["start_frame"] + note["max_frames"])
+        )
+        if (
+            not authoritative_frames
+            or authoritative_frames != expected_trial_frames
+            or len(set(authoritative_frames)) != len(authoritative_frames)
+            or not isinstance(raw_summary, dict)
+            or raw_summary.get("frame_count") != note["max_frames"]
+        ):
+            raise DetectorDevelopmentError(
+                "invalid_parent_tracking_contract",
+                "The parent tracking contract does not exactly bind the production trial frame window",
+                status_code=409,
+            )
+        requested_frames = request.get("frame_indices")
+        if requested_frames is None:
+            frame_indices = self._default_detector_probe_frames(authoritative_frames)
+        else:
+            frame_indices = list(requested_frames)
+            if not set(frame_indices).issubset(authoritative_frames):
+                raise DetectorDevelopmentError(
+                    "probe_frames_outside_parent_trial",
+                    "Detector probe frames must come from the authoritative parent trial",
+                    status_code=400,
+                )
+
+        try:
+            self._verify_materialized_config_snapshot(config_snapshot)
+        except ValueError as exc:
+            raise DetectorDevelopmentError(
+                "parent_config_changed",
+                "The parent production trial configuration changed during probe creation",
+                status_code=409,
+            ) from exc
+        internal_request: dict[str, Any] = {
+            "parent_trial_id": parent_trial_id,
+            "source_id": f"sha256-{source_sha256[:24]}",
+            "source_relative_path": source_path.relative_to(self.repo_root.resolve()).as_posix(),
+            "source_sha256": source_sha256,
+            "tracking_contract_relative_path": contract_path.relative_to(
+                self.repo_root.resolve()
+            ).as_posix(),
+            "tracking_contract_sha256": contract_sha256,
+            "base_config_relative_path": base_config_path.relative_to(
+                self.repo_root.resolve()
+            ).as_posix(),
+            "base_config_sha256": base_config_sha256,
+            "effective_config_relative_path": config_snapshot.path.relative_to(
+                self.repo_root.resolve()
+            ).as_posix(),
+            "effective_config_sha256": config_snapshot.sha256,
+            "trial_intent_sha256": note["intent_sha256"],
+            "tuning_patch_binding": tuning_patch_binding,
+            "tuning_patch_sha256": tuning_patch_sha256,
+            "profile_ids": list(request["profile_ids"]),
+            "frame_indices": frame_indices,
+            "top_k": 5,
+            "requested_decode_mode": "preroll",
+        }
+        retry_from_job_id = request.get("retry_from_job_id")
+        if retry_from_job_id is not None:
+            internal_request["retry_from_job_id"] = retry_from_job_id
+        return self._detector_development_service().create_probe(internal_request)
+
+    def get_detector_probe(self, job_id: str) -> dict[str, Any]:
+        return self._detector_development_service().get_probe(job_id)
+
+    def cancel_detector_probe(self, job_id: str) -> dict[str, Any]:
+        return self._detector_development_service().cancel_probe(job_id)
+
+    def read_detector_probe_artifact(
+        self, job_id: str, artifact_id: str
+    ) -> tuple[bytes, str, str]:
+        safe_job_id = require_safe_id(job_id, "detector probe job_id")
+        return self._detector_development_service().read_probe_artifact(
+            safe_job_id, artifact_id
+        )
+
+    def _detector_development_service(self) -> DetectorDevelopmentService:
+        with self._detector_development_lock:
+            if self._closing:
+                raise DetectorDevelopmentError(
+                    "service_closed", "Detector development service is closed", status_code=503
+                )
+            if self._detector_development is None:
+                self._detector_development = DetectorDevelopmentService(self.repo_root)
+            return self._detector_development
+
+    def _detector_probe_source_path(self, parent: dict[str, Any]) -> Path:
+        source = parent.get("input_video")
+        if not isinstance(source, str) or not source:
+            raise DetectorDevelopmentError(
+                "parent_source_unavailable",
+                "The parent production trial source is unavailable",
+                status_code=409,
+            )
+        try:
+            return self._resolve_safe_descendant(
+                self.data_dir,
+                Path(source),
+                expected_kind="file",
+            )
+        except (OSError, RuntimeError) as exc:
+            raise DetectorDevelopmentError(
+                "unsafe_parent_source",
+                "The parent production trial source is outside the trusted data root",
+                status_code=409,
+            ) from exc
+
+    def _detector_probe_output_dir(self, parent: dict[str, Any]) -> Path:
+        output = parent.get("output_dir")
+        if not isinstance(output, str) or not output:
+            raise DetectorDevelopmentError(
+                "parent_output_unavailable",
+                "The parent production trial output is unavailable",
+                status_code=409,
+            )
+        try:
+            return self._resolve_safe_run_output(Path(output))
+        except (OSError, RuntimeError) as exc:
+            raise DetectorDevelopmentError(
+                "unsafe_parent_output",
+                "The parent production trial output is outside the trusted output root",
+                status_code=409,
+            ) from exc
+
+    def _detector_probe_contract_path(self, output_dir: Path) -> Path:
+        try:
+            return self._resolve_safe_descendant(
+                output_dir,
+                output_dir / TRACKING_CONTRACT_REPORT_NAME,
+                expected_kind="file",
+                direct=True,
+            )
+        except (OSError, RuntimeError) as exc:
+            raise DetectorDevelopmentError(
+                "parent_tracking_contract_unavailable",
+                "The parent production trial has no direct tracking contract",
+                status_code=409,
+            ) from exc
+
+    def _detector_probe_config_snapshot(
+        self,
+        parent: dict[str, Any],
+        note: dict[str, Any],
+        source_path: Path,
+    ) -> _YamlConfigSnapshot:
+        config_path_raw = parent.get("config_path")
+        config_sha256 = parent.get("config_sha256")
+        if not isinstance(config_path_raw, str) or not config_path_raw:
+            raise DetectorDevelopmentError(
+                "parent_config_unavailable",
+                "The parent production trial configuration is unavailable",
+                status_code=409,
+            )
+        expected_sha256 = require_sha256(config_sha256, "parent config_sha256")
+        try:
+            config_path = self._resolve_safe_descendant(
+                self.config_dir,
+                Path(config_path_raw),
+                expected_kind="file",
+            )
+            snapshot = self._capture_yaml_config_snapshot(config_path)
+        except (OSError, RuntimeError, ValueError) as exc:
+            raise DetectorDevelopmentError(
+                "unsafe_parent_config",
+                "The parent production trial configuration is outside the trusted config root",
+                status_code=409,
+            ) from exc
+        if snapshot.sha256 != expected_sha256:
+            raise DetectorDevelopmentError(
+                "parent_config_digest_mismatch",
+                "The parent production trial configuration digest does not match",
+                status_code=409,
+            )
+        workflow = _value_at_dotted_path(snapshot.raw, "metadata.production_workflow")
+        if not isinstance(workflow, dict):
+            raise DetectorDevelopmentError(
+                "parent_config_lineage_mismatch",
+                "The parent configuration has no production workflow lineage",
+                status_code=409,
+            )
+        lineage_fields = (
+            "schema_version",
+            "purpose",
+            "workflow_id",
+            "submission_id",
+            "output_id",
+            "generation",
+            "start_frame",
+            "max_frames",
+            "enable_postprocess",
+            "enable_follow_cam",
+            "calibration_digest",
+            "intent_sha256",
+        )
+        if any(workflow.get(key) != note.get(key) for key in lineage_fields):
+            raise DetectorDevelopmentError(
+                "parent_config_lineage_mismatch",
+                "The parent configuration lineage does not match its run note",
+                status_code=409,
+            )
+        configured_source = snapshot.raw.get("input_video")
+        if not isinstance(configured_source, str) or Path(configured_source).resolve() != source_path:
+            raise DetectorDevelopmentError(
+                "parent_config_source_mismatch",
+                "The parent configuration is bound to another source",
+                status_code=409,
+            )
+        return snapshot
+
+    def _detector_probe_base_config_binding(
+        self, config: dict[str, Any]
+    ) -> tuple[str, Path]:
+        lineage = _value_at_dotted_path(
+            config, "metadata.production_workflow.base_config_lineage"
+        )
+        if (
+            not isinstance(lineage, dict)
+            or set(lineage) != {"name", "sha256"}
+            or not isinstance(lineage.get("name"), str)
+            or not lineage["name"]
+        ):
+            raise DetectorDevelopmentError(
+                "parent_base_config_lineage_missing",
+                "The parent configuration has no immutable base-config lineage",
+                status_code=409,
+            )
+        expected_sha256 = require_sha256(lineage.get("sha256"), "base config sha256")
+        try:
+            base_path, _ = self._resolve_config_path(lineage["name"])
+            safe_base_path = self._resolve_safe_descendant(
+                self.config_dir,
+                base_path,
+                expected_kind="file",
+            )
+            base_snapshot = self._capture_yaml_config_snapshot(safe_base_path)
+        except (FileNotFoundError, OSError, RuntimeError, ValueError) as exc:
+            raise DetectorDevelopmentError(
+                "parent_base_config_unavailable",
+                "The parent base configuration is unavailable",
+                status_code=409,
+            ) from exc
+        if base_snapshot.sha256 != expected_sha256:
+            raise DetectorDevelopmentError(
+                "parent_base_config_digest_mismatch",
+                "The parent base configuration digest does not match its lineage",
+                status_code=409,
+            )
+        return expected_sha256, safe_base_path
+
+    @staticmethod
+    def _detector_probe_tuning_binding(
+        config: dict[str, Any],
+    ) -> tuple[dict[str, Any], str]:
+        tuning = _value_at_dotted_path(config, "metadata.production_tuning")
+        if tuning is _MISSING_VALUE:
+            binding = {
+                "state": "absent",
+                "schema_version": "1.0",
+                "version_id": None,
+                "parent_version_id": None,
+                "values_sha256": canonical_sha256({}),
+            }
+            return binding, canonical_sha256(binding)
+        if not isinstance(tuning, dict):
+            raise DetectorDevelopmentError(
+                "invalid_parent_tuning_lineage",
+                "The parent tuning lineage is invalid",
+                status_code=409,
+            )
+        try:
+            normalized = normalize_production_trial_config_patch(
+                {"metadata": {"production_tuning": deepcopy(tuning)}},
+                base_config=config,
+            )
+        except ValueError as exc:
+            raise DetectorDevelopmentError(
+                "invalid_parent_tuning_lineage",
+                "The parent tuning lineage failed canonical validation",
+                status_code=409,
+            ) from exc
+        normalized_tuning = _value_at_dotted_path(
+            normalized, "metadata.production_tuning"
+        )
+        if normalized_tuning != tuning:
+            raise DetectorDevelopmentError(
+                "invalid_parent_tuning_lineage",
+                "The parent tuning lineage is not canonical",
+                status_code=409,
+            )
+        version_id = tuning.get("version_id")
+        parent_version_id = tuning.get("parent_version_id")
+        if (
+            not isinstance(version_id, str)
+            or not version_id.strip()
+            or len(version_id) > 120
+            or not (
+                parent_version_id is None
+                or (
+                    isinstance(parent_version_id, str)
+                    and bool(parent_version_id.strip())
+                    and len(parent_version_id) <= 120
+                )
+            )
+        ):
+            raise DetectorDevelopmentError(
+                "invalid_parent_tuning_lineage",
+                "The parent tuning version identity is invalid",
+                status_code=409,
+            )
+        values_sha256 = require_sha256(
+            tuning.get("values_sha256"), "production tuning values_sha256"
+        )
+        binding = {
+            "state": "versioned",
+            "schema_version": "1.0",
+            "version_id": version_id,
+            "parent_version_id": parent_version_id,
+            "values_sha256": values_sha256,
+        }
+        return binding, canonical_sha256(binding)
+
+    @staticmethod
+    def _detector_probe_source_signature(config: dict[str, Any]) -> dict[str, Any]:
+        signature = _value_at_dotted_path(config, "metadata.production_workflow.source_signature")
+        if (
+            not isinstance(signature, dict)
+            or not isinstance(signature.get("path"), str)
+            or not signature["path"]
+            or isinstance(signature.get("size_bytes"), bool)
+            or not isinstance(signature.get("size_bytes"), int)
+            or signature["size_bytes"] <= 0
+            or not isinstance(signature.get("modified_at"), str)
+            or not signature["modified_at"]
+        ):
+            raise DetectorDevelopmentError(
+                "parent_source_signature_missing",
+                "The parent configuration source signature is incomplete",
+                status_code=409,
+            )
+        return signature
+
+    @staticmethod
+    def _default_detector_probe_frames(authoritative_frames: list[int]) -> list[int]:
+        if len(authoritative_frames) <= 6:
+            return authoritative_frames
+        final = len(authoritative_frames) - 1
+        return sorted({authoritative_frames[round(index * final / 5)] for index in range(6)})
 
     def list_configs(self) -> list[dict[str, Any]]:
         items: list[dict[str, Any]] = []

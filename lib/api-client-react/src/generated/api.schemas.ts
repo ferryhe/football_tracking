@@ -1779,6 +1779,927 @@ export interface DeriveConfigRequest {
   patch?: DeriveConfigRequestPatch;
 }
 
+export type DetectorAvailabilityObservationStatus =
+  (typeof DetectorAvailabilityObservationStatus)[keyof typeof DetectorAvailabilityObservationStatus];
+
+export const DetectorAvailabilityObservationStatus = {
+  pass: "pass",
+  fail: "fail",
+  not_run: "not_run",
+} as const;
+
+export type DetectorAvailabilityObservationInstalledRuntime = {
+  [key: string]: string | null;
+} | null;
+
+export interface DetectorAvailabilityObservation {
+  status: DetectorAvailabilityObservationStatus;
+  reason: string;
+  installed_runtime?: DetectorAvailabilityObservationInstalledRuntime;
+  evidence_sha256?: string | null;
+}
+
+export interface DetectorAvailabilityObservations {
+  file: DetectorAvailabilityObservation;
+  digest: DetectorAvailabilityObservation;
+  class_map: DetectorAvailabilityObservation;
+  license: DetectorAvailabilityObservation;
+  runtime_load: DetectorAvailabilityObservation;
+}
+
+export interface DetectorCatalogFindingAccess {
+  method: string;
+  account_or_plan_required: string;
+  local_weights_validated: boolean;
+}
+
+export interface DetectorCatalogFindingAvailability {
+  status: "unavailable";
+  /** @minItems 1 */
+  reason_codes: string[];
+}
+
+export interface DetectorCatalogFindingEgress {
+  frames_leave_local_machine: "unknown_until_access_method_selected";
+  destination: string | null;
+  operator_consent: "required_before_external_inference";
+}
+
+export type DetectorCatalogFindingLicenseStatus =
+  (typeof DetectorCatalogFindingLicenseStatus)[keyof typeof DetectorCatalogFindingLicenseStatus];
+
+export const DetectorCatalogFindingLicenseStatus = {
+  review_required: "review_required",
+  unavailable: "unavailable",
+  unknown: "unknown",
+} as const;
+
+export interface DetectorCatalogFindingLicense {
+  status: DetectorCatalogFindingLicenseStatus;
+  name: string | null;
+  spdx_id: string | null;
+  url: string | null;
+  approved_for_local_probe: boolean;
+}
+
+export interface DetectorCatalogFindingLicenseSet {
+  dataset: DetectorCatalogFindingLicense;
+  model: DetectorCatalogFindingLicense;
+  runtime: DetectorCatalogFindingLicense;
+  deployment: DetectorCatalogFindingLicense;
+}
+
+export interface DetectorCatalogFindingSource {
+  project: string;
+  version: string | null;
+  url: string;
+}
+
+export interface DetectorCatalogFindingView {
+  finding_id: string;
+  display_name: string;
+  source: DetectorCatalogFindingSource;
+  architecture_family: string;
+  access: DetectorCatalogFindingAccess;
+  licenses: DetectorCatalogFindingLicenseSet;
+  egress: DetectorCatalogFindingEgress;
+  selectable: false;
+  availability: DetectorCatalogFindingAvailability;
+}
+
+export interface DetectorLicenseMetadata {
+  name: string;
+  spdx_id: string;
+  url: string;
+  reviewed: boolean;
+  approved_for_local_probe: boolean;
+}
+
+export interface DetectorLicenseSet {
+  dataset: DetectorLicenseMetadata;
+  model: DetectorLicenseMetadata;
+  runtime: DetectorLicenseMetadata;
+  deployment: DetectorLicenseMetadata;
+}
+
+export type DetectorModelAvailabilityStatus =
+  (typeof DetectorModelAvailabilityStatus)[keyof typeof DetectorModelAvailabilityStatus];
+
+export const DetectorModelAvailabilityStatus = {
+  available: "available",
+  unavailable: "unavailable",
+  blocked: "blocked",
+} as const;
+
+export interface DetectorModelAvailability {
+  status: DetectorModelAvailabilityStatus;
+  reason_codes: string[];
+  observations: DetectorAvailabilityObservations;
+  observed_weight_path?: string | null;
+}
+
+export interface DetectorModelWeights {
+  relative_path: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  sha256: string;
+  /** @exclusiveMinimum 0 */
+  size_bytes: number;
+}
+
+export interface DetectorModelSource {
+  project: string;
+  version: string;
+  asset_release: string;
+  weight_url: string;
+  acquisition_method: string;
+  access_requirement: string;
+}
+
+export type DetectorModelEgressOperatorConsent =
+  (typeof DetectorModelEgressOperatorConsent)[keyof typeof DetectorModelEgressOperatorConsent];
+
+export const DetectorModelEgressOperatorConsent = {
+  not_required: "not_required",
+  granted: "granted",
+  required_not_granted: "required_not_granted",
+} as const;
+
+export interface DetectorModelEgress {
+  frames_leave_local_machine: boolean;
+  destination: string | null;
+  operator_consent: DetectorModelEgressOperatorConsent;
+}
+
+export type DetectorModelDescriptorViewLifecycleState =
+  (typeof DetectorModelDescriptorViewLifecycleState)[keyof typeof DetectorModelDescriptorViewLifecycleState];
+
+export const DetectorModelDescriptorViewLifecycleState = {
+  unverified: "unverified",
+  feasibility_passed: "feasibility_passed",
+  development_candidate: "development_candidate",
+  source_segment_qualified: "source_segment_qualified",
+  camera_qualified: "camera_qualified",
+  retired: "retired",
+} as const;
+
+export type DetectorModelDescriptorViewCheckpoint = {
+  [key: string]: unknown;
+} | null;
+
+export type DetectorModelDescriptorViewRuntimeContract = {
+  [key: string]: unknown;
+};
+
+export type DetectorModelDescriptorViewClassMap = { [key: string]: string };
+
+export type DetectorModelDescriptorViewExpectedInput = {
+  [key: string]: unknown;
+};
+
+export type DetectorModelDescriptorViewExecution = {
+  [key: string]: unknown;
+} | null;
+
+export type DetectorModelDescriptorViewMemoryEnvelope = {
+  [key: string]: unknown;
+} | null;
+
+export type DetectorModelDescriptorViewBindings = { [key: string]: unknown };
+
+export interface DetectorModelDescriptorView {
+  schema_version: string;
+  artifact_type: "detector_model_descriptor";
+  model_id: string;
+  version: string;
+  model_version: string;
+  display_name: string;
+  architecture_family: string;
+  weights: DetectorModelWeights;
+  source: DetectorModelSource;
+  checkpoint?: DetectorModelDescriptorViewCheckpoint;
+  runtime_contract: DetectorModelDescriptorViewRuntimeContract;
+  class_names: string[];
+  class_map: DetectorModelDescriptorViewClassMap;
+  expected_input: DetectorModelDescriptorViewExpectedInput;
+  execution?: DetectorModelDescriptorViewExecution;
+  memory_envelope?: DetectorModelDescriptorViewMemoryEnvelope;
+  licenses: DetectorLicenseSet;
+  egress: DetectorModelEgress;
+  lifecycle_state: DetectorModelDescriptorViewLifecycleState;
+  bindings: DetectorModelDescriptorViewBindings;
+  /** @pattern ^[0-9a-f]{64}$ */
+  descriptor_sha256: string;
+  import_manifest_sha256?: string | null;
+}
+
+export interface DetectorQualificationView {
+  trial_eligible: boolean;
+  source_segment_qualified: boolean;
+  camera_qualified: boolean;
+}
+
+export interface DetectorModelRecordView {
+  descriptor: DetectorModelDescriptorView;
+  availability: DetectorModelAvailability;
+  qualification: DetectorQualificationView;
+  selectable_for_probe: boolean;
+}
+
+export type DetectorProfileViewMode =
+  (typeof DetectorProfileViewMode)[keyof typeof DetectorProfileViewMode];
+
+export const DetectorProfileViewMode = {
+  direct: "direct",
+  sahi: "sahi",
+} as const;
+
+export interface DetectorProfileSettingsView {
+  /**
+   * @minimum 0
+   * @maximum 1
+   */
+  confidence_threshold: number;
+  /** @exclusiveMinimum 0 */
+  image_size: number;
+  use_half: boolean;
+  allowed_labels: string[];
+  top_k: 5;
+  slice_height?: number | null;
+  slice_width?: number | null;
+  overlap_height_ratio?: number | null;
+  overlap_width_ratio?: number | null;
+  perform_standard_pred?: boolean | null;
+  postprocess_type?: string | null;
+  postprocess_match_metric?: string | null;
+  postprocess_match_threshold?: number | null;
+}
+
+export type DetectorProfileAvailabilityViewStatus =
+  (typeof DetectorProfileAvailabilityViewStatus)[keyof typeof DetectorProfileAvailabilityViewStatus];
+
+export const DetectorProfileAvailabilityViewStatus = {
+  available: "available",
+  unavailable: "unavailable",
+  blocked: "blocked",
+} as const;
+
+export interface DetectorProfileRuntimeView {
+  name: string;
+  installed_version: string | null;
+  load_smoke: boolean;
+}
+
+export interface DetectorProfileAvailabilityView {
+  status: DetectorProfileAvailabilityViewStatus;
+  reason_codes: string[];
+  runtime?: DetectorProfileRuntimeView | null;
+}
+
+export interface DetectorProfileView {
+  schema_version: string;
+  artifact_type: "detector_profile";
+  profile_id: string;
+  version: string;
+  model_id: string;
+  model_version: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  model_descriptor_sha256: string;
+  mode: DetectorProfileViewMode;
+  settings: DetectorProfileSettingsView;
+  /** @pattern ^[0-9a-f]{64}$ */
+  profile_sha256: string;
+  recommended: boolean;
+  availability: DetectorProfileAvailabilityView;
+  selectable_for_probe: boolean;
+}
+
+export interface DetectorModelCatalogResponse {
+  schema_version: string;
+  artifact_type: "ball_detector_development_v1";
+  models: DetectorModelRecordView[];
+  profiles: DetectorProfileView[];
+  catalog_findings: DetectorCatalogFindingView[];
+}
+
+export interface DetectorModelImportRequest {
+  /**
+   * @minLength 1
+   * @maxLength 500
+   */
+  package_relative_path: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  manifest_sha256: string;
+}
+
+export interface DetectorModelImportResponse {
+  created: boolean;
+  model: DetectorModelRecordView;
+}
+
+export interface DetectorProbeArtifactView {
+  /** @pattern ^[a-z0-9][a-z0-9._-]{0,119}$ */
+  artifact_id: string;
+  relative_path: string;
+  media_type: "image/jpeg";
+  /** @pattern ^[0-9a-f]{64}$ */
+  sha256: string;
+  /** @exclusiveMinimum 0 */
+  size_bytes: number;
+  /** @exclusiveMinimum 0 */
+  width: number;
+  /** @exclusiveMinimum 0 */
+  height: number;
+}
+
+export type DetectorProbeCandidateViewCoordinateReason =
+  (typeof DetectorProbeCandidateViewCoordinateReason)[keyof typeof DetectorProbeCandidateViewCoordinateReason];
+
+export const DetectorProbeCandidateViewCoordinateReason = {
+  direct_source_coordinates: "direct_source_coordinates",
+  sahi_tile_offset_applied: "sahi_tile_offset_applied",
+} as const;
+
+export interface DetectorProbeCandidateView {
+  /** @minimum 0 */
+  frame_index: number;
+  /**
+   * @minItems 4
+   * @maxItems 4
+   */
+  bbox_source_px: [number, number, number, number];
+  /**
+   * @minimum 0
+   * @maximum 1
+   */
+  confidence: number;
+  class_name: "ball";
+  /** @minLength 1 */
+  checkpoint_class_name: string;
+  /** @minLength 1 */
+  source: string;
+  coordinate_reason: DetectorProbeCandidateViewCoordinateReason;
+  merge_reason: "retained_top_k";
+}
+
+export interface DetectorProbeCreateRequest {
+  /** @pattern ^[a-z0-9][a-z0-9._-]{0,119}$ */
+  parent_trial_id: string;
+  /**
+   * @minItems 2
+   * @maxItems 6
+   */
+  profile_ids: string[];
+  frame_indices?: number[] | null;
+  top_k?: 5;
+  retry_from_job_id?: string | null;
+}
+
+export type DetectorProbeCreateResponseStatus =
+  (typeof DetectorProbeCreateResponseStatus)[keyof typeof DetectorProbeCreateResponseStatus];
+
+export const DetectorProbeCreateResponseStatus = {
+  queued: "queued",
+  running: "running",
+  committing: "committing",
+  ready: "ready",
+  failed: "failed",
+  cancelled: "cancelled",
+  blocked: "blocked",
+} as const;
+
+export interface DetectorProbeCreateResponse {
+  /** @pattern ^[a-z0-9][a-z0-9._-]{0,119}$ */
+  job_id: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  request_sha256: string;
+  status: DetectorProbeCreateResponseStatus;
+  status_url: string;
+  cancel_url: string;
+  retry_from_job_id?: string | null;
+}
+
+export type DetectorProbeDecodeViewRequestedDecodeMode =
+  (typeof DetectorProbeDecodeViewRequestedDecodeMode)[keyof typeof DetectorProbeDecodeViewRequestedDecodeMode];
+
+export const DetectorProbeDecodeViewRequestedDecodeMode = {
+  sequential: "sequential",
+  preroll: "preroll",
+  direct: "direct",
+} as const;
+
+export type DetectorProbeDecodeViewEffectiveDecodeMode =
+  (typeof DetectorProbeDecodeViewEffectiveDecodeMode)[keyof typeof DetectorProbeDecodeViewEffectiveDecodeMode];
+
+export const DetectorProbeDecodeViewEffectiveDecodeMode = {
+  sequential: "sequential",
+  preroll_verified: "preroll_verified",
+  direct_verified: "direct_verified",
+  sequential_fallback: "sequential_fallback",
+} as const;
+
+export interface DetectorProbeDecodeView {
+  /** @exclusiveMinimum 0 */
+  width: number;
+  /** @exclusiveMinimum 0 */
+  height: number;
+  /** @exclusiveMinimum 0 */
+  frame_count: number;
+  /** @exclusiveMinimum 0 */
+  fps: number;
+  requested_decode_mode: DetectorProbeDecodeViewRequestedDecodeMode;
+  effective_decode_mode: DetectorProbeDecodeViewEffectiveDecodeMode;
+  /**
+   * @minItems 1
+   * @maxItems 50
+   */
+  verified_frame_indices: number[];
+  position_verification: "opencv_next_frame_index_with_0.25_tolerance";
+}
+
+export type DetectorProbeExecutionBundleViewInstalledRuntime = {
+  [key: string]: string;
+};
+
+export type DetectorProbeExecutionBundleViewRuntimeContract = {
+  [key: string]: string;
+};
+
+export type DetectorProbeExecutionBundleViewRuntimeObservationEvidenceSha256s =
+  { [key: string]: unknown };
+
+export type DetectorProbeExecutionBundleViewCodeBundleFiles = {
+  [key: string]: string;
+};
+
+export type DetectorProbeExecutionBundleViewCodeCommitStatus =
+  (typeof DetectorProbeExecutionBundleViewCodeCommitStatus)[keyof typeof DetectorProbeExecutionBundleViewCodeCommitStatus];
+
+export const DetectorProbeExecutionBundleViewCodeCommitStatus = {
+  bound: "bound",
+  unbound: "unbound",
+  unavailable: "unavailable",
+} as const;
+
+export type DetectorProbeExecutionEnvironmentViewDevice =
+  (typeof DetectorProbeExecutionEnvironmentViewDevice)[keyof typeof DetectorProbeExecutionEnvironmentViewDevice];
+
+export const DetectorProbeExecutionEnvironmentViewDevice = {
+  cpu: "cpu",
+  "cuda:0": "cuda:0",
+} as const;
+
+export interface DetectorProbeExecutionEnvironmentView {
+  device: DetectorProbeExecutionEnvironmentViewDevice;
+  precision: "fp32";
+  cuda_available: boolean;
+  /** @minimum 0 */
+  cuda_device_count: number;
+  cuda_visible_devices: string | null;
+  cuda_compiled_version: string | null;
+  cudnn_version?: number | null;
+  gpu_name: string | null;
+  gpu_compute_capability: string | null;
+  gpu_total_memory_bytes?: number | null;
+  cuda_driver_version?: number | null;
+  /** @minLength 1 */
+  python_implementation: string;
+  /** @minLength 1 */
+  python_version: string;
+  /** @minLength 1 */
+  numpy_version: string;
+  /** @minLength 1 */
+  opencv_version: string;
+  /** @minLength 1 */
+  pydantic_version: string;
+  /** @minLength 1 */
+  pydantic_core_version: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  opencv_build_information_sha256: string;
+  opencv_ffmpeg_enabled: boolean | null;
+  /** @pattern ^[0-9a-f]{64}$ */
+  decoder_fingerprint_sha256: string;
+}
+
+export interface DetectorProbeExecutionBundleView {
+  schema_version: "1.0";
+  installed_runtime: DetectorProbeExecutionBundleViewInstalledRuntime;
+  runtime_contract: DetectorProbeExecutionBundleViewRuntimeContract;
+  /** @pattern ^[0-9a-f]{64}$ */
+  runtime_contract_sha256: string;
+  runtime_observation_evidence_sha256s: DetectorProbeExecutionBundleViewRuntimeObservationEvidenceSha256s;
+  execution_environment: DetectorProbeExecutionEnvironmentView;
+  /** @pattern ^[0-9a-f]{64}$ */
+  runtime_environment_sha256: string;
+  code_bundle_files: DetectorProbeExecutionBundleViewCodeBundleFiles;
+  /** @pattern ^[0-9a-f]{64}$ */
+  code_bundle_sha256: string;
+  code_commit: string | null;
+  code_commit_status: DetectorProbeExecutionBundleViewCodeCommitStatus;
+  code_commit_reason:
+    | "code_bundle_differs_from_commit"
+    | "repository_commit_unavailable"
+    | null;
+  /** @pattern ^[0-9a-f]{64}$ */
+  frozen_profiles_sha256: string;
+}
+
+export type DetectorProbeExecutionViewDevice =
+  (typeof DetectorProbeExecutionViewDevice)[keyof typeof DetectorProbeExecutionViewDevice];
+
+export const DetectorProbeExecutionViewDevice = {
+  cpu: "cpu",
+  "cuda:0": "cuda:0",
+} as const;
+
+export interface DetectorProbeExecutionView {
+  device: DetectorProbeExecutionViewDevice;
+  precision: "fp32";
+}
+
+export type DetectorProbeFrameEvidenceViewRequestedDecodeMode =
+  (typeof DetectorProbeFrameEvidenceViewRequestedDecodeMode)[keyof typeof DetectorProbeFrameEvidenceViewRequestedDecodeMode];
+
+export const DetectorProbeFrameEvidenceViewRequestedDecodeMode = {
+  sequential: "sequential",
+  preroll: "preroll",
+  direct: "direct",
+} as const;
+
+export type DetectorProbeFrameEvidenceViewEffectiveDecodeMode =
+  (typeof DetectorProbeFrameEvidenceViewEffectiveDecodeMode)[keyof typeof DetectorProbeFrameEvidenceViewEffectiveDecodeMode];
+
+export const DetectorProbeFrameEvidenceViewEffectiveDecodeMode = {
+  sequential: "sequential",
+  preroll_verified: "preroll_verified",
+  direct_verified: "direct_verified",
+  sequential_fallback: "sequential_fallback",
+} as const;
+
+export type DetectorProbeMediaIntegrityViewStatus =
+  (typeof DetectorProbeMediaIntegrityViewStatus)[keyof typeof DetectorProbeMediaIntegrityViewStatus];
+
+export const DetectorProbeMediaIntegrityViewStatus = {
+  ok: "ok",
+  unavailable: "unavailable",
+} as const;
+
+export interface DetectorProbeMediaIntegrityView {
+  path: string | null;
+  status: DetectorProbeMediaIntegrityViewStatus;
+  /** @minimum 0 */
+  width: number;
+  /** @minimum 0 */
+  height: number;
+  /** @minimum 0 */
+  mean_luma: number;
+  /** @minimum 0 */
+  std_luma: number;
+  /**
+   * @minimum 0
+   * @maximum 1
+   */
+  texture_tile_ratio: number;
+  /**
+   * @minimum 0
+   * @maximum 1
+   */
+  dominant_color_ratio: number;
+  gray: boolean;
+  low_information: boolean;
+  likely_corrupt: boolean;
+  reasons: string[];
+}
+
+export type DetectorProbeProfileEvidenceViewStatus =
+  (typeof DetectorProbeProfileEvidenceViewStatus)[keyof typeof DetectorProbeProfileEvidenceViewStatus];
+
+export const DetectorProbeProfileEvidenceViewStatus = {
+  completed: "completed",
+  failed: "failed",
+  blocked: "blocked",
+} as const;
+
+export type DetectorProbeProfileEvidenceViewFilterReasons = {
+  [key: string]: number;
+};
+
+export interface DetectorProbeProfileEvidenceView {
+  /** @pattern ^[a-z0-9][a-z0-9._-]{0,119}$ */
+  profile_id: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  profile_sha256: string;
+  status: DetectorProbeProfileEvidenceViewStatus;
+  latency_ms?: number | null;
+  /** @minimum 0 */
+  candidate_count: number;
+  top_k: 5;
+  /** @maxItems 5 */
+  raw_candidates: DetectorProbeCandidateView[];
+  display_candidate: DetectorProbeCandidateView | null;
+  filter_reasons: DetectorProbeProfileEvidenceViewFilterReasons;
+  failure_code: string | null;
+  raw_overlay_artifact_url: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  raw_overlay_sha256: string;
+  /** @exclusiveMinimum 0 */
+  raw_overlay_size_bytes: number;
+}
+
+export interface DetectorProbeFrameEvidenceView {
+  /** @minimum 0 */
+  frame_index: number;
+  /** @exclusiveMinimum 0 */
+  source_width: number;
+  /** @exclusiveMinimum 0 */
+  source_height: number;
+  requested_decode_mode: DetectorProbeFrameEvidenceViewRequestedDecodeMode;
+  effective_decode_mode: DetectorProbeFrameEvidenceViewEffectiveDecodeMode;
+  /** @minimum 0 */
+  decoded_frame_position: number;
+  media_integrity: DetectorProbeMediaIntegrityView;
+  source_artifact_url: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  source_frame_sha256: string;
+  /** @exclusiveMinimum 0 */
+  source_frame_size_bytes: number;
+  /**
+   * @minItems 2
+   * @maxItems 6
+   */
+  profile_results: DetectorProbeProfileEvidenceView[];
+}
+
+export type DetectorProbeJobResponseStatus =
+  (typeof DetectorProbeJobResponseStatus)[keyof typeof DetectorProbeJobResponseStatus];
+
+export const DetectorProbeJobResponseStatus = {
+  queued: "queued",
+  running: "running",
+  committing: "committing",
+  ready: "ready",
+  failed: "failed",
+  cancelled: "cancelled",
+  blocked: "blocked",
+} as const;
+
+export interface DetectorProbeProgressView {
+  /** @minimum 0 */
+  completed: number;
+  /** @minimum 0 */
+  total: number;
+  updated_at: string;
+}
+
+export type DetectorProbeTuningPatchBindingViewState =
+  (typeof DetectorProbeTuningPatchBindingViewState)[keyof typeof DetectorProbeTuningPatchBindingViewState];
+
+export const DetectorProbeTuningPatchBindingViewState = {
+  absent: "absent",
+  versioned: "versioned",
+} as const;
+
+export interface DetectorProbeTuningPatchBindingView {
+  state: DetectorProbeTuningPatchBindingViewState;
+  schema_version: "1.0";
+  version_id: string | null;
+  parent_version_id: string | null;
+  /** @pattern ^[0-9a-f]{64}$ */
+  values_sha256: string;
+}
+
+export interface FrozenDetectorProfileBindingView {
+  /** @pattern ^[a-z0-9][a-z0-9._-]{0,119}$ */
+  profile_id: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  profile_sha256: string;
+  /** @pattern ^[a-z0-9][a-z0-9._-]{0,119}$ */
+  model_id: string;
+  model_version: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  model_descriptor_sha256: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  weights_sha256: string;
+  /** @exclusiveMinimum 0 */
+  weights_size_bytes: number;
+}
+
+export type FrozenDetectorProbeRequestViewRequestedDecodeMode =
+  (typeof FrozenDetectorProbeRequestViewRequestedDecodeMode)[keyof typeof FrozenDetectorProbeRequestViewRequestedDecodeMode];
+
+export const FrozenDetectorProbeRequestViewRequestedDecodeMode = {
+  sequential: "sequential",
+  preroll: "preroll",
+  direct: "direct",
+} as const;
+
+export type FrozenDetectorProbeRequestViewProfileSha256s = {
+  [key: string]: unknown;
+};
+
+export interface FrozenDetectorProbeRequestView {
+  /** @pattern ^[a-z0-9][a-z0-9._-]{0,119}$ */
+  parent_trial_id: string;
+  /** @pattern ^[a-z0-9][a-z0-9._-]{0,119}$ */
+  source_id: string;
+  source_relative_path: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  source_sha256: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  source_file_identity_sha256: string;
+  /** @exclusiveMinimum 0 */
+  source_size_bytes: number;
+  /** @exclusiveMinimum 0 */
+  source_width: number;
+  /** @exclusiveMinimum 0 */
+  source_height: number;
+  /** @exclusiveMinimum 0 */
+  source_frame_count: number;
+  tracking_contract_relative_path: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  tracking_contract_sha256: string;
+  base_config_relative_path: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  base_config_sha256: string;
+  effective_config_relative_path: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  effective_config_sha256: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  trial_intent_sha256: string;
+  tuning_patch_binding: DetectorProbeTuningPatchBindingView;
+  /** @pattern ^[0-9a-f]{64}$ */
+  tuning_patch_sha256: string;
+  /**
+   * @minItems 2
+   * @maxItems 6
+   */
+  profile_ids: string[];
+  /** @pattern ^[0-9a-f]{64}$ */
+  frozen_profiles_sha256: string;
+  profile_sha256s: FrozenDetectorProbeRequestViewProfileSha256s;
+  /**
+   * @minItems 2
+   * @maxItems 6
+   */
+  profile_bindings: FrozenDetectorProfileBindingView[];
+  execution_bundle: DetectorProbeExecutionBundleView;
+  /** @pattern ^[0-9a-f]{64}$ */
+  execution_bundle_sha256: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  runtime_environment_sha256: string;
+  /**
+   * @minItems 1
+   * @maxItems 50
+   */
+  frame_indices: number[];
+  top_k: 5;
+  requested_decode_mode: FrozenDetectorProbeRequestViewRequestedDecodeMode;
+  retry_from_job_id?: string | null;
+}
+
+export type FrozenDetectorProfileViewMode =
+  (typeof FrozenDetectorProfileViewMode)[keyof typeof FrozenDetectorProfileViewMode];
+
+export const FrozenDetectorProfileViewMode = {
+  direct: "direct",
+  sahi: "sahi",
+} as const;
+
+export interface FrozenDetectorProfileView {
+  schema_version: string;
+  artifact_type: "detector_profile";
+  profile_id: string;
+  version: string;
+  model_id: string;
+  model_version: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  model_descriptor_sha256: string;
+  mode: FrozenDetectorProfileViewMode;
+  settings: DetectorProfileSettingsView;
+  /** @pattern ^[0-9a-f]{64}$ */
+  profile_sha256: string;
+  recommended: boolean;
+  availability: DetectorProfileAvailabilityView;
+  selectable_for_probe: boolean;
+  model_descriptor: DetectorModelDescriptorView;
+}
+
+export interface DetectorProbeSourceBindingView {
+  /** @pattern ^[a-z0-9][a-z0-9._-]{0,119}$ */
+  source_id: string;
+  relative_path: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  sha256: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  file_identity_sha256: string;
+  /** @exclusiveMinimum 0 */
+  size_bytes: number;
+  /** @exclusiveMinimum 0 */
+  width: number;
+  /** @exclusiveMinimum 0 */
+  height: number;
+  /** @exclusiveMinimum 0 */
+  frame_count: number;
+  tracking_contract_relative_path: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  tracking_contract_sha256: string;
+}
+
+export type DetectorProbeLineageViewProfileSha256s = { [key: string]: unknown };
+
+export interface DetectorProbeLineageView {
+  /** @pattern ^[a-z0-9][a-z0-9._-]{0,119}$ */
+  parent_trial_id: string;
+  base_config_relative_path: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  base_config_sha256: string;
+  effective_config_relative_path: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  effective_config_sha256: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  trial_intent_sha256: string;
+  tuning_patch_binding: DetectorProbeTuningPatchBindingView;
+  /** @pattern ^[0-9a-f]{64}$ */
+  tuning_patch_sha256: string;
+  profile_sha256s: DetectorProbeLineageViewProfileSha256s;
+  /** @pattern ^[0-9a-f]{64}$ */
+  frozen_profiles_sha256: string;
+  execution_bundle: DetectorProbeExecutionBundleView;
+  /** @pattern ^[0-9a-f]{64}$ */
+  execution_bundle_sha256: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  runtime_environment_sha256: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  intent_sha256: string;
+  retry_from_job_id: string | null;
+}
+
+export interface DetectorProbeReportView {
+  schema_version: "1.0";
+  artifact_type: "detector_probe_report";
+  /** @pattern ^[a-z0-9][a-z0-9._-]{0,119}$ */
+  job_id: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  request_sha256: string;
+  source: DetectorProbeSourceBindingView;
+  lineage: DetectorProbeLineageView;
+  /**
+   * @minItems 2
+   * @maxItems 6
+   */
+  frozen_profiles: FrozenDetectorProfileView[];
+  top_k: 5;
+  /**
+   * @minItems 1
+   * @maxItems 50
+   */
+  frames: DetectorProbeFrameEvidenceView[];
+  decode: DetectorProbeDecodeView;
+  execution: DetectorProbeExecutionView;
+  /**
+   * @minItems 3
+   * @maxItems 350
+   */
+  artifacts: DetectorProbeArtifactView[];
+  created_at: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  report_sha256: string;
+}
+
+export interface DetectorProbeJobResponse {
+  schema_version: "1.0";
+  artifact_type: "detector_probe_job";
+  /** @pattern ^[a-z0-9][a-z0-9._-]{0,119}$ */
+  job_id: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  idempotency_key: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  request_sha256: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  intent_sha256: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  frozen_profiles_sha256: string;
+  status: DetectorProbeJobResponseStatus;
+  stage: string;
+  progress: DetectorProbeProgressView;
+  frozen_request: FrozenDetectorProbeRequestView;
+  /**
+   * @minItems 2
+   * @maxItems 6
+   */
+  frozen_profiles: FrozenDetectorProfileView[];
+  retry_from_job_id: string | null;
+  error_code?: string | null;
+  blocker_code?: string | null;
+  recovery_action?: string | null;
+  report: DetectorProbeReportView | null;
+  result_manifest_sha256?: string | null;
+  created_at: string;
+  updated_at: string;
+  status_url: string;
+  cancel_url: string;
+  can_cancel: boolean;
+}
+
 export type EventCandidateEvidence = { [key: string]: unknown };
 
 export interface EventCandidateWindow {

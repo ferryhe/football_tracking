@@ -14,16 +14,16 @@
 - Delivery order: `PR-T1 → PR-T2 → PR-T3 → PR-T4 → PR-T5`
 - Current PR: PR-T2 · Detector Model Registry and Bounded Probe Comparison
 - Current branch: `codex/tiny-ball-detector-registry-probes`
-- Current phase: PR-T1 merged and cleaned up · PR-T2 scope prepared · implementation starting from refreshed `main`
+- Current phase: PR-T1 merged and cleaned up · PR-T2 core/frontend/contract gates green · final execution-provenance hardening in progress before real-video evidence
 - Managed workflow authorized: 2026-07-17
 - Heartbeat: active · `tiny-ball-step3-managed-pr-heartbeat` · every 15 minutes
 - Merge rule: implementation, specification review, quality review, local/CI checks, then a complete 10-minute remote-feedback window; any material corrective push restarts that window
-- Blockers: none. PR-T1 merged as `6a9db0e4d85047c2ca03ec8b2dc936fe75f67a41` after all local gates, replacement CI, independent reviews, and the complete replacement remote-feedback window passed. PR-T2 has a reviewed scope and begins with the existing Ultralytics/SAHI environment; no dependency, workspace, lockfile, or committed weight change is authorized.
+- Blockers: none requiring user action. PR-T1 merged as `6a9db0e4d85047c2ca03ec8b2dc936fe75f67a41` after all local gates, replacement CI, independent reviews, and the complete replacement remote-feedback window passed. PR-T2's registry, safe import, bounded probes, API/UI comparison, exact parent-window binding, durable recovery, bounded rendering, supervised worker, source verification, and generated contracts are implemented; the enforced frontend suite passes 774/774 with each new core file above 90%, and canonical codegen is independently byte-idempotent with no workspace/lock/dependency change. A final-schema dry run proved one 11.34-second source hash and cache-hit retry but failed closed before inference with `worker_containment_unavailable`, so it is not evidence. Independent review then exposed merge-blocking execution provenance gaps: dirty/untracked code could be mislabeled as old-HEAD `bound`, five locally executed report-validation modules were outside the bundle, and Pydantic/Pydantic Core versions were absent from the environment binding. Those bindings must be repaired and independently reviewed before committing a clean execution bundle and rerunning the six-profile real source. The older `probe-6cf...` evidence remains historical. No dependency, workspace, lockfile, or committed weight change is authorized.
 
 | PR | Branch | Status | Pull request | Remote feedback | Merge |
 | --- | --- | --- | --- | --- | --- |
 | PR-T1 | `codex/tiny-ball-trial-diagnosis` | completed · Copilot corrections resolved · spec APPROVE · quality/security APPROVE · replacement CI passed | https://github.com/ferryhe/football_tracking/pull/112 | complete 2026-07-18T02:12:00Z–2026-07-18T02:22:27Z | `6a9db0e` · 2026-07-18T02:23:04Z |
-| PR-T2 | `codex/tiny-ball-detector-registry-probes` | active · scope prepared · implementation starting | pending | not started | pending |
+| PR-T2 | `codex/tiny-ball-detector-registry-probes` | active · execution provenance hardening before final-schema real-video evidence | pending | not started | pending |
 | PR-T3 | pending | not started | pending | not started | pending |
 | PR-T4 | pending | not started | pending | not started | pending |
 | PR-T5 | pending | not started | pending | not started | pending |

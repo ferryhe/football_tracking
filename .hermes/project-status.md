@@ -5,24 +5,24 @@
 - Program status: active · five managed PRs authorized
 - Current PR: PR-T2 · Detector Model Registry and Bounded Probe Comparison
 - Current branch: codex/tiny-ball-detector-registry-probes
-- Current phase: PR-T1 merged and cleaned up · PR-T2 scope prepared · implementation starting from refreshed main
+- Current phase: PR-T1 merged and cleaned up · PR-T2 core/frontend/contract gates green · final execution-provenance hardening in progress before real-video evidence
 - Approval: the user authorized the final independently reviewed plan and the established managed-PR operating method on 2026-07-17.
-- Checks: PR-T1 merged as `6a9db0e4d85047c2ca03ec8b2dc936fe75f67a41` after the official Python route passed 1,748 tests with 64 skipped; full Vitest passed 542/542; Node and Python replacement CI passed; both independent reviews APPROVE; all Copilot threads were resolved; and the replacement remote-feedback window completed with zero new feedback. Test-only ports are closed and the user's existing 5173 service remains running.
-- Blockers: none. PR-T2 is constrained to immutable model descriptors, safe import, bounded probe jobs, and side-by-side probe evidence. It must not implement T3 annotation, T4 training/qualification, T5 acceptance integration, arbitrary model-path tuning, dependency/workspace changes, or committed `.pt` assets.
-- Next: commit and push the PR-T2 status checkpoint; dispatch a test-first PR-T2 implementation agent; independently review specification and quality/security; run the bounded real-video probe and complete local/CI/remote-feedback gates before merge
+- Checks: PR-T1 merged as `6a9db0e4d85047c2ca03ec8b2dc936fe75f67a41` after the official Python route passed 1,748 tests with 64 skipped; full Vitest passed 542/542; Node and Python replacement CI passed; both independent reviews APPROVE; all Copilot threads were resolved; and the replacement remote-feedback window completed with zero new feedback. PR-T2's source/import/runtime/supervisor reviews remain green. Frontend recovery, exact-job cancellation, strict lineage parsing, single-frame pagination, 50-frame-by-six-profile resource bounds, and durable create recovery are implemented. The enforced workflow suite passes 774/774 with global S/B/F/L 93.19/91.23/99.37/94.47 and every new probe core file above 90% in all four metrics. OpenAPI plus React/Zod clients were regenerated twice across a 326-file digest manifest with byte-identical output; required source identities are present and workspace, lock, and package files have zero diff. The updated backend source-mismatch regression passes under the deferred verification contract.
+- Blockers: none requiring user action. A final real-video dry run proved metadata-only POST, one 11.34-second source hash, and cache-hit retry, but correctly failed closed before inference with `worker_containment_unavailable`; it is not accepted evidence. The dry run and independent review also exposed a merge-blocking provenance defect: dirty/untracked execution files could be labeled as bound to the old HEAD, five local modules in the report-validation import closure were absent from the code bundle, and Pydantic/Pydantic Core versions were not bound. The implementation must distinguish clean `bound`, dirty `unbound`, and Git-unavailable states; bind the full reviewed local closure; and recheck both schema-runtime versions before any fresh evidence run. The older `probe-6cf...` record remains historical. Scope remains immutable model descriptors, safe import, bounded probe jobs, and side-by-side probe evidence; no dependency/workspace/lock/weight change is authorized.
+- Next: complete and independently review the execution commit/closure/runtime binding repair; regenerate contracts and rerun focused/full gates; commit the clean execution bundle; diagnose/retest Windows worker containment without weakening process-tree termination; execute the final six-profile real-video probe plus cache-hit retry; refresh evidence; then open PR-T2 and complete CI plus the restartable 10-minute remote-feedback window before merge
 - Heartbeat: ACTIVE
 - Heartbeat automation id: tiny-ball-step3-managed-pr-heartbeat
 - Heartbeat interval: every 15 minutes
 - Heartbeat scope: PR-T1 through PR-T5, including checks, feedback windows, merges, and cleanup
 - Dirty-baseline preservation: the pre-existing line-ending-only modification to `docs/superpowers/plans/2026-07-14-production-workflow-final-managed-pr-plan.md` is unrelated user state and must not be staged or changed by this program
-- Last updated: 2026-07-17 ET
+- Last updated: 2026-07-18 05:17 ET
 
 ## Current Program PR Ledger
 
 | PR | Branch | Status | Pull request | Remote feedback started | Merge |
 | --- | --- | --- | --- | --- | --- |
 | PR-T1 | codex/tiny-ball-trial-diagnosis | completed · Copilot corrections resolved · spec APPROVE · quality/security APPROVE · replacement CI passed | https://github.com/ferryhe/football_tracking/pull/112 | complete 2026-07-18T02:12:00Z–2026-07-18T02:22:27Z | `6a9db0e` · 2026-07-18T02:23:04Z |
-| PR-T2 | codex/tiny-ball-detector-registry-probes | active · scope prepared · implementation starting | pending | not started | pending |
+| PR-T2 | codex/tiny-ball-detector-registry-probes | active · execution provenance hardening before final-schema real-video evidence | pending | not started | pending |
 | PR-T3 | pending | not started | pending | not started | pending |
 | PR-T4 | pending | not started | pending | not started | pending |
 | PR-T5 | pending | not started | pending | not started | pending |
