@@ -658,6 +658,14 @@ class TrialCollectedCount(BaseModel):
     value: int | None = Field(default=None, ge=0)
     status: Literal["collected", "not_collected", "invalid"]
 
+    @model_validator(mode="after")
+    def validate_status_value(self) -> "TrialCollectedCount":
+        if self.status == "collected" and self.value is None:
+            raise ValueError("collected counts require a value")
+        if self.status != "collected" and self.value is not None:
+            raise ValueError("unavailable counts cannot expose a value")
+        return self
+
 
 class TrialStageReconciliation(BaseModel):
     status: Literal["reconciled", "mismatch", "not_collected"]

@@ -1,4 +1,4 @@
-import { act, render, screen } from "@testing-library/react";
+import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -39,10 +39,41 @@ const trialStepCapture = vi.hoisted(() => ({
     stopButtonRef?: React.Ref<HTMLButtonElement>;
   },
 }));
+const workspaceLifecycle = vi.hoisted(() => ({
+  mounts: 0,
+  unmounts: 0,
+  onSourceChange: null as null | ((source: SourceSignature) => void),
+  onCalibrationChange: null as null | ((calibration: unknown) => void),
+}));
 
 vi.mock("@workspace/api-client-react", () => ({
   useListInputVideos: () => queryResult,
 }));
+
+vi.mock(
+  "@/components/production/ProductionWorkspace",
+  async (importOriginal) => {
+    const React = await import("react");
+    const actual = await importOriginal<
+      typeof import("@/components/production/ProductionWorkspace")
+    >();
+    type WorkspaceProps = Parameters<typeof actual.ProductionWorkspace>[0];
+    return {
+      ...actual,
+      ProductionWorkspace: (props: WorkspaceProps) => {
+        workspaceLifecycle.onSourceChange = props.onSourceChange;
+        workspaceLifecycle.onCalibrationChange = props.onCalibrationChange;
+        React.useEffect(() => {
+          workspaceLifecycle.mounts += 1;
+          return () => {
+            workspaceLifecycle.unmounts += 1;
+          };
+        }, []);
+        return React.createElement(actual.ProductionWorkspace, props);
+      },
+    };
+  },
+);
 
 vi.mock("@/components/production/ProductionCalibrationStep", () => ({
   ProductionCalibrationStep: () => <div>interactive calibration</div>,
@@ -106,6 +137,10 @@ beforeEach(() => {
   };
   refetch.mockReset();
   trialStepCapture.props = null;
+  workspaceLifecycle.mounts = 0;
+  workspaceLifecycle.unmounts = 0;
+  workspaceLifecycle.onSourceChange = null;
+  workspaceLifecycle.onCalibrationChange = null;
 });
 
 function completedCalibrationDraft() {
@@ -165,6 +200,37 @@ async function draftWithUnsettledTrial(kind: "pending" | "running") {
           observed_at: "2026-07-14T12:06:00Z",
         });
   return updateProductionTrial(draft, trial);
+}
+
+async function draftWithTerminalAttempt() {
+  const draft = completedCalibrationDraft();
+  const settings = createProductionTrialState().settings;
+  const submission = await buildProductionTrialSubmission({
+    workflow_id: draft.workflow_id,
+    source,
+    calibration: draft.calibration!,
+    settings,
+    parent_run_id: null,
+    submission_id: "submission-terminal",
+    output_id: "output-terminal",
+    generation: 1,
+    created_at: "2026-07-14T12:05:00Z",
+  });
+  const pending = setPendingProductionTrial(
+    createProductionTrialState(settings),
+    submission.pending,
+  );
+  return updateProductionTrial(
+    draft,
+    appendProductionTrialAttempt(pending, {
+      run: {
+        run_id: `production_trial_${submission.pending.output_id}`,
+        status: "failed",
+      },
+      pending: submission.pending,
+      observed_at: "2026-07-14T12:06:00Z",
+    }),
+  );
 }
 
 describe("ProductionPage", () => {
@@ -437,6 +503,62 @@ describe("ProductionPage", () => {
       screen.getByRole("heading", { name: "Choose the original video" }),
     ).toBeVisible();
     expect(localStorage.getItem(PRODUCTION_DRAFT_STORAGE_KEY)).toBeNull();
+  });
+
+  it("keeps the workspace mounted across workflow rotations and remounts when replacement clears the draft", async () => {
+    for (const upstreamChange of ["source", "calibration"] as const) {
+      const draft = await draftWithTerminalAttempt();
+      saveProductionDraft(localStorage, draft);
+      workspaceLifecycle.mounts = 0;
+      workspaceLifecycle.unmounts = 0;
+      const view = renderPage();
+      expect(workspaceLifecycle.mounts).toBe(1);
+      const previousWorkflowId = draft.workflow_id;
+
+      act(() => {
+        if (upstreamChange === "source") {
+          workspaceLifecycle.onSourceChange?.({
+            ...source,
+            size_bytes: source.size_bytes + 1,
+          });
+        } else {
+          workspaceLifecycle.onCalibrationChange?.({
+            ...draft.calibration!,
+            approved_polygon: [
+              [1, 0],
+              [1_919, 0],
+              [1_919, 1_079],
+            ],
+            polygon_digest: "d".repeat(64),
+          });
+        }
+      });
+
+      await waitFor(() => {
+        const persisted = JSON.parse(
+          localStorage.getItem(PRODUCTION_DRAFT_STORAGE_KEY) ?? "{}",
+        );
+        expect(persisted.workflow_id).not.toBe(previousWorkflowId);
+      });
+      expect(workspaceLifecycle.mounts).toBe(1);
+      expect(workspaceLifecycle.unmounts).toBe(0);
+      view.unmount();
+      createSafeBrowserStorage().removeItem(PRODUCTION_DRAFT_STORAGE_KEY);
+    }
+
+    const draft = await draftWithTerminalAttempt();
+    saveProductionDraft(localStorage, draft);
+    workspaceLifecycle.mounts = 0;
+    workspaceLifecycle.unmounts = 0;
+    const view = renderPage();
+    await view.user.click(
+      screen.getByRole("button", { name: "Start new production" }),
+    );
+    await view.user.click(
+      screen.getByRole("button", { name: "Replace and start new" }),
+    );
+    await waitFor(() => expect(workspaceLifecycle.mounts).toBe(2));
+    expect(workspaceLifecycle.unmounts).toBe(1);
   });
 
   it("preserves an active trial when Back or Start New is attempted", async () => {

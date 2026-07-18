@@ -14,15 +14,15 @@
 - Delivery order: `PR-T1 → PR-T2 → PR-T3 → PR-T4 → PR-T5`
 - Current PR: PR-T1 · Fail-Closed Trial Diagnosis and Recovery Actions
 - Current branch: `codex/tiny-ball-trial-diagnosis`
-- Current phase: PR #112 open · final remote-feedback window scheduled for 2026-07-18T01:57:00Z–2026-07-18T02:07:00Z
+- Current phase: PR #112 open · two Copilot findings corrected and independently re-approved · replacement remote-feedback window scheduled for 2026-07-18T02:12:00Z–2026-07-18T02:22:00Z
 - Managed workflow authorized: 2026-07-17
 - Heartbeat: active · `tiny-ball-step3-managed-pr-heartbeat` · every 15 minutes
 - Merge rule: implementation, specification review, quality review, local/CI checks, then a complete 10-minute remote-feedback window; any material corrective push restarts that window
-- Blockers: none. Final specification and quality/security reviews both APPROVE. Current gates: final official Python route 1,748 passed with 64 skipped; full Vitest 542/542; TrialStep 45/45; both TypeScript configurations; production build/bundle inspection; Production Chromium 38/38; and `git diff --check`.
+- Blockers: none. Final specification and quality/security reviews both APPROVE, and both independently APPROVE the two Copilot corrections. Current gates: final official Python route 1,748 passed with 64 skipped; feedback-focused backend 63 passed with 56 subtests; full Vitest 542/542; feedback-focused Production page 17/17; TrialStep 45/45; both TypeScript configurations; production build/bundle inspection; Production Chromium 38/38; Ruff; and `git diff --check`.
 
 | PR | Branch | Status | Pull request | Remote feedback | Merge |
 | --- | --- | --- | --- | --- | --- |
-| PR-T1 | `codex/tiny-ball-trial-diagnosis` | open · spec APPROVE · quality/security APPROVE · checks/feedback monitoring | https://github.com/ferryhe/football_tracking/pull/112 | scheduled 2026-07-18T01:57:00Z–2026-07-18T02:07:00Z | pending |
+| PR-T1 | `codex/tiny-ball-trial-diagnosis` | open · Copilot corrections complete · spec APPROVE · quality/security APPROVE · checks/feedback monitoring | https://github.com/ferryhe/football_tracking/pull/112 | replacement window scheduled 2026-07-18T02:12:00Z–2026-07-18T02:22:00Z | pending |
 | PR-T2 | pending | not started | pending | not started | pending |
 | PR-T3 | pending | not started | pending | not started | pending |
 | PR-T4 | pending | not started | pending | not started | pending |

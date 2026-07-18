@@ -3,10 +3,33 @@ from __future__ import annotations
 import unittest
 from pathlib import Path
 
+from pydantic import ValidationError
+
+from football_tracking.api.schemas import TrialCollectedCount
 from scripts.export_openapi import _frontend_paths, build_openapi_document
 
 
 class ExportOpenApiTests(unittest.TestCase):
+    def test_trial_collected_count_requires_value_only_when_collected(self) -> None:
+        for status, value in (
+            ("collected", 0),
+            ("not_collected", None),
+            ("invalid", None),
+        ):
+            with self.subTest(status=status, value=value):
+                observation = TrialCollectedCount(status=status, value=value)
+                self.assertEqual(status, observation.status)
+                self.assertEqual(value, observation.value)
+
+        for status, value in (
+            ("collected", None),
+            ("not_collected", 0),
+            ("invalid", 0),
+        ):
+            with self.subTest(status=status, value=value):
+                with self.assertRaises(ValidationError):
+                    TrialCollectedCount(status=status, value=value)
+
     def test_build_openapi_document_exposes_frontend_proxy_paths(self) -> None:
         document = build_openapi_document()
         paths = set(document["paths"])
