@@ -6,6 +6,7 @@
  */
 import type { DetectorProbeExecutionBundleView } from "./detectorProbeExecutionBundleView";
 import type { DetectorProbeLineageViewProfileSha256s } from "./detectorProbeLineageViewProfileSha256s";
+import type { DetectorProbeReviewProxyUpgradeBindingView } from "./detectorProbeReviewProxyUpgradeBindingView";
 import type { DetectorProbeTuningPatchBindingView } from "./detectorProbeTuningPatchBindingView";
 
 export interface DetectorProbeLineageView {
@@ -32,5 +33,8 @@ export interface DetectorProbeLineageView {
   runtime_environment_sha256: string;
   /** @pattern ^[0-9a-f]{64}$ */
   intent_sha256: string;
+  semantic_intent_sha256?: string | null;
   retry_from_job_id: string | null;
+  retry_kind?: "review_proxy_decode_upgrade" | null;
+  review_proxy_upgrade?: DetectorProbeReviewProxyUpgradeBindingView | null;
 }

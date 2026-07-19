@@ -33,7 +33,14 @@ class CandidateDatasetTests(unittest.TestCase):
             path = Path(temp_name) / "source.bin"
             path.write_bytes(b"fixture")
             frames = _solid_frames(8, width=8, height=6)
-            factory = CaptureFactory({str(path.resolve()): CaptureSpec(frames)})
+            factory = CaptureFactory(
+                {
+                    str(path.resolve()): CaptureSpec(
+                        frames,
+                        decoder_positions_msec=[-50.0, 50.0, 100.0, 150.0, 200.0, 250.0, 300.0, 350.0],
+                    )
+                }
+            )
 
             with patch(
                 "football_tracking.candidate_dataset.cv2.VideoCapture",
@@ -52,6 +59,21 @@ class CandidateDatasetTests(unittest.TestCase):
         self.assertTrue(np.array_equal(frames[2], decoded[2]))
         self.assertEqual("sequential", metadata["effective_decode_mode"])
         self.assertEqual([2, 6], metadata["verified_frame_indices"])
+        self.assertEqual(
+            [
+                {
+                    "frame_index": 2,
+                    "decoder_reported_pos_msec": 100.0,
+                    "observation_method": "opencv_cap_prop_pos_msec_after_verified_frame_read",
+                },
+                {
+                    "frame_index": 6,
+                    "decoder_reported_pos_msec": 300.0,
+                    "observation_method": "opencv_cap_prop_pos_msec_after_verified_frame_read",
+                },
+            ],
+            metadata["frame_timing_observations"],
+        )
         self.assertTrue(all(capture.released for capture in factory.instances))
 
     def test_verified_bounded_decode_records_seek_fallback_without_losing_identity(self) -> None:
@@ -83,6 +105,38 @@ class CandidateDatasetTests(unittest.TestCase):
         self.assertEqual(2, len(factory.instances))
         self.assertEqual([], factory.instances[1].seek_calls)
         self.assertEqual(8, factory.instances[1].read_count)
+        self.assertTrue(all(capture.released for capture in factory.instances))
+
+    def test_verified_bounded_decode_rejects_missing_decoder_timestamp(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_name:
+            path = Path(temp_name) / "source.bin"
+            path.write_bytes(b"fixture")
+            frames = _solid_frames(3, width=8, height=6)
+            factory = CaptureFactory(
+                {
+                    str(path.resolve()): CaptureSpec(
+                        frames,
+                        decoder_positions_msec=[-50.0, float("nan"), 50.0],
+                    )
+                }
+            )
+
+            with (
+                patch(
+                    "football_tracking.candidate_dataset.cv2.VideoCapture",
+                    side_effect=factory,
+                ),
+                self.assertRaisesRegex(CandidateDatasetError, "finite POS_MSEC"),
+            ):
+                decode_verified_frames(
+                    path.resolve(),
+                    [1],
+                    requested_decode_mode="sequential",
+                    expected_width=8,
+                    expected_height=6,
+                    expected_frame_count=3,
+                )
+
         self.assertTrue(all(capture.released for capture in factory.instances))
 
     def test_late_frame_seek_failure_fails_closed_without_linear_scan(self) -> None:
@@ -161,8 +215,7 @@ class CandidateDatasetTests(unittest.TestCase):
                     expected_width=8,
                     expected_height=6,
                     expected_frame_count=len(frames),
-                    cancel_callback=lambda: bool(factory.instances)
-                    and factory.instances[0].read_count >= 3,
+                    cancel_callback=lambda: bool(factory.instances) and factory.instances[0].read_count >= 3,
                 )
 
         self.assertEqual(3, factory.instances[0].read_count)
@@ -214,8 +267,7 @@ class CandidateDatasetTests(unittest.TestCase):
                         expected_width=8,
                         expected_height=6,
                         expected_frame_count=len(frames),
-                        cancel_callback=lambda: bool(factory.instances)
-                        and factory.instances[0].read_count >= 1,
+                        cancel_callback=lambda: bool(factory.instances) and factory.instances[0].read_count >= 1,
                     )
 
                 self.assertEqual(1, factory.instances[0].read_count)
@@ -228,9 +280,7 @@ class CandidateDatasetTests(unittest.TestCase):
             factory = CaptureFactory({str(path.resolve()): CaptureSpec(frames)})
 
             def shutting_down() -> bool:
-                raise DetectorDevelopmentError(
-                    "service_shutting_down", "service is closing"
-                )
+                raise DetectorDevelopmentError("service_shutting_down", "service is closing")
 
             with patch(
                 "football_tracking.candidate_dataset.cv2.VideoCapture",
@@ -945,10 +995,14 @@ class CaptureSpec:
         *,
         opened: bool = True,
         reported_frame_count: int | None = None,
+        decoder_positions_msec: list[float] | None = None,
+        fps: float = 20.0,
     ) -> None:
         self.frames = frames
         self.opened = opened
         self.reported_frame_count = reported_frame_count
+        self.decoder_positions_msec = decoder_positions_msec
+        self.fps = fps
 
 
 class FakeCapture:
@@ -956,6 +1010,8 @@ class FakeCapture:
         self.frames = [frame.copy() for frame in spec.frames]
         self.opened = spec.opened
         self.reported_frame_count = spec.reported_frame_count
+        self.decoder_positions_msec = spec.decoder_positions_msec
+        self.fps = spec.fps
         self.seek_succeeds = seek_succeeds
         self.position = 0
         self.released = False
@@ -974,6 +1030,13 @@ class FakeCapture:
             return float(self.reported_frame_count if self.reported_frame_count is not None else len(self.frames))
         if prop == cv2.CAP_PROP_POS_FRAMES:
             return float(self.position)
+        if prop == cv2.CAP_PROP_POS_MSEC:
+            decoded_index = max(0, self.position - 1)
+            if self.decoder_positions_msec is not None:
+                return float(self.decoder_positions_msec[decoded_index])
+            return float(decoded_index * 1000.0 / self.fps)
+        if prop == cv2.CAP_PROP_FPS:
+            return float(self.fps)
         return 0.0
 
     def set(self, prop: int, value: float) -> bool:
@@ -1011,11 +1074,7 @@ class CaptureFactory:
     def __call__(self, path: str) -> FakeCapture:
         capture = FakeCapture(
             self.specs[path],
-            seek_succeeds=(
-                False
-                if self.all_seeks_fail
-                else self.first_seek_succeeds or bool(self.instances)
-            ),
+            seek_succeeds=(False if self.all_seeks_fail else self.first_seek_succeeds or bool(self.instances)),
         )
         self.instances.append(capture)
         return capture

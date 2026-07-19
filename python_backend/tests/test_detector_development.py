@@ -13,7 +13,10 @@ import time
 import unittest
 from copy import deepcopy
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
+
+from audited_authority_test_support import patched_audited_t2_probe_bindings
+from pydantic import ValidationError
 
 from football_tracking.candidate_dataset import CandidateDatasetCancelled
 from football_tracking.detector_development import (
@@ -25,7 +28,10 @@ from football_tracking.detector_development import (
     merge_probe_candidates,
     normalize_probe_candidates,
 )
-from football_tracking.detector_development_common import canonical_sha256
+from football_tracking.detector_development_common import (
+    atomic_write_json,
+    canonical_sha256,
+)
 from football_tracking.detector_probe_runner import (
     ArtifactWriteError,
     probe_execution_environment,
@@ -1068,10 +1074,7 @@ class ProbeContractTests(unittest.TestCase):
                 "printf 'trusted-blob\\n'",
             )
             (root / ".gitattributes").write_text(
-                "".join(
-                    f"{path} filter=constant\n"
-                    for path in paths[: 2 if include_second else 1]
-                ),
+                "".join(f"{path} filter=constant\n" for path in paths[: 2 if include_second else 1]),
                 encoding="utf-8",
             )
         for path in paths[: 2 if include_second else 1]:
@@ -1110,10 +1113,7 @@ class ProbeContractTests(unittest.TestCase):
         temporary, root, paths, commit = self._commit_binding_fixture(crlf_worktree=True)
         try:
             raw_worktree = {path: (root / Path(path)).read_bytes() for path in paths}
-            raw_blobs = {
-                path: self._git_bytes(root, "cat-file", "blob", f"{commit}:{path}")
-                for path in paths
-            }
+            raw_blobs = {path: self._git_bytes(root, "cat-file", "blob", f"{commit}:{path}") for path in paths}
             self.assertTrue(all(b"\r\n" in content for content in raw_worktree.values()))
             self.assertTrue(all(b"\r\n" not in content for content in raw_blobs.values()))
 
@@ -1168,20 +1168,14 @@ class ProbeContractTests(unittest.TestCase):
 
             tracked = root / Path(paths[0])
             tracked.write_text("modified\n", encoding="utf-8")
-            self._assert_unbound_commit_evidence(
-                DetectorProbeCoordinator._code_commit_binding(root, paths)
-            )
+            self._assert_unbound_commit_evidence(DetectorProbeCoordinator._code_commit_binding(root, paths))
             self._git(root, "restore", "--", paths[0])
             tracked.unlink()
-            self._assert_unbound_commit_evidence(
-                DetectorProbeCoordinator._code_commit_binding(root, paths)
-            )
+            self._assert_unbound_commit_evidence(DetectorProbeCoordinator._code_commit_binding(root, paths))
             self._git(root, "restore", "--", paths[0])
             renamed = "python_backend/football_tracking/renamed_probe.py"
             self._git(root, "mv", paths[0], renamed)
-            self._assert_unbound_commit_evidence(
-                DetectorProbeCoordinator._code_commit_binding(root, paths)
-            )
+            self._assert_unbound_commit_evidence(DetectorProbeCoordinator._code_commit_binding(root, paths))
         finally:
             temporary.cleanup()
 
@@ -1190,9 +1184,7 @@ class ProbeContractTests(unittest.TestCase):
             untracked = root / Path(paths[1])
             untracked.parent.mkdir(parents=True, exist_ok=True)
             untracked.write_text("untracked\n", encoding="utf-8")
-            self._assert_unbound_commit_evidence(
-                DetectorProbeCoordinator._code_commit_binding(root, paths)
-            )
+            self._assert_unbound_commit_evidence(DetectorProbeCoordinator._code_commit_binding(root, paths))
         finally:
             temporary.cleanup()
 
@@ -1237,12 +1229,8 @@ class ProbeContractTests(unittest.TestCase):
     def test_code_commit_binding_ignores_inherited_git_redirection_environment(self) -> None:
         from football_tracking.detector_probe import DetectorProbeCoordinator
 
-        first_temporary, first_root, paths, first_commit = (
-            self._commit_binding_fixture()
-        )
-        second_temporary, second_root, second_paths, _second_commit = (
-            self._commit_binding_fixture()
-        )
+        first_temporary, first_root, paths, first_commit = self._commit_binding_fixture()
+        second_temporary, second_root, second_paths, _second_commit = self._commit_binding_fixture()
         original_run = subprocess.run
         observed_environments: list[dict[str, str]] = []
         try:
@@ -1285,11 +1273,7 @@ class ProbeContractTests(unittest.TestCase):
             self.assertEqual("bound", binding.code_commit_status)
             self.assertTrue(observed_environments)
             for environment in observed_environments:
-                inherited_git_names = {
-                    name
-                    for name in environment
-                    if name.upper().startswith("GIT_")
-                }
+                inherited_git_names = {name for name in environment if name.upper().startswith("GIT_")}
                 self.assertEqual({"GIT_TERMINAL_PROMPT"}, inherited_git_names)
                 self.assertEqual("0", environment["GIT_TERMINAL_PROMPT"])
         finally:
@@ -1300,11 +1284,10 @@ class ProbeContractTests(unittest.TestCase):
         from football_tracking.detector_probe import DetectorProbeCoordinator
 
         first_temporary, first_root, paths, _commit = self._commit_binding_fixture()
-        second_temporary, second_root, _second_paths, _second_commit = (
-            self._commit_binding_fixture()
-        )
+        second_temporary, second_root, _second_paths, _second_commit = self._commit_binding_fixture()
         original_run = subprocess.run
         try:
+
             def redirect_reported_root(command, **kwargs):
                 if command[1:] == ["rev-parse", "--show-toplevel"]:
                     return subprocess.CompletedProcess(
@@ -1329,9 +1312,7 @@ class ProbeContractTests(unittest.TestCase):
     def test_code_commit_binding_rejects_arbitrary_clean_filter_equivalence(self) -> None:
         from football_tracking.detector_probe import DetectorProbeCoordinator
 
-        temporary, root, paths, commit = self._commit_binding_fixture(
-            constant_clean_filter=True
-        )
+        temporary, root, paths, commit = self._commit_binding_fixture(constant_clean_filter=True)
         try:
             status = self._git_bytes(
                 root,
@@ -1344,31 +1325,21 @@ class ProbeContractTests(unittest.TestCase):
             )
             self.assertEqual(b"", status)
             raw_worktree = {path: (root / Path(path)).read_bytes() for path in paths}
-            raw_blobs = {
-                path: self._git_bytes(root, "cat-file", "blob", f"{commit}:{path}")
-                for path in paths
-            }
-            self.assertTrue(
-                all(content == b"trusted-blob\n" for content in raw_blobs.values())
-            )
-            self.assertTrue(
-                all(content != raw_blobs[path] for path, content in raw_worktree.items())
-            )
+            raw_blobs = {path: self._git_bytes(root, "cat-file", "blob", f"{commit}:{path}") for path in paths}
+            self.assertTrue(all(content == b"trusted-blob\n" for content in raw_blobs.values()))
+            self.assertTrue(all(content != raw_blobs[path] for path, content in raw_worktree.items()))
 
-            self._assert_unbound_commit_evidence(
-                DetectorProbeCoordinator._code_commit_binding(root, paths)
-            )
+            self._assert_unbound_commit_evidence(DetectorProbeCoordinator._code_commit_binding(root, paths))
         finally:
             temporary.cleanup()
 
     def test_code_commit_binding_fails_closed_on_git_head_and_worktree_drift(self) -> None:
         from football_tracking.detector_probe import DetectorProbeCoordinator
 
-        temporary, root, paths, _commit = self._commit_binding_fixture(
-            crlf_worktree=True
-        )
+        temporary, root, paths, _commit = self._commit_binding_fixture(crlf_worktree=True)
         original_run = subprocess.run
         try:
+
             def git_failure(command, **kwargs):
                 if command[1:3] == ["cat-file", "blob"]:
                     raise subprocess.TimeoutExpired(command, 2)
@@ -1378,9 +1349,7 @@ class ProbeContractTests(unittest.TestCase):
                 "football_tracking.detector_probe.subprocess.run",
                 side_effect=git_failure,
             ):
-                self._assert_unavailable_commit_evidence(
-                    DetectorProbeCoordinator._code_commit_binding(root, paths)
-                )
+                self._assert_unavailable_commit_evidence(DetectorProbeCoordinator._code_commit_binding(root, paths))
 
             rev_parse_calls = 0
 
@@ -1401,9 +1370,7 @@ class ProbeContractTests(unittest.TestCase):
                 "football_tracking.detector_probe.subprocess.run",
                 side_effect=drift_head_after_capture,
             ):
-                self._assert_unavailable_commit_evidence(
-                    DetectorProbeCoordinator._code_commit_binding(root, paths)
-                )
+                self._assert_unavailable_commit_evidence(DetectorProbeCoordinator._code_commit_binding(root, paths))
             self.assertEqual(2, rev_parse_calls)
 
             drifted = False
@@ -1421,9 +1388,7 @@ class ProbeContractTests(unittest.TestCase):
                 "football_tracking.detector_probe.subprocess.run",
                 side_effect=drift_worktree_after_blob_read,
             ):
-                self._assert_unbound_commit_evidence(
-                    DetectorProbeCoordinator._code_commit_binding(root, paths)
-                )
+                self._assert_unbound_commit_evidence(DetectorProbeCoordinator._code_commit_binding(root, paths))
             self.assertTrue(drifted)
         finally:
             temporary.cleanup()
@@ -1531,12 +1496,8 @@ class ProbeContractTests(unittest.TestCase):
                     "parent_pid": 111,
                 },
             )
-            self.assertTrue(
-                worker._wait_for_start(control, "worker-1", 111, lambda: True)
-            )
-            self.assertFalse(
-                worker._wait_for_start(control, "worker-other", 111, lambda: True)
-            )
+            self.assertTrue(worker._wait_for_start(control, "worker-1", 111, lambda: True))
+            self.assertFalse(worker._wait_for_start(control, "worker-other", 111, lambda: True))
 
     def test_worker_opens_parent_monitor_once_and_closes_on_every_return(self) -> None:
         import football_tracking.detector_probe_worker as worker
@@ -1807,6 +1768,8 @@ class DetectorProbeJobTests(unittest.TestCase):
                         "direct": "direct_verified",
                     }[request["_requested_decode_mode"]],
                     "decoded_frame_position": frame_index,
+                    "decoder_reported_pos_msec": frame_index * 1000.0 / 30.0,
+                    "decoder_timing_observation_method": "opencv_cap_prop_pos_msec_after_verified_frame_read",
                     "media_integrity": {
                         "path": None,
                         "status": "ok",
@@ -1841,6 +1804,14 @@ class DetectorProbeJobTests(unittest.TestCase):
                 "effective_decode_mode": effective_mode,
                 "verified_frame_indices": request["frame_indices"],
                 "position_verification": "opencv_next_frame_index_with_0.25_tolerance",
+                "frame_timing_observations": [
+                    {
+                        "frame_index": frame_index,
+                        "decoder_reported_pos_msec": frame_index * 1000.0 / 30.0,
+                        "observation_method": "opencv_cap_prop_pos_msec_after_verified_frame_read",
+                    }
+                    for frame_index in request["frame_indices"]
+                ],
             },
             "execution": {
                 "device": request["_execution_environment"]["device"],
@@ -2017,10 +1988,7 @@ class DetectorProbeJobTests(unittest.TestCase):
 
         package_root = Path(probe_module.__file__).resolve().parent
         self.assertEqual(
-            {
-                f"football_tracking/{name}": _sha256(package_root / name)
-                for name in probe_module._CODE_BUNDLE_FILES
-            },
+            {f"football_tracking/{name}": _sha256(package_root / name) for name in probe_module._CODE_BUNDLE_FILES},
             bundle["code_bundle_files"],
         )
         self.assertEqual(
@@ -2077,6 +2045,10 @@ class DetectorProbeJobTests(unittest.TestCase):
             service.close()
 
         cases = (
+            lambda bundle: bundle.__setitem__(
+                "code_bundle_files",
+                dict(reversed(list(bundle["code_bundle_files"].items()))),
+            ),
             lambda bundle: bundle["execution_environment"].pop("pydantic_version"),
             lambda bundle: bundle["execution_environment"].__setitem__("pydantic_core_version", ""),
             lambda bundle: bundle["execution_environment"].__setitem__("pydantic_version", "tampered"),
@@ -2098,9 +2070,7 @@ class DetectorProbeJobTests(unittest.TestCase):
                 code_commit_status="bound",
                 code_commit_reason=None,
                 code_commit_blob_files=dict(bundle["code_bundle_files"]),
-                code_commit_blob_bundle_sha256=canonical_sha256(
-                    bundle["code_bundle_files"]
-                ),
+                code_commit_blob_bundle_sha256=canonical_sha256(bundle["code_bundle_files"]),
                 code_commit_binding_kind="raw_byte_equality",
             ),
             lambda bundle: bundle.update(
@@ -2123,6 +2093,382 @@ class DetectorProbeJobTests(unittest.TestCase):
                         frozen,
                         observed["frozen_profiles"],
                     )
+
+    def test_audited_t2_17_file_bundle_accepts_only_its_exact_frozen_binding(self) -> None:
+        from football_tracking.detector_probe import DetectorProbeCoordinator
+
+        fixture_path = Path(__file__).parent / "fixtures" / "audited_t2_17_file_execution_bundle.v1.json"
+        fixture = json.loads(fixture_path.read_text(encoding="utf-8"))
+        bundle = {
+            "code_bundle_files": {path: SHA_A for path in fixture["code_bundle_paths"]},
+            "code_bundle_sha256": fixture["code_bundle_sha256"],
+            "runtime_environment_sha256": fixture["runtime_environment_sha256"],
+            "code_commit": fixture["code_commit"],
+            "code_commit_blob_bundle_sha256": fixture["code_commit_blob_bundle_sha256"],
+        }
+        frozen = {"execution_bundle_sha256": fixture["execution_bundle_sha256"]}
+
+        self.assertEqual(
+            tuple(fixture["code_bundle_paths"]),
+            DetectorProbeCoordinator._validated_code_bundle_paths(frozen, bundle),
+        )
+        for label, mutate in (
+            (
+                "reordered-paths",
+                lambda value: value.__setitem__(
+                    "code_bundle_files",
+                    dict(reversed(list(value["code_bundle_files"].items()))),
+                ),
+            ),
+            (
+                "missing-path",
+                lambda value: value["code_bundle_files"].pop(fixture["code_bundle_paths"][-1]),
+            ),
+            (
+                "extra-path",
+                lambda value: value["code_bundle_files"].__setitem__(
+                    "football_tracking/review_proxy_mapping.py",
+                    SHA_B,
+                ),
+            ),
+            (
+                "forged-code-bundle-hash",
+                lambda value: value.__setitem__("code_bundle_sha256", SHA_B),
+            ),
+            (
+                "forged-runtime-hash",
+                lambda value: value.__setitem__("runtime_environment_sha256", SHA_B),
+            ),
+            (
+                "forged-commit",
+                lambda value: value.__setitem__("code_commit", "a" * 40),
+            ),
+            (
+                "forged-commit-blob-hash",
+                lambda value: value.__setitem__("code_commit_blob_bundle_sha256", SHA_B),
+            ),
+        ):
+            with self.subTest(label=label):
+                changed = deepcopy(bundle)
+                mutate(changed)
+                with self.assertRaises(DetectorDevelopmentError):
+                    DetectorProbeCoordinator._validated_code_bundle_paths(frozen, changed)
+
+    def test_audited_t2_real_jobs_remain_verified_and_byte_immutable(self) -> None:
+        from football_tracking.api.schemas import DetectorProbeReportView
+        from football_tracking.detector_probe import DetectorProbeCoordinator
+
+        repo_root = Path(__file__).resolve().parents[1]
+        fixture_path = Path(__file__).parent / "fixtures" / "audited_t2_17_file_execution_bundle.v1.json"
+        fixture = json.loads(fixture_path.read_text(encoding="utf-8"))
+        jobs_root = repo_root / "data" / "ball_detector_development_v1" / "probes" / "jobs"
+        job_paths = [jobs_root / f"{job_id}.json" for job_id in fixture["job_ids"]]
+        if not all(path.is_file() for path in job_paths):
+            self.skipTest("audited T2 real-job evidence is not present in this checkout")
+        before = {path: path.read_bytes() for path in job_paths}
+
+        with tempfile.TemporaryDirectory() as temporary:
+            isolated_root = Path(temporary)
+            isolated_probe_root = isolated_root / "data" / "ball_detector_development_v1" / "probes"
+            isolated_jobs_root = isolated_probe_root / "jobs"
+            isolated_results_root = isolated_probe_root / "results"
+            isolated_jobs_root.mkdir(parents=True)
+            isolated_results_root.mkdir()
+            for job_id, job_path in zip(fixture["job_ids"], job_paths, strict=True):
+                shutil.copy2(job_path, isolated_jobs_root / job_path.name)
+                shutil.copytree(
+                    repo_root / "data" / "ball_detector_development_v1" / "probes" / "results" / job_id,
+                    isolated_results_root / job_id,
+                )
+            coordinator = DetectorProbeCoordinator(isolated_root, auto_start_workers=False)
+            try:
+                observed = [coordinator.get_verified_probe(job_id) for job_id in fixture["job_ids"]]
+                repair_parents = [coordinator.get_review_proxy_upgrade_parent(job_id) for job_id in fixture["job_ids"]]
+            finally:
+                coordinator.close()
+
+        self.assertEqual(["ready", "ready"], [job["status"] for job in observed])
+        self.assertEqual(before, {path: path.read_bytes() for path in job_paths})
+        for job in observed:
+            DetectorProbeReportView.model_validate(job["report"])
+            coherently_rehashed = deepcopy(job["report"])
+            coherently_rehashed["created_at"] = "2026-07-18T23:59:59+00:00"
+            coherently_rehashed["report_sha256"] = canonical_sha256(
+                {key: value for key, value in coherently_rehashed.items() if key != "report_sha256"}
+            )
+            with self.assertRaises(ValidationError):
+                DetectorProbeReportView.model_validate(coherently_rehashed)
+        for job, parent in zip(observed, repair_parents, strict=True):
+            self.assertEqual(job["job_id"], parent["parent_probe_job_id"])
+            self.assertEqual(job["report"]["report_sha256"], parent["parent_probe_report_sha256"])
+            self.assertEqual(job["result_manifest_sha256"], parent["parent_probe_result_manifest_sha256"])
+            self.assertEqual(fixture["execution_bundle_sha256"], parent["parent_execution_bundle_sha256"])
+            self.assertEqual(fixture["runtime_environment_sha256"], parent["parent_runtime_environment_sha256"])
+            self.assertEqual(job["frozen_request"]["frame_indices"], parent["frame_indices"])
+        for path in job_paths:
+            record = json.loads(path.read_text(encoding="utf-8"))
+            bundle = record["frozen_request"]["execution_bundle"]
+            self.assertEqual(fixture["execution_bundle_sha256"], record["frozen_request"]["execution_bundle_sha256"])
+            self.assertEqual(fixture["code_bundle_paths"], list(bundle["code_bundle_files"]))
+            self.assertEqual(fixture["runtime_environment_sha256"], bundle["runtime_environment_sha256"])
+            self.assertEqual(fixture["code_commit"], bundle["code_commit"])
+
+    def test_current_or_forged_probe_cannot_become_a_legacy_proxy_repair_parent(self) -> None:
+        service = self._service()
+        try:
+            job = service.create_probe(self._request())
+            service.execute_probe(job["job_id"])
+            with self.assertRaises(DetectorDevelopmentError) as rejected:
+                service.get_review_proxy_upgrade_parent(job["job_id"])
+        finally:
+            service.close()
+
+        self.assertEqual("review_proxy_repair_ineligible", rejected.exception.code)
+
+    def test_review_proxy_child_survives_crash_after_atomic_rename_before_return(
+        self,
+    ) -> None:
+        import football_tracking.detector_probe as probe_module
+
+        service = self._service()
+        recovered = None
+        try:
+            parent = service.create_probe(self._request())
+            service.execute_probe(parent["job_id"])
+            coordinator = service._probes()
+            parent_job_id = parent["job_id"]
+            result_root = (
+                self.repo_root / "data" / "ball_detector_development_v1" / "probes" / "results" / parent_job_id
+            )
+            report_path = result_root / "detector_probe_report.v1.json"
+            manifest_path = result_root / "detector_probe_manifest.v1.json"
+            report = json.loads(report_path.read_text(encoding="utf-8"))
+            report.pop("review_proxy_manifest", None)
+            report["decode"].pop("frame_timing_observations", None)
+            for frame in report["frames"]:
+                frame.pop("decoder_reported_pos_msec", None)
+                frame.pop("decoder_timing_observation_method", None)
+            report["report_sha256"] = canonical_sha256(
+                {key: value for key, value in report.items() if key != "report_sha256"}
+            )
+            atomic_write_json(report_path, report, trusted_root=result_root)
+            report_bytes = report_path.read_bytes()
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest["report_content_sha256"] = report["report_sha256"]
+            manifest["report_file_sha256"] = hashlib.sha256(report_bytes).hexdigest()
+            manifest["report_file_size_bytes"] = len(report_bytes)
+            atomic_write_json(manifest_path, manifest, trusted_root=result_root)
+            result_manifest_sha256 = hashlib.sha256(manifest_path.read_bytes()).hexdigest()
+            with coordinator._lock:
+                record = coordinator._record(parent_job_id)
+                record["report"] = deepcopy(report)
+                record["result_manifest_sha256"] = result_manifest_sha256
+                coordinator._persist_record(record)
+
+            legacy_binding = {
+                parent_job_id: {
+                    "report_sha256": report["report_sha256"],
+                    "execution_bundle_sha256": report["lineage"]["execution_bundle_sha256"],
+                }
+            }
+            proxy_sample = _jpeg_fixture(2560, 720)
+            frame_indices = [frame["frame_index"] for frame in report["frames"]]
+            sample_sha256 = hashlib.sha256(proxy_sample).hexdigest()
+            repair_evidence = {
+                "schema_version": "1.0",
+                "repair_id": "repair-atomic-rename-crash",
+                "repair_request_sha256": SHA_A,
+                "repair_report_sha256": SHA_B,
+                "repair_result_manifest_sha256": SHA_C,
+                "proxy_media_sha256": SHA_A,
+                "proxy_size_bytes": 12345,
+                "repair_execution_binding_sha256": SHA_B,
+                "repair_code_bundle_sha256": SHA_C,
+                "repair_runtime_sha256": SHA_A,
+                "repair_decoder_fingerprint_sha256": SHA_B,
+                "sampled_frame_sha256s": {str(index): sample_sha256 for index in frame_indices},
+            }
+            proxy_media = {
+                "sha256": SHA_A,
+                "size_bytes": 12345,
+                "width": 2560,
+                "height": 720,
+                "frame_count": report["source"]["frame_count"],
+                "fps": report["decode"]["fps"],
+            }
+            real_publish = probe_module._publish_staging_directory
+
+            def crash_after_rename(staging: Path, destination: Path) -> None:
+                real_publish(staging, destination)
+                raise SystemExit("synthetic death after child os.replace")
+
+            with patched_audited_t2_probe_bindings(legacy_binding):
+                child_plan = service.review_proxy_upgrade_child_plan(parent_job_id, repair_evidence=repair_evidence)
+                real_claim = coordinator._publish_review_proxy_child_claim
+
+                def crash_after_child_claim(**kwargs):
+                    real_claim(**kwargs)
+                    raise SystemExit("synthetic death after child claim before job record")
+
+                with (
+                    patch.object(
+                        coordinator,
+                        "_publish_review_proxy_child_claim",
+                        side_effect=crash_after_child_claim,
+                    ),
+                    self.assertRaisesRegex(
+                        SystemExit,
+                        "synthetic death after child claim before job record",
+                    ),
+                ):
+                    service.create_review_proxy_upgrade_child(
+                        parent_job_id,
+                        repair_evidence=repair_evidence,
+                        proxy_media=proxy_media,
+                        proxy_sample_bytes={index: proxy_sample for index in frame_indices},
+                        expected_child_plan=child_plan,
+                    )
+                expected_child_job_id = (
+                    f"probe-{child_plan['request_sha256'][:16]}-"
+                    f"{canonical_sha256({'request_sha256': child_plan['request_sha256'], 'repair_id': repair_evidence['repair_id']})[:12]}"
+                )
+                self.assertFalse((coordinator._jobs_root / f"{expected_child_job_id}.json").exists())
+                self.assertFalse((coordinator._results_root / expected_child_job_id).exists())
+                service.close()
+                service = self._service()
+                coordinator = service._probes()
+                with (
+                    patch.object(
+                        probe_module,
+                        "_publish_staging_directory",
+                        side_effect=crash_after_rename,
+                    ),
+                    self.assertRaisesRegex(SystemExit, "synthetic death after child os.replace"),
+                ):
+                    service.create_review_proxy_upgrade_child(
+                        parent_job_id,
+                        repair_evidence=repair_evidence,
+                        proxy_media=proxy_media,
+                        proxy_sample_bytes={index: proxy_sample for index in frame_indices},
+                        expected_child_plan=child_plan,
+                    )
+                child_job_id = next(job_id for job_id in coordinator._jobs if job_id != parent_job_id)
+                child_root = result_root.parent / child_job_id
+                before = {
+                    path.relative_to(child_root).as_posix(): path.read_bytes()
+                    for path in child_root.rglob("*")
+                    if path.is_file()
+                }
+                self.assertTrue(before)
+                self.assertEqual("committing", service.get_probe(child_job_id)["status"])
+                service.close()
+                recovered = self._service()
+                ready = recovered.get_verified_probe(child_job_id)
+                second_repair_evidence = deepcopy(repair_evidence)
+                second_repair_evidence["repair_id"] = "repair-second-child-must-not-publish"
+                second_plan = recovered.review_proxy_upgrade_child_plan(
+                    parent_job_id,
+                    repair_evidence=second_repair_evidence,
+                )
+                child_bytes_before_rejected_attempt = {
+                    path.relative_to(child_root).as_posix(): path.read_bytes()
+                    for path in child_root.rglob("*")
+                    if path.is_file()
+                }
+                with self.assertRaises(DetectorDevelopmentError) as duplicate_child:
+                    recovered.create_review_proxy_upgrade_child(
+                        parent_job_id,
+                        repair_evidence=second_repair_evidence,
+                        proxy_media=proxy_media,
+                        proxy_sample_bytes={index: proxy_sample for index in frame_indices},
+                        expected_child_plan=second_plan,
+                    )
+                self.assertEqual(
+                    "review_proxy_parent_child_exists",
+                    duplicate_child.exception.code,
+                )
+                after = {
+                    path.relative_to(child_root).as_posix(): path.read_bytes()
+                    for path in child_root.rglob("*")
+                    if path.is_file()
+                }
+                child_job_path = (
+                    self.repo_root
+                    / "data"
+                    / "ball_detector_development_v1"
+                    / "probes"
+                    / "jobs"
+                    / f"{child_job_id}.json"
+                )
+                original_child_job = child_job_path.read_bytes()
+                for tamper in (
+                    "malformed",
+                    "missing",
+                    "top_level_parent",
+                    "top_level_kind",
+                ):
+                    with self.subTest(durable_child_claim=tamper):
+                        if tamper == "malformed":
+                            child_job_path.write_text("{", encoding="utf-8")
+                        elif tamper == "missing":
+                            child_job_path.unlink()
+                        else:
+                            forged_child = json.loads(original_child_job)
+                            if tamper == "top_level_parent":
+                                forged_child["retry_from_job_id"] = "probe-hidden-parent"
+                            else:
+                                forged_child["retry_kind"] = "ordinary_retry"
+                            atomic_write_json(
+                                child_job_path,
+                                forged_child,
+                                trusted_root=child_job_path.parent,
+                            )
+                        try:
+                            with self.assertRaises(DetectorDevelopmentError) as hidden_child:
+                                recovered.create_review_proxy_upgrade_child(
+                                    parent_job_id,
+                                    repair_evidence=second_repair_evidence,
+                                    proxy_media=proxy_media,
+                                    proxy_sample_bytes={index: proxy_sample for index in frame_indices},
+                                    expected_child_plan=second_plan,
+                                )
+                            self.assertEqual(
+                                "review_proxy_parent_child_claimed",
+                                hidden_child.exception.code,
+                            )
+                            self.assertEqual(
+                                [child_job_id],
+                                [
+                                    path.name
+                                    for path in result_root.parent.iterdir()
+                                    if path.is_dir() and path.name != parent_job_id
+                                ],
+                            )
+                            self.assertEqual(
+                                child_bytes_before_rejected_attempt,
+                                {
+                                    path.relative_to(child_root).as_posix(): path.read_bytes()
+                                    for path in child_root.rglob("*")
+                                    if path.is_file()
+                                },
+                            )
+                        finally:
+                            child_job_path.write_bytes(original_child_job)
+                self.assertEqual(
+                    child_job_id,
+                    recovered._probes().get_review_proxy_upgrade_child(parent_job_id)["job_id"],
+                )
+            self.assertEqual("ready", ready["status"])
+            self.assertEqual(before, after)
+            self.assertEqual(child_bytes_before_rejected_attempt, after)
+            self.assertEqual(
+                [child_job_id],
+                [job_id for job_id in recovered._probes()._jobs if job_id != parent_job_id],
+            )
+        finally:
+            if recovered is not None:
+                recovered.close()
+            service.close()
 
     def test_source_hash_is_deferred_cached_and_visible_as_verifying_source(self) -> None:
         import football_tracking.detector_probe as probe_module
@@ -2759,9 +3105,7 @@ class DetectorProbeJobTests(unittest.TestCase):
                     def changed_read(path, *args, **kwargs):
                         content, digest = original_read(path, *args, **kwargs)
                         try:
-                            relative_path = (
-                                Path(path).resolve().relative_to(package_root).as_posix()
-                            )
+                            relative_path = Path(path).resolve().relative_to(package_root).as_posix()
                         except ValueError:
                             return content, digest
                         if relative_path == changed_name:
@@ -2807,13 +3151,9 @@ class DetectorProbeJobTests(unittest.TestCase):
             with self.subTest(field=field):
                 service = self._service()
                 try:
-                    job = service.create_probe(
-                        self._request(trial_intent_sha256=canonical_sha256({"field": field}))
-                    )
+                    job = service.create_probe(self._request(trial_intent_sha256=canonical_sha256({"field": field})))
                     changed_environment = deepcopy(
-                        service.get_probe(job["job_id"])["frozen_request"]["execution_bundle"][
-                            "execution_environment"
-                        ]
+                        service.get_probe(job["job_id"])["frozen_request"]["execution_bundle"]["execution_environment"]
                     )
                     changed_environment[field] = "version-drift"
                     with patch.object(
@@ -3259,6 +3599,62 @@ finally:
         ]
         self.assertEqual([path.resolve()], image_reads)
         self.assertFalse(any("overlays" in candidate.parts for candidate in image_reads))
+
+    def test_verified_probe_replays_result_manifest_before_returning_ready_report(self) -> None:
+        service = self._service()
+        try:
+            job = service.create_probe(self._request())
+            service.execute_probe(job["job_id"])
+            verified = service.get_verified_probe(job["job_id"])
+            verified_job_record = service.get_verified_probe_job_record(job["job_id"])
+            self.assertEqual("ready", verified["status"])
+            self.assertIn("status_url", verified)
+            self.assertNotIn("resource_sha256", verified)
+            self.assertNotIn("status_url", verified_job_record)
+            self.assertIn("resource_sha256", verified_job_record)
+            persisted_job = json.loads(
+                (
+                    self.repo_root
+                    / "data"
+                    / "ball_detector_development_v1"
+                    / "probes"
+                    / "jobs"
+                    / f"{job['job_id']}.json"
+                ).read_text(encoding="utf-8")
+            )
+            self.assertEqual(persisted_job, verified_job_record)
+
+            job_path = (
+                self.repo_root / "data" / "ball_detector_development_v1" / "probes" / "jobs" / f"{job['job_id']}.json"
+            )
+            changed_job = deepcopy(persisted_job)
+            changed_job["report"]["report_sha256"] = SHA_A
+            _atomic_json(job_path, changed_job)
+            with self.assertRaises(DetectorDevelopmentError) as changed_record:
+                service.get_verified_probe_job_record(job["job_id"])
+            self.assertEqual("result_report_mismatch", changed_record.exception.code)
+            _atomic_json(job_path, persisted_job)
+
+            report_path = (
+                self.repo_root
+                / "data"
+                / "ball_detector_development_v1"
+                / "probes"
+                / "results"
+                / job["job_id"]
+                / "detector_probe_report.v1.json"
+            )
+            report = json.loads(report_path.read_text(encoding="utf-8"))
+            candidate = report["frames"][0]["profile_results"][0]["raw_candidates"][0]
+            candidate["bbox_source_px"] = [11.0, 20.0, 19.0, 28.0]
+            report["report_sha256"] = canonical_sha256(
+                {key: value for key, value in report.items() if key != "report_sha256"}
+            )
+            _atomic_json(report_path, report)
+            with self.assertRaises(DetectorDevelopmentError):
+                service.get_verified_probe_job_record(job["job_id"])
+        finally:
+            service.close()
 
     def test_concurrent_artifact_gets_do_not_hold_the_registry_lock_during_decode(self) -> None:
         service = self._service()
@@ -3870,6 +4266,18 @@ finally:
         self.assertEqual("worker_termination_failed", first_failed["error_code"])
         self.assertIsNone(first_failed["report"])
         first.close()
+
+    def test_staging_absence_requires_an_authoritative_lstat_miss(self) -> None:
+        import football_tracking.detector_probe as probe_module
+
+        staging = self.repo_root / "dangling-reparse"
+        reparse_metadata = Mock(st_mode=0, st_file_attributes=0x400)
+        with patch.object(Path, "lstat", return_value=reparse_metadata):
+            self.assertFalse(probe_module._path_entry_is_absent(staging))
+        with patch.object(Path, "lstat", side_effect=PermissionError("injected")):
+            self.assertFalse(probe_module._path_entry_is_absent(staging))
+        with patch.object(Path, "lstat", side_effect=FileNotFoundError("injected")):
+            self.assertTrue(probe_module._path_entry_is_absent(staging))
 
     def test_close_waits_for_quarantine_watcher_to_release_global_lease(self) -> None:
         import football_tracking.detector_probe as probe_module

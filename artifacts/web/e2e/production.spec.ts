@@ -1,6 +1,7 @@
 import AxeBuilder from "@axe-core/playwright";
 import { expect, test, type Page, type Route } from "@playwright/test";
 import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
 import type {
   ArtifactSummary,
   BroadcastOperationResponse,
@@ -32,6 +33,11 @@ import {
   detectorProbeJobFixture as strictDetectorProbeJobFixture,
 } from "../src/test/detectorProbeFixtures";
 import {
+  ballAnnotationSessionFixture,
+  developmentFinalResultFixture,
+  refreshBallAnnotationProgress,
+} from "../src/test/ballAnnotationFixtures";
+import {
   acceptProductionTrial,
   appendProductionTrialAttempt,
   buildProductionTrialSubmission,
@@ -40,6 +46,7 @@ import {
   setPendingProductionTrial,
   sha256Text,
 } from "../src/lib/productionTrial";
+import { computeReviewProxyBindingSha256 } from "../src/lib/productionBallAnnotation";
 import {
   createProductionDraft,
   PRODUCTION_DRAFT_STORAGE_KEY,
@@ -50,6 +57,16 @@ import {
   type ProductionDraft,
 } from "../src/lib/productionWorkflow";
 import { PRODUCTION_BROADCAST_DELIVERY_ARTIFACTS } from "../src/lib/broadcastDelivery";
+
+const ballAnnotationApiGolden = JSON.parse(
+  readFileSync(
+    new URL(
+      "../../../test_fixtures/contracts/ball_annotation_api_golden.v1.json",
+      import.meta.url,
+    ),
+    "utf8",
+  ),
+) as Record<string, any>;
 
 const inputCatalog = {
   root_dir: "data",
@@ -69,6 +86,9 @@ const previewDataUrl = `data:image/svg+xml;base64,${Buffer.from(
 
 const squarePreviewSvg =
   '<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="1000"><rect width="1000" height="1000" fill="#174f2a"/><path d="M80 80H920V920H80Z" fill="none" stroke="white" stroke-width="8"/></svg>';
+
+const ballAnnotationOperatorGovernance =
+  "One person may annotate development data and make local trial decisions, but their own work is not an independent production audit. / 一个人可以标注开发数据并作出本地试跑决定，但其本人完成的工作不构成独立生产审计。";
 
 function trialTrackCsv(counts: {
   detected: number;
@@ -1209,29 +1229,48 @@ function readyAllZeroDetectorProbe(
   return job;
 }
 
-async function installDetectorProbeScenario(page: Page) {
+async function installDetectorProbeScenario(
+  page: Page,
+  options: {
+    jobId?: string;
+    frameIndices?: number[];
+    profileIds?: [string, string];
+  } = {},
+) {
   const createBodies: Array<Record<string, unknown>> = [];
   const artifactReads: string[] = [];
-  const jobId = "probe-e2e-ready";
+  const jobId = options.jobId ?? "probe-e2e-ready";
   let job: ReturnType<typeof readyAllZeroDetectorProbe> | null = null;
+  const withProfileIds = <T>(value: T): T => {
+    if (!options.profileIds) return value;
+    let serialized = JSON.stringify(value);
+    detectorProbeProfileIds.forEach((profileId, index) => {
+      serialized = serialized.replaceAll(profileId, options.profileIds![index]);
+    });
+    return JSON.parse(serialized) as T;
+  };
 
   await page.route("**/api/**", async (route) => {
     const request = route.request();
     const url = new URL(request.url());
     const method = request.method();
     if (method === "GET" && url.pathname === "/api/detector-models") {
-      await route.fulfill({ json: detectorProbeCatalogFixture() });
+      await route.fulfill({
+        json: withProfileIds(detectorProbeCatalogFixture()),
+      });
       return;
     }
     if (method === "POST" && url.pathname === "/api/detector-probes") {
       const body = request.postDataJSON() as Record<string, unknown>;
       createBodies.push(body);
-      job = readyAllZeroDetectorProbe(
-        jobId,
-        String(body.parent_trial_id),
-        Array.isArray(body.frame_indices)
-          ? [...(body.frame_indices as number[])]
-          : [10, 20, 30, 40, 50, 60],
+      job = withProfileIds(
+        readyAllZeroDetectorProbe(
+          jobId,
+          String(body.parent_trial_id),
+          Array.isArray(body.frame_indices)
+            ? [...(body.frame_indices as number[])]
+            : (options.frameIndices ?? [10, 20, 30, 40, 50, 60]),
+        ),
       );
       await route.fulfill({
         status: 202,
@@ -1269,6 +1308,518 @@ async function installDetectorProbeScenario(page: Page) {
   });
 
   return { artifactReads, createBodies };
+}
+
+async function installBallAnnotationScenario(page: Page) {
+  const jpegBase64 = await page.evaluate(() => {
+    const canvas = document.createElement("canvas");
+    canvas.width = 5_120;
+    canvas.height = 1_440;
+    const context = canvas.getContext("2d");
+    if (!context) throw new Error("Canvas is unavailable");
+    context.fillStyle = "#174f2a";
+    context.fillRect(0, 0, 5_120, 1_440);
+    context.fillStyle = "#ffffff";
+    context.fillRect(2_552, 712, 16, 16);
+    return canvas.toDataURL("image/jpeg", 0.9).split(",", 2)[1];
+  });
+  const jpeg = Buffer.from(jpegBase64, "base64");
+  const jpegSha256 = createHash("sha256").update(jpeg).digest("hex");
+  const session = ballAnnotationSessionFixture({
+    profileId: detectorProbeProfileIds[0],
+    frameSha256: jpegSha256,
+    frameSizeBytes: jpeg.byteLength,
+    sourceWidth: 5_120,
+    sourceHeight: 1_440,
+  });
+  const firstFrame = session.frames[0];
+  if (!firstFrame) throw new Error("Ball annotation fixture has no frames");
+  const proxyBinding = {
+    schema_version: "1.0",
+    artifact_type: "ball_review_proxy_frame_binding",
+    proxy: {
+      sha256: "4".repeat(64),
+      size_bytes: 4_096,
+      width: 1_920,
+      height: 1_080,
+    },
+    map_sha256: "5".repeat(64),
+    source_frame: {
+      frame_index: firstFrame.frame_index,
+      timing_status: "observed",
+      decoder_reported_pos_msec: firstFrame.decoder_reported_pos_msec,
+      sha256: firstFrame.source_frame_sha256,
+    },
+    proxy_frame: {
+      frame_index: firstFrame.frame_index,
+      timing_basis: "verified_cfr_frame_index_time_v1",
+      cfr_time_msec: firstFrame.decoder_reported_pos_msec + 50,
+      sha256: "6".repeat(64),
+    },
+    map_time_tolerance_msec: 2,
+    declared_offset_msec: 50,
+    time_mapping: {
+      method: "explicit_per_frame_decoder_pos_msec_map_v1",
+      source_timing_status: "observed",
+      proxy_timing_basis: "verified_cfr_frame_index_time_v1",
+      declared_offset_msec: 50,
+      observed_offset_msec: 50,
+      residual_msec: 0,
+      tolerance_msec: 2,
+    },
+  };
+  const proxyBindingSha256 = computeReviewProxyBindingSha256(proxyBinding);
+  firstFrame.proxy_binding = {
+    ...proxyBinding,
+    binding_sha256: proxyBindingSha256,
+  };
+  const createBodies: Array<Record<string, unknown>> = [];
+  const mutationBodies: Array<Record<string, unknown>> = [];
+  let staleResponsesRemaining = 2;
+  let tamperNextSessionRead = false;
+  let finalResult: ReturnType<typeof developmentFinalResultFixture> | null =
+    null;
+
+  const jsonNoStore = async (
+    route: Route,
+    body: unknown,
+    status = 200,
+    headers: Record<string, string> = {},
+  ) =>
+    route.fulfill({
+      status,
+      contentType: "application/json",
+      headers: { "Cache-Control": "no-store", ...headers },
+      json: body,
+    });
+
+  await page.route("**/api/**", async (route) => {
+    const request = route.request();
+    const url = new URL(request.url());
+    const method = request.method();
+    if (method === "POST" && url.pathname === "/api/ball-annotation-sessions") {
+      createBodies.push(request.postDataJSON() as Record<string, unknown>);
+      await jsonNoStore(route, session, 202);
+      return;
+    }
+    if (
+      method === "GET" &&
+      url.pathname === `/api/ball-annotation-sessions/${session.session_id}`
+    ) {
+      if (tamperNextSessionRead) {
+        tamperNextSessionRead = false;
+        const tampered = structuredClone(session);
+        tampered.frames[0].proxy_binding.proxy.sha256 = "9".repeat(64);
+        await jsonNoStore(route, tampered);
+      } else {
+        await jsonNoStore(route, session);
+      }
+      return;
+    }
+    const frameMatch = new RegExp(
+      `^/api/ball-annotation-sessions/${session.session_id}/frames/(\\d+)$`,
+    ).exec(url.pathname);
+    if (method === "GET" && frameMatch) {
+      await route.fulfill({
+        status: 200,
+        contentType: "image/jpeg",
+        headers: {
+          "Cache-Control": "no-store",
+          ETag: `"${jpegSha256}"`,
+          "X-Content-SHA256": jpegSha256,
+          "X-Source-Frame-Index": frameMatch[1],
+        },
+        body: jpeg,
+      });
+      return;
+    }
+    const annotationMatch = new RegExp(
+      `^/api/ball-annotation-sessions/${session.session_id}/annotations/(\\d+)$`,
+    ).exec(url.pathname);
+    if (method === "PUT" && annotationMatch) {
+      const body = request.postDataJSON() as Record<string, any>;
+      mutationBodies.push(body);
+      if (staleResponsesRemaining > 0) {
+        staleResponsesRemaining -= 1;
+        await jsonNoStore(
+          route,
+          { detail: { code: "stale_revision", message: "stale revision" } },
+          412,
+        );
+        return;
+      }
+      const frameIndex = Number(annotationMatch[1]);
+      const frame = session.frames.find(
+        (candidate: any) => candidate.frame_index === frameIndex,
+      );
+      const expectedRevision = Number(body.expected_revision);
+      const revision = expectedRevision + 1;
+      const etag = createHash("sha256")
+        .update(`${frameIndex}:${revision}`)
+        .digest("hex");
+      frame.annotation_revision = revision;
+      frame.annotation_etag = etag;
+      frame.current_annotation = body.annotation;
+      refreshBallAnnotationProgress(session);
+      await jsonNoStore(
+        route,
+        {
+          schema_version: "1.0",
+          artifact_type: "ball_annotation_revision",
+          revision_id: `revision-${frameIndex}-${revision}`,
+          session_id: session.session_id,
+          frame_index: frameIndex,
+          revision,
+          operation: body.operation,
+          mutation_id: body.mutation_id,
+          expected_revision: expectedRevision,
+          supersedes_revision: expectedRevision || null,
+          undo_revision: body.undo_revision,
+          accepted_suggestion_kind: null,
+          accepted_suggestion_id: null,
+          accepted_suggestion_job_id: null,
+          accepted_suggestion_sha256: null,
+          dismissed_suggestion_kind: null,
+          dismissed_suggestion_id: null,
+          dismissed_suggestion_job_id: null,
+          dismissed_suggestion_sha256: null,
+          effective_annotation: body.annotation,
+          operator_id: session.operator_id,
+          annotation_etag: etag,
+          created_at: "2026-07-18T00:05:00Z",
+        },
+        200,
+        { ETag: `"${etag}"` },
+      );
+      return;
+    }
+    if (
+      method === "POST" &&
+      url.pathname ===
+        `/api/ball-annotation-sessions/${session.session_id}/finalize`
+    ) {
+      finalResult = developmentFinalResultFixture(session);
+      session.status = "finalized";
+      session.stage = "finalized";
+      session.final_package = {
+        result_url: `/api/v1/ball-annotation-sessions/${session.session_id}/result`,
+        manifest_sha256: "1".repeat(64),
+        package_sha256: finalResult.package.package_sha256,
+        report_sha256: finalResult.feasibility_report.report_sha256,
+        status: "not_applicable",
+      };
+      await jsonNoStore(route, finalResult);
+      return;
+    }
+    if (
+      method === "GET" &&
+      url.pathname ===
+        `/api/ball-annotation-sessions/${session.session_id}/result` &&
+      finalResult
+    ) {
+      await jsonNoStore(route, finalResult);
+      return;
+    }
+    await route.fallback();
+  });
+
+  return {
+    createBodies,
+    mutationBodies,
+    session,
+    proxyBindingSha256,
+    tamperNextProxyRead: () => {
+      tamperNextSessionRead = true;
+    },
+  };
+}
+
+function finalizedGoldenDevelopmentSession(golden: Record<string, any>) {
+  const session = structuredClone(golden.development_session);
+  const result = golden.development_final_result;
+  const annotations = new Map(
+    result.package.effective_annotations.map((annotation: any) => [
+      annotation.frame_index,
+      annotation,
+    ]),
+  );
+  const revisions = new Map(
+    result.package.revision_chain.map((revision: any) => [
+      revision.frame_index,
+      revision,
+    ]),
+  );
+
+  for (const frame of session.frames) {
+    const annotation = annotations.get(frame.frame_index) as
+      | Record<string, unknown>
+      | undefined;
+    const revision = revisions.get(frame.frame_index) as
+      | Record<string, any>
+      | undefined;
+    frame.current_annotation = annotation
+      ? Object.fromEntries(
+          Object.entries(annotation).filter(([key]) => key !== "frame_index"),
+        )
+      : null;
+    frame.annotation_revision = revision?.revision ?? 0;
+    frame.annotation_etag = revision?.annotation_etag ?? frame.annotation_etag;
+    for (const candidate of frame.suggested_candidates) {
+      if (revision?.accepted_suggestion_id === candidate.candidate_id) {
+        candidate.decision = "accepted";
+      } else if (revision?.dismissed_suggestion_id === candidate.candidate_id) {
+        candidate.decision = "dismissed";
+      }
+    }
+  }
+
+  session.status = "finalized";
+  session.stage = "finalized";
+  session.final_package = {
+    result_url: `/api/v1/ball-annotation-sessions/${session.session_id}/result`,
+    manifest_sha256: session.sampling_manifest.manifest_sha256,
+    package_sha256: result.package.package_sha256,
+    report_sha256: result.feasibility_report.report_sha256,
+    status: result.feasibility_report.status,
+  };
+  refreshBallAnnotationProgress(session);
+  return session;
+}
+
+async function installBallAnnotationClosureScenario(page: Page) {
+  const golden = ballAnnotationApiGolden as unknown as Record<string, any>;
+  const development = finalizedGoldenDevelopmentSession(golden);
+  const developmentResult = structuredClone(golden.development_final_result);
+  const checkActive = structuredClone(golden.check_session_active);
+  const check = structuredClone(golden.check_session_ready);
+  const checkResult = structuredClone(golden.check_final_result);
+  const jpeg = Buffer.from(
+    "/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAIBAQEBAQIBAQECAgICAgQDAgICAgUEBAMEBgUGBgYFBgYGBwkIBgcJBwYGCAsICQoKCgoKBggLDAsKDAkKCgr/2wBDAQICAgICAgUDAwUKBwYHCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgr/wAARCAAgAEADASIAAhEBAxEB/8QAHwAAAQUBAQEBAQEAAAAAAAAAAAECAwQFBgcICQoL/8QAtRAAAgEDAwIEAwUFBAQAAAF9AQIDAAQRBRIhMUEGE1FhByJxFDKBkaEII0KxwRVS0fAkM2JyggkKFhcYGRolJicoKSo0NTY3ODk6Q0RFRkdISUpTVFVWV1hZWmNkZWZnaGlqc3R1dnd4eXqDhIWGh4iJipKTlJWWl5iZmqKjpKWmp6ipqrKztLW2t7i5usLDxMXGx8jJytLT1NXW19jZ2uHi4+Tl5ufo6erx8vP09fb3+Pn6/8QAHwEAAwEBAQEBAQEBAQAAAAAAAAECAwQFBgcICQoL/8QAtREAAgECBAQDBAcFBAQAAQJ3AAECAxEEBSExBhJBUQdhcRMiMoEIFEKRobHBCSMzUvAVYnLRChYkNOEl8RcYGRomJygpKjU2Nzg5OkNERUZHSElKU1RVVldYWVpjZGVmZ2hpanN0dXZ3eHl6goOEhYaHiImKkpOUlZaXmJmaoqOkpaanqKmqsrO0tba3uLm6wsPExcbHyMnK0tPU1dbX2Nna4uPk5ebn6Onq8vP09fb3+Pn6/9oADAMBAAIRAxEAPwD5Hoor6A+H3w+/YQ1H9hDxd478d/FvXrT4xWmvQR6FoUNgpQoVk8uKOPftnt5VEjT3LMj27xRKsZyiXv8AOWHw8sTKSUkrJvVpbK9lfdvoj+TcLhZ4ucoxlFWi5e80r2V7K+7fRHz/AEUUVgcoUUUUAFFFFABRRRQAUUUUAFFFFABRRRQB/9k=",
+    "base64",
+  );
+  const frameSha256 = createHash("sha256").update(jpeg).digest("hex");
+  const createBodies: Array<Record<string, any>> = [];
+  const checkFrameReads: number[] = [];
+  const checkMutationFrameIndices: number[] = [];
+  const mutationBodies: Array<Record<string, any>> = [];
+  const finalizeBodies: Array<Record<string, any>> = [];
+  const lifecycleEvents: string[] = [];
+  let checkCreated = false;
+  let checkFinalized = false;
+  let rejectNextCheckCreateAsUnlocked = false;
+
+  const jsonNoStore = async (
+    route: Route,
+    body: unknown,
+    status = 200,
+    headers: Record<string, string> = {},
+  ) =>
+    route.fulfill({
+      status,
+      contentType: "application/json",
+      headers: { "Cache-Control": "no-store", ...headers },
+      json: body,
+    });
+
+  await page.route("**/api/**", async (route) => {
+    const request = route.request();
+    const url = new URL(request.url());
+    const method = request.method();
+
+    if (method === "POST" && url.pathname === "/api/ball-annotation-sessions") {
+      const body = request.postDataJSON() as Record<string, any>;
+      createBodies.push(body);
+      if (body.data_role === "development") {
+        await jsonNoStore(route, development, 202);
+      } else {
+        if (rejectNextCheckCreateAsUnlocked) {
+          rejectNextCheckCreateAsUnlocked = false;
+          lifecycleEvents.push("check-create:rejected-unlocked");
+          const unlocked = structuredClone(checkActive);
+          unlocked.sampling_manifest.locked_before_probe = false;
+          await jsonNoStore(route, unlocked, 202);
+          return;
+        }
+        lifecycleEvents.push("check-create:accepted-locked");
+        checkCreated = true;
+        await jsonNoStore(route, checkActive, 202);
+      }
+      return;
+    }
+    if (
+      method === "GET" &&
+      url.pathname === `/api/ball-annotation-sessions/${development.session_id}`
+    ) {
+      await jsonNoStore(route, development);
+      return;
+    }
+    if (
+      method === "GET" &&
+      url.pathname === `/api/ball-annotation-sessions/${check.session_id}` &&
+      checkCreated
+    ) {
+      lifecycleEvents.push("check-session:read");
+      await jsonNoStore(route, check);
+      return;
+    }
+    const frameMatch = new RegExp(
+      `^/api/ball-annotation-sessions/(${development.session_id}|${check.session_id})/frames/(\\d+)$`,
+    ).exec(url.pathname);
+    if (method === "GET" && frameMatch) {
+      const frameIndex = Number(frameMatch[2]);
+      if (frameMatch[1] === check.session_id) {
+        checkFrameReads.push(frameIndex);
+        lifecycleEvents.push(`check-frame:read:${frameIndex}`);
+      }
+      await route.fulfill({
+        status: 200,
+        contentType: "image/jpeg",
+        headers: {
+          "Cache-Control": "no-store",
+          ETag: `"${frameSha256}"`,
+          "X-Content-SHA256": frameSha256,
+          "X-Source-Frame-Index": frameMatch[2],
+        },
+        body: jpeg,
+      });
+      return;
+    }
+    const checkAnnotationMatch = new RegExp(
+      `^/api/ball-annotation-sessions/${check.session_id}/annotations/(\\d+)$`,
+    ).exec(url.pathname);
+    if (method === "PUT" && checkAnnotationMatch) {
+      const frameIndex = Number(checkAnnotationMatch[1]);
+      const body = request.postDataJSON() as Record<string, any>;
+      const frame = check.frames.find(
+        (candidate: any) => candidate.frame_index === frameIndex,
+      );
+      const sealedRevision = checkResult.package.revision_chain.find(
+        (candidate: any) => candidate.frame_index === frameIndex,
+      );
+      if (!frame || !sealedRevision) {
+        await jsonNoStore(
+          route,
+          { detail: { code: "frame_not_found", message: "frame not found" } },
+          404,
+        );
+        return;
+      }
+      mutationBodies.push(body);
+      checkMutationFrameIndices.push(frameIndex);
+      lifecycleEvents.push(`check-annotation:write:${frameIndex}`);
+      frame.current_annotation = body.annotation;
+      frame.annotation_revision = sealedRevision.revision;
+      frame.annotation_etag = sealedRevision.annotation_etag;
+      for (const candidate of frame.suggested_candidates) {
+        if (body.suggestion_id === candidate.candidate_id) {
+          candidate.decision = "accepted";
+        } else if (body.dismissed_suggestion_id === candidate.candidate_id) {
+          candidate.decision = "dismissed";
+        }
+      }
+      refreshBallAnnotationProgress(check);
+      await jsonNoStore(
+        route,
+        {
+          schema_version: "1.0",
+          artifact_type: "ball_annotation_revision",
+          revision_id: sealedRevision.revision_id,
+          session_id: check.session_id,
+          frame_index: frameIndex,
+          revision: sealedRevision.revision,
+          operation: body.operation,
+          mutation_id: body.mutation_id,
+          expected_revision: body.expected_revision,
+          supersedes_revision: sealedRevision.supersedes_revision,
+          undo_revision: body.undo_revision,
+          accepted_suggestion_kind: body.suggestion_kind,
+          accepted_suggestion_id: body.suggestion_id,
+          accepted_suggestion_job_id: body.accepted_suggestion_job_id,
+          accepted_suggestion_sha256: body.accepted_suggestion_sha256,
+          dismissed_suggestion_kind: body.dismissed_suggestion_kind,
+          dismissed_suggestion_id: body.dismissed_suggestion_id,
+          dismissed_suggestion_job_id: body.dismissed_suggestion_job_id,
+          dismissed_suggestion_sha256: body.dismissed_suggestion_sha256,
+          effective_annotation: body.annotation,
+          operator_id: check.operator_id,
+          annotation_etag: sealedRevision.annotation_etag,
+          created_at: sealedRevision.created_at,
+        },
+        200,
+        { ETag: `"${sealedRevision.annotation_etag}"` },
+      );
+      return;
+    }
+    if (
+      method === "POST" &&
+      url.pathname ===
+        `/api/ball-annotation-sessions/${check.session_id}/finalize`
+    ) {
+      finalizeBodies.push(request.postDataJSON() as Record<string, any>);
+      if (
+        check.progress.annotated_frames !== check.progress.total_frames ||
+        check.progress.unconfirmed_suggestions > 0 ||
+        check.progress.unconfirmed_propagation_suggestions > 0
+      ) {
+        await jsonNoStore(
+          route,
+          {
+            detail: {
+              code: "pending_suggestion_decisions",
+              message: "All suggestions must be decided before finalization.",
+            },
+          },
+          409,
+        );
+        return;
+      }
+      checkFinalized = true;
+      check.status = "finalized";
+      check.stage = "finalized";
+      check.final_package = {
+        result_url: `/api/v1/ball-annotation-sessions/${check.session_id}/result`,
+        manifest_sha256: check.sampling_manifest.manifest_sha256,
+        package_sha256: checkResult.package.package_sha256,
+        report_sha256: checkResult.feasibility_report.report_sha256,
+        status: checkResult.feasibility_report.status,
+      };
+      await jsonNoStore(route, checkResult);
+      return;
+    }
+    if (
+      method === "GET" &&
+      url.pathname ===
+        `/api/ball-annotation-sessions/${development.session_id}/result`
+    ) {
+      await jsonNoStore(route, developmentResult);
+      return;
+    }
+    if (
+      method === "GET" &&
+      url.pathname ===
+        `/api/ball-annotation-sessions/${check.session_id}/result` &&
+      checkFinalized
+    ) {
+      await jsonNoStore(route, checkResult);
+      return;
+    }
+    await route.fallback();
+  });
+
+  return {
+    check,
+    checkFrameReads,
+    checkMutationFrameIndices,
+    createBodies,
+    development,
+    developmentResult,
+    finalizeBodies,
+    lifecycleEvents,
+    mutationBodies,
+    rejectNextCheckCreateAsUnlocked: () => {
+      rejectNextCheckCreateAsUnlocked = true;
+    },
+  };
 }
 
 function draftWithCompletedCalibration() {
@@ -4632,6 +5183,9 @@ test("blocks acceptance and exposes bounded tuning when every trial frame is los
 }) => {
   const scenario = await installTrialScenario(page, { allLost: true });
   const detectorScenario = await installDetectorProbeScenario(page);
+  const ballAnnotationScenario = await installBallAnnotationScenario(page);
+  allowRuntimeError(page, /status of 412/);
+  allowRuntimeError(page, /status of 412/);
   await openTrialFromDraft(page);
 
   await page.getByRole("button", { name: "Start bounded trial" }).click();
@@ -4706,7 +5260,9 @@ test("blocks acceptance and exposes bounded tuning when every trial frame is los
     ),
   ).toBeVisible();
   await expect(
-    detectorProbe.getByText(/Next, start the 20–50-frame feasibility check/),
+    detectorProbe.getByText(
+      /data-isolated action must first freeze a new 20–50-frame unseen-frame check manifest/,
+    ),
   ).toBeVisible();
   await expect(
     detectorProbe.getByRole("img", { name: "Source frame 10" }),
@@ -4761,16 +5317,710 @@ test("blocks acceptance and exposes bounded tuning when every trial frame is los
     page.getByRole("button", { name: "Accept this trial" }),
   ).toHaveCount(0);
 
-  await page.setViewportSize({ width: 375, height: 812 });
+  await detectorProbe
+    .getByRole("button", {
+      name: "Start development annotation on displayed frames",
+    })
+    .click();
+  await expect(
+    detectorProbe.getByRole("button", { name: "Retry comparison" }),
+  ).toBeDisabled();
+  await expect(detectorProbe).toContainText(
+    "historical evidence and parent/child lineage remain visible",
+  );
+  const annotationSetup = page.getByTestId("ball-annotation-setup");
+  await expect(annotationSetup).toBeVisible();
+  await expect(
+    annotationSetup.getByTestId("ball-annotation-setup-governance"),
+  ).toHaveText(ballAnnotationOperatorGovernance);
+  const evidenceInputs = annotationSetup.locator(
+    'input[placeholder="Pre-reveal evidence"]',
+  );
+  await expect(evidenceInputs).toHaveCount(8);
+  for (let index = 0; index < 8; index += 1) {
+    await evidenceInputs.nth(index).fill(`source evidence ${index + 1}`);
+  }
+  await annotationSetup
+    .getByRole("button", { name: "Start development annotation" })
+    .click();
+  await expect.poll(() => ballAnnotationScenario.createBodies.length).toBe(1);
+  expect(ballAnnotationScenario.createBodies[0]).toMatchObject({
+    data_role: "development",
+    development_probe_job_ids: ["probe-e2e-ready"],
+    locked_profile_id: detectorProbeProfileIds[0],
+    target_frame_count: null,
+  });
+  const annotationWorkspace = page.getByLabel("Tiny-ball frame verification");
+  await expect(annotationWorkspace).toBeVisible();
+  await expect(
+    annotationWorkspace.getByTestId("ball-annotation-workspace-governance"),
+  ).toHaveText(ballAnnotationOperatorGovernance);
+  await expect(
+    annotationWorkspace.getByRole("region", { name: "Verified source frame" }),
+  ).toBeVisible();
+  const proxyBinding = annotationWorkspace.getByRole("region", {
+    name: "Review proxy binding",
+  });
+  await expect(proxyBinding).toContainText(
+    `Proxy binding SHA-256 ${ballAnnotationScenario.proxyBindingSha256}`,
+  );
+  await expect(proxyBinding).toContainText(
+    `Proxy media SHA-256 ${"4".repeat(64)}`,
+  );
+  await expect(proxyBinding).toContainText(
+    `Proxy map SHA-256 ${"5".repeat(64)}`,
+  );
+  await expect(proxyBinding).toContainText(
+    "Source frame 10 @ 500.000 ms → proxy frame 10 @ 550.000 ms",
+  );
+
+  await page.setViewportSize({ width: 390, height: 844 });
+  const touchSurface = annotationWorkspace.getByTestId(
+    "ball-annotation-touch-surface",
+  );
+  await expect(touchSurface).toBeVisible();
+  await expect(touchSurface).toHaveCSS("touch-action", "none");
+  expect(
+    await annotationWorkspace.evaluate(
+      (element) => getComputedStyle(element).touchAction,
+    ),
+  ).not.toBe("none");
+
+  await annotationWorkspace
+    .getByRole("button", { name: "Draw confirmed box" })
+    .click();
+  const touchBounds = await touchSurface.boundingBox();
+  expect(touchBounds).not.toBeNull();
+  const touchStart = {
+    x: touchBounds!.x + touchBounds!.width * 0.45,
+    y: touchBounds!.y + touchBounds!.height * 0.48,
+  };
+  const touchEnd = {
+    x: touchBounds!.x + touchBounds!.width * 0.55,
+    y: touchBounds!.y + touchBounds!.height * 0.52,
+  };
+  const cdp = await page.context().newCDPSession(page);
+  await cdp.send("Input.dispatchTouchEvent", {
+    type: "touchStart",
+    touchPoints: [{ ...touchStart, id: 1, radiusX: 22, radiusY: 22 }],
+  });
+  await cdp.send("Input.dispatchTouchEvent", {
+    type: "touchMove",
+    touchPoints: [{ ...touchEnd, id: 1, radiusX: 22, radiusY: 22 }],
+  });
+  await cdp.send("Input.dispatchTouchEvent", {
+    type: "touchCancel",
+    touchPoints: [],
+  });
+  await cdp.detach();
+  await expect(
+    annotationWorkspace.getByLabel("Box left (source pixels)"),
+  ).toHaveValue("");
+
+  const zoomIn = annotationWorkspace.getByRole("button", { name: "Zoom in" });
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    if (await zoomIn.isDisabled()) break;
+    await zoomIn.click();
+  }
+  await expect(zoomIn).toBeDisabled();
+  const zoomState = await touchSurface.evaluate((element) => ({
+    zoom: Number(element.getAttribute("data-zoom")),
+    maxZoom: Number(element.getAttribute("data-max-zoom")),
+    sourcePixelScale: Number(element.getAttribute("data-source-pixel-scale")),
+  }));
+  expect(zoomState.maxZoom).toBeGreaterThanOrEqual(14);
+  expect(zoomState.zoom).toBe(zoomState.maxZoom);
+  expect(zoomState.sourcePixelScale).toBeGreaterThanOrEqual(1);
+
+  await annotationWorkspace.getByRole("button", { name: "Pan image" }).click();
+  await touchSurface.scrollIntoViewIfNeeded();
+  const panBounds = await touchSurface.boundingBox();
+  expect(panBounds).not.toBeNull();
+  const panBefore = Number(await touchSurface.getAttribute("data-pan-x"));
+  await page.mouse.move(
+    panBounds!.x + panBounds!.width / 2,
+    panBounds!.y + panBounds!.height / 2,
+  );
+  await page.mouse.down();
+  await page.mouse.move(
+    panBounds!.x + panBounds!.width / 2 + 24,
+    panBounds!.y + panBounds!.height / 2 + 12,
+    { steps: 3 },
+  );
+  await page.mouse.up();
+  await expect
+    .poll(async () => Number(await touchSurface.getAttribute("data-pan-x")))
+    .not.toBe(panBefore);
+
+  await annotationWorkspace
+    .getByRole("button", { name: "Draw confirmed box" })
+    .click();
+  await touchSurface.scrollIntoViewIfNeeded();
+  const drawBounds = await touchSurface.boundingBox();
+  expect(drawBounds).not.toBeNull();
+  const drawStart = {
+    x: drawBounds!.x + drawBounds!.width * 0.45,
+    y: drawBounds!.y + drawBounds!.height * 0.48,
+  };
+  const drawEnd = {
+    x: drawBounds!.x + drawBounds!.width * 0.55,
+    y: drawBounds!.y + drawBounds!.height * 0.52,
+  };
+
+  await page.mouse.move(drawStart.x, drawStart.y);
+  await page.mouse.down();
+  await page.mouse.move(drawEnd.x, drawEnd.y, { steps: 3 });
+  await page.mouse.up();
+  await expect(
+    annotationWorkspace.getByLabel("Box left (source pixels)"),
+  ).not.toHaveValue("");
+
+  await annotationWorkspace.getByRole("button", { name: "Next frame" }).click();
+  await expect(
+    annotationWorkspace.getByRole("alert", {
+      name: "Unsaved frame changes",
+    }),
+  ).toBeVisible();
+  await expect(annotationWorkspace.getByText(/Frame 10 ·/)).toBeVisible();
+  await annotationWorkspace
+    .getByRole("button", { name: "Stay on this frame" })
+    .click();
+
+  for (const [offset, frameIndex] of [10, 20, 30, 40, 50, 60].entries()) {
+    await expect(
+      annotationWorkspace.getByText(new RegExp(`Frame ${frameIndex} ·`)),
+    ).toBeVisible();
+    await annotationWorkspace.getByLabel("Presence").selectOption("absent");
+    const save = annotationWorkspace.getByRole("button", {
+      name: "Save confirmed annotation",
+    });
+    await save.click();
+    if (offset === 0) {
+      await expect(
+        annotationWorkspace
+          .getByRole("alert")
+          .filter({ hasText: "This frame changed elsewhere" }),
+      ).toContainText("latest revision was loaded");
+      ballAnnotationScenario.tamperNextProxyRead();
+      await save.click();
+      await expect(
+        annotationWorkspace
+          .getByRole("alert")
+          .filter({ hasText: "Review proxy binding digest is invalid" }),
+      ).toBeVisible();
+      await save.click();
+    }
+    await expect(
+      annotationWorkspace.getByText(`${offset + 1} / 6 frames annotated`),
+    ).toBeVisible();
+    if (offset < 5) {
+      await annotationWorkspace
+        .getByRole("button", { name: "Next frame" })
+        .click();
+      if (offset === 0) {
+        await expect(
+          annotationWorkspace.getByText(
+            "Direct source frame · no proxy binding",
+          ),
+        ).toBeVisible();
+      }
+    }
+  }
+  expect(ballAnnotationScenario.mutationBodies[0]).toMatchObject({
+    operation: "set",
+    expected_revision: 0,
+    suggestion_id: null,
+  });
+  await annotationWorkspace
+    .getByRole("button", { name: "Freeze and generate one-time report" })
+    .click();
+  await expect(
+    page.getByTestId("ball-annotation-dashboard-governance"),
+  ).toHaveText(ballAnnotationOperatorGovernance);
+  await annotationWorkspace
+    .getByRole("button", {
+      name: "Development complete — prepare unseen-frame check",
+    })
+    .click();
+  await expect(page.getByLabel("Unseen-frame check size (20–50)")).toHaveValue(
+    "20",
+  );
+  await expect(
+    page.getByRole("button", { name: "Start unseen-frame check" }),
+  ).toBeVisible();
+
   await expect(detectorProbe).toBeVisible();
   const probeWidth = await detectorProbe.evaluate((element) => ({
     client: element.clientWidth,
     scroll: element.scrollWidth,
   }));
   expect(probeWidth.scroll).toBeLessThanOrEqual(probeWidth.client);
+  const annotationWidth = await page
+    .getByTestId("ball-annotation-setup")
+    .evaluate((element) => ({
+      client: element.clientWidth,
+      scroll: element.scrollWidth,
+    }));
+  expect(annotationWidth.scroll).toBeLessThanOrEqual(annotationWidth.client);
 
   await expectNoSeriousAccessibilityFindings(page);
-  expect(runtimeErrors.get(page) ?? []).toEqual([]);
+  expect(
+    (runtimeErrors.get(page) ?? []).filter(
+      (message) => !/status of 412/.test(message),
+    ),
+  ).toEqual([]);
+});
+
+test("freezes an isolated 20-frame unseen check and reports the bounded result", async ({
+  page,
+}) => {
+  test.slow();
+  const trialScenario = await installTrialScenario(page, { allLost: true });
+  const detectorScenario = await installDetectorProbeScenario(page, {
+    jobId: "probe-development",
+    frameIndices: [0, 40, 80, 120, 160, 199],
+    profileIds: ["current-coco-yolov8n-direct", "official-coco-yolo11s-sahi"],
+  });
+  const annotationScenario = await installBallAnnotationClosureScenario(page);
+  const developmentRequest =
+    annotationScenario.developmentResult.package.session_request_authority
+      .normalized_request;
+  const checkResult = (
+    ballAnnotationApiGolden as unknown as Record<string, any>
+  ).check_final_result;
+  const checkRequest =
+    checkResult.package.session_request_authority.normalized_request;
+  const rawCreateRequest = (normalized: Record<string, any>) => {
+    const {
+      applicable_lighting_strata: _applicableLighting,
+      applicable_scale_strata: _applicableScales,
+      strata_applicability: strata,
+      ...request
+    } = normalized;
+    return {
+      ...request,
+      strata_applicability: {
+        lighting: strata.lighting.map(
+          ({ evidence, ...row }: Record<string, any>) => ({
+            ...row,
+            evidence_note: evidence.note,
+          }),
+        ),
+        scale: strata.scale.map(
+          ({ evidence, ...row }: Record<string, any>) => ({
+            ...row,
+            evidence_note: evidence.note,
+          }),
+        ),
+      },
+    };
+  };
+  const expectedDevelopmentCreate = rawCreateRequest(developmentRequest);
+  const expectedCheckCreate = rawCreateRequest(checkRequest);
+
+  await openTrialFromDraft(page);
+  await page.getByRole("button", { name: "Start bounded trial" }).click();
+  await expect.poll(() => trialScenario.createBodies.length).toBe(1);
+  trialScenario.setStatus(trialScenario.runId(), "completed");
+
+  const detectorProbe = page.getByTestId("production-detector-probe-panel");
+  await expect(detectorProbe).toBeVisible();
+  await detectorProbe
+    .getByRole("button", { name: "Run bounded comparison" })
+    .click();
+  await expect.poll(() => detectorScenario.createBodies.length).toBe(1);
+  expect(detectorScenario.createBodies[0]).toEqual({
+    parent_trial_id: trialScenario.runId(),
+    profile_ids: ["current-coco-yolov8n-direct", "official-coco-yolo11s-sahi"],
+    top_k: 5,
+  });
+  await detectorProbe
+    .getByLabel("Locked profile for development annotation")
+    .selectOption("official-coco-yolo11s-sahi");
+  await detectorProbe
+    .getByRole("button", {
+      name: "Start development annotation on displayed frames",
+    })
+    .click();
+
+  const annotationSetup = page.getByTestId("ball-annotation-setup");
+  await expect(annotationSetup).toBeVisible();
+  await annotationSetup
+    .getByLabel("Operator ID")
+    .fill(developmentRequest.operator_id);
+  for (const row of developmentRequest.strata_applicability.scale) {
+    await annotationSetup
+      .getByLabel(`${row.stratum} applicability`)
+      .selectOption(row.status);
+    await annotationSetup
+      .getByLabel(`${row.stratum} Pre-reveal evidence`)
+      .fill(row.evidence.note);
+  }
+  for (const row of developmentRequest.strata_applicability.lighting) {
+    await annotationSetup
+      .getByLabel(`${row.stratum} applicability`)
+      .selectOption(row.status);
+    await annotationSetup
+      .getByLabel(`${row.stratum} Pre-reveal evidence`)
+      .fill(row.evidence.note);
+  }
+  await annotationSetup
+    .getByRole("button", { name: "Start development annotation" })
+    .click();
+  await expect.poll(() => annotationScenario.createBodies.length).toBe(1);
+  expect(annotationScenario.createBodies[0]).toEqual(expectedDevelopmentCreate);
+
+  const annotationWorkspace = page.getByLabel("Tiny-ball frame verification");
+  await expect(annotationWorkspace).toBeVisible();
+  await expect(annotationWorkspace.getByText(/Frame 0 ·/)).toBeVisible();
+  await expect(annotationWorkspace.getByLabel("Presence")).toHaveValue(
+    "absent",
+  );
+  await annotationWorkspace.getByRole("button", { name: "Next frame" }).click();
+  await expect(annotationWorkspace.getByText(/Frame 40 ·/)).toBeVisible();
+  await expect(annotationWorkspace.getByLabel("Presence")).toHaveValue(
+    "present",
+  );
+  await expect(
+    annotationWorkspace.getByLabel("Box left (source pixels)"),
+  ).toHaveValue("10");
+  await expect(
+    annotationWorkspace.getByLabel("Box top (source pixels)"),
+  ).toHaveValue("10");
+  await expect(
+    annotationWorkspace.getByLabel("Box right (source pixels)"),
+  ).toHaveValue("14");
+  await expect(
+    annotationWorkspace.getByLabel("Box bottom (source pixels)"),
+  ).toHaveValue("14");
+  await annotationWorkspace
+    .getByRole("button", { name: "Previous frame" })
+    .click();
+  await expect(annotationWorkspace.getByText(/Frame 0 ·/)).toBeVisible();
+
+  await annotationWorkspace
+    .getByRole("button", {
+      name: "Development complete — prepare unseen-frame check",
+    })
+    .click();
+  await expect(annotationSetup).toBeVisible();
+  await annotationSetup
+    .getByLabel("Operator ID")
+    .fill(checkRequest.operator_id);
+  await annotationSetup
+    .getByLabel("Unseen-frame check size (20–50)")
+    .fill(String(checkRequest.target_frame_count));
+  for (const row of checkRequest.strata_applicability.scale) {
+    await annotationSetup
+      .getByLabel(`${row.stratum} applicability`)
+      .selectOption(row.status);
+    await annotationSetup
+      .getByLabel(`${row.stratum} Pre-reveal evidence`)
+      .fill(row.evidence.note);
+  }
+  for (const row of checkRequest.strata_applicability.lighting) {
+    await annotationSetup
+      .getByLabel(`${row.stratum} applicability`)
+      .selectOption(row.status);
+    await annotationSetup
+      .getByLabel(`${row.stratum} Pre-reveal evidence`)
+      .fill(row.evidence.note);
+    await annotationSetup
+      .getByLabel(`${row.stratum} Sampling quota`)
+      .fill(String(row.quota));
+    await annotationSetup
+      .getByLabel(
+        `${row.stratum} Source-frame intervals (for example 0-999, 1200-1400)`,
+      )
+      .fill(
+        row.frame_intervals
+          .map(
+            (interval: { start_frame: number; end_frame: number }) =>
+              `${interval.start_frame}-${interval.end_frame}`,
+          )
+          .join(", "),
+      );
+  }
+  annotationScenario.rejectNextCheckCreateAsUnlocked();
+  await annotationSetup
+    .getByRole("button", { name: "Start unseen-frame check" })
+    .click();
+  await expect.poll(() => annotationScenario.createBodies.length).toBe(2);
+  expect(annotationScenario.createBodies[1]).toEqual(expectedCheckCreate);
+  await expect(annotationSetup).toBeVisible();
+  await expect(annotationSetup.getByRole("alert")).toContainText(
+    "Sampling role boundary is invalid.",
+  );
+  expect(annotationScenario.checkFrameReads).toEqual([]);
+  expect(annotationScenario.finalizeBodies).toEqual([]);
+  expect(annotationScenario.lifecycleEvents).toEqual([
+    "check-create:rejected-unlocked",
+  ]);
+
+  await annotationSetup
+    .getByRole("button", {
+      name: /Start unseen-frame check|Resume exact pending create/,
+    })
+    .click();
+  await expect.poll(() => annotationScenario.createBodies.length).toBe(3);
+  expect(annotationScenario.createBodies[2]).toEqual(expectedCheckCreate);
+  expect(annotationScenario.createBodies[2]).toMatchObject({
+    data_role: "check",
+    target_frame_count: 20,
+    development_probe_job_ids: ["probe-development"],
+    development_package_session_id: annotationScenario.development.session_id,
+    development_package_sha256:
+      annotationScenario.developmentResult.package.package_sha256,
+  });
+
+  const developmentFrameIndices = new Set(
+    annotationScenario.development.sampling_manifest.frame_indices,
+  );
+  const checkFrameIndices =
+    annotationScenario.check.sampling_manifest.frame_indices;
+  expect(checkFrameIndices).toHaveLength(20);
+  expect(
+    checkFrameIndices.filter((frameIndex: number) =>
+      developmentFrameIndices.has(frameIndex),
+    ),
+  ).toEqual([]);
+  const developmentGroupIds = new Set(
+    annotationScenario.development.sampling_manifest.groups.map(
+      (group: any) => group.group_id,
+    ),
+  );
+  const checkGroupIds = annotationScenario.check.sampling_manifest.groups.map(
+    (group: any) => group.group_id,
+  );
+  expect(
+    checkGroupIds.filter((groupId: string) => developmentGroupIds.has(groupId)),
+  ).toEqual([]);
+  expect(
+    annotationScenario.check.sampling_manifest.excluded_development_groups.map(
+      (group: any) => group.group_id,
+    ),
+  ).toEqual([...developmentGroupIds]);
+  const developmentGroups =
+    annotationScenario.development.sampling_manifest.groups;
+  for (const checkGroup of annotationScenario.check.sampling_manifest.groups) {
+    expect(
+      developmentGroups.some(
+        (developmentGroup: any) =>
+          checkGroup.start_frame <= developmentGroup.end_frame &&
+          developmentGroup.start_frame <= checkGroup.end_frame,
+      ),
+    ).toBe(false);
+    const checkDerivativeFamily = new Set(checkGroup.derivative_family);
+    expect(
+      developmentGroups.some((developmentGroup: any) =>
+        developmentGroup.derivative_family.some((frameIndex: number) =>
+          checkDerivativeFamily.has(frameIndex),
+        ),
+      ),
+    ).toBe(false);
+  }
+  const requestedCheckIntervals =
+    annotationScenario.createBodies[2].strata_applicability.lighting.flatMap(
+      (row: any) => row.frame_intervals as Array<Record<string, number>>,
+    );
+  expect(requestedCheckIntervals).not.toHaveLength(0);
+  expect(
+    checkFrameIndices.every((frameIndex: number) =>
+      requestedCheckIntervals.some(
+        (interval: Record<string, number>) =>
+          interval.start_frame <= frameIndex &&
+          frameIndex <= interval.end_frame,
+      ),
+    ),
+  ).toBe(true);
+
+  await expect(annotationWorkspace).toBeVisible({ timeout: 15_000 });
+  await expect
+    .poll(() =>
+      annotationScenario.lifecycleEvents.includes("check-session:read"),
+    )
+    .toBe(true);
+  await expect.poll(() => annotationScenario.checkFrameReads.length).toBe(1);
+  const acceptedCreateOffset = annotationScenario.lifecycleEvents.indexOf(
+    "check-create:accepted-locked",
+  );
+  const sessionReadOffset =
+    annotationScenario.lifecycleEvents.indexOf("check-session:read");
+  const firstFrameReadOffset = annotationScenario.lifecycleEvents.findIndex(
+    (event) => event.startsWith("check-frame:read:"),
+  );
+  expect(acceptedCreateOffset).toBeGreaterThan(0);
+  expect(sessionReadOffset).toBeGreaterThan(acceptedCreateOffset);
+  expect(firstFrameReadOffset).toBeGreaterThan(sessionReadOffset);
+  await expect(
+    annotationWorkspace.getByText("0 / 20 frames annotated"),
+  ).toBeVisible({ timeout: 15_000 });
+  const finalize = annotationWorkspace.getByRole("button", {
+    name: "Freeze and generate one-time report",
+  });
+  await expect(finalize).toBeDisabled();
+  expect(annotationScenario.finalizeBodies).toHaveLength(0);
+
+  for (const [offset, frameIndex] of checkFrameIndices.entries()) {
+    await expect(
+      annotationWorkspace.getByText(new RegExp(`Frame ${frameIndex} ·`)),
+    ).toBeVisible();
+    await expect(
+      annotationWorkspace.getByRole("button", { name: "Ignore suggestion" }),
+    ).toBeEnabled({ timeout: 15_000 });
+    await annotationWorkspace.getByLabel("Presence").selectOption("absent");
+    await annotationWorkspace.getByLabel("Lighting").selectOption("bright_sun");
+    if (offset === checkFrameIndices.length - 1) {
+      await annotationWorkspace
+        .getByRole("button", { name: "Save confirmed annotation" })
+        .click();
+    } else {
+      await annotationWorkspace
+        .getByRole("button", { name: "Ignore suggestion" })
+        .click();
+    }
+    await expect
+      .poll(() => annotationScenario.mutationBodies.length)
+      .toBe(offset + 1);
+    await expect(
+      annotationWorkspace.getByText(`${offset + 1} / 20 frames annotated`),
+    ).toBeVisible();
+    if (offset < checkFrameIndices.length - 1) {
+      await annotationWorkspace
+        .getByRole("button", { name: "Next frame" })
+        .click();
+    }
+  }
+  expect(annotationScenario.mutationBodies).toHaveLength(20);
+  for (const body of annotationScenario.mutationBodies.slice(0, -1)) {
+    expect(body).toMatchObject({
+      operation: "set",
+      suggestion_id: null,
+      dismissed_suggestion_kind: "detector_candidate",
+      annotation: {
+        annotation_state: "confirmed",
+        presence: "absent",
+        training_use: "excluded",
+        lighting_tag: "bright_sun",
+        provenance: "suggestion_dismissed_manual",
+      },
+    });
+  }
+  expect(annotationScenario.mutationBodies.at(-1)).toMatchObject({
+    operation: "set",
+    suggestion_id: null,
+    dismissed_suggestion_id: null,
+    annotation: {
+      annotation_state: "confirmed",
+      presence: "absent",
+      provenance: "manual_human_annotation",
+    },
+  });
+  await expect(
+    annotationWorkspace.getByText("20 / 20 frames annotated"),
+  ).toBeVisible();
+  await expect(
+    annotationWorkspace.getByRole("button", { name: "Ignore suggestion" }),
+  ).toBeEnabled();
+  await expect(finalize).toBeDisabled();
+  expect(annotationScenario.check.progress.annotated_frames).toBe(20);
+  expect(annotationScenario.check.progress.unconfirmed_suggestions).toBe(1);
+  expect(annotationScenario.finalizeBodies).toHaveLength(0);
+
+  await annotationWorkspace
+    .getByRole("button", { name: "Ignore suggestion" })
+    .click();
+  await expect.poll(() => annotationScenario.mutationBodies.length).toBe(21);
+  expect(annotationScenario.mutationBodies.at(-1)).toMatchObject({
+    operation: "set",
+    suggestion_id: null,
+    dismissed_suggestion_kind: "detector_candidate",
+    annotation: {
+      annotation_state: "confirmed",
+      presence: "absent",
+      provenance: "suggestion_dismissed_manual",
+    },
+  });
+  expect(annotationScenario.check.progress.annotated_frames).toBe(20);
+  expect(annotationScenario.check.progress.unconfirmed_suggestions).toBe(0);
+  expect(
+    [...new Set(annotationScenario.checkFrameReads)].sort(
+      (left, right) => left - right,
+    ),
+  ).toEqual(checkFrameIndices);
+  expect(
+    annotationScenario.checkFrameReads.filter((frameIndex) =>
+      developmentFrameIndices.has(frameIndex),
+    ),
+  ).toEqual([]);
+  expect(annotationScenario.checkMutationFrameIndices.slice(0, 20)).toEqual(
+    checkFrameIndices,
+  );
+  expect(annotationScenario.checkMutationFrameIndices.at(-1)).toBe(
+    checkFrameIndices.at(-1),
+  );
+  await expect(finalize).toBeEnabled();
+  await finalize.click();
+  await expect.poll(() => annotationScenario.finalizeBodies.length).toBe(1);
+
+  const dashboard = page.getByTestId("feasibility-dashboard");
+  await expect(dashboard).toBeVisible();
+  await expect(dashboard.getByText("20–50-frame feasibility")).toBeVisible();
+  await expect(dashboard.getByText("Insufficient evidence")).toBeVisible();
+  await expect(dashboard.getByText("20 / 20 frames annotated")).toBeVisible();
+  await expect(
+    dashboard.getByText("Localizable positives").locator(".."),
+  ).toContainText("0");
+  await expect(
+    dashboard.getByText("Confirmed absent backgrounds").locator(".."),
+  ).toContainText("10");
+  await expect(
+    dashboard.getByText("Excluded / unresolvable").locator(".."),
+  ).toContainText("10");
+  await expect(dashboard.getByText("0 unconfirmed suggestions")).toBeVisible();
+  await expect(dashboard.getByText("Missing strata")).toBeVisible();
+  await expect(
+    dashboard
+      .getByLabel("Missing strata")
+      .getByText("lighting_strata_mismatch"),
+  ).toBeVisible();
+  await expect(dashboard.getByText("requires_new_attempt")).toBeVisible();
+  await expect(
+    dashboard.getByRole("row", { name: /Top-1 matches \/ positives/ }),
+  ).toContainText(/0 \/ 0.*0\.0%/);
+  await expect(
+    dashboard.getByRole("row", { name: /Top-5 matches \/ positives/ }),
+  ).toContainText(/0 \/ 0.*0\.0%/);
+  await expect(
+    dashboard.getByRole("row", {
+      name: /False candidates \/ evaluable frames/,
+    }),
+  ).toContainText(/10 \/ 10.*2\.935/);
+  const rawCandidateRow = dashboard.getByRole("row", {
+    name: /Raw candidates/,
+  });
+  const rawCandidateCells = rawCandidateRow.getByRole("cell");
+  await expect(rawCandidateCells).toHaveCount(2);
+  await expect(rawCandidateCells.nth(0)).toHaveText("10");
+  await expect(rawCandidateCells.nth(1)).toHaveText("5");
+  await expect(dashboard).toContainText(
+    "one-sided-wilson-score-v1 / bounded-hoeffding-upper-v1",
+  );
+  await expect(dashboard).toContainText("development_package_bound=true");
+  await expect(dashboard).toContainText("check_probe_bound=true");
+  await expect(dashboard).toContainText("sealed_evidence_bound=true");
+  await expect(dashboard).toContainText(
+    "Data-isolated check · evaluation only, never training data",
+  );
+  await expect(dashboard).toContainText(
+    "Data-isolated unseen-frame check result revealed; this group is permanently retired",
+  );
+  await expect(dashboard).toContainText(
+    "This result cannot authorize dataset expansion or trial acceptance.",
+  );
+  await expect(dashboard).toContainText(
+    "Recommended next step: Try another model/profile or collect harder development frames. Any next check must use a newly frozen unseen temporal group.",
+  );
 });
 
 test("shows readable module, frame-exception, and stage-counter reconciliation failures", async ({

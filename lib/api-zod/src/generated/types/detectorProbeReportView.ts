@@ -10,6 +10,7 @@ import type { DetectorProbeExecutionView } from "./detectorProbeExecutionView";
 import type { DetectorProbeFrameEvidenceView } from "./detectorProbeFrameEvidenceView";
 import type { DetectorProbeLineageView } from "./detectorProbeLineageView";
 import type { DetectorProbeSourceBindingView } from "./detectorProbeSourceBindingView";
+import type { DetectorReviewProxyManifestView } from "./detectorReviewProxyManifestView";
 import type { FrozenDetectorProfileView } from "./frozenDetectorProfileView";
 
 export interface DetectorProbeReportView {
@@ -33,10 +34,11 @@ export interface DetectorProbeReportView {
    */
   frames: DetectorProbeFrameEvidenceView[];
   decode: DetectorProbeDecodeView;
+  review_proxy_manifest?: DetectorReviewProxyManifestView | null;
   execution: DetectorProbeExecutionView;
   /**
    * @minItems 3
-   * @maxItems 350
+   * @maxItems 400
    */
   artifacts: DetectorProbeArtifactView[];
   created_at: string;

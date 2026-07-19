@@ -69,7 +69,10 @@ def normalize_probe_candidates(
         confidence = raw.get("confidence")
         class_name = str(raw.get("class_name") or "").strip()
         values = [*bbox, confidence, origin_x, origin_y] if isinstance(bbox, (list, tuple)) and len(bbox) == 4 else []
-        if not values or any(isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(float(value)) for value in values):
+        if not values or any(
+            isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(float(value))
+            for value in values
+        ):
             reasons["non_finite_candidate"] += 1
             continue
         normalized_class = class_name.lower()
@@ -101,9 +104,7 @@ def normalize_probe_candidates(
                 "class_name": "ball",
                 "checkpoint_class_name": class_name,
                 "source": str(raw.get("source") or mode),
-                "coordinate_reason": (
-                    "direct_source_coordinates" if mode == "direct" else "sahi_tile_offset_applied"
-                ),
+                "coordinate_reason": ("direct_source_coordinates" if mode == "direct" else "sahi_tile_offset_applied"),
             }
         )
     return {
@@ -134,7 +135,10 @@ def merge_probe_candidates(
     retained: list[dict[str, Any]] = []
     duplicate_count = 0
     for candidate in ordered:
-        if any(_intersection_over_union(candidate["bbox_source_px"], kept["bbox_source_px"]) >= iou_threshold for kept in retained):
+        if any(
+            _intersection_over_union(candidate["bbox_source_px"], kept["bbox_source_px"]) >= iou_threshold
+            for kept in retained
+        ):
             duplicate_count += 1
             continue
         retained.append(candidate)
@@ -190,6 +194,8 @@ def run_detector_probe(
     except CandidateDatasetError as exc:
         raise CorruptProbeFrameError(str(exc)) from exc
 
+    timing_by_frame = {row["frame_index"]: row for row in decode["frame_timing_observations"]}
+
     frame_rows_by_index: dict[int, dict[str, Any]] = {}
     total = len(frame_indices) * len(profiles)
     completed = 0
@@ -199,9 +205,7 @@ def run_detector_probe(
         frame = frames[frame_index]
         integrity = inspect_frame(frame)
         if integrity.get("likely_corrupt") or integrity.get("low_information"):
-            raise CorruptProbeFrameError(
-                f"frame {frame_index} failed media integrity: {integrity.get('reasons')}"
-            )
+            raise CorruptProbeFrameError(f"frame {frame_index} failed media integrity: {integrity.get('reasons')}")
         source_path_relative = Path("frames") / f"{frame_index:09d}.jpg"
         source_artifact = staging_dir / source_path_relative
         source_artifact.parent.mkdir(parents=True, exist_ok=True)
@@ -219,6 +223,8 @@ def run_detector_probe(
             "requested_decode_mode": decode["requested_decode_mode"],
             "effective_decode_mode": decode["effective_decode_mode"],
             "decoded_frame_position": frame_index,
+            "decoder_reported_pos_msec": timing_by_frame[frame_index]["decoder_reported_pos_msec"],
+            "decoder_timing_observation_method": timing_by_frame[frame_index]["observation_method"],
             "media_integrity": integrity,
             "profile_results": [],
         }
@@ -324,9 +330,7 @@ def run_detector_probe(
 
 def _write_jpeg_artifact(path: Path, image: Any) -> None:
     try:
-        encoded, payload = cv2.imencode(
-            ".jpg", image, [cv2.IMWRITE_JPEG_QUALITY, 92]
-        )
+        encoded, payload = cv2.imencode(".jpg", image, [cv2.IMWRITE_JPEG_QUALITY, 92])
     except cv2.error as exc:
         raise ArtifactWriteError("Detector probe JPEG encoding failed") from exc
     if not encoded:
@@ -352,9 +356,7 @@ def _build_probe_detector(request: dict[str, Any], profile: dict[str, Any]) -> Y
     runtime_root = Path(request["_runtime_weights_root"]).resolve(strict=True)
     snapshot_paths = request.get("_weight_snapshot_paths")
     if not isinstance(snapshot_paths, dict) or weights["sha256"] not in snapshot_paths:
-        raise DetectorDevelopmentError(
-            "weights_snapshot_missing", "Private detector weight snapshot is unavailable"
-        )
+        raise DetectorDevelopmentError("weights_snapshot_missing", "Private detector weight snapshot is unavailable")
     weights_path = Path(snapshot_paths[weights["sha256"]]).resolve(strict=True)
     try:
         weights_path.relative_to(runtime_root)
@@ -433,25 +435,17 @@ def probe_execution_environment() -> dict[str, Any]:
         "python_version": platform.python_version(),
         "numpy_version": str(np.__version__),
         "opencv_version": str(cv2.__version__),
-        "opencv_build_information_sha256": canonical_sha256(
-            {"build_information": opencv_build_information}
-        ),
-        "opencv_ffmpeg_enabled": (
-            True if ffmpeg_line == "YES" else False if ffmpeg_line == "NO" else None
-        ),
+        "opencv_build_information_sha256": canonical_sha256({"build_information": opencv_build_information}),
+        "opencv_ffmpeg_enabled": (True if ffmpeg_line == "YES" else False if ffmpeg_line == "NO" else None),
     }
     try:
         import torch
 
         cuda_available = bool(torch.cuda.is_available())
         cuda_device_count = int(torch.cuda.device_count()) if cuda_available else 0
-        cuda_compiled_version = (
-            str(torch.version.cuda) if torch.version.cuda is not None else None
-        )
+        cuda_compiled_version = str(torch.version.cuda) if torch.version.cuda is not None else None
         raw_cudnn_version = torch.backends.cudnn.version()
-        cudnn_version = (
-            int(raw_cudnn_version) if raw_cudnn_version is not None else None
-        )
+        cudnn_version = int(raw_cudnn_version) if raw_cudnn_version is not None else None
         if cuda_available:
             properties = torch.cuda.get_device_properties(0)
             gpu_name = str(properties.name)

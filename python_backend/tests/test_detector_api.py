@@ -402,6 +402,8 @@ class DetectorApiTests(unittest.TestCase):
                     "requested_decode_mode": "preroll",
                     "effective_decode_mode": "preroll_verified",
                     "decoded_frame_position": frame_index,
+                    "decoder_reported_pos_msec": frame_index * 50.0,
+                    "decoder_timing_observation_method": "opencv_cap_prop_pos_msec_after_verified_frame_read",
                     "media_integrity": {
                         "path": None,
                         "status": "ok",
@@ -430,6 +432,14 @@ class DetectorApiTests(unittest.TestCase):
                 "effective_decode_mode": "preroll_verified",
                 "verified_frame_indices": list(request["frame_indices"]),
                 "position_verification": "opencv_next_frame_index_with_0.25_tolerance",
+                "frame_timing_observations": [
+                    {
+                        "frame_index": frame_index,
+                        "decoder_reported_pos_msec": frame_index * 50.0,
+                        "observation_method": "opencv_cap_prop_pos_msec_after_verified_frame_read",
+                    }
+                    for frame_index in request["frame_indices"]
+                ],
             },
             "execution": {
                 "device": request["_execution_environment"]["device"],
@@ -450,6 +460,39 @@ class DetectorApiTests(unittest.TestCase):
         request.update(patch)
         return request
 
+    def _annotation_check_authority(
+        self,
+        session_id: str,
+        frame_indices: list[int],
+        manifest_sha256: str,
+    ) -> dict[str, object]:
+        authority: dict[str, object] = {
+            "schema_version": "1.0",
+            "artifact_type": "ball_annotation_check_probe_creation_authority",
+            "session_id": session_id,
+            "attempt_family_sha256": "a" * 64,
+            "development_package_sha256": "b" * 64,
+            "parent_trial_id": self.parent_trial_id,
+            "source_sha256": self.source_sha256,
+            "source_frame_count": 200,
+            "sampling_manifest_sha256": manifest_sha256,
+            "sampling_lock_sha256": "c" * 64,
+            "frame_indices": frame_indices,
+            "profile_bindings": [
+                {
+                    "profile_id": profile_id,
+                    "profile_sha256": next(
+                        profile["profile_sha256"]
+                        for profile in self.catalog["profiles"]
+                        if profile["profile_id"] == profile_id
+                    ),
+                }
+                for profile_id in self._request()["profile_ids"]
+            ],
+        }
+        authority["authority_sha256"] = canonical_sha256(authority)
+        return authority
+
     def test_public_request_forbids_all_client_authority_fields(self) -> None:
         forged_fields = {
             "source_relative_path": "data/other.mp4",
@@ -460,6 +503,8 @@ class DetectorApiTests(unittest.TestCase):
             "tuning_patch_sha256": "f" * 64,
             "requested_decode_mode": "direct",
             "model_path": "weights/forged.pt",
+            "annotation_sampling_manifest_sha256": "f" * 64,
+            "_annotation_session_id": "annotation-forged",
         }
         for name, value in forged_fields.items():
             with self.subTest(name=name):
@@ -749,6 +794,117 @@ class DetectorApiTests(unittest.TestCase):
         outside = self.client.post("/api/v1/detector-probes", json=self._request(frame_indices=[99, 100]))
         self.assertEqual(400, outside.status_code)
         self.assertEqual("probe_frames_outside_parent_trial", outside.json()["detail"]["code"])
+
+    def test_server_owned_annotation_check_may_probe_frozen_frames_across_the_source(self) -> None:
+        frame_indices = list(range(0, 200, 10))
+        public = self.client.post(
+            "/api/v1/detector-probes",
+            json=self._request(frame_indices=frame_indices),
+        )
+        self.assertEqual(400, public.status_code)
+        self.assertEqual("probe_frames_outside_parent_trial", public.json()["detail"]["code"])
+
+        manifest_sha256 = "f" * 64
+        session_id = "annotation-check-source-wide"
+        annotation = mock.Mock()
+        annotation.authorize_check_probe_creation.return_value = self._annotation_check_authority(
+            session_id,
+            frame_indices,
+            manifest_sha256,
+        )
+        with mock.patch.object(self.service, "_ball_annotation_service", return_value=annotation):
+            created = self.service._create_annotation_check_probe(
+                {
+                    **self._request(frame_indices=frame_indices),
+                    "annotation_sampling_manifest_sha256": manifest_sha256,
+                    "_annotation_session_id": session_id,
+                }
+            )
+        frozen = self.development.get_verified_probe_job_record(created["job_id"])["frozen_request"]
+        self.assertEqual(frame_indices, frozen["frame_indices"])
+        self.assertEqual(manifest_sha256, frozen["annotation_sampling_manifest_sha256"])
+        self.assertEqual(1, annotation.authorize_check_probe_creation.call_count)
+
+    def test_server_owned_annotation_check_rejects_profile_replacement_before_job_creation(self) -> None:
+        frame_indices = list(range(0, 200, 10))
+        manifest_sha256 = "f" * 64
+        session_id = "annotation-check-profile-replaced"
+        authority = self._annotation_check_authority(session_id, frame_indices, manifest_sha256)
+        authority["profile_bindings"][0]["profile_sha256"] = "f" * 64
+        authority["authority_sha256"] = canonical_sha256(
+            {key: value for key, value in authority.items() if key != "authority_sha256"}
+        )
+        annotation = mock.Mock()
+        annotation.authorize_check_probe_creation.return_value = authority
+        jobs_root = self.repo_root / "data" / "ball_detector_development_v1" / "probes" / "jobs"
+        before = sorted(jobs_root.glob("*.json"))
+
+        with (
+            mock.patch.object(self.service, "_ball_annotation_service", return_value=annotation),
+            self.assertRaises(DetectorDevelopmentError) as raised,
+        ):
+            self.service._create_annotation_check_probe(
+                {
+                    **self._request(frame_indices=frame_indices),
+                    "annotation_sampling_manifest_sha256": manifest_sha256,
+                    "_annotation_session_id": session_id,
+                }
+            )
+
+        self.assertEqual("invalid_annotation_check_authority", raised.exception.code)
+        self.assertEqual(before, sorted(jobs_root.glob("*.json")))
+
+    def test_server_owned_annotation_check_rejects_an_invalid_source_frame_set(self) -> None:
+        cases = {
+            "implicit": None,
+            "too_few": list(range(19)),
+            "too_many": list(range(51)),
+            "duplicate": [*range(19), 18],
+            "unsorted": list(range(20))[::-1],
+            "boolean": [*range(19), True],
+            "outside_source": [*range(19), 200],
+        }
+        for name, frame_indices in cases.items():
+            session_id = f"annotation-invalid-{name}"
+            authorized_frames = frame_indices if frame_indices is not None else list(range(20))
+            annotation = mock.Mock()
+            annotation.authorize_check_probe_creation.return_value = self._annotation_check_authority(
+                session_id,
+                authorized_frames,
+                "f" * 64,
+            )
+            with (
+                self.subTest(name=name),
+                mock.patch.object(self.service, "_ball_annotation_service", return_value=annotation),
+                self.assertRaises(DetectorDevelopmentError) as raised,
+            ):
+                request = self._request(frame_indices=frame_indices) if frame_indices is not None else self._request()
+                if frame_indices is None:
+                    request.pop("frame_indices")
+                self.service._create_annotation_check_probe(
+                    {
+                        **request,
+                        "annotation_sampling_manifest_sha256": "f" * 64,
+                        "_annotation_session_id": session_id,
+                    }
+                )
+            self.assertEqual("invalid_annotation_check_frames", raised.exception.code)
+
+        with self.assertRaises(DetectorDevelopmentError) as missing:
+            self.service._create_annotation_check_probe(
+                {
+                    **self._request(frame_indices=list(range(20))),
+                    "annotation_sampling_manifest_sha256": "f" * 64,
+                }
+            )
+        self.assertEqual("missing_sampling_manifest", missing.exception.code)
+
+        with self.assertRaises(DetectorDevelopmentError) as arbitrary_digest:
+            self.service.create_detector_probe(
+                self._request(frame_indices=list(range(20))),
+                _annotation_sampling_manifest_sha256="f" * 64,
+            )
+        self.assertEqual("invalid_annotation_check_authority", arbitrary_digest.exception.code)
 
 
 if __name__ == "__main__":

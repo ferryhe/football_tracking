@@ -20,12 +20,20 @@ export interface DetectorProbeFrameEvidenceView {
   effective_decode_mode: DetectorProbeFrameEvidenceViewEffectiveDecodeMode;
   /** @minimum 0 */
   decoded_frame_position: number;
+  decoder_reported_pos_msec?: number | null;
+  decoder_timing_observation_method?:
+    | "opencv_cap_prop_pos_msec_after_verified_frame_read"
+    | "verified_review_proxy_frame_index_mapping_v1"
+    | null;
   media_integrity: DetectorProbeMediaIntegrityView;
   source_artifact_url: string;
   /** @pattern ^[0-9a-f]{64}$ */
   source_frame_sha256: string;
   /** @exclusiveMinimum 0 */
   source_frame_size_bytes: number;
+  proxy_artifact_url?: string | null;
+  proxy_frame_sha256?: string | null;
+  proxy_frame_size_bytes?: number | null;
   /**
    * @minItems 2
    * @maxItems 6

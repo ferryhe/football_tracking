@@ -147,6 +147,29 @@ class ApiServiceSmokeTests(unittest.TestCase):
             },
         )
 
+    def test_annotation_probe_getter_uses_verified_persisted_record_not_public_view(self) -> None:
+        public_view = {"job_id": "probe-example", "status_url": "/api/v1/detector-probes/probe-example"}
+        persisted_record = {"job_id": "probe-example", "resource_sha256": "a" * 64}
+        detector_development = mock.Mock()
+        detector_development.get_probe.return_value = public_view
+        detector_development.get_verified_probe_job_record.return_value = persisted_record
+
+        with mock.patch.object(
+            self.service,
+            "_detector_development_service",
+            return_value=detector_development,
+        ):
+            self.assertEqual(public_view, self.service.get_detector_probe("probe-example"))
+            self.assertEqual(persisted_record, self.service._get_verified_detector_probe("probe-example"))
+
+        detector_development.get_probe.assert_called_once_with("probe-example")
+        detector_development.get_verified_probe_job_record.assert_called_once_with("probe-example")
+        detector_development.get_verified_probe.assert_not_called()
+
+        annotation_service = self.service._ball_annotation_service()
+        self.assertIs(annotation_service._get_probe.__self__, self.service)
+        self.assertIs(annotation_service._get_probe.__func__, ApiService._get_verified_detector_probe)
+
     def decode_preview_image(self, data_url: str) -> np.ndarray:
         encoded = data_url.split(",", 1)[1]
         buffer = np.frombuffer(base64.b64decode(encoded), dtype=np.uint8)
@@ -860,10 +883,7 @@ class ApiServiceSmokeTests(unittest.TestCase):
         self.assertEqual((5119, 1382), polygon[-2])
         self.assertTrue(
             all(
-                isinstance(x, int)
-                and isinstance(y, int)
-                and 0 <= x < frame_width
-                and 0 <= y < frame_height
+                isinstance(x, int) and isinstance(y, int) and 0 <= x < frame_width and 0 <= y < frame_height
                 for suggested_polygon in (polygon, expanded_polygon)
                 for x, y in suggested_polygon
             )
@@ -1991,6 +2011,19 @@ class ApiServiceSmokeTests(unittest.TestCase):
         self.assertTrue(self.service._path_is_relative_to(extended_artifact, output_dir))
         self.assertEqual([normal_artifact], self.service._iter_artifact_paths(output_dir))
 
+    @unittest.skipUnless(os.name == "nt", "Windows ctypes cache behavior only")
+    def test_ready_broadcast_identity_sampling_does_not_accumulate_ctypes_pointer_types(self) -> None:
+        import ctypes
+
+        artifact = self.write_text("outputs/ready-identity/artifact.json", "{}\n")
+        self.service._windows_ready_broadcast_path_identity_token(artifact)
+        pointer_types = set(ctypes._pointer_type_cache)
+
+        for _ in range(100):
+            self.service._windows_ready_broadcast_path_identity_token(artifact)
+
+        self.assertEqual(pointer_types, set(ctypes._pointer_type_cache))
+
     def test_list_runs_collects_metrics_artifacts_and_stats(self) -> None:
         output_dir = self.create_output_bundle("kept_baseline")
         (output_dir / "tracking_contract.v2.json").write_text(
@@ -2396,9 +2429,7 @@ class ApiServiceSmokeTests(unittest.TestCase):
                 materialize.assert_not_called()
                 thread.assert_not_called()
                 self.assertFalse((self.repo_root / "config" / "generated").exists())
-                self.assertFalse(
-                    (self.repo_root / "outputs" / "runs" / "input" / run_id).exists()
-                )
+                self.assertFalse((self.repo_root / "outputs" / "runs" / "input" / run_id).exists())
                 self.assertFalse(any(run["run_id"] == run_id for run in self.service.list_runs()))
 
     def test_production_trial_accepts_frontend_versioned_patch_preflight(self) -> None:
@@ -2418,9 +2449,7 @@ class ApiServiceSmokeTests(unittest.TestCase):
         self.assertEqual(
             {
                 "name": "default.yaml",
-                "sha256": hashlib.sha256(
-                    (self.repo_root / "config" / "default.yaml").read_bytes()
-                ).hexdigest(),
+                "sha256": hashlib.sha256((self.repo_root / "config" / "default.yaml").read_bytes()).hexdigest(),
             },
             generated["metadata"]["production_workflow"]["base_config_lineage"],
         )
@@ -2489,9 +2518,7 @@ class ApiServiceSmokeTests(unittest.TestCase):
                 materialize.assert_not_called()
                 thread.assert_not_called()
                 self.assertFalse((self.repo_root / "config" / "generated").exists())
-                self.assertFalse(
-                    (self.repo_root / "outputs" / "runs" / "input" / run_id).exists()
-                )
+                self.assertFalse((self.repo_root / "outputs" / "runs" / "input" / run_id).exists())
 
     def test_production_trial_parent_must_exist_and_be_completed(self) -> None:
         with self.assertRaisesRegex(ValueError, "production_trial parent run does not exist"):
@@ -2510,7 +2537,9 @@ class ApiServiceSmokeTests(unittest.TestCase):
                 parent_run_id=str(parent["run_id"]),
             )
         self.assertFalse(
-            (self.repo_root / "config" / "generated" / "default_field_setup_production_trial_pending_child.yaml").exists()
+            (
+                self.repo_root / "config" / "generated" / "default_field_setup_production_trial_pending_child.yaml"
+            ).exists()
         )
 
     def test_production_trial_first_run_accepts_self_consistent_local_draft_history(self) -> None:
@@ -2602,9 +2631,7 @@ class ApiServiceSmokeTests(unittest.TestCase):
         self.assertEqual("completed", completed_parent["status"])
         self.assertEqual(expected_digest, completed_parent["config_sha256"])
         manifest = json.loads(
-            (Path(str(completed_parent["output_dir"])) / "run_manifest.json").read_text(
-                encoding="utf-8"
-            )
+            (Path(str(completed_parent["output_dir"])) / "run_manifest.json").read_text(encoding="utf-8")
         )
         self.assertEqual(expected_digest, manifest["config_sha256"])
         child = self.create_passive_production_trial(
@@ -3243,9 +3270,7 @@ class ApiServiceSmokeTests(unittest.TestCase):
             )
 
         rewritten_parent = json.loads(json.dumps(valid_patch))
-        rewritten_parent["metadata"]["production_tuning"]["history"][0]["created_at"] = (
-            "2026-07-17T11:59:00.000Z"
-        )
+        rewritten_parent["metadata"]["production_tuning"]["history"][0]["created_at"] = "2026-07-17T11:59:00.000Z"
         with self.assertRaisesRegex(ValueError, "production_trial tuning history must append parent"):
             self.create_passive_production_trial(
                 run_id="production_trial_multi_draft_rewritten_parent",
@@ -3256,9 +3281,7 @@ class ApiServiceSmokeTests(unittest.TestCase):
             )
 
         tampered_local = json.loads(json.dumps(valid_patch))
-        tampered_local["metadata"]["production_tuning"]["history"][1]["values"][
-            "detector.confidence_threshold"
-        ] = 0.19
+        tampered_local["metadata"]["production_tuning"]["history"][1]["values"]["detector.confidence_threshold"] = 0.19
         with self.assertRaisesRegex(ValueError, "values_sha256 does not match values"):
             self.create_passive_production_trial(
                 run_id="production_trial_multi_draft_tampered_local",
@@ -3338,12 +3361,7 @@ class ApiServiceSmokeTests(unittest.TestCase):
             }
         )
         run_id = "production_trial_blocked_active"
-        generated = (
-            self.repo_root
-            / "config"
-            / "generated"
-            / f"default_field_setup_{run_id}.yaml"
-        )
+        generated = self.repo_root / "config" / "generated" / f"default_field_setup_{run_id}.yaml"
         output_dir = self.repo_root / "outputs" / "runs" / "input" / run_id
 
         with mock.patch("football_tracking.api.service.threading.Thread") as thread:

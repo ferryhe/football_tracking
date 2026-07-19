@@ -70,6 +70,7 @@ from football_tracking.api.broadcast_api import (
     validate_review_queue_activation,
     validate_review_queue_bindings,
 )
+from football_tracking.ball_annotation_service import BallAnnotationService
 from football_tracking.ball_audit import compact_ball_audit_summary
 from football_tracking.broadcast_hybrid_orchestration import (
     PUBLIC_ARTIFACTS,
@@ -96,13 +97,20 @@ from football_tracking.config_lineage import (
 )
 from football_tracking.detector_development import DetectorDevelopmentService
 from football_tracking.detector_development_common import (
+    WINDOWS_RESERVED_NAMES,
     DetectorDevelopmentError,
+    atomic_write_json,
     canonical_sha256,
+    exact_regular_tree_snapshot,
+    hash_regular_file,
     json_object_from_bytes,
     read_regular_bytes,
     require_safe_id,
     require_sha256,
+    require_trusted_relative_path,
+    secure_mkdirs,
 )
+from football_tracking.detector_review_proxy import DetectorReviewProxyCoordinator
 from football_tracking.events import compact_event_candidate_summary
 from football_tracking.final_artifact_manifest import finalize_ai_candidate
 from football_tracking.follow_cam import FollowCamGenerator
@@ -154,6 +162,27 @@ from football_tracking.trial_diagnosis import (
     build_trial_diagnosis,
     normalize_production_trial_config_patch,
     trial_tuning_schema,
+)
+
+_REVIEW_PROXY_PRE_SIDE_EFFECT_RETRYABLE_CODES = frozenset(
+    {
+        "cancelled",
+        "continuation_child_plan_changed",
+        "path_unavailable",
+        "repair_execution_binding_changed",
+        "review_proxy_child_terminal",
+        "review_proxy_continuation_failed",
+        "review_proxy_failed",
+        "review_proxy_worker_died",
+        "review_proxy_worker_timeout",
+        "service_shutting_down",
+        "source_changed",
+    }
+)
+_REVIEW_PROXY_SAME_ATTEMPT_RESUMABLE_CODES = frozenset(
+    {
+        "invalid_review_proxy_repair_evidence",
+    }
 )
 
 _WINDOWS_RESERVED_NAMES = {
@@ -553,24 +582,55 @@ def _localized_run_status(language: str, status: str) -> str:
     return labels[language].get(status, status)
 
 
+def _validated_api_repo_root(repo_root: Path) -> Path:
+    raw = Path(repo_root)
+    if raw.drive and not raw.root:
+        raise DetectorDevelopmentError("invalid_path", "Repository root is ambiguous")
+    for part in raw.parts:
+        if part == raw.anchor or part in {".", ".."}:
+            continue
+        if (
+            not part
+            or ":" in part
+            or part.endswith((" ", "."))
+            or any(character in '<>"|?*/\\' for character in part)
+            or part.rstrip(" .").split(".", 1)[0].upper() in WINDOWS_RESERVED_NAMES
+        ):
+            raise DetectorDevelopmentError("invalid_path", "Repository root is unsafe")
+    absolute = Path(os.path.abspath(raw))
+    if not absolute.name:
+        raise DetectorDevelopmentError("invalid_path", "Repository root is unsafe")
+    return secure_mkdirs(absolute.parent, absolute.name)
+
+
 class ApiService:
     def __init__(self, repo_root: Path) -> None:
-        self.repo_root = repo_root
-        self.config_dir = repo_root / "config"
-        self.outputs_dir = repo_root / "outputs"
+        self.repo_root = _validated_api_repo_root(repo_root)
+        self.config_dir = self.repo_root / "config"
+        self.outputs_dir = self.repo_root / "outputs"
         self.run_outputs_dir = self.outputs_dir / "runs"
         self.review_evidence_inbox_dir = self.outputs_dir / "review_evidence_inbox"
-        self.target_prelabel_commitment_registry = (
-            self.outputs_dir / "target_prelabel_commitments"
-        )
-        self.data_dir = repo_root / "data"
-        self.registry_path = repo_root / "data" / "run_registry.json"
-        self.registry_lock_path = repo_root / "data" / "run_registry.lock"
-        self.service_lease_dir = repo_root / "data" / "service_leases"
+        self.target_prelabel_commitment_registry = self.outputs_dir / "target_prelabel_commitments"
+        self.data_dir = self.repo_root / "data"
+        self.registry_path = self.repo_root / "data" / "run_registry.json"
+        self.registry_lock_path = self.repo_root / "data" / "run_registry.lock"
+        self.service_lease_dir = self.repo_root / "data" / "service_leases"
         self.generated_config_dir = self.config_dir / "generated"
         self._lock = threading.Lock()
         self._detector_development_lock = threading.Lock()
         self._detector_development: DetectorDevelopmentService | None = None
+        self._ball_annotation_lock = threading.Lock()
+        self._ball_annotation: BallAnnotationService | None = None
+        self._detector_review_proxy_lock = threading.RLock()
+        self._detector_review_proxy: DetectorReviewProxyCoordinator | None = None
+        repair_root = secure_mkdirs(
+            self.repo_root,
+            "data",
+            "ball_detector_development_v1",
+            "review_proxy_continuations",
+        )
+        self._detector_review_proxy_jobs_root = secure_mkdirs(repair_root, "jobs")
+        self._detector_review_proxy_failpoint: Callable[[str], None] | None = None
         self._instance_id = uuid4().hex
         self._service_lease_path = self.service_lease_dir / f"{self._instance_id}.lock"
         self._service_lease_handle = self._acquire_service_lease()
@@ -601,12 +661,13 @@ class ApiService:
             ignore_errors=True,
         )
         try:
-            self.provider_settings = load_provider_settings(repo_root)
+            self.provider_settings = load_provider_settings(self.repo_root)
             self.ai_client = OpenAIResponsesClient(self.provider_settings)
             self._ensure_registry_file()
             self._recover_interrupted_broadcast_operations()
             self._recover_interrupted_review_evidence_imports()
             self._recover_review_evidence_revocations()
+            self._recover_detector_review_proxy_repairs()
         except BaseException:
             self.close()
             raise
@@ -622,8 +683,18 @@ class ApiService:
         with self._detector_development_lock:
             detector_development = self._detector_development
             self._detector_development = None
+        with self._ball_annotation_lock:
+            ball_annotation = self._ball_annotation
+            self._ball_annotation = None
+        with self._detector_review_proxy_lock:
+            detector_review_proxy = self._detector_review_proxy
+            self._detector_review_proxy = None
+        if ball_annotation is not None:
+            ball_annotation.close()
         if detector_development is not None:
             detector_development.close()
+        if detector_review_proxy is not None:
+            detector_review_proxy.close()
         current_thread = threading.current_thread()
         for thread in registered_threads:
             if thread is not current_thread and thread.is_alive():
@@ -770,8 +841,62 @@ class ApiService:
     def import_detector_model(self, request: dict[str, Any]) -> dict[str, Any]:
         return self._detector_development_service().import_model(request)
 
-    def create_detector_probe(self, request: dict[str, Any]) -> dict[str, Any]:
+    def create_detector_probe(
+        self,
+        request: dict[str, Any],
+        *,
+        _annotation_check_session_id: str | None = None,
+        _annotation_sampling_manifest_sha256: str | None = None,
+    ) -> dict[str, Any]:
         """Resolve all probe authority from one completed production-trial record."""
+
+        if (_annotation_check_session_id is None) != (_annotation_sampling_manifest_sha256 is None):
+            raise DetectorDevelopmentError(
+                "invalid_annotation_check_authority",
+                "Server-owned annotation check authority is incomplete",
+                status_code=409,
+            )
+        annotation_check_authority = None
+        annotation_check_profile_sha256s = None
+        if _annotation_check_session_id is not None:
+            annotation_check_authority = self._ball_annotation_service().authorize_check_probe_creation(
+                _annotation_check_session_id
+            )
+            supplied_manifest_sha256 = require_sha256(
+                _annotation_sampling_manifest_sha256,
+                "annotation sampling manifest sha256",
+            )
+            authority_payload = deepcopy(annotation_check_authority)
+            authority_sha256 = authority_payload.pop("authority_sha256", None)
+            profile_bindings = annotation_check_authority.get("profile_bindings")
+            if isinstance(profile_bindings, list) and len(profile_bindings) == 2:
+                try:
+                    checked_profile_bindings = [
+                        (
+                            require_safe_id(binding.get("profile_id"), "annotation profile_id"),
+                            require_sha256(binding.get("profile_sha256"), "annotation profile sha256"),
+                        )
+                        for binding in profile_bindings
+                        if isinstance(binding, dict)
+                    ]
+                except DetectorDevelopmentError:
+                    checked_profile_bindings = []
+                if len(checked_profile_bindings) == len(profile_bindings) and [
+                    item[0] for item in checked_profile_bindings
+                ] == sorted({item[0] for item in checked_profile_bindings}):
+                    annotation_check_profile_sha256s = dict(checked_profile_bindings)
+            if (
+                annotation_check_authority.get("session_id") != _annotation_check_session_id
+                or annotation_check_authority.get("sampling_manifest_sha256") != supplied_manifest_sha256
+                or not isinstance(authority_sha256, str)
+                or canonical_sha256(authority_payload) != authority_sha256
+                or not isinstance(annotation_check_profile_sha256s, dict)
+            ):
+                raise DetectorDevelopmentError(
+                    "invalid_annotation_check_authority",
+                    "Persisted annotation check authority does not match the server request",
+                    status_code=409,
+                )
 
         allowed_request_fields = {
             "parent_trial_id",
@@ -788,9 +913,7 @@ class ApiService:
                 status_code=400,
             )
         if request.get("top_k", 5) != 5:
-            raise DetectorDevelopmentError(
-                "invalid_top_k", "Detector probe top_k is fixed at 5", status_code=400
-            )
+            raise DetectorDevelopmentError("invalid_top_k", "Detector probe top_k is fixed at 5", status_code=400)
         parent_trial_id = require_safe_id(request.get("parent_trial_id"), "parent_trial_id")
         try:
             parent = self.get_run(parent_trial_id)
@@ -832,12 +955,8 @@ class ApiService:
 
         source_path = self._detector_probe_source_path(parent)
         config_snapshot = self._detector_probe_config_snapshot(parent, note, source_path)
-        base_config_sha256, base_config_path = self._detector_probe_base_config_binding(
-            config_snapshot.raw
-        )
-        tuning_patch_binding, tuning_patch_sha256 = self._detector_probe_tuning_binding(
-            config_snapshot.raw
-        )
+        base_config_sha256, base_config_path = self._detector_probe_base_config_binding(config_snapshot.raw)
+        tuning_patch_binding, tuning_patch_sha256 = self._detector_probe_tuning_binding(config_snapshot.raw)
         output_dir = self._detector_probe_output_dir(parent)
         contract_path = self._detector_probe_contract_path(output_dir)
         try:
@@ -847,9 +966,7 @@ class ApiService:
                 max_bytes=_MAX_DETECTOR_CONTRACT_BYTES,
                 trusted_root=output_dir,
             )
-            raw_contract = json_object_from_bytes(
-                contract_bytes, "production trial tracking contract"
-            )
+            raw_contract = json_object_from_bytes(contract_bytes, "production trial tracking contract")
             raw_summary = raw_contract.get("summary")
             contract = normalize_tracking_contract_payload(
                 raw_contract,
@@ -874,9 +991,7 @@ class ApiService:
                 "The parent production trial tracking contract is not a successful V2 contract",
                 status_code=409,
             )
-        source_sha256 = require_sha256(
-            source_binding.get("video_sha256"), "tracking contract source video_sha256"
-        )
+        source_sha256 = require_sha256(source_binding.get("video_sha256"), "tracking contract source video_sha256")
         source_signature = self._detector_probe_source_signature(config_snapshot.raw)
         try:
             source_stat = source_path.stat()
@@ -913,9 +1028,7 @@ class ApiService:
                     status_code=409,
                 )
             authoritative_frames.append(frame_index)
-        expected_trial_frames = list(
-            range(note["start_frame"], note["start_frame"] + note["max_frames"])
-        )
+        expected_trial_frames = list(range(note["start_frame"], note["start_frame"] + note["max_frames"]))
         if (
             not authoritative_frames
             or authoritative_frames != expected_trial_frames
@@ -929,11 +1042,49 @@ class ApiService:
                 status_code=409,
             )
         requested_frames = request.get("frame_indices")
+        annotation_check = annotation_check_authority is not None
         if requested_frames is None:
+            if annotation_check:
+                raise DetectorDevelopmentError(
+                    "invalid_annotation_check_frames",
+                    "Server-owned annotation checks require an explicit 20-50 frame set",
+                    status_code=400,
+                )
             frame_indices = self._default_detector_probe_frames(authoritative_frames)
         else:
             frame_indices = list(requested_frames)
-            if not set(frame_indices).issubset(authoritative_frames):
+            if annotation_check:
+                source_frame_count = source_binding.get("frame_count")
+                authority_profile_ids = (
+                    [binding.get("profile_id") for binding in profile_bindings]
+                    if isinstance(profile_bindings, list)
+                    and all(isinstance(binding, dict) for binding in profile_bindings)
+                    else None
+                )
+                valid_annotation_check = (
+                    isinstance(source_frame_count, int)
+                    and not isinstance(source_frame_count, bool)
+                    and 20 <= len(frame_indices) <= 50
+                    and frame_indices == sorted(set(frame_indices))
+                    and all(
+                        isinstance(frame_index, int)
+                        and not isinstance(frame_index, bool)
+                        and 0 <= frame_index < source_frame_count
+                        for frame_index in frame_indices
+                    )
+                    and annotation_check_authority.get("parent_trial_id") == parent_trial_id
+                    and annotation_check_authority.get("source_sha256") == source_sha256
+                    and annotation_check_authority.get("source_frame_count") == source_frame_count
+                    and annotation_check_authority.get("frame_indices") == frame_indices
+                    and authority_profile_ids == request.get("profile_ids")
+                )
+                if not valid_annotation_check:
+                    raise DetectorDevelopmentError(
+                        "invalid_annotation_check_frames",
+                        "Server-owned annotation check frames must be 20-50 unique sorted source frames",
+                        status_code=400,
+                    )
+            elif not set(frame_indices).issubset(authoritative_frames):
                 raise DetectorDevelopmentError(
                     "probe_frames_outside_parent_trial",
                     "Detector probe frames must come from the authoritative parent trial",
@@ -953,17 +1104,11 @@ class ApiService:
             "source_id": f"sha256-{source_sha256[:24]}",
             "source_relative_path": source_path.relative_to(self.repo_root.resolve()).as_posix(),
             "source_sha256": source_sha256,
-            "tracking_contract_relative_path": contract_path.relative_to(
-                self.repo_root.resolve()
-            ).as_posix(),
+            "tracking_contract_relative_path": contract_path.relative_to(self.repo_root.resolve()).as_posix(),
             "tracking_contract_sha256": contract_sha256,
-            "base_config_relative_path": base_config_path.relative_to(
-                self.repo_root.resolve()
-            ).as_posix(),
+            "base_config_relative_path": base_config_path.relative_to(self.repo_root.resolve()).as_posix(),
             "base_config_sha256": base_config_sha256,
-            "effective_config_relative_path": config_snapshot.path.relative_to(
-                self.repo_root.resolve()
-            ).as_posix(),
+            "effective_config_relative_path": config_snapshot.path.relative_to(self.repo_root.resolve()).as_posix(),
             "effective_config_sha256": config_snapshot.sha256,
             "trial_intent_sha256": note["intent_sha256"],
             "tuning_patch_binding": tuning_patch_binding,
@@ -973,24 +1118,2425 @@ class ApiService:
             "top_k": 5,
             "requested_decode_mode": "preroll",
         }
+        if annotation_check_authority is not None:
+            internal_request["annotation_sampling_manifest_sha256"] = annotation_check_authority[
+                "sampling_manifest_sha256"
+            ]
         retry_from_job_id = request.get("retry_from_job_id")
         if retry_from_job_id is not None:
             internal_request["retry_from_job_id"] = retry_from_job_id
-        return self._detector_development_service().create_probe(internal_request)
+        development = self._detector_development_service()
+        if annotation_check_profile_sha256s is not None:
+            return development.create_probe(
+                internal_request,
+                _expected_profile_sha256s=annotation_check_profile_sha256s,
+            )
+        return development.create_probe(internal_request)
 
     def get_detector_probe(self, job_id: str) -> dict[str, Any]:
         return self._detector_development_service().get_probe(job_id)
 
+    def _get_verified_detector_probe(self, job_id: str) -> dict[str, Any]:
+        # Annotation packages bind the exact persisted job record.  The public
+        # detector-probe view intentionally removes private record fields and
+        # adds transport URLs, so it cannot satisfy a full-record trust anchor.
+        return self._detector_development_service().get_verified_probe_job_record(job_id)
+
+    def _create_annotation_check_probe(self, request: dict[str, Any]) -> dict[str, Any]:
+        internal = deepcopy(request)
+        session_id = internal.pop("_annotation_session_id", None)
+        manifest_sha256 = internal.pop("annotation_sampling_manifest_sha256", None)
+        if session_id is None or manifest_sha256 is None:
+            raise DetectorDevelopmentError(
+                "missing_sampling_manifest",
+                "Server-owned annotation check probes require a persisted session and frozen sampling manifest",
+            )
+        return self.create_detector_probe(
+            internal,
+            _annotation_check_session_id=session_id,
+            _annotation_sampling_manifest_sha256=manifest_sha256,
+        )
+
+    def _create_annotation_propagation_probe(self, request: dict[str, Any]) -> dict[str, Any]:
+        return self.create_detector_probe(deepcopy(request))
+
+    def create_ball_annotation_session(self, request: dict[str, Any]) -> dict[str, Any]:
+        session = self._ball_annotation_service().create_session(request)
+        return self._with_review_proxy_repair_capability(session)
+
+    def get_ball_annotation_session(self, session_id: str) -> dict[str, Any]:
+        session = self._ball_annotation_service().get_session(session_id)
+        return self._with_review_proxy_repair_capability(session)
+
+    def _with_review_proxy_repair_capability(self, session: dict[str, Any]) -> dict[str, Any]:
+        public = deepcopy(session)
+        public["review_proxy_repair"] = None
+        if (
+            public.get("data_role") != "development"
+            or public.get("status") != "blocked"
+            or public.get("blocker_code") != "review_proxy_required"
+        ):
+            return public
+        try:
+            authority = self._ball_annotation_service().get_review_proxy_repair_authority(
+                require_safe_id(public.get("session_id"), "annotation session_id")
+            )
+            parent = self._detector_development_service().get_review_proxy_upgrade_parent(
+                authority["parent_probe_job_id"]
+            )
+        except (DetectorDevelopmentError, KeyError):
+            return public
+        if authority["frame_indices"] != parent["frame_indices"]:
+            return public
+        public["review_proxy_repair"] = {
+            "eligible": True,
+            "action": "generate_verified_review_proxy",
+            "create_url": "/api/v1/detector-review-proxy-repairs",
+            "parent_probe_job_id": parent["parent_probe_job_id"],
+            "parent_probe_report_sha256": parent["parent_probe_report_sha256"],
+            "parent_probe_result_manifest_sha256": parent["parent_probe_result_manifest_sha256"],
+            "parent_probe_record_sha256": parent["parent_probe_record_sha256"],
+            "blocked_session_record_sha256": authority["blocked_session_record_sha256"],
+        }
+        return public
+
+    def create_detector_review_proxy_repair(self, request: dict[str, Any]) -> dict[str, Any]:
+        """Create the one server-authoritative repair for a pristine blocker."""
+
+        if not isinstance(request, dict) or set(request) != {"blocked_session_id"}:
+            raise DetectorDevelopmentError(
+                "forged_review_proxy_authority",
+                "Review-proxy repair creation accepts only blocked_session_id",
+                status_code=400,
+            )
+        blocked_session_id = require_safe_id(request.get("blocked_session_id"), "blocked annotation session_id")
+        public_request = {"blocked_session_id": blocked_session_id}
+        request_sha256 = canonical_sha256(public_request)
+        with self._detector_review_proxy_lock:
+            existing = self._find_detector_review_proxy_repair(request_sha256)
+            if existing is not None:
+                self._start_detector_review_proxy_continuation(existing["repair_id"])
+                return self._public_detector_review_proxy_repair(existing)
+
+            annotation_authority = self._ball_annotation_service().get_review_proxy_repair_authority(blocked_session_id)
+            parent = self._detector_development_service().get_review_proxy_upgrade_parent(
+                annotation_authority["parent_probe_job_id"]
+            )
+            self._validate_review_proxy_repair_authority(annotation_authority, parent)
+            source = annotation_authority["source"]
+            low_request = {
+                "source_id": source["source_id"],
+                "source_relative_path": source["relative_path"],
+                "source_sha256": source["sha256"],
+                "source_size_bytes": source["size_bytes"],
+                "source_width": source["width"],
+                "source_height": source["height"],
+                "source_frame_count": source["frame_count"],
+                "source_fps": source["fps"],
+                "sampled_frame_indices": annotation_authority["frame_indices"],
+            }
+            low = self._detector_review_proxy_coordinator().create_repair(low_request)
+            repair_id = require_safe_id(low.get("repair_id"), "repair_id")
+            now = _utc_now_iso()
+            authority = {
+                "blocked_session_id": blocked_session_id,
+                "blocked_session_request_sha256": annotation_authority["blocked_session_request_sha256"],
+                "blocked_session_record_sha256": annotation_authority["blocked_session_record_sha256"],
+                "parent_probe_job_id": parent["parent_probe_job_id"],
+                "development_probe_job_ids": deepcopy(annotation_authority["development_probe_job_ids"]),
+                "parent_probe_request_sha256": parent["parent_probe_request_sha256"],
+                "parent_probe_intent_sha256": parent["parent_probe_intent_sha256"],
+                "parent_probe_semantic_intent_sha256": parent["parent_probe_semantic_intent_sha256"],
+                "parent_probe_report_sha256": parent["parent_probe_report_sha256"],
+                "parent_probe_result_manifest_sha256": parent["parent_probe_result_manifest_sha256"],
+                "parent_probe_record_sha256": parent["parent_probe_record_sha256"],
+                "parent_execution_bundle_sha256": parent["parent_execution_bundle_sha256"],
+                "parent_runtime_environment_sha256": parent["parent_runtime_environment_sha256"],
+                "source_frame_evidence_sha256": parent["source_frame_evidence_sha256"],
+                "source_id": source["source_id"],
+                "source_sha256": source["sha256"],
+                "source_file_identity_sha256": source["file_identity_sha256"],
+                "source_size_bytes": source["size_bytes"],
+                "source_width": source["width"],
+                "source_height": source["height"],
+                "source_frame_count": source["frame_count"],
+                "source_fps": source["fps"],
+                "locked_profile_id": annotation_authority["locked_profile"]["profile_id"],
+                "locked_profile_sha256": annotation_authority["locked_profile"]["profile_sha256"],
+                "frame_indices": deepcopy(annotation_authority["frame_indices"]),
+                "sampling_manifest_sha256": annotation_authority["sampling_manifest_sha256"],
+                "temporal_groups_sha256": annotation_authority["temporal_groups_sha256"],
+                "candidate_evidence_sha256": parent["candidate_evidence_sha256"],
+                "replacement_request_authority_sha256": annotation_authority["replacement_request_authority_sha256"],
+            }
+            record = {
+                "schema_version": "1.0",
+                "artifact_type": "detector_review_proxy_repair_transaction",
+                "repair_id": repair_id,
+                "attempt_root_repair_id": repair_id,
+                "attempt_number": 1,
+                "retry_from_repair_id": None,
+                "idempotency_key": request_sha256,
+                "request_sha256": request_sha256,
+                "status": "queued",
+                "stage": "proxy_queued",
+                "preset_id": "h264-cfr-720p-v1",
+                "eligibility": {
+                    "eligible": True,
+                    "action": "generate_verified_review_proxy",
+                    "blocker_code": "review_proxy_required",
+                },
+                "authority": authority,
+                "low_request_sha256": low["request_sha256"],
+                "low_progress": deepcopy(low.get("progress")),
+                "continuation_intent": None,
+                "child_probe": None,
+                "replacement_session": None,
+                "result": None,
+                "error_code": None,
+                "blocker_code": None,
+                "recovery_action": None,
+                "created_at": now,
+                "updated_at": now,
+            }
+            self._persist_detector_review_proxy_repair(record)
+        self._start_detector_review_proxy_continuation(repair_id)
+        return self._public_detector_review_proxy_repair(record)
+
+    def get_detector_review_proxy_repair(self, repair_id: str) -> dict[str, Any]:
+        repair_id = require_safe_id(repair_id, "repair_id")
+        with self._detector_review_proxy_lock:
+            record = self._read_detector_review_proxy_repair(repair_id)
+            transaction_sha256 = record["transaction_sha256"]
+        if record["status"] not in {"ready", "failed", "blocked", "cancelled"} or (
+            record.get("recovery_action") == "resume"
+        ):
+            self._start_detector_review_proxy_continuation(repair_id)
+        elif record["status"] == "ready":
+            self._verify_ready_detector_review_proxy_repair(record)
+            with self._detector_review_proxy_lock:
+                current = self._read_detector_review_proxy_repair(repair_id)
+                if current.get("status") != "ready" or current.get("transaction_sha256") != transaction_sha256:
+                    raise DetectorDevelopmentError(
+                        "review_proxy_transaction_changed",
+                        "Ready repair transaction changed during verification",
+                        status_code=409,
+                    )
+                record = current
+        return self._public_detector_review_proxy_repair(record)
+
+    def _verify_ready_detector_review_proxy_repair(self, record: dict[str, Any]) -> None:
+        """Replay every durable lower authority before revealing a ready result."""
+
+        authority = record["authority"]
+        annotation = self._ball_annotation_service()
+        detector = self._detector_development_service()
+        group = self._review_proxy_group_publication_summary(record["group_publication"])
+        if group != record["group_publication"]:
+            raise DetectorDevelopmentError(
+                "group_publication_changed",
+                "Stored replacement group witness changed",
+                status_code=409,
+            )
+        replacement = annotation.verify_ready_review_proxy_replacement(
+            blocked_session_id=authority["blocked_session_id"],
+            blocked_session_record_sha256=authority["blocked_session_record_sha256"],
+            replacement_session_id=record["replacement_session"]["session_id"],
+            child_probe_job_id=record["child_probe"]["job_id"],
+            session_creation_authority_sha256=group["session_creation_authority_sha256"],
+            group_publication_sha256=group["group_publication_sha256"],
+        )
+        current_annotation = replacement["blocked_authority"]
+        parent = detector.get_review_proxy_upgrade_parent(authority["parent_probe_job_id"])
+        self._validate_review_proxy_repair_authority(current_annotation, parent)
+        if self._build_review_proxy_repair_authority(current_annotation, parent) != authority:
+            raise DetectorDevelopmentError(
+                "review_proxy_authority_changed",
+                "Ready repair authority changed after publication",
+            )
+
+        low = self._detector_review_proxy_coordinator().get_verified_proxy(record["repair_id"])
+        repair_evidence, proxy_media, samples = self._load_verified_review_proxy_evidence(record, low)
+        intent = record["continuation_intent"]
+        if (
+            intent["repair_evidence"] != repair_evidence
+            or intent["proxy_media"] != proxy_media
+            or sorted(samples) != authority["frame_indices"]
+        ):
+            raise DetectorDevelopmentError(
+                "review_proxy_evidence_changed",
+                "Ready repair evidence changed after publication",
+            )
+
+        child = detector.get_verified_probe_job_record(record["child_probe"]["job_id"])
+        child_summary = self._review_proxy_child_summary(child)
+        if child_summary != record["child_probe"]:
+            raise DetectorDevelopmentError(
+                "review_proxy_child_changed",
+                "Ready repair child changed after publication",
+            )
+        session = replacement["session"]
+        session_summary = record["replacement_session"]
+        retry_lineage = session.get("retry_lineage")
+        lineage = session.get("lineage")
+        if (
+            session.get("session_id") != session_summary["session_id"]
+            or session.get("request_sha256") != session_summary["request_sha256"]
+            or session.get("retry_from_session_id") != session_summary["retry_from_session_id"]
+            or not isinstance(retry_lineage, dict)
+            or retry_lineage.get("mode") != session_summary["retry_mode"]
+            or session.get("attempt_family_sha256") != session_summary["attempt_family_sha256"]
+            or not isinstance(lineage, dict)
+            or lineage.get("development_probe_job_ids") != session_summary["development_probe_job_ids"]
+        ):
+            raise DetectorDevelopmentError(
+                "replacement_session_changed",
+                "Ready replacement creation authority changed after publication",
+            )
+        if (
+            replacement["session_creation_authority_sha256"] != group["session_creation_authority_sha256"]
+            or replacement["group_publication_sha256"] != group["group_publication_sha256"]
+        ):
+            raise DetectorDevelopmentError(
+                "group_publication_changed",
+                "Ready replacement group publication changed",
+            )
+        expected_proxy_result = self._build_review_proxy_result_proxy(
+            record=record,
+            low=low,
+            child=child,
+            proxy_media=proxy_media,
+            samples=samples,
+        )
+        expected_result = {
+            "proxy": expected_proxy_result,
+            "child_probe": child_summary,
+            "replacement_session": session_summary,
+            "parent_probe_record_sha256_after": parent["parent_probe_record_sha256"],
+        }
+        if record.get("result") != expected_result:
+            raise DetectorDevelopmentError(
+                "review_proxy_result_changed",
+                "Ready repair result changed from replayed lower authority",
+            )
+
+    def _can_retry_detector_review_proxy_repair(self, record: dict[str, Any]) -> bool:
+        if record.get("status") not in {"failed", "blocked", "cancelled"}:
+            return False
+        if any(
+            record.get(field) is not None
+            for field in (
+                "child_probe",
+                "replacement_session",
+                "group_publication",
+                "result",
+            )
+        ):
+            return False
+        rank = self._review_proxy_actual_side_effect_floor(record)
+        if record.get("status") == "cancelled":
+            return rank == 0
+        return rank in {0, 1, 2} and record.get("error_code") in (_REVIEW_PROXY_PRE_SIDE_EFFECT_RETRYABLE_CODES)
+
+    @classmethod
+    def _review_proxy_expected_recovery_action(cls, *, status: str, rank: int, error_code: str | None) -> str | None:
+        if status not in {"failed", "blocked"}:
+            return None
+        if rank >= 3:
+            return "resume"
+        if rank in {1, 2} and error_code in _REVIEW_PROXY_SAME_ATTEMPT_RESUMABLE_CODES:
+            return "resume"
+        if rank in {0, 1, 2} and error_code in _REVIEW_PROXY_PRE_SIDE_EFFECT_RETRYABLE_CODES:
+            return "retry"
+        return None
+
+    @staticmethod
+    def _review_proxy_group_publication_summary(commit: dict[str, Any]) -> dict[str, Any]:
+        try:
+            body = {
+                "session_id": require_safe_id(commit["session_id"], "replacement session_id"),
+                "blocked_session_id": require_safe_id(
+                    commit["blocked_session_id"],
+                    "blocked annotation session_id",
+                ),
+                "child_probe_job_id": require_safe_id(
+                    commit["child_probe_job_id"],
+                    "review-proxy child probe job_id",
+                ),
+                "session_record_sha256": require_sha256(
+                    commit["session_record_sha256"],
+                    "replacement session record sha256",
+                ),
+                "session_creation_authority_sha256": require_sha256(
+                    commit["session_creation_authority_sha256"],
+                    "replacement session creation authority sha256",
+                ),
+                "group_publication_sha256": require_sha256(
+                    commit["group_publication_sha256"],
+                    "replacement group publication sha256",
+                ),
+            }
+            commit_sha256 = require_sha256(
+                commit["commit_sha256"],
+                "replacement group commit sha256",
+            )
+        except (KeyError, TypeError, DetectorDevelopmentError) as exc:
+            raise DetectorDevelopmentError(
+                "group_publication_changed",
+                "Replacement temporal-group commit is incomplete",
+                status_code=409,
+            ) from exc
+        if canonical_sha256(body) != commit_sha256:
+            raise DetectorDevelopmentError(
+                "group_publication_changed",
+                "Replacement temporal-group commit digest changed",
+                status_code=409,
+            )
+        return {**body, "commit_sha256": commit_sha256}
+
+    def _inspect_review_proxy_low_job(
+        self,
+        record: dict[str, Any],
+        authority: dict[str, Any],
+        journal_rank: int,
+    ) -> int:
+        """Return the verified proxy-publication floor for one low job."""
+
+        try:
+            low = self._detector_review_proxy_coordinator().get_repair(record["repair_id"])
+            frozen = low["frozen_request"]
+            low_status = low["status"]
+        except (DetectorDevelopmentError, KeyError, TypeError) as exc:
+            raise DetectorDevelopmentError(
+                "review_proxy_side_effect_floor_unverifiable",
+                "Durable review-proxy job authority cannot be verified",
+                status_code=409,
+            ) from exc
+        expected_frozen = {
+            "source_id": authority.get("source_id"),
+            "source_sha256": authority.get("source_sha256"),
+            "source_size_bytes": authority.get("source_size_bytes"),
+            "source_width": authority.get("source_width"),
+            "source_height": authority.get("source_height"),
+            "source_frame_count": authority.get("source_frame_count"),
+            "source_fps": authority.get("source_fps"),
+            "sampled_frame_indices": authority.get("frame_indices"),
+        }
+        lineage_matches = bool(
+            isinstance(frozen, dict)
+            and low.get("repair_id") == record.get("repair_id")
+            and low.get("request_sha256") == record.get("low_request_sha256")
+            and canonical_sha256(frozen) == low.get("request_sha256")
+            and low.get("attempt_root_repair_id") == record.get("attempt_root_repair_id")
+            and low.get("attempt_number") == record.get("attempt_number")
+            and low.get("retry_from_repair_id") == record.get("retry_from_repair_id")
+            and all(frozen.get(key) == value for key, value in expected_frozen.items())
+        )
+        if not lineage_matches or low_status not in {
+            "queued",
+            "running",
+            "committing",
+            "ready",
+            "failed",
+            "blocked",
+            "cancelled",
+        }:
+            raise DetectorDevelopmentError(
+                "review_proxy_side_effect_floor_unverifiable",
+                "Durable review-proxy job differs from its continuation journal",
+                status_code=409,
+            )
+        low_rank = 1 if low_status == "ready" else 0
+        if journal_rank >= 1 and low_rank == 0:
+            raise DetectorDevelopmentError(
+                "review_proxy_side_effect_floor_unverifiable",
+                "Repair journal names a proxy absent from the lower store",
+                status_code=409,
+            )
+        upper_status = record.get("status")
+        if journal_rank == 0 and upper_status in {"failed", "blocked", "cancelled"} and low_rank == 0:
+            terminal_matches = bool(
+                low_status == upper_status
+                and (
+                    upper_status == "cancelled"
+                    and low.get("error_code") == "cancelled"
+                    or upper_status in {"failed", "blocked"}
+                    and low.get("error_code") == record.get("error_code")
+                )
+            )
+            if not terminal_matches:
+                raise DetectorDevelopmentError(
+                    "review_proxy_side_effect_floor_unverifiable",
+                    "Terminal review-proxy job differs from its continuation journal",
+                    status_code=409,
+                )
+        return low_rank
+
+    def _inspect_review_proxy_lower_side_effects(self, record: dict[str, Any]) -> dict[str, Any]:
+        """Read the exact lower-store prefix without mutating either store."""
+
+        journal_rank = self._review_proxy_stage_completed(record)
+        authority = record.get("authority")
+        intent = record.get("continuation_intent")
+        child_plan = intent.get("child_plan") if isinstance(intent, dict) else None
+        if not isinstance(authority, dict):
+            raise DetectorDevelopmentError(
+                "review_proxy_side_effect_floor_unverifiable",
+                "Repair lower authority is incomplete",
+                status_code=409,
+            )
+        low_rank = self._inspect_review_proxy_low_job(record, authority, journal_rank)
+        parent_job_id = require_safe_id(
+            authority.get("parent_probe_job_id"),
+            "review-proxy parent probe job_id",
+        )
+        detector = self._detector_development_service()
+        try:
+            child = detector.get_review_proxy_upgrade_child(parent_job_id)
+        except DetectorDevelopmentError as exc:
+            if (
+                exc.code == "review_proxy_parent_child_claimed"
+                and record.get("child_probe") is None
+                and journal_rank < 3
+            ):
+                return {
+                    "rank": 3,
+                    "claim_only": True,
+                    "child_probe": None,
+                    "replacement_session": None,
+                    "group_publication": None,
+                }
+            raise DetectorDevelopmentError(
+                "review_proxy_side_effect_floor_unverifiable",
+                "Durable review-proxy child authority cannot be verified",
+                status_code=409,
+            ) from exc
+        if child is None:
+            if journal_rank >= 3 or record.get("child_probe") is not None:
+                raise DetectorDevelopmentError(
+                    "review_proxy_side_effect_floor_unverifiable",
+                    "Repair journal names a child absent from the lower store",
+                    status_code=409,
+                )
+            return {
+                "rank": max(journal_rank, low_rank),
+                "claim_only": False,
+                "child_probe": None,
+                "replacement_session": None,
+                "group_publication": None,
+            }
+
+        child = detector.get_verified_probe_job_record(
+            require_safe_id(child.get("job_id"), "review-proxy child probe job_id")
+        )
+
+        child_frozen = child.get("frozen_request")
+        child_upgrade = child_frozen.get("review_proxy_upgrade") if isinstance(child_frozen, dict) else None
+        child_repair_evidence = child_upgrade.get("repair_evidence") if isinstance(child_upgrade, dict) else None
+        try:
+            child_repair_id = require_safe_id(
+                child_repair_evidence.get("repair_id") if isinstance(child_repair_evidence, dict) else None,
+                "review-proxy child repair_id",
+            )
+        except DetectorDevelopmentError as exc:
+            raise DetectorDevelopmentError(
+                "review_proxy_side_effect_floor_unverifiable",
+                "Durable review-proxy child has no verified repair binding",
+                status_code=409,
+            ) from exc
+        if child_repair_id != record.get("repair_id"):
+            if journal_rank >= 3 or record.get("child_probe") is not None:
+                raise DetectorDevelopmentError(
+                    "review_proxy_side_effect_floor_unverifiable",
+                    "Repair journal names a child from a different repair attempt",
+                    status_code=409,
+                )
+            return {
+                "rank": max(journal_rank, low_rank),
+                "claim_only": False,
+                "child_probe": None,
+                "replacement_session": None,
+                "group_publication": None,
+            }
+
+        if not isinstance(child_plan, dict):
+            raise DetectorDevelopmentError(
+                "review_proxy_side_effect_floor_unverifiable",
+                "Durable review-proxy child has no frozen continuation plan",
+                status_code=409,
+            )
+        child_prefix_valid = bool(
+            child.get("request_sha256") == child_plan.get("request_sha256")
+            and child.get("intent_sha256") == child_plan.get("intent_sha256")
+            and child.get("semantic_intent_sha256") == child_plan.get("semantic_intent_sha256")
+            and child.get("resource_sha256") == child_plan.get("resource_sha256")
+            and child.get("frozen_profiles_sha256") == child_plan.get("frozen_profiles_sha256")
+            and child.get("retry_from_job_id") == parent_job_id
+            and child.get("retry_kind") == "review_proxy_decode_upgrade"
+        )
+        if not child_prefix_valid:
+            raise DetectorDevelopmentError(
+                "review_proxy_side_effect_floor_unverifiable",
+                "Durable review-proxy child differs from the frozen continuation",
+                status_code=409,
+            )
+        if child.get("status") != "ready":
+            if record.get("child_probe") is not None or journal_rank >= 3:
+                raise DetectorDevelopmentError(
+                    "review_proxy_side_effect_floor_unverifiable",
+                    "Repair journal names an unverified lower child",
+                    status_code=409,
+                )
+            return {
+                "rank": 3,
+                "claim_only": True,
+                "child_probe": None,
+                "replacement_session": None,
+                "group_publication": None,
+            }
+
+        try:
+            child_summary = self._review_proxy_child_summary(child)
+        except (DetectorDevelopmentError, KeyError, TypeError) as exc:
+            raise DetectorDevelopmentError(
+                "review_proxy_side_effect_floor_unverifiable",
+                "Durable review-proxy child summary cannot be verified",
+                status_code=409,
+            ) from exc
+        expected_child_bindings = {
+            "request_sha256": child_plan.get("request_sha256"),
+            "intent_sha256": child_plan.get("intent_sha256"),
+            "semantic_intent_sha256": child_plan.get("semantic_intent_sha256"),
+            "resource_sha256": child_plan.get("resource_sha256"),
+            "frozen_profiles_sha256": child_plan.get("frozen_profiles_sha256"),
+            "execution_bundle_sha256": child_plan.get("execution_bundle_sha256"),
+            "runtime_environment_sha256": child_plan.get("runtime_environment_sha256"),
+            "retry_from_job_id": parent_job_id,
+        }
+        if any(child_summary.get(key) != value for key, value in expected_child_bindings.items()) or (
+            record.get("child_probe") is not None and record.get("child_probe") != child_summary
+        ):
+            raise DetectorDevelopmentError(
+                "review_proxy_side_effect_floor_unverifiable",
+                "Durable review-proxy child summary changed",
+                status_code=409,
+            )
+
+        try:
+            annotation = self._ball_annotation_service()
+            group_witness = record.get("group_publication")
+            if group_witness is not None:
+                group_witness = self._review_proxy_group_publication_summary(group_witness)
+                if group_witness != record.get("group_publication"):
+                    raise DetectorDevelopmentError(
+                        "group_publication_changed",
+                        "Stored replacement group witness changed",
+                        status_code=409,
+                    )
+            replacement = annotation.inspect_review_proxy_replacement_side_effect(
+                authority["blocked_session_id"],
+                child_probe_job_id=child_summary["job_id"],
+                expected_development_probe_job_ids=authority["development_probe_job_ids"],
+                blocked_session_record_sha256=authority["blocked_session_record_sha256"],
+                expected_group_commit=group_witness,
+                replacement_session_witnessed=record.get("replacement_session") is not None,
+            )
+        except (DetectorDevelopmentError, KeyError, TypeError) as exc:
+            if journal_rank < 3 and record.get("child_probe") is None:
+                # The verified child alone proves the non-retryable floor. A
+                # missing or malformed annotation store must not hide that
+                # fact behind a second error or permit a descendant attempt.
+                return {
+                    "rank": 3,
+                    "claim_only": False,
+                    "child_probe": child_summary,
+                    "replacement_session": None,
+                    "group_publication": None,
+                }
+            raise DetectorDevelopmentError(
+                "review_proxy_side_effect_floor_unverifiable",
+                "Durable replacement annotation authority cannot be verified",
+                status_code=409,
+            ) from exc
+        if replacement is None:
+            if journal_rank >= 4 or record.get("replacement_session") is not None:
+                raise DetectorDevelopmentError(
+                    "review_proxy_side_effect_floor_unverifiable",
+                    "Repair journal names a replacement absent from the lower store",
+                    status_code=409,
+                )
+            return {
+                "rank": 3,
+                "claim_only": False,
+                "child_probe": child_summary,
+                "replacement_session": None,
+                "group_publication": None,
+            }
+
+        try:
+            session_summary = self._review_proxy_session_summary(replacement["session"])
+        except (DetectorDevelopmentError, KeyError, TypeError) as exc:
+            raise DetectorDevelopmentError(
+                "review_proxy_side_effect_floor_unverifiable",
+                "Durable replacement session summary cannot be verified",
+                status_code=409,
+            ) from exc
+        if record.get("replacement_session") is not None and record.get("replacement_session") != session_summary:
+            raise DetectorDevelopmentError(
+                "review_proxy_side_effect_floor_unverifiable",
+                "Durable replacement session summary changed",
+                status_code=409,
+            )
+
+        group_commit = replacement.get("group_commit")
+        if group_commit is None:
+            if journal_rank >= 5 or record.get("group_publication") is not None:
+                raise DetectorDevelopmentError(
+                    "review_proxy_side_effect_floor_unverifiable",
+                    "Repair journal names groups absent from the lower store",
+                    status_code=409,
+                )
+            return {
+                "rank": 4,
+                "claim_only": False,
+                "child_probe": child_summary,
+                "replacement_session": session_summary,
+                "group_publication": None,
+            }
+        try:
+            group_summary = self._review_proxy_group_publication_summary(group_commit)
+        except (KeyError, TypeError) as exc:
+            raise DetectorDevelopmentError(
+                "review_proxy_side_effect_floor_unverifiable",
+                "Durable replacement group commit is incomplete",
+                status_code=409,
+            ) from exc
+        if record.get("group_publication") is not None and record.get("group_publication") != group_summary:
+            raise DetectorDevelopmentError(
+                "review_proxy_side_effect_floor_unverifiable",
+                "Durable replacement group commit changed",
+                status_code=409,
+            )
+        return {
+            "rank": 5,
+            "claim_only": False,
+            "child_probe": child_summary,
+            "replacement_session": session_summary,
+            "group_publication": group_summary,
+        }
+
+    def _reconcile_review_proxy_lower_side_effects(self, record: dict[str, Any]) -> tuple[int, bool]:
+        inspection = self._inspect_review_proxy_lower_side_effects(record)
+        changed = False
+        for key in (
+            "child_probe",
+            "replacement_session",
+            "group_publication",
+        ):
+            lower_value = inspection[key]
+            if lower_value is not None and record.get(key) is None:
+                record[key] = deepcopy(lower_value)
+                changed = True
+        rank = int(inspection["rank"])
+        if not inspection["claim_only"]:
+            stage = {
+                1: "proxy_ready",
+                3: "child_probe_ready",
+                4: "replacement_session_ready",
+                5: "groups_published",
+            }.get(rank)
+            if stage is not None and self._review_proxy_stage_completed(record) < rank:
+                record["stage"] = stage
+                changed = True
+        return rank, changed
+
+    def _review_proxy_actual_side_effect_floor(self, record: dict[str, Any]) -> int:
+        """Return the highest phase proven by the append-only lower stores."""
+
+        return int(self._inspect_review_proxy_lower_side_effects(record)["rank"])
+
+    def retry_detector_review_proxy_repair(self, repair_id: str) -> dict[str, Any]:
+        repair_id = require_safe_id(repair_id, "repair_id")
+        with self._detector_review_proxy_lock:
+            source_record = self._read_detector_review_proxy_repair(repair_id)
+            existing = [
+                self._read_detector_review_proxy_repair(path.stem)
+                for path in sorted(self._detector_review_proxy_jobs_root.glob("*.json"))
+                if path.stem != repair_id
+            ]
+            descendants = [record for record in existing if record.get("retry_from_repair_id") == repair_id]
+            if len(descendants) > 1:
+                raise DetectorDevelopmentError(
+                    "duplicate_review_proxy_retry",
+                    "Multiple continuation retries share one parent attempt",
+                )
+            if descendants:
+                return self._public_detector_review_proxy_repair(descendants[0])
+            if not self._can_retry_detector_review_proxy_repair(source_record):
+                raise DetectorDevelopmentError(
+                    "review_proxy_retry_ineligible",
+                    "This repair phase cannot create a new attempt",
+                    status_code=409,
+                )
+            authority = deepcopy(source_record["authority"])
+            current_annotation = self._ball_annotation_service().get_review_proxy_repair_authority(
+                authority["blocked_session_id"]
+            )
+            current_parent = self._detector_development_service().get_review_proxy_upgrade_parent(
+                current_annotation["parent_probe_job_id"]
+            )
+            self._validate_review_proxy_repair_authority(current_annotation, current_parent)
+            if self._build_review_proxy_repair_authority(current_annotation, current_parent) != authority:
+                raise DetectorDevelopmentError(
+                    "review_proxy_authority_changed",
+                    "Retry authority changed after the original attempt",
+                    status_code=409,
+                )
+            rank = self._review_proxy_actual_side_effect_floor(source_record)
+            if rank >= 3:
+                raise DetectorDevelopmentError(
+                    "review_proxy_retry_ineligible",
+                    "A durable review-proxy child already exists for this audited parent",
+                    status_code=409,
+                )
+            low = self._detector_review_proxy_coordinator().retry_repair(
+                repair_id,
+                allow_ready_pre_reveal=rank in {1, 2},
+            )
+            new_repair_id = require_safe_id(low.get("repair_id"), "retry repair_id")
+            root_id = require_safe_id(
+                source_record.get("attempt_root_repair_id", repair_id),
+                "retry root repair_id",
+            )
+            attempt_number = int(source_record.get("attempt_number", 1)) + 1
+            request_sha256 = canonical_sha256(
+                {
+                    "artifact_type": "detector_review_proxy_retry_request",
+                    "retry_from_repair_id": repair_id,
+                    "attempt_root_repair_id": root_id,
+                    "attempt_number": attempt_number,
+                    "blocked_session_id": authority["blocked_session_id"],
+                }
+            )
+            now = _utc_now_iso()
+            record = {
+                "schema_version": "1.0",
+                "artifact_type": "detector_review_proxy_repair_transaction",
+                "repair_id": new_repair_id,
+                "attempt_root_repair_id": root_id,
+                "attempt_number": attempt_number,
+                "retry_from_repair_id": repair_id,
+                "idempotency_key": request_sha256,
+                "request_sha256": request_sha256,
+                "status": "queued",
+                "stage": "proxy_queued",
+                "preset_id": "h264-cfr-720p-v1",
+                "eligibility": deepcopy(source_record["eligibility"]),
+                "authority": authority,
+                "low_request_sha256": low["request_sha256"],
+                "low_progress": deepcopy(low.get("progress")),
+                "continuation_intent": None,
+                "child_probe": None,
+                "replacement_session": None,
+                "group_publication": None,
+                "result": None,
+                "error_code": None,
+                "blocker_code": None,
+                "recovery_action": None,
+                "created_at": now,
+                "updated_at": now,
+            }
+            self._persist_detector_review_proxy_repair(record)
+        self._start_detector_review_proxy_continuation(new_repair_id)
+        return self._public_detector_review_proxy_repair(record)
+
+    def cancel_detector_review_proxy_repair(self, repair_id: str) -> dict[str, Any]:
+        repair_id = require_safe_id(repair_id, "repair_id")
+        with self._detector_review_proxy_lock:
+            record = self._read_detector_review_proxy_repair(repair_id)
+            if record["status"] in {"ready", "failed", "blocked", "cancelled"}:
+                return self._public_detector_review_proxy_repair(record)
+            if record["status"] == "committing" or record.get("continuation_intent") is not None:
+                raise DetectorDevelopmentError(
+                    "commit_in_progress",
+                    "Review-proxy continuation can no longer be cancelled",
+                    status_code=409,
+                )
+            low = self._detector_review_proxy_coordinator().cancel_repair(repair_id)
+            low_status = low.get("status")
+            if low_status == "cancelled":
+                record.update(
+                    status="cancelled",
+                    stage="cancelled",
+                    error_code=None,
+                    blocker_code=None,
+                    recovery_action=None,
+                    low_progress=deepcopy(low.get("progress")),
+                    updated_at=_utc_now_iso(),
+                )
+            elif low_status in {"committing", "ready"}:
+                record.update(
+                    status="committing",
+                    stage=("proxy_ready" if low_status == "ready" else "proxy_committing"),
+                    low_progress=deepcopy(low.get("progress")),
+                    updated_at=_utc_now_iso(),
+                )
+                self._persist_detector_review_proxy_repair(record)
+                self._start_detector_review_proxy_continuation(repair_id)
+                raise DetectorDevelopmentError(
+                    "commit_in_progress",
+                    "The review proxy already reached its commit point",
+                    status_code=409,
+                )
+            elif low_status in {"failed", "blocked"}:
+                error_code = str(low.get("error_code") or "review_proxy_failed")
+                record.update(
+                    status=low_status,
+                    stage=str(low.get("stage") or low_status),
+                    error_code=error_code,
+                    blocker_code=(error_code if low_status == "blocked" else None),
+                    recovery_action=self._review_proxy_expected_recovery_action(
+                        status=low_status,
+                        rank=0,
+                        error_code=error_code,
+                    ),
+                    low_progress=deepcopy(low.get("progress")),
+                    updated_at=_utc_now_iso(),
+                )
+            else:
+                # A running worker has only received a cancellation request;
+                # it has not durably cancelled yet.  Preserve the truthful
+                # state and let the watcher observe its terminal transition.
+                record.update(
+                    status=("queued" if low_status == "queued" else "running"),
+                    stage=str(low.get("stage") or "cancelling"),
+                    low_progress=deepcopy(low.get("progress")),
+                    updated_at=_utc_now_iso(),
+                )
+            self._persist_detector_review_proxy_repair(record)
+        if record["status"] not in {"cancelled", "failed", "blocked"}:
+            self._start_detector_review_proxy_continuation(repair_id)
+        return self._public_detector_review_proxy_repair(record)
+
+    def _detector_review_proxy_coordinator(
+        self,
+    ) -> DetectorReviewProxyCoordinator:
+        with self._detector_review_proxy_lock:
+            if self._closing:
+                raise DetectorDevelopmentError(
+                    "service_closed",
+                    "Detector review-proxy service is closed",
+                    status_code=503,
+                )
+            if self._detector_review_proxy is None:
+                self._detector_review_proxy = DetectorReviewProxyCoordinator(self.repo_root)
+            return self._detector_review_proxy
+
+    def _persist_detector_review_proxy_repair(self, record: dict[str, Any]) -> None:
+        repair_id = require_safe_id(record.get("repair_id"), "repair_id")
+        if (
+            record.get("schema_version") != "1.0"
+            or record.get("artifact_type") != "detector_review_proxy_repair_transaction"
+            or record.get("status")
+            not in {
+                "queued",
+                "running",
+                "committing",
+                "ready",
+                "failed",
+                "blocked",
+                "cancelled",
+            }
+            or record.get("idempotency_key") != record.get("request_sha256")
+            or not self._valid_detector_review_proxy_transaction_phase(record)
+        ):
+            raise DetectorDevelopmentError(
+                "invalid_review_proxy_transaction",
+                "Review-proxy continuation transaction is invalid",
+            )
+        sealed = deepcopy(record)
+        sealed.pop("transaction_sha256", None)
+        sealed["transaction_sha256"] = canonical_sha256(sealed)
+        record["transaction_sha256"] = sealed["transaction_sha256"]
+        atomic_write_json(
+            self._detector_review_proxy_jobs_root / f"{repair_id}.json",
+            sealed,
+            trusted_root=self._detector_review_proxy_jobs_root,
+        )
+
+    def _read_detector_review_proxy_repair(self, repair_id: str) -> dict[str, Any]:
+        repair_id = require_safe_id(repair_id, "repair_id")
+        path = self._detector_review_proxy_jobs_root / f"{repair_id}.json"
+        if not path.is_file():
+            raise DetectorDevelopmentError(
+                "review_proxy_repair_not_found",
+                "Detector review-proxy repair was not found",
+                status_code=404,
+            )
+        content, _digest = read_regular_bytes(
+            path,
+            "review-proxy continuation transaction",
+            max_bytes=4 * 1024 * 1024,
+            trusted_root=self._detector_review_proxy_jobs_root,
+        )
+        record = json_object_from_bytes(content, "review-proxy continuation transaction")
+        sealed_digest = record.get("transaction_sha256")
+        canonical_record = deepcopy(record)
+        canonical_record.pop("transaction_sha256", None)
+        if (
+            record.get("repair_id") != repair_id
+            or record.get("artifact_type") != "detector_review_proxy_repair_transaction"
+            or not isinstance(sealed_digest, str)
+            or canonical_sha256(canonical_record) != sealed_digest
+            or record.get("idempotency_key") != record.get("request_sha256")
+            or record.get("request_sha256") != self._expected_detector_review_proxy_request_sha256(record)
+            or record.get("status")
+            not in {
+                "queued",
+                "running",
+                "committing",
+                "ready",
+                "failed",
+                "blocked",
+                "cancelled",
+            }
+            or not self._valid_detector_review_proxy_transaction_phase(record)
+        ):
+            raise DetectorDevelopmentError(
+                "invalid_review_proxy_transaction",
+                "Persisted review-proxy continuation is invalid",
+            )
+        return record
+
+    @staticmethod
+    def _expected_detector_review_proxy_request_sha256(record: dict[str, Any]) -> str:
+        authority = record.get("authority", {})
+        if record.get("attempt_number", 1) == 1:
+            request = {"blocked_session_id": authority.get("blocked_session_id")}
+        else:
+            request = {
+                "artifact_type": "detector_review_proxy_retry_request",
+                "retry_from_repair_id": record.get("retry_from_repair_id"),
+                "attempt_root_repair_id": record.get("attempt_root_repair_id"),
+                "attempt_number": record.get("attempt_number"),
+                "blocked_session_id": authority.get("blocked_session_id"),
+            }
+        return canonical_sha256(request)
+
+    def _find_detector_review_proxy_repair(self, request_sha256: str) -> dict[str, Any] | None:
+        request_sha256 = require_sha256(request_sha256, "review-proxy request sha256")
+        found: list[dict[str, Any]] = []
+        for path in sorted(self._detector_review_proxy_jobs_root.glob("*.json")):
+            record = self._read_detector_review_proxy_repair(path.stem)
+            if record.get("request_sha256") == request_sha256:
+                found.append(record)
+        if len(found) > 1:
+            raise DetectorDevelopmentError(
+                "duplicate_review_proxy_transaction",
+                "Multiple review-proxy continuations share one request",
+            )
+        return found[0] if found else None
+
+    @staticmethod
+    def _review_proxy_stage_completed(record: dict[str, Any]) -> int:
+        ranks = {
+            "proxy_queued": 0,
+            "queued": 0,
+            "running": 0,
+            "verifying_source": 0,
+            "transcoding": 0,
+            "independent_verification": 0,
+            "recovered_after_restart": 0,
+            "proxy_committing": 0,
+            "failed": 0,
+            "blocked": 0,
+            "cancelled": 0,
+            "proxy_ready": 1,
+            "continuation_intent": 2,
+            "child_probe_ready": 3,
+            "replacement_session_ready": 4,
+            "groups_published": 5,
+            "ready": 6,
+        }
+        return ranks.get(str(record.get("stage")), -1)
+
+    @classmethod
+    def _valid_detector_review_proxy_transaction_phase(cls, record: dict[str, Any]) -> bool:
+        repair_id = record.get("repair_id")
+        attempt_root_repair_id = record.get("attempt_root_repair_id")
+        attempt_number = record.get("attempt_number")
+        retry_from_repair_id = record.get("retry_from_repair_id")
+        lineage_valid = (
+            isinstance(attempt_number, int)
+            and not isinstance(attempt_number, bool)
+            and attempt_number >= 1
+            and isinstance(attempt_root_repair_id, str)
+            and (
+                attempt_number == 1
+                and attempt_root_repair_id == repair_id
+                and retry_from_repair_id is None
+                or attempt_number > 1
+                and isinstance(retry_from_repair_id, str)
+                and retry_from_repair_id != repair_id
+                and attempt_root_repair_id != repair_id
+            )
+        )
+        authority = record.get("authority")
+        if not isinstance(authority, dict):
+            authority = {}
+        try:
+            from football_tracking.api.schemas import (
+                DetectorReviewProxyRepairAuthorityView,
+            )
+
+            authority_valid = (
+                isinstance(authority, dict)
+                and DetectorReviewProxyRepairAuthorityView.model_validate(authority).model_dump(mode="json")
+                == authority
+            )
+        except Exception:
+            authority_valid = False
+        intent = record.get("continuation_intent")
+        intent_valid = intent is None
+        child_plan: dict[str, Any] | None = None
+        if isinstance(intent, dict):
+            intent_body = deepcopy(intent)
+            intent_digest = intent_body.pop("intent_sha256", None)
+            child_plan = intent_body.get("child_plan")
+            child_plan_valid = False
+            if isinstance(child_plan, dict):
+                plan_body = deepcopy(child_plan)
+                plan_digest = plan_body.pop("plan_sha256", None)
+                continuation = plan_body.get("continuation_execution_binding")
+                continuation_valid = False
+                if isinstance(continuation, dict):
+                    continuation_body = deepcopy(continuation)
+                    continuation_digest = continuation_body.pop("binding_sha256", None)
+                    continuation_valid = canonical_sha256(continuation_body) == continuation_digest
+                child_plan_valid = (
+                    plan_body.get("artifact_type") == "detector_review_proxy_child_plan"
+                    and plan_body.get("repair_id") == repair_id
+                    and authority_valid
+                    and plan_body.get("parent_probe_job_id") == authority.get("parent_probe_job_id")
+                    and canonical_sha256(plan_body) == plan_digest
+                    and continuation_valid
+                )
+            sampled_frame_sha256s = intent_body.get("repair_evidence", {}).get("sampled_frame_sha256s")
+            try:
+                sampled_frames_valid = (
+                    isinstance(sampled_frame_sha256s, dict)
+                    and sorted(int(key) for key in sampled_frame_sha256s) == authority.get("frame_indices")
+                    and all(
+                        isinstance(value, str) and len(value) == 64 and set(value) <= set("0123456789abcdef")
+                        for value in sampled_frame_sha256s.values()
+                    )
+                )
+            except (TypeError, ValueError):
+                sampled_frames_valid = False
+            intent_valid = (
+                intent_body.get("artifact_type") == "detector_review_proxy_continuation_intent"
+                and intent_body.get("repair_id") == repair_id
+                and isinstance(intent_body.get("repair_evidence"), dict)
+                and intent_body["repair_evidence"].get("repair_id") == repair_id
+                and intent_body["repair_evidence"].get("repair_request_sha256") == record.get("low_request_sha256")
+                and isinstance(intent_body.get("proxy_media"), dict)
+                and intent_body["repair_evidence"].get("proxy_media_sha256") == intent_body["proxy_media"].get("sha256")
+                and intent_body["repair_evidence"].get("proxy_size_bytes")
+                == intent_body["proxy_media"].get("size_bytes")
+                and intent_body["proxy_media"].get("frame_count") == authority.get("source_frame_count")
+                and intent_body["proxy_media"].get("fps") == authority.get("source_fps")
+                and sampled_frames_valid
+                and authority_valid
+                and intent_body.get("authority_sha256") == canonical_sha256(authority)
+                and child_plan_valid
+                and canonical_sha256(intent_body) == intent_digest
+            )
+        rank = cls._review_proxy_stage_completed(record)
+        present = (
+            intent is not None,
+            record.get("child_probe") is not None,
+            record.get("replacement_session") is not None,
+            record.get("group_publication") is not None,
+            record.get("result") is not None,
+        )
+        expected = {
+            0: (False, False, False, False, False),
+            1: (False, False, False, False, False),
+            2: (True, False, False, False, False),
+            3: (True, True, False, False, False),
+            4: (True, True, True, False, False),
+            5: (True, True, True, True, False),
+            6: (True, True, True, True, True),
+        }.get(rank)
+        status = record.get("status")
+        stage = record.get("stage")
+        status_phase_valid = (
+            (status == "queued" and stage in {"proxy_queued", "queued", "recovered_after_restart"})
+            or (
+                status == "running"
+                and stage
+                in {
+                    "queued",
+                    "running",
+                    "verifying_source",
+                    "transcoding",
+                    "independent_verification",
+                    "recovered_after_restart",
+                }
+            )
+            or (status == "cancelled" and stage == "cancelled")
+            or (status == "committing" and (stage == "proxy_committing" or rank in {1, 2, 3, 4, 5}))
+            or (status == "ready" and rank == 6)
+            or (status == "failed" and (stage == "failed" or rank in {1, 2, 3, 4, 5}))
+            or (status == "blocked" and (stage == "blocked" or rank in {1, 2, 3, 4, 5}))
+        )
+        child = record.get("child_probe")
+        replacement = record.get("replacement_session")
+        group = record.get("group_publication")
+        result = record.get("result")
+        summaries_valid = True
+        try:
+            from football_tracking.api.schemas import (
+                DetectorReviewProxyRepairChildProbeView,
+                DetectorReviewProxyRepairResultView,
+                DetectorReviewProxyRepairSessionView,
+            )
+
+            if child is not None:
+                summaries_valid = (
+                    DetectorReviewProxyRepairChildProbeView.model_validate(child).model_dump(mode="json") == child
+                )
+            if summaries_valid and replacement is not None:
+                summaries_valid = (
+                    DetectorReviewProxyRepairSessionView.model_validate(replacement).model_dump(mode="json")
+                    == replacement
+                )
+            if summaries_valid and group is not None:
+                summaries_valid = (
+                    isinstance(group, dict)
+                    and set(group)
+                    == {
+                        "session_id",
+                        "blocked_session_id",
+                        "child_probe_job_id",
+                        "session_record_sha256",
+                        "session_creation_authority_sha256",
+                        "group_publication_sha256",
+                        "commit_sha256",
+                    }
+                    and all(
+                        isinstance(value, str) and len(value) == 64 and set(value) <= set("0123456789abcdef")
+                        for value in (
+                            group["session_record_sha256"],
+                            group["session_creation_authority_sha256"],
+                            group["group_publication_sha256"],
+                            group["commit_sha256"],
+                        )
+                    )
+                    and canonical_sha256({key: value for key, value in group.items() if key != "commit_sha256"})
+                    == group["commit_sha256"]
+                )
+            if summaries_valid and result is not None:
+                summaries_valid = (
+                    DetectorReviewProxyRepairResultView.model_validate(result).model_dump(mode="json") == result
+                    and result.get("child_probe") == child
+                    and result.get("replacement_session") == replacement
+                    and result.get("parent_probe_record_sha256_after")
+                    == record.get("authority", {}).get("parent_probe_record_sha256")
+                )
+        except Exception:
+            summaries_valid = False
+        cross_bindings_valid = authority_valid
+        if cross_bindings_valid and child is not None:
+            continuation = child_plan.get("continuation_execution_binding") if isinstance(child_plan, dict) else None
+            cross_bindings_valid = bool(
+                isinstance(child_plan, dict)
+                and isinstance(continuation, dict)
+                and child.get("retry_from_job_id") == authority.get("parent_probe_job_id")
+                and child.get("request_sha256") == child_plan.get("request_sha256")
+                and child.get("intent_sha256") == child_plan.get("intent_sha256")
+                and child.get("semantic_intent_sha256") == child_plan.get("semantic_intent_sha256")
+                and child.get("resource_sha256") == child_plan.get("resource_sha256")
+                and child.get("frozen_profiles_sha256") == child_plan.get("frozen_profiles_sha256")
+                and child.get("execution_bundle_sha256") == child_plan.get("execution_bundle_sha256")
+                and child.get("runtime_environment_sha256") == child_plan.get("runtime_environment_sha256")
+                and child.get("continuation_execution_binding_sha256") == continuation.get("binding_sha256")
+                and child.get("continuation_code_bundle_sha256") == continuation.get("code_bundle_sha256")
+                and child.get("continuation_runtime_sha256") == continuation.get("runtime_sha256")
+            )
+        if cross_bindings_valid and replacement is not None:
+            cross_bindings_valid = bool(
+                child is not None
+                and replacement.get("retry_from_session_id") == authority.get("blocked_session_id")
+                and replacement.get("development_probe_job_ids")
+                == [
+                    *authority.get("development_probe_job_ids", []),
+                    child.get("job_id"),
+                ]
+            )
+        if cross_bindings_valid and group is not None:
+            cross_bindings_valid = bool(
+                replacement is not None
+                and child is not None
+                and group.get("session_id") == replacement.get("session_id")
+                and group.get("blocked_session_id") == authority.get("blocked_session_id")
+                and group.get("child_probe_job_id") == child.get("job_id")
+            )
+        if cross_bindings_valid and result is not None:
+            proxy = result.get("proxy") if isinstance(result, dict) else None
+            proxy_media = intent.get("proxy_media") if isinstance(intent, dict) else None
+            repair_evidence = intent.get("repair_evidence") if isinstance(intent, dict) else None
+            cross_bindings_valid = bool(
+                isinstance(proxy, dict)
+                and isinstance(proxy_media, dict)
+                and isinstance(repair_evidence, dict)
+                and proxy.get("review_proxy_id") == repair_id
+                and proxy.get("proxy_media_sha256") == proxy_media.get("sha256")
+                and proxy.get("proxy_size_bytes") == proxy_media.get("size_bytes")
+                and proxy.get("proxy_width") == proxy_media.get("width")
+                and proxy.get("proxy_height") == proxy_media.get("height")
+                and proxy.get("proxy_frame_count") == authority.get("source_frame_count")
+                and proxy.get("proxy_frame_count") == proxy_media.get("frame_count")
+                and proxy.get("proxy_fps") == authority.get("source_fps")
+                and proxy.get("proxy_fps") == proxy_media.get("fps")
+                and proxy.get("sampled_artifact_count") == len(authority.get("frame_indices", []))
+                and proxy.get("repair_execution_binding_sha256")
+                == repair_evidence.get("repair_execution_binding_sha256")
+                and proxy.get("repair_code_bundle_sha256") == repair_evidence.get("repair_code_bundle_sha256")
+                and proxy.get("repair_runtime_sha256") == repair_evidence.get("repair_runtime_sha256")
+                and proxy.get("repair_decoder_fingerprint_sha256")
+                == repair_evidence.get("repair_decoder_fingerprint_sha256")
+            )
+        error_code = record.get("error_code")
+        blocker_code = record.get("blocker_code")
+        recovery_action = record.get("recovery_action")
+        expected_recovery_action = cls._review_proxy_expected_recovery_action(
+            status=str(status),
+            rank=rank,
+            error_code=error_code if isinstance(error_code, str) else None,
+        )
+        errors_valid = bool(
+            (
+                status in {"failed", "blocked"}
+                and isinstance(error_code, str)
+                and bool(error_code)
+                and (
+                    status == "failed"
+                    and blocker_code is None
+                    or status == "blocked"
+                    and isinstance(blocker_code, str)
+                    and bool(blocker_code)
+                    and blocker_code == error_code
+                )
+                and recovery_action == expected_recovery_action
+            )
+            or (
+                status not in {"failed", "blocked"}
+                and error_code is None
+                and blocker_code is None
+                and recovery_action is None
+            )
+        )
+        return bool(
+            intent_valid
+            and lineage_valid
+            and record.get("request_sha256") == cls._expected_detector_review_proxy_request_sha256(record)
+            and expected is not None
+            and present == expected
+            and status_phase_valid
+            and summaries_valid
+            and cross_bindings_valid
+            and errors_valid
+        )
+
+    def _public_detector_review_proxy_repair(self, record: dict[str, Any]) -> dict[str, Any]:
+        public = {
+            key: deepcopy(record[key])
+            for key in (
+                "schema_version",
+                "repair_id",
+                "attempt_root_repair_id",
+                "attempt_number",
+                "retry_from_repair_id",
+                "idempotency_key",
+                "request_sha256",
+                "status",
+                "stage",
+                "preset_id",
+                "eligibility",
+                "authority",
+                "error_code",
+                "blocker_code",
+                "recovery_action",
+                "created_at",
+                "updated_at",
+            )
+        }
+        public["artifact_type"] = "detector_review_proxy_repair_job"
+        low_progress = record.get("low_progress")
+        source_total = int(record["authority"]["source_frame_count"])
+        source_completed = 0
+        if isinstance(low_progress, dict):
+            low_completed = low_progress.get("completed")
+            low_total = low_progress.get("total")
+            expected_low_total = source_total * 3 + len(record["authority"]["frame_indices"])
+            if (
+                isinstance(low_completed, bool)
+                or not isinstance(low_completed, int)
+                or isinstance(low_total, bool)
+                or not isinstance(low_total, int)
+                or low_total != expected_low_total
+                or not 0 <= low_completed <= low_total
+            ):
+                raise DetectorDevelopmentError(
+                    "invalid_review_proxy_progress",
+                    "Review-proxy progress differs from frozen work authority",
+                )
+            source_completed = min(
+                source_total,
+                (source_total * low_completed) // low_total,
+            )
+        if self._review_proxy_stage_completed(record) >= 1:
+            source_completed = source_total
+        public["progress"] = {
+            "stage_completed": self._review_proxy_stage_completed(record),
+            "stage_total": 6,
+            "source_frames_completed": source_completed,
+            "source_frames_total": source_total,
+            "updated_at": record["updated_at"],
+        }
+        journal_rank = self._review_proxy_stage_completed(record)
+        actual_floor = self._review_proxy_actual_side_effect_floor(record)
+        if record.get("status") in {"failed", "blocked", "cancelled"} and actual_floor > journal_rank:
+            raise DetectorDevelopmentError(
+                "review_proxy_side_effect_floor_mismatch",
+                "Repair journal is behind an immutable continuation side effect",
+                status_code=409,
+            )
+        public["can_cancel"] = record.get("status") in {"queued", "running"}
+        public["can_retry"] = self._can_retry_detector_review_proxy_repair(record)
+        public["result"] = deepcopy(record.get("result")) if record.get("status") == "ready" else None
+        base = f"/api/v1/detector-review-proxy-repairs/{record['repair_id']}"
+        public["status_url"] = base
+        public["cancel_url"] = f"{base}/cancel"
+        public["retry_url"] = f"{base}/retry"
+        return public
+
+    def _start_detector_review_proxy_continuation(self, repair_id: str) -> None:
+        repair_id = require_safe_id(repair_id, "repair_id")
+        key = f"review-proxy-{repair_id}"
+        with self._lock:
+            if self._closing or key in self._active_threads or key in self._starting_threads:
+                return
+            thread = threading.Thread(
+                target=self._watch_detector_review_proxy_repair,
+                args=(repair_id, key),
+                name=f"review-proxy-continuation-{repair_id}",
+                daemon=True,
+            )
+            self._active_threads[key] = thread
+            self._starting_threads.add(key)
+        try:
+            thread.start()
+        except BaseException:
+            with self._lock:
+                self._active_threads.pop(key, None)
+            raise
+        finally:
+            with self._lock:
+                self._starting_threads.discard(key)
+
+    def _watch_detector_review_proxy_repair(self, repair_id: str, thread_key: str) -> None:
+        try:
+            wait = threading.Event()
+            while not self._closing:
+                if self._advance_detector_review_proxy_repair(repair_id):
+                    return
+                wait.wait(0.1)
+        except Exception as exc:
+            if self._closing or getattr(exc, "code", None) == "service_closed":
+                return
+            with self._detector_review_proxy_lock:
+                try:
+                    record = self._read_detector_review_proxy_repair(repair_id)
+                except Exception:
+                    return
+                if record.get("status") not in {
+                    "ready",
+                    "failed",
+                    "blocked",
+                    "cancelled",
+                }:
+                    try:
+                        actual_rank, _reconciled = self._reconcile_review_proxy_lower_side_effects(record)
+                    except DetectorDevelopmentError as floor_error:
+                        if floor_error.code != "review_proxy_side_effect_floor_unverifiable":
+                            raise
+                        # Preserve the already valid journal prefix. Read paths
+                        # still fail closed against the damaged lower store;
+                        # this handler must not erase a committed phase while
+                        # recording an unrelated worker failure.
+                        actual_rank = self._review_proxy_stage_completed(record)
+                    completed_rank = self._review_proxy_stage_completed(record)
+                    if actual_rank > completed_rank:
+                        # A verified claim without its deterministic job row is
+                        # already a non-retryable side effect, but there is no
+                        # child summary to journal yet. Keep the same attempt
+                        # resumable instead of publishing a false terminal row.
+                        record.update(
+                            status="committing",
+                            error_code=None,
+                            blocker_code=None,
+                            recovery_action=None,
+                            updated_at=_utc_now_iso(),
+                        )
+                        self._persist_detector_review_proxy_repair(record)
+                        return
+                    code = str(getattr(exc, "code", "review_proxy_continuation_failed"))
+                    blocked = getattr(exc, "status_code", None) == 409
+                    terminal_status = "blocked" if blocked else "failed"
+                    record.update(
+                        status=terminal_status,
+                        error_code=code,
+                        blocker_code=(code if blocked else None),
+                        recovery_action=self._review_proxy_expected_recovery_action(
+                            status=terminal_status,
+                            rank=completed_rank,
+                            error_code=code,
+                        ),
+                        error_message=str(exc)[:1000],
+                        updated_at=_utc_now_iso(),
+                    )
+                    # Preserve the last durably completed phase whenever
+                    # evidence has already been published.  Collapsing stage
+                    # to "failed" would make the journal contradict its own
+                    # child/session/group bindings and could tempt a restart
+                    # to republish them.
+                    if completed_rank == 0:
+                        record["stage"] = terminal_status
+                    self._persist_detector_review_proxy_repair(record)
+        finally:
+            with self._lock:
+                self._active_threads.pop(thread_key, None)
+
+    def _advance_detector_review_proxy_repair(self, repair_id: str) -> bool:
+        with self._detector_review_proxy_lock:
+            record = self._read_detector_review_proxy_repair(repair_id)
+            if record["status"] in {"ready", "failed", "blocked", "cancelled"}:
+                if record.get("recovery_action") == "resume" and self._review_proxy_stage_completed(record) >= 1:
+                    record.update(
+                        status="committing",
+                        error_code=None,
+                        blocker_code=None,
+                        recovery_action=None,
+                        updated_at=_utc_now_iso(),
+                    )
+                    self._persist_detector_review_proxy_repair(record)
+                else:
+                    return True
+        coordinator = self._detector_review_proxy_coordinator()
+        low = coordinator.get_repair(repair_id)
+        low_status = low.get("status")
+        if low_status == "ready":
+            verified = coordinator.get_verified_proxy(repair_id)
+            self._commit_detector_review_proxy_continuation(repair_id, verified)
+            return True
+        with self._detector_review_proxy_lock:
+            record = self._read_detector_review_proxy_repair(repair_id)
+            if record["status"] in {"ready", "failed", "blocked", "cancelled"}:
+                return True
+            record["low_progress"] = deepcopy(low.get("progress"))
+            record["updated_at"] = _utc_now_iso()
+            if low_status in {"queued", "running"}:
+                record.update(status=low_status, stage=str(low.get("stage") or low_status))
+                self._persist_detector_review_proxy_repair(record)
+                return False
+            if low_status == "committing":
+                record.update(status="committing", stage="proxy_committing")
+                self._persist_detector_review_proxy_repair(record)
+                return False
+            if low_status in {"failed", "blocked", "cancelled"}:
+                error_code = (
+                    str(low.get("error_code") or "review_proxy_failed") if low_status in {"failed", "blocked"} else None
+                )
+                record.update(
+                    status=low_status,
+                    stage=str(low.get("stage") or low_status),
+                    error_code=error_code,
+                    blocker_code=(error_code if low_status == "blocked" else None),
+                    recovery_action=self._review_proxy_expected_recovery_action(
+                        status=str(low_status),
+                        rank=self._review_proxy_stage_completed({"stage": str(low.get("stage") or low_status)}),
+                        error_code=error_code,
+                    ),
+                )
+                self._persist_detector_review_proxy_repair(record)
+                return True
+            raise DetectorDevelopmentError(
+                "invalid_review_proxy_status",
+                "Detector review proxy reported an invalid status",
+            )
+
+    @staticmethod
+    def _build_review_proxy_repair_authority(annotation: dict[str, Any], parent: dict[str, Any]) -> dict[str, Any]:
+        source = annotation["source"]
+        return {
+            "blocked_session_id": annotation["blocked_session_id"],
+            "blocked_session_request_sha256": annotation["blocked_session_request_sha256"],
+            "blocked_session_record_sha256": annotation["blocked_session_record_sha256"],
+            "parent_probe_job_id": parent["parent_probe_job_id"],
+            "development_probe_job_ids": deepcopy(annotation["development_probe_job_ids"]),
+            "parent_probe_request_sha256": parent["parent_probe_request_sha256"],
+            "parent_probe_intent_sha256": parent["parent_probe_intent_sha256"],
+            "parent_probe_semantic_intent_sha256": parent["parent_probe_semantic_intent_sha256"],
+            "parent_probe_report_sha256": parent["parent_probe_report_sha256"],
+            "parent_probe_result_manifest_sha256": parent["parent_probe_result_manifest_sha256"],
+            "parent_probe_record_sha256": parent["parent_probe_record_sha256"],
+            "parent_execution_bundle_sha256": parent["parent_execution_bundle_sha256"],
+            "parent_runtime_environment_sha256": parent["parent_runtime_environment_sha256"],
+            "source_frame_evidence_sha256": parent["source_frame_evidence_sha256"],
+            "source_id": source["source_id"],
+            "source_sha256": source["sha256"],
+            "source_file_identity_sha256": source["file_identity_sha256"],
+            "source_size_bytes": source["size_bytes"],
+            "source_width": source["width"],
+            "source_height": source["height"],
+            "source_frame_count": source["frame_count"],
+            "source_fps": source["fps"],
+            "locked_profile_id": annotation["locked_profile"]["profile_id"],
+            "locked_profile_sha256": annotation["locked_profile"]["profile_sha256"],
+            "frame_indices": deepcopy(annotation["frame_indices"]),
+            "sampling_manifest_sha256": annotation["sampling_manifest_sha256"],
+            "temporal_groups_sha256": annotation["temporal_groups_sha256"],
+            "candidate_evidence_sha256": parent["candidate_evidence_sha256"],
+            "replacement_request_authority_sha256": annotation["replacement_request_authority_sha256"],
+        }
+
+    @staticmethod
+    def _validate_review_proxy_repair_authority(annotation: dict[str, Any], parent: dict[str, Any]) -> None:
+        annotation_source = annotation.get("source")
+        parent_source = parent.get("source")
+        locked_profile = annotation.get("locked_profile")
+        frozen_profiles = parent.get("frozen_profiles")
+        if (
+            not isinstance(annotation_source, dict)
+            or not isinstance(parent_source, dict)
+            or not isinstance(locked_profile, dict)
+            or not isinstance(frozen_profiles, list)
+            or annotation.get("parent_probe_job_id") != parent.get("parent_probe_job_id")
+            or annotation.get("frame_indices") != parent.get("frame_indices")
+        ):
+            raise DetectorDevelopmentError(
+                "review_proxy_authority_mismatch",
+                "Blocked session and audited parent authority disagree",
+                status_code=409,
+            )
+        expected_source = {
+            "source_id": parent_source.get("source_id"),
+            "relative_path": parent_source.get("relative_path"),
+            "sha256": parent_source.get("sha256"),
+            "file_identity_sha256": parent_source.get("file_identity_sha256"),
+            "size_bytes": parent_source.get("size_bytes"),
+            "width": parent_source.get("width"),
+            "height": parent_source.get("height"),
+            "frame_count": parent_source.get("frame_count"),
+        }
+        if any(annotation_source.get(key) != value for key, value in expected_source.items()):
+            raise DetectorDevelopmentError(
+                "review_proxy_authority_mismatch",
+                "Blocked session source differs from the audited parent",
+                status_code=409,
+            )
+        fps = annotation_source.get("fps")
+        if (
+            isinstance(fps, bool)
+            or not isinstance(fps, (int, float))
+            or not math.isclose(
+                float(fps),
+                float(parent.get("report_decode_fps", 0.0)),
+                rel_tol=0.0,
+                abs_tol=1e-9,
+            )
+        ):
+            raise DetectorDevelopmentError(
+                "review_proxy_authority_mismatch",
+                "Blocked session FPS differs from the audited parent",
+                status_code=409,
+            )
+        bound_profile = next(
+            (
+                item
+                for item in frozen_profiles
+                if isinstance(item, dict) and item.get("profile_id") == locked_profile.get("profile_id")
+            ),
+            None,
+        )
+        if not isinstance(bound_profile, dict) or bound_profile.get("profile_sha256") != locked_profile.get(
+            "profile_sha256"
+        ):
+            raise DetectorDevelopmentError(
+                "review_proxy_authority_mismatch",
+                "Locked detector profile differs from the audited parent",
+                status_code=409,
+            )
+
+    def _hit_detector_review_proxy_failpoint(self, stage: str) -> None:
+        callback = self._detector_review_proxy_failpoint
+        if callback is not None:
+            callback(stage)
+
+    def _load_verified_review_proxy_evidence(
+        self, record: dict[str, Any], low: dict[str, Any]
+    ) -> tuple[dict[str, Any], dict[str, Any], dict[int, bytes]]:
+        repair_id = record["repair_id"]
+        report = low.get("report")
+        if (
+            low.get("status") != "ready"
+            or low.get("repair_id") != repair_id
+            or low.get("request_sha256") != record.get("low_request_sha256")
+            or low.get("attempt_root_repair_id") != record.get("attempt_root_repair_id")
+            or low.get("attempt_number") != record.get("attempt_number")
+            or low.get("retry_from_repair_id") != record.get("retry_from_repair_id")
+            or not isinstance(report, dict)
+        ):
+            raise DetectorDevelopmentError(
+                "review_proxy_result_mismatch",
+                "Verified review proxy does not match its continuation",
+            )
+        self._verify_review_proxy_attempt_lineage(record)
+        result_root = require_trusted_relative_path(
+            self.repo_root,
+            f"data/ball_detector_development_v1/review_proxies/results/{repair_id}",
+            "review proxy result root",
+            allowed_first_parts={"data"},
+        )
+        report_bytes, report_file_sha256 = read_regular_bytes(
+            result_root / "detector_review_proxy_report.v1.json",
+            "review proxy report",
+            max_bytes=4 * 1024 * 1024,
+            trusted_root=result_root,
+        )
+        manifest_bytes, manifest_sha256 = read_regular_bytes(
+            result_root / "detector_review_proxy_manifest.v1.json",
+            "review proxy result manifest",
+            max_bytes=4 * 1024 * 1024,
+            trusted_root=result_root,
+        )
+        disk_report = json_object_from_bytes(report_bytes, "review proxy report")
+        disk_manifest = json_object_from_bytes(manifest_bytes, "review proxy result manifest")
+        if (
+            manifest_sha256 != low.get("result_manifest_sha256")
+            or report != disk_report
+            or disk_report.get("schema_version") != "1.0"
+            or disk_report.get("artifact_type") != "detector_review_proxy_report"
+            or disk_report.get("repair_id") != repair_id
+            or disk_report.get("request_sha256") != record.get("low_request_sha256")
+            or disk_manifest.get("schema_version") != "1.0"
+            or disk_manifest.get("artifact_type") != "detector_review_proxy_result_manifest"
+            or disk_manifest.get("repair_id") != repair_id
+            or disk_manifest.get("request_sha256") != record.get("low_request_sha256")
+            or disk_manifest.get("report_file_sha256") != report_file_sha256
+            or disk_manifest.get("report_file_size_bytes") != len(report_bytes)
+            or not isinstance(disk_report.get("integrity"), dict)
+            or disk_manifest.get("integrity_sha256") != canonical_sha256(disk_report["integrity"])
+        ):
+            raise DetectorDevelopmentError(
+                "review_proxy_manifest_mismatch",
+                "Review proxy manifest changed before continuation",
+            )
+        # From here onward only the bytes re-read from the immutable published
+        # tree are authoritative.  The coordinator's in-memory/public copy was
+        # compared above solely to detect a split-brain return value.
+        report = disk_report
+        proxy = report.get("proxy")
+        binding = report.get("repair_execution_binding")
+        samples = report.get("sampled_frames")
+        if not isinstance(proxy, dict) or not isinstance(binding, dict) or not isinstance(samples, list):
+            raise DetectorDevelopmentError(
+                "invalid_review_proxy_result",
+                "Review proxy evidence is incomplete",
+            )
+        proxy_path = require_trusted_relative_path(
+            result_root,
+            proxy.get("relative_path"),
+            "review proxy media",
+        )
+        sealed_proxy_size = proxy.get("size_bytes")
+        if (
+            isinstance(sealed_proxy_size, bool)
+            or not isinstance(sealed_proxy_size, int)
+            or not 0 < sealed_proxy_size <= 32 * 1024 * 1024 * 1024
+        ):
+            raise DetectorDevelopmentError(
+                "invalid_review_proxy_result",
+                "Review proxy media size authority is invalid",
+            )
+        sample_paths: list[tuple[int, dict[str, Any], Path]] = []
+        for item in samples:
+            if not isinstance(item, dict):
+                raise DetectorDevelopmentError(
+                    "invalid_review_proxy_samples",
+                    "Review proxy sample binding is invalid",
+                )
+            frame_index = item.get("frame_index")
+            if isinstance(frame_index, bool) or not isinstance(frame_index, int):
+                raise DetectorDevelopmentError(
+                    "invalid_review_proxy_samples",
+                    "Review proxy sample index is invalid",
+                )
+            sample_paths.append(
+                (
+                    frame_index,
+                    item,
+                    require_trusted_relative_path(
+                        result_root,
+                        item.get("relative_path"),
+                        "review proxy sample",
+                    ),
+                )
+            )
+        expected_files = {
+            "detector_review_proxy_report.v1.json",
+            "detector_review_proxy_manifest.v1.json",
+            proxy_path.relative_to(result_root).as_posix(),
+            *(path.relative_to(result_root).as_posix() for _, _, path in sample_paths),
+        }
+        try:
+            tree_before = exact_regular_tree_snapshot(
+                result_root,
+                expected_files,
+                "review proxy result tree",
+                trusted_root=self.repo_root,
+            )
+        except DetectorDevelopmentError as exc:
+            if exc.code in {
+                "unexpected_result_artifact",
+                "invalid_result_allowlist",
+            }:
+                raise DetectorDevelopmentError(
+                    "unexpected_review_proxy_artifact",
+                    "Review proxy result tree contains unexpected artifacts",
+                ) from exc
+            raise
+        repeated_report_bytes, repeated_report_sha256 = read_regular_bytes(
+            result_root / "detector_review_proxy_report.v1.json",
+            "review proxy report",
+            max_bytes=4 * 1024 * 1024,
+            trusted_root=result_root,
+        )
+        repeated_manifest_bytes, repeated_manifest_sha256 = read_regular_bytes(
+            result_root / "detector_review_proxy_manifest.v1.json",
+            "review proxy result manifest",
+            max_bytes=4 * 1024 * 1024,
+            trusted_root=result_root,
+        )
+        if (
+            repeated_report_bytes != report_bytes
+            or repeated_report_sha256 != report_file_sha256
+            or repeated_manifest_bytes != manifest_bytes
+            or repeated_manifest_sha256 != manifest_sha256
+        ):
+            raise DetectorDevelopmentError(
+                "review_proxy_manifest_mismatch",
+                "Review proxy documents changed during continuation verification",
+            )
+        proxy_sha256, proxy_size = hash_regular_file(
+            proxy_path,
+            "review proxy media",
+            max_bytes=sealed_proxy_size,
+            trusted_root=result_root,
+        )
+        if (
+            proxy_sha256 != proxy.get("sha256")
+            or proxy_size != proxy.get("size_bytes")
+            or proxy_sha256 != disk_manifest.get("proxy_sha256")
+            or proxy_size != disk_manifest.get("proxy_size_bytes")
+        ):
+            raise DetectorDevelopmentError(
+                "review_proxy_digest_mismatch",
+                "Review proxy media changed before continuation",
+            )
+        sample_bytes: dict[int, bytes] = {}
+        sample_sha256s: dict[str, str] = {}
+        for frame_index, item, sample_path in sample_paths:
+            content, digest = read_regular_bytes(
+                sample_path,
+                "review proxy sample",
+                max_bytes=32 * 1024 * 1024,
+                trusted_root=result_root,
+            )
+            if digest != item.get("sha256") or len(content) != item.get("size_bytes"):
+                raise DetectorDevelopmentError(
+                    "review_proxy_sample_mismatch",
+                    "Review proxy sample changed before continuation",
+                )
+            sample_bytes[frame_index] = content
+            sample_sha256s[str(frame_index)] = digest
+        if sorted(sample_bytes) != record["authority"]["frame_indices"]:
+            raise DetectorDevelopmentError(
+                "review_proxy_sample_mismatch",
+                "Review proxy samples differ from frozen frame authority",
+            )
+        if [sample_sha256s[str(index)] for index in sorted(sample_bytes)] != disk_manifest.get("sample_sha256s"):
+            raise DetectorDevelopmentError(
+                "review_proxy_sample_mismatch",
+                "Review proxy sample manifest changed before continuation",
+            )
+        try:
+            tree_after = exact_regular_tree_snapshot(
+                result_root,
+                expected_files,
+                "review proxy result tree",
+                trusted_root=self.repo_root,
+            )
+        except DetectorDevelopmentError as exc:
+            if exc.code in {
+                "unexpected_result_artifact",
+                "invalid_result_allowlist",
+            }:
+                raise DetectorDevelopmentError(
+                    "unexpected_review_proxy_artifact",
+                    "Review proxy result tree contains unexpected artifacts",
+                ) from exc
+            raise
+        if tree_after != tree_before:
+            raise DetectorDevelopmentError(
+                "source_changed",
+                "Review proxy result tree changed during continuation verification",
+            )
+        binding_without_digest = deepcopy(binding)
+        binding_sha256 = binding_without_digest.pop("binding_sha256", None)
+        if (
+            canonical_sha256(binding_without_digest) != binding_sha256
+            or canonical_sha256(binding.get("code_files")) != binding.get("code_bundle_sha256")
+            or canonical_sha256(binding.get("runtime")) != binding.get("runtime_sha256")
+        ):
+            raise DetectorDevelopmentError(
+                "repair_execution_binding_changed",
+                "Review proxy execution binding is invalid",
+            )
+        repair_evidence = {
+            "schema_version": "1.0",
+            "repair_id": repair_id,
+            "repair_request_sha256": record["low_request_sha256"],
+            "repair_report_sha256": report_file_sha256,
+            "repair_result_manifest_sha256": manifest_sha256,
+            "proxy_media_sha256": proxy_sha256,
+            "proxy_size_bytes": proxy_size,
+            "repair_execution_binding_sha256": binding_sha256,
+            "repair_code_bundle_sha256": binding["code_bundle_sha256"],
+            "repair_runtime_sha256": binding["runtime_sha256"],
+            "repair_decoder_fingerprint_sha256": binding["decoder_fingerprint_sha256"],
+            "sampled_frame_sha256s": sample_sha256s,
+        }
+        proxy_media = {
+            "sha256": proxy_sha256,
+            "size_bytes": proxy_size,
+            "width": proxy["width"],
+            "height": proxy["height"],
+            "frame_count": proxy["frame_count"],
+            "fps": float(proxy["fps"]),
+        }
+        return repair_evidence, proxy_media, sample_bytes
+
+    def _verify_review_proxy_attempt_lineage(self, record: dict[str, Any]) -> None:
+        """Bind a retry attempt to its one immutable upper parent."""
+
+        repair_id = require_safe_id(record.get("repair_id"), "repair_id")
+        attempt_number = record.get("attempt_number")
+        root_id = require_safe_id(
+            record.get("attempt_root_repair_id"),
+            "attempt root repair_id",
+        )
+        retry_from = record.get("retry_from_repair_id")
+        if isinstance(attempt_number, bool) or not isinstance(attempt_number, int) or attempt_number < 1:
+            raise DetectorDevelopmentError(
+                "invalid_review_proxy_retry",
+                "Review-proxy attempt lineage is invalid",
+            )
+        if attempt_number == 1:
+            if root_id != repair_id or retry_from is not None:
+                raise DetectorDevelopmentError(
+                    "invalid_review_proxy_retry",
+                    "Initial review-proxy attempt lineage is invalid",
+                )
+            return
+        parent_id = require_safe_id(retry_from, "retry parent repair_id")
+        with self._detector_review_proxy_lock:
+            parent = self._read_detector_review_proxy_repair(parent_id)
+            descendants = [
+                self._read_detector_review_proxy_repair(path.stem)
+                for path in sorted(self._detector_review_proxy_jobs_root.glob("*.json"))
+                if path.stem != parent_id
+            ]
+        matching_descendants = [
+            candidate for candidate in descendants if candidate.get("retry_from_repair_id") == parent_id
+        ]
+        if (
+            parent.get("attempt_root_repair_id") != root_id
+            or parent.get("attempt_number") != attempt_number - 1
+            or parent.get("authority") != record.get("authority")
+            or len(matching_descendants) != 1
+            or matching_descendants[0].get("repair_id") != repair_id
+        ):
+            raise DetectorDevelopmentError(
+                "invalid_review_proxy_retry",
+                "Review-proxy retry changed its immutable parent lineage",
+            )
+
+    @staticmethod
+    def _build_review_proxy_result_proxy(
+        *,
+        record: dict[str, Any],
+        low: dict[str, Any],
+        child: dict[str, Any],
+        proxy_media: dict[str, Any],
+        samples: dict[int, bytes],
+    ) -> dict[str, Any]:
+        try:
+            manifest = child["report"]["review_proxy_manifest"]
+            repair_binding = low["report"]["repair_execution_binding"]
+            authority = record["authority"]
+            expected_indices = authority["frame_indices"]
+            manifest_proxy = manifest["proxy"]
+            manifest_source = manifest["source"]
+            if (
+                sorted(samples) != expected_indices
+                or manifest["expected_frame_indices"] != expected_indices
+                or manifest_source["sha256"] != authority["source_sha256"]
+                or manifest_source["file_identity_sha256"] != authority["source_file_identity_sha256"]
+                or manifest_source["size_bytes"] != authority["source_size_bytes"]
+                or manifest_proxy["sha256"] != proxy_media["sha256"]
+                or manifest_proxy["size_bytes"] != proxy_media["size_bytes"]
+                or manifest_proxy["width"] != proxy_media["width"]
+                or manifest_proxy["height"] != proxy_media["height"]
+                or manifest_proxy["frame_count"] != proxy_media["frame_count"]
+                or not math.isclose(
+                    float(manifest_proxy["fps"]),
+                    float(proxy_media["fps"]),
+                    rel_tol=0.0,
+                    abs_tol=1e-9,
+                )
+            ):
+                raise ValueError("proxy result authority mismatch")
+            return {
+                "review_proxy_id": record["repair_id"],
+                "review_proxy_manifest_sha256": manifest["manifest_sha256"],
+                "proxy_media_sha256": proxy_media["sha256"],
+                "proxy_size_bytes": proxy_media["size_bytes"],
+                "proxy_width": proxy_media["width"],
+                "proxy_height": proxy_media["height"],
+                "proxy_frame_count": proxy_media["frame_count"],
+                "proxy_fps": proxy_media["fps"],
+                "mapping_sha256": manifest["mapping_sha256"],
+                "sampled_artifact_count": len(samples),
+                "encoder_binding_sha256": repair_binding["encoder_preset_sha256"],
+                "repair_execution_binding_sha256": repair_binding["binding_sha256"],
+                "repair_code_bundle_sha256": repair_binding["code_bundle_sha256"],
+                "repair_runtime_sha256": repair_binding["runtime_sha256"],
+                "repair_decoder_fingerprint_sha256": repair_binding["decoder_fingerprint_sha256"],
+            }
+        except (KeyError, TypeError, ValueError) as exc:
+            raise DetectorDevelopmentError(
+                "review_proxy_result_mismatch",
+                "Review-proxy result authority is incomplete or inconsistent",
+            ) from exc
+
+    @staticmethod
+    def _review_proxy_child_summary(child: dict[str, Any]) -> dict[str, Any]:
+        frozen = child.get("frozen_request")
+        report = child.get("report")
+        upgrade = frozen.get("review_proxy_upgrade") if isinstance(frozen, dict) else None
+        continuation = upgrade.get("continuation_execution_binding") if isinstance(upgrade, dict) else None
+        if (
+            child.get("status") != "ready"
+            or not isinstance(frozen, dict)
+            or not isinstance(report, dict)
+            or not isinstance(continuation, dict)
+        ):
+            raise DetectorDevelopmentError(
+                "review_proxy_child_not_ready",
+                "Review-proxy child probe is incomplete",
+            )
+        job_id = require_safe_id(child.get("job_id"), "child probe job_id")
+        return {
+            "job_id": job_id,
+            "request_sha256": child["request_sha256"],
+            "intent_sha256": child["intent_sha256"],
+            "semantic_intent_sha256": child["semantic_intent_sha256"],
+            "resource_sha256": child["resource_sha256"],
+            "frozen_profiles_sha256": child["frozen_profiles_sha256"],
+            "report_sha256": report["report_sha256"],
+            "result_manifest_sha256": child["result_manifest_sha256"],
+            "execution_bundle_sha256": frozen["execution_bundle_sha256"],
+            "runtime_environment_sha256": frozen["runtime_environment_sha256"],
+            "continuation_execution_binding_sha256": continuation["binding_sha256"],
+            "continuation_code_bundle_sha256": continuation["code_bundle_sha256"],
+            "continuation_runtime_sha256": continuation["runtime_sha256"],
+            "retry_from_job_id": child["retry_from_job_id"],
+            "retry_kind": "review_proxy_decode_upgrade",
+            "status_url": f"/api/v1/detector-probes/{job_id}",
+            "report_url": f"/api/v1/detector-probes/{job_id}",
+        }
+
+    @staticmethod
+    def _review_proxy_session_summary(session: dict[str, Any]) -> dict[str, Any]:
+        retry_lineage = session.get("retry_lineage")
+        lineage = session.get("lineage")
+        artifact_type = session.get("artifact_type")
+        lifecycle = (session.get("status"), session.get("stage"))
+        lifecycle_valid = lifecycle in {
+            ("annotating", "annotating"),
+            ("finalizing", "finalizing"),
+            ("finalized", "finalized"),
+        }
+        if artifact_type is None and session.get("status") == "annotating" and "stage" not in session:
+            # Minimal internal test doubles predate the persisted stage field.
+            lifecycle_valid = True
+        if (
+            not lifecycle_valid
+            or not isinstance(retry_lineage, dict)
+            or retry_lineage.get("mode") != "review_proxy_decode_upgrade"
+            or not isinstance(lineage, dict)
+        ):
+            raise DetectorDevelopmentError(
+                "replacement_session_mismatch",
+                "Review-proxy replacement session is invalid",
+            )
+        session_id = require_safe_id(session.get("session_id"), "replacement session_id")
+        return {
+            "session_id": session_id,
+            "request_sha256": session["request_sha256"],
+            "status": "annotating",
+            "retry_from_session_id": session["retry_from_session_id"],
+            "retry_mode": "review_proxy_decode_upgrade",
+            "attempt_family_sha256": session["attempt_family_sha256"],
+            "development_probe_job_ids": deepcopy(lineage["development_probe_job_ids"]),
+            "status_url": f"/api/v1/ball-annotation-sessions/{session_id}",
+        }
+
+    def _commit_detector_review_proxy_continuation(self, repair_id: str, low: dict[str, Any]) -> None:
+        with self._detector_review_proxy_lock:
+            record = self._read_detector_review_proxy_repair(repair_id)
+            first_proxy_ready = record.get("stage") not in {
+                "proxy_ready",
+                "continuation_intent",
+                "child_probe_ready",
+                "replacement_session_ready",
+                "groups_published",
+                "ready",
+            }
+            record.update(
+                status="committing",
+                low_progress=deepcopy(low.get("progress")),
+                updated_at=_utc_now_iso(),
+            )
+            if self._review_proxy_stage_completed(record) < 1:
+                record["stage"] = "proxy_ready"
+            self._persist_detector_review_proxy_repair(record)
+        if first_proxy_ready:
+            self._hit_detector_review_proxy_failpoint("after_proxy_ready")
+
+        repair_evidence, proxy_media, samples = self._load_verified_review_proxy_evidence(record, low)
+        detector = self._detector_development_service()
+        existing_intent = record.get("continuation_intent")
+        if existing_intent is None:
+            child_plan = detector.review_proxy_upgrade_child_plan(
+                record["authority"]["parent_probe_job_id"],
+                repair_evidence=repair_evidence,
+            )
+            intent_body = {
+                "schema_version": "1.0",
+                "artifact_type": "detector_review_proxy_continuation_intent",
+                "repair_id": repair_id,
+                "authority_sha256": canonical_sha256(record["authority"]),
+                "repair_evidence": repair_evidence,
+                "proxy_media": proxy_media,
+                "child_plan": child_plan,
+            }
+            intent = {**intent_body, "intent_sha256": canonical_sha256(intent_body)}
+        else:
+            intent = deepcopy(existing_intent)
+            child_plan = intent.get("child_plan")
+            if (
+                not isinstance(child_plan, dict)
+                or intent.get("repair_evidence") != repair_evidence
+                or intent.get("proxy_media") != proxy_media
+            ):
+                raise DetectorDevelopmentError(
+                    "continuation_intent_changed",
+                    "Review-proxy continuation evidence changed after commit",
+                )
+        with self._detector_review_proxy_lock:
+            record = self._read_detector_review_proxy_repair(repair_id)
+            committed_intent = record.get("continuation_intent")
+            if committed_intent is not None and committed_intent != intent:
+                raise DetectorDevelopmentError(
+                    "continuation_intent_changed",
+                    "Review-proxy continuation intent changed after commit",
+                )
+            first_intent = committed_intent is None
+            record.update(
+                status="committing",
+                continuation_intent=intent,
+                updated_at=_utc_now_iso(),
+            )
+            if self._review_proxy_stage_completed(record) < 2:
+                record["stage"] = "continuation_intent"
+            self._persist_detector_review_proxy_repair(record)
+        if first_intent:
+            self._hit_detector_review_proxy_failpoint("after_continuation_intent")
+
+        existing_child = record.get("child_probe")
+        if existing_child is None:
+            child_public = detector.create_review_proxy_upgrade_child(
+                record["authority"]["parent_probe_job_id"],
+                repair_evidence=repair_evidence,
+                proxy_media=proxy_media,
+                proxy_sample_bytes=samples,
+                expected_child_plan=child_plan,
+            )
+        else:
+            child_public = detector.get_review_proxy_upgrade_child(record["authority"]["parent_probe_job_id"])
+        if not isinstance(child_public, dict):
+            raise DetectorDevelopmentError(
+                "child_probe_changed",
+                "Review-proxy child is absent after commit",
+            )
+        child = detector.get_verified_probe_job_record(
+            require_safe_id(child_public.get("job_id"), "review-proxy child probe job_id")
+        )
+        child_summary = self._review_proxy_child_summary(child)
+        child_upgrade = child["frozen_request"]["review_proxy_upgrade"]
+        expected_child_bindings = {
+            "request_sha256": child_plan.get("request_sha256"),
+            "intent_sha256": child_plan.get("intent_sha256"),
+            "semantic_intent_sha256": child_plan.get("semantic_intent_sha256"),
+            "resource_sha256": child_plan.get("resource_sha256"),
+            "frozen_profiles_sha256": child_plan.get("frozen_profiles_sha256"),
+            "execution_bundle_sha256": child_plan.get("execution_bundle_sha256"),
+            "runtime_environment_sha256": child_plan.get("runtime_environment_sha256"),
+            "continuation_execution_binding_sha256": child_plan.get("continuation_execution_binding", {}).get(
+                "binding_sha256"
+            ),
+            "retry_from_job_id": record["authority"]["parent_probe_job_id"],
+            "retry_kind": "review_proxy_decode_upgrade",
+        }
+        if (
+            not isinstance(child_upgrade, dict)
+            or child_upgrade.get("repair_evidence", {}).get("repair_id") != repair_id
+            or any(child_summary.get(key) != value for key, value in expected_child_bindings.items())
+        ):
+            raise DetectorDevelopmentError(
+                "child_probe_changed",
+                "Review-proxy child differs from its frozen continuation plan",
+            )
+        with self._detector_review_proxy_lock:
+            record = self._read_detector_review_proxy_repair(repair_id)
+            committed_child = record.get("child_probe")
+            if committed_child is not None and committed_child != child_summary:
+                raise DetectorDevelopmentError(
+                    "child_probe_changed",
+                    "Review-proxy child identity changed after commit",
+                )
+            first_child = committed_child is None
+            record.update(
+                child_probe=child_summary,
+                updated_at=_utc_now_iso(),
+            )
+            if self._review_proxy_stage_completed(record) < 3:
+                record["stage"] = "child_probe_ready"
+            self._persist_detector_review_proxy_repair(record)
+        if first_child:
+            self._hit_detector_review_proxy_failpoint("after_child_ready")
+
+        annotation = self._ball_annotation_service()
+        existing_group = record.get("group_publication")
+        if existing_group is not None:
+            group_witness = self._review_proxy_group_publication_summary(existing_group)
+            if group_witness != existing_group:
+                raise DetectorDevelopmentError(
+                    "group_publication_changed",
+                    "Stored replacement group witness changed",
+                    status_code=409,
+                )
+            replacement = annotation.verify_ready_review_proxy_replacement(
+                blocked_session_id=record["authority"]["blocked_session_id"],
+                blocked_session_record_sha256=record["authority"]["blocked_session_record_sha256"],
+                replacement_session_id=record["replacement_session"]["session_id"],
+                child_probe_job_id=child_summary["job_id"],
+                session_creation_authority_sha256=group_witness["session_creation_authority_sha256"],
+                group_publication_sha256=group_witness["group_publication_sha256"],
+            )["session"]
+        else:
+            replacement = annotation.create_review_proxy_replacement_session(
+                record["authority"]["blocked_session_id"], child_summary["job_id"]
+            )
+        session_summary = self._review_proxy_session_summary(replacement)
+        with self._detector_review_proxy_lock:
+            record = self._read_detector_review_proxy_repair(repair_id)
+            existing_session = record.get("replacement_session")
+            if existing_session is not None and existing_session != session_summary:
+                raise DetectorDevelopmentError(
+                    "replacement_session_changed",
+                    "Replacement annotation session changed after commit",
+                )
+            first_session = record.get("replacement_session") is None
+            record.update(
+                replacement_session=session_summary,
+                updated_at=_utc_now_iso(),
+            )
+            if self._review_proxy_stage_completed(record) < 4:
+                record["stage"] = "replacement_session_ready"
+            self._persist_detector_review_proxy_repair(record)
+        if first_session:
+            self._hit_detector_review_proxy_failpoint("after_replacement_session")
+
+        group_commit = (
+            group_witness
+            if existing_group is not None
+            else annotation.get_review_proxy_replacement_commit(
+                session_summary["session_id"],
+                blocked_session_id=record["authority"]["blocked_session_id"],
+                child_probe_job_id=child_summary["job_id"],
+            )
+        )
+        with self._detector_review_proxy_lock:
+            record = self._read_detector_review_proxy_repair(repair_id)
+            first_groups = record.get("group_publication") is None
+            group_publication = self._review_proxy_group_publication_summary(group_commit)
+            if record.get("group_publication") is not None and record.get("group_publication") != group_publication:
+                raise DetectorDevelopmentError(
+                    "group_publication_changed",
+                    "Replacement temporal-group publication changed after commit",
+                )
+            record.update(
+                group_publication=group_publication,
+                updated_at=_utc_now_iso(),
+            )
+            if self._review_proxy_stage_completed(record) < 5:
+                record["stage"] = "groups_published"
+            self._persist_detector_review_proxy_repair(record)
+        if first_groups:
+            self._hit_detector_review_proxy_failpoint("after_group_publication")
+
+        parent_after = detector.get_review_proxy_upgrade_parent(record["authority"]["parent_probe_job_id"])[
+            "parent_probe_record_sha256"
+        ]
+        if parent_after != record["authority"]["parent_probe_record_sha256"]:
+            raise DetectorDevelopmentError(
+                "historical_parent_changed",
+                "Historical probe changed during review-proxy continuation",
+            )
+        annotation.verify_blocked_review_proxy_parent_immutable(
+            record["authority"]["blocked_session_id"],
+            record["authority"]["blocked_session_record_sha256"],
+        )
+        proxy_result = self._build_review_proxy_result_proxy(
+            record=record,
+            low=low,
+            child=child,
+            proxy_media=proxy_media,
+            samples=samples,
+        )
+        with self._detector_review_proxy_lock:
+            record = self._read_detector_review_proxy_repair(repair_id)
+            record.update(
+                status="ready",
+                stage="ready",
+                result={
+                    "proxy": proxy_result,
+                    "child_probe": child_summary,
+                    "replacement_session": session_summary,
+                    "parent_probe_record_sha256_after": parent_after,
+                },
+                error_code=None,
+                blocker_code=None,
+                recovery_action=None,
+                updated_at=_utc_now_iso(),
+            )
+            self._persist_detector_review_proxy_repair(record)
+
+    def _recover_detector_review_proxy_repairs(self) -> None:
+        repair_ids: list[str] = []
+        for path in sorted(self._detector_review_proxy_jobs_root.glob("*.json")):
+            record = self._read_detector_review_proxy_repair(path.stem)
+            journal_rank = self._review_proxy_stage_completed(record)
+            terminal = record.get("status") in {
+                "ready",
+                "failed",
+                "blocked",
+                "cancelled",
+            }
+            discover_unjournaled_lower = bool(
+                terminal and record.get("status") != "ready" and record.get("recovery_action") != "resume"
+            )
+            actual_rank = journal_rank
+            reconciled = False
+            if discover_unjournaled_lower:
+                actual_rank, reconciled = self._reconcile_review_proxy_lower_side_effects(record)
+            lower_ahead = actual_rank > journal_rank
+            if lower_ahead:
+                record.update(
+                    status="committing",
+                    error_code=None,
+                    blocker_code=None,
+                    recovery_action=None,
+                    updated_at=_utc_now_iso(),
+                )
+                self._persist_detector_review_proxy_repair(record)
+            elif reconciled:
+                self._persist_detector_review_proxy_repair(record)
+            if lower_ahead or not terminal or record.get("recovery_action") == "resume":
+                repair_ids.append(record["repair_id"])
+        for repair_id in repair_ids:
+            self._start_detector_review_proxy_continuation(repair_id)
+
+    def read_ball_annotation_frame(self, session_id: str, frame_index: int) -> tuple[bytes, str, str]:
+        return self._ball_annotation_service().read_frame(session_id, frame_index)
+
+    def put_ball_annotation(
+        self,
+        session_id: str,
+        frame_index: int,
+        request: dict[str, Any],
+        *,
+        if_match: str | None,
+    ) -> dict[str, Any]:
+        return self._ball_annotation_service().put_annotation(
+            session_id,
+            frame_index,
+            request,
+            if_match=if_match,
+        )
+
+    def create_ball_propagation_job(
+        self,
+        session_id: str,
+        request: dict[str, Any],
+        *,
+        if_match: str | None,
+    ) -> dict[str, Any]:
+        return self._ball_annotation_service().create_propagation_job(session_id, request, if_match=if_match)
+
+    def get_ball_propagation_job(self, session_id: str, job_id: str) -> dict[str, Any]:
+        return self._ball_annotation_service().get_propagation_job(session_id, job_id)
+
+    def cancel_ball_propagation_job(self, session_id: str, job_id: str) -> dict[str, Any]:
+        return self._ball_annotation_service().cancel_propagation_job(session_id, job_id)
+
+    def finalize_ball_annotation_session(self, session_id: str, mutation_id: str) -> dict[str, Any]:
+        return self._ball_annotation_service().finalize_session(session_id, mutation_id)
+
+    def get_ball_annotation_result(self, session_id: str) -> dict[str, Any]:
+        return self._ball_annotation_service().get_final_result(session_id)
+
     def cancel_detector_probe(self, job_id: str) -> dict[str, Any]:
         return self._detector_development_service().cancel_probe(job_id)
 
-    def read_detector_probe_artifact(
-        self, job_id: str, artifact_id: str
-    ) -> tuple[bytes, str, str]:
+    def read_detector_probe_artifact(self, job_id: str, artifact_id: str) -> tuple[bytes, str, str]:
         safe_job_id = require_safe_id(job_id, "detector probe job_id")
-        return self._detector_development_service().read_probe_artifact(
-            safe_job_id, artifact_id
-        )
+        return self._detector_development_service().read_probe_artifact(safe_job_id, artifact_id)
 
     def _detector_development_service(self) -> DetectorDevelopmentService:
         with self._detector_development_lock:
@@ -1001,6 +3547,21 @@ class ApiService:
             if self._detector_development is None:
                 self._detector_development = DetectorDevelopmentService(self.repo_root)
             return self._detector_development
+
+    def _ball_annotation_service(self) -> BallAnnotationService:
+        with self._ball_annotation_lock:
+            if self._closing:
+                raise DetectorDevelopmentError("service_closed", "Ball annotation service is closed", status_code=503)
+            if self._ball_annotation is None:
+                self._ball_annotation = BallAnnotationService(
+                    self.repo_root,
+                    get_probe=self._get_verified_detector_probe,
+                    create_probe=self._create_annotation_check_probe,
+                    create_propagation_probe=self._create_annotation_propagation_probe,
+                    cancel_propagation_probe=self.cancel_detector_probe,
+                    read_probe_artifact=self.read_detector_probe_artifact,
+                )
+            return self._ball_annotation
 
     def _detector_probe_source_path(self, parent: dict[str, Any]) -> Path:
         source = parent.get("input_video")
@@ -1125,12 +3686,8 @@ class ApiService:
             )
         return snapshot
 
-    def _detector_probe_base_config_binding(
-        self, config: dict[str, Any]
-    ) -> tuple[str, Path]:
-        lineage = _value_at_dotted_path(
-            config, "metadata.production_workflow.base_config_lineage"
-        )
+    def _detector_probe_base_config_binding(self, config: dict[str, Any]) -> tuple[str, Path]:
+        lineage = _value_at_dotted_path(config, "metadata.production_workflow.base_config_lineage")
         if (
             not isinstance(lineage, dict)
             or set(lineage) != {"name", "sha256"}
@@ -1196,9 +3753,7 @@ class ApiService:
                 "The parent tuning lineage failed canonical validation",
                 status_code=409,
             ) from exc
-        normalized_tuning = _value_at_dotted_path(
-            normalized, "metadata.production_tuning"
-        )
+        normalized_tuning = _value_at_dotted_path(normalized, "metadata.production_tuning")
         if normalized_tuning != tuning:
             raise DetectorDevelopmentError(
                 "invalid_parent_tuning_lineage",
@@ -1225,9 +3780,7 @@ class ApiService:
                 "The parent tuning version identity is invalid",
                 status_code=409,
             )
-        values_sha256 = require_sha256(
-            tuning.get("values_sha256"), "production tuning values_sha256"
-        )
+        values_sha256 = require_sha256(tuning.get("values_sha256"), "production tuning values_sha256")
         binding = {
             "state": "versioned",
             "schema_version": "1.0",
@@ -2508,7 +5061,7 @@ class ApiService:
         )
         create_file.restype = wintypes.HANDLE
         get_file_information = kernel32.GetFileInformationByHandle
-        get_file_information.argtypes = (wintypes.HANDLE, ctypes.POINTER(ByHandleFileInformation))
+        get_file_information.argtypes = (wintypes.HANDLE, ctypes.c_void_p)
         get_file_information.restype = wintypes.BOOL
         get_file_information_ex = kernel32.GetFileInformationByHandleEx
         get_file_information_ex.argtypes = (wintypes.HANDLE, ctypes.c_int, wintypes.LPVOID, wintypes.DWORD)
@@ -4218,17 +6771,13 @@ class ApiService:
                             exclusive=is_production_trial,
                             base_config_snapshot=base_config_snapshot,
                         )
-                        config_path, relative_name, materialized_config_snapshot = (
-                            materialized_config
-                        )
+                        config_path, relative_name, materialized_config_snapshot = materialized_config
                         if is_production_trial:
                             materialized_config_path = config_path
                     config = load_config(
                         config_path,
                         raw_config=(
-                            materialized_config_snapshot.raw
-                            if materialized_config_snapshot is not None
-                            else None
+                            materialized_config_snapshot.raw if materialized_config_snapshot is not None else None
                         ),
                     )
 
@@ -4248,9 +6797,7 @@ class ApiService:
                         # Running the legacy follow-cam here would create a second, misleading deliverable.
                         config.follow_cam.enabled = False
 
-                    expected_output_dir = self._build_run_output_dir(
-                        run_id=run_id, input_video=config.input_video
-                    )
+                    expected_output_dir = self._build_run_output_dir(run_id=run_id, input_video=config.input_video)
                     if is_production_trial and config.output_dir.resolve() != expected_output_dir.resolve():
                         raise ValueError("production_trial persisted output_dir does not match effective run")
                     config.output_dir = expected_output_dir
@@ -4272,9 +6819,7 @@ class ApiService:
                         "completed_at": None,
                         "config_name": relative_name,
                         "config_path": str(config_path),
-                        "config_sha256": (
-                            materialized_config_snapshot.sha256 if is_production_trial else None
-                        ),
+                        "config_sha256": (materialized_config_snapshot.sha256 if is_production_trial else None),
                         "input_video": str(config.input_video),
                         "parent_run_id": request.get("parent_run_id"),
                         "output_dir": str(config.output_dir),
@@ -4289,9 +6834,7 @@ class ApiService:
                             {
                                 "status": "tracking",
                                 "quality_profile": "stable_broadcast",
-                                "max_manual_review_windows": int(
-                                    request.get("max_manual_review_windows") or 30
-                                ),
+                                "max_manual_review_windows": int(request.get("max_manual_review_windows") or 30),
                                 "preflight": broadcast_preflight,
                                 "owner_pid": os.getpid(),
                                 "owner_instance_id": self._instance_id,
@@ -4427,14 +6970,11 @@ class ApiService:
                 source_signature = workflow.get("source_signature")
                 if isinstance(source_signature, dict) and "path" in source_signature:
                     candidates.append(source_signature["path"])
-            normalized = [
-                self._normalize_production_trial_runtime_binding(config_path, value)
-                for value in candidates
-            ]
+            normalized = [self._normalize_production_trial_runtime_binding(config_path, value) for value in candidates]
             if normalized and any(value != normalized[0] for value in normalized[1:]):
                 raise ValueError(f"production_trial runtime binding conflict: {config_path}")
-            effective[config_path] = normalized[0] if normalized else self._normalize_production_trial_runtime_binding(
-                config_path, fallback
+            effective[config_path] = (
+                normalized[0] if normalized else self._normalize_production_trial_runtime_binding(config_path, fallback)
             )
 
         input_video = Path(effective["input_video"])
@@ -4531,9 +7071,7 @@ class ApiService:
         if current_tuning is _MISSING_VALUE:
             current_tuning = None
         current_workflow = _value_at_dotted_path(patch, "metadata.production_workflow")
-        current_signature = (
-            current_workflow.get("source_signature") if isinstance(current_workflow, dict) else None
-        )
+        current_signature = current_workflow.get("source_signature") if isinstance(current_workflow, dict) else None
         if not isinstance(current_workflow, dict) or not isinstance(current_signature, dict):
             raise ValueError("production_trial source identity is unavailable")
         current_input = _value_at_dotted_path(patch, "input_video")
@@ -4589,10 +7127,7 @@ class ApiService:
             if legacy_note.get("calibration_digest") != note.get("calibration_digest"):
                 raise ValueError("production_trial legacy restart calibration does not match")
             legacy_input = legacy.get("input_video")
-            if (
-                not isinstance(legacy_input, str)
-                or Path(legacy_input).resolve() != Path(current_input).resolve()
-            ):
+            if not isinstance(legacy_input, str) or Path(legacy_input).resolve() != Path(current_input).resolve():
                 raise ValueError("production_trial legacy restart source does not match")
             legacy_config_name = legacy.get("config_name")
             if not isinstance(legacy_config_name, str) or not legacy_config_name:
@@ -4608,15 +7143,11 @@ class ApiService:
             except (FileNotFoundError, ValueError, RuntimeError) as exc:
                 raise ValueError("production_trial legacy restart source identity is unavailable") from exc
             legacy_workflow = _value_at_dotted_path(legacy_raw, "metadata.production_workflow")
-            legacy_signature = (
-                legacy_workflow.get("source_signature") if isinstance(legacy_workflow, dict) else None
-            )
+            legacy_signature = legacy_workflow.get("source_signature") if isinstance(legacy_workflow, dict) else None
             if not isinstance(legacy_signature, dict) or legacy_signature != current_signature:
                 raise ValueError("production_trial legacy restart source does not match")
             legacy_base_lineage = (
-                legacy_workflow.get("base_config_lineage")
-                if isinstance(legacy_workflow, dict)
-                else None
+                legacy_workflow.get("base_config_lineage") if isinstance(legacy_workflow, dict) else None
             )
             if legacy_base_lineage is not None and (
                 not isinstance(legacy_base_lineage, dict)
@@ -4668,11 +7199,7 @@ class ApiService:
         ):
             raise ValueError("production_trial parent identity does not match")
         existing_child = next(
-            (
-                item
-                for item in registry.get("runs", [])
-                if item.get("parent_run_id") == parent_run_id
-            ),
+            (item for item in registry.get("runs", []) if item.get("parent_run_id") == parent_run_id),
             None,
         )
         if existing_child is not None:
@@ -4680,11 +7207,7 @@ class ApiService:
 
         workflow_id = note.get("workflow_id")
         parent_workflow_id = parent_note.get("workflow_id")
-        if (
-            not isinstance(workflow_id, str)
-            or not workflow_id.strip()
-            or workflow_id != parent_workflow_id
-        ):
+        if not isinstance(workflow_id, str) or not workflow_id.strip() or workflow_id != parent_workflow_id:
             raise ValueError("production_trial parent workflow does not match")
 
         parent_input = parent.get("input_video")
@@ -4722,17 +7245,10 @@ class ApiService:
 
         parent_workflow = _value_at_dotted_path(parent_raw, "metadata.production_workflow")
         current_base_lineage = current_workflow.get("base_config_lineage")
-        parent_base_lineage = (
-            parent_workflow.get("base_config_lineage") if isinstance(parent_workflow, dict) else None
-        )
-        if (
-            not isinstance(current_base_lineage, dict)
-            or current_base_lineage != parent_base_lineage
-        ):
+        parent_base_lineage = parent_workflow.get("base_config_lineage") if isinstance(parent_workflow, dict) else None
+        if not isinstance(current_base_lineage, dict) or current_base_lineage != parent_base_lineage:
             raise ValueError("production_trial parent base config lineage does not match")
-        parent_signature = (
-            parent_workflow.get("source_signature") if isinstance(parent_workflow, dict) else None
-        )
+        parent_signature = parent_workflow.get("source_signature") if isinstance(parent_workflow, dict) else None
         if not isinstance(current_signature, dict) or not isinstance(parent_signature, dict):
             raise ValueError("production_trial parent source identity is unavailable")
         if current_signature != parent_signature:
@@ -4749,10 +7265,7 @@ class ApiService:
                 parent_raw,
                 protected_path,
             ):
-                raise ValueError(
-                    "production_trial parent calibration geometry does not match: "
-                    f"{protected_path}"
-                )
+                raise ValueError(f"production_trial parent calibration geometry does not match: {protected_path}")
 
         parent_tuning = _value_at_dotted_path(parent_raw, "metadata.production_tuning")
         if parent_tuning is _MISSING_VALUE:
@@ -4761,8 +7274,7 @@ class ApiService:
             return
         if parent_tuning is None:
             if isinstance(current_tuning, dict) and (
-                current_tuning.get("parent_version_id") is None
-                and current_tuning.get("history") == []
+                current_tuning.get("parent_version_id") is None and current_tuning.get("history") == []
             ):
                 return
             raise ValueError("production_trial tuning history must append parent")
@@ -5168,9 +7680,7 @@ class ApiService:
             or gate_failure.get("code") != "acceptable"
             or gate_failure.get("severity") != "none"
         ):
-            raise RuntimeError(
-                "Accepted production trial does not have a complete server-verified acceptance contract"
-            )
+            raise RuntimeError("Accepted production trial does not have a complete server-verified acceptance contract")
 
     def _preflight_broadcast_request(self, request: dict[str, Any]) -> dict[str, Any]:
         if self._is_approved_child_run_request(request):
@@ -6207,11 +8717,7 @@ class ApiService:
                 "config lineage registry authority does not match the target",
             ) from exc
         target_run_id = parent.get("run_id")
-        if (
-            not isinstance(target_run_id, str)
-            or not target_run_id
-            or target_run_id != target_run_id.strip()
-        ):
+        if not isinstance(target_run_id, str) or not target_run_id or target_run_id != target_run_id.strip():
             raise ConfigLineageError(
                 CONFIG_LINEAGE_MISMATCH,
                 "review evidence target run identity is malformed",
@@ -12413,9 +14919,7 @@ class ApiService:
         output_path = self.generated_config_dir / output_name
         if exclusive and output_path.exists():
             raise FileExistsError(str(output_path))
-        source_snapshot = base_config_snapshot or self._capture_yaml_config_snapshot(
-            base_config_path
-        )
+        source_snapshot = base_config_snapshot or self._capture_yaml_config_snapshot(base_config_path)
         if base_config_snapshot is not None:
             self._verify_source_config_snapshot(
                 source_snapshot,

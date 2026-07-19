@@ -457,6 +457,29 @@ describe("ProductionDetectorProbePanel", () => {
     },
   );
 
+  it("keeps historical probe evidence visible but disables ordinary retry after annotation continuation", async () => {
+    const onRetry = vi.fn();
+    const { user } = renderPanel({
+      job: {
+        ...readyJob,
+        status: "cancelled",
+        stage: "cancelled",
+        frames: [],
+      },
+      lineageLocked: true,
+      onRetry,
+    });
+
+    expect(screen.getByText("probe-job-1")).toBeVisible();
+    expect(
+      screen.getByText(/historical evidence and parent\/child lineage/i),
+    ).toBeVisible();
+    const retry = screen.getByRole("button", { name: "Retry comparison" });
+    expect(retry).toBeDisabled();
+    await user.click(retry);
+    expect(onRetry).not.toHaveBeenCalled();
+  });
+
   it("renders same-frame source and side-by-side raw/display evidence for every profile", () => {
     renderPanel({ job: readyJob });
     loadAllEvidenceImages();
@@ -661,7 +684,9 @@ describe("ProductionDetectorProbePanel", () => {
     ).toHaveTextContent(
       "No selected profile produced retained candidate boxes",
     );
-    expect(screen.getByText(/20–50-frame feasibility check/i)).toBeVisible();
+    expect(
+      screen.getByText(/freeze a new 20–50-frame unseen-frame check manifest/i),
+    ).toBeVisible();
     expect(screen.queryByRole("button", { name: /accept trial/i })).toBeNull();
     expect(
       screen.queryByRole("button", { name: "Run bounded comparison" }),
@@ -886,5 +911,41 @@ describe("ProductionDetectorProbePanel", () => {
     } finally {
       localStorage.removeItem("app-language");
     }
+  });
+
+  it("uses revealed probe frames only for development annotation and keeps the unseen-frame check separate", async () => {
+    const onStartDevelopmentAnnotation = vi.fn();
+    const { user } = renderPanel({
+      job: readyJob,
+      onStartDevelopmentAnnotation,
+    });
+    loadAllEvidenceImages();
+
+    expect(
+      screen.getByText(
+        "These displayed frames are already revealed. They can support development annotation only; suggestions remain unconfirmed.",
+      ),
+    ).toBeVisible();
+    expect(
+      screen.getByText(
+        "After development annotation, a data-isolated action must first freeze a new 20–50-frame unseen-frame check manifest, then run a new background probe. None of these displayed frames may be selected into that check.",
+      ),
+    ).toBeVisible();
+    await user.selectOptions(
+      screen.getByLabelText("Locked profile for development annotation"),
+      "official-coco-yolo11s-sahi",
+    );
+    await user.click(
+      screen.getByRole("button", {
+        name: "Start development annotation on displayed frames",
+      }),
+    );
+    expect(onStartDevelopmentAnnotation).toHaveBeenCalledWith(
+      readyJob.jobId,
+      "official-coco-yolo11s-sahi",
+    );
+    expect(
+      screen.queryByRole("button", { name: /start.*check|freeze.*check/i }),
+    ).toBeNull();
   });
 });

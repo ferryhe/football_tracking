@@ -56,6 +56,329 @@ class ExportOpenApiTests(unittest.TestCase):
         self.assertEqual("Api", document["info"]["title"])
         self.assertEqual([{"url": "/api"}], document["servers"])
 
+    def test_openapi_exposes_strict_ball_annotation_workflow_contract(self) -> None:
+        document = build_openapi_document()
+        paths = document["paths"]
+        error_ref = "#/components/schemas/BallApiErrorResponse"
+
+        json_operations = {
+            ("/ball-annotation-sessions", "post"): (
+                "create_ball_annotation_session",
+                "202",
+                "BallAnnotationSessionResponse",
+                {"400", "404", "409"},
+            ),
+            ("/ball-annotation-sessions/{session_id}", "get"): (
+                "get_ball_annotation_session",
+                "200",
+                "BallAnnotationSessionResponse",
+                {"400", "404", "409"},
+            ),
+            (
+                "/ball-annotation-sessions/{session_id}/annotations/{frame_index}",
+                "put",
+            ): (
+                "put_ball_annotation",
+                "200",
+                "BallAnnotationRevisionResponse",
+                {"400", "404", "409", "412", "428"},
+            ),
+            ("/ball-annotation-sessions/{session_id}/propagation-jobs", "post"): (
+                "create_ball_propagation_job",
+                "202",
+                "BallPropagationJobResponse",
+                {"400", "404", "409", "412", "428"},
+            ),
+            (
+                "/ball-annotation-sessions/{session_id}/propagation-jobs/{job_id}",
+                "get",
+            ): (
+                "get_ball_propagation_job",
+                "200",
+                "BallPropagationJobResponse",
+                {"400", "404", "409"},
+            ),
+            (
+                "/ball-annotation-sessions/{session_id}/propagation-jobs/{job_id}/cancel",
+                "post",
+            ): (
+                "cancel_ball_propagation_job",
+                "200",
+                "BallPropagationJobResponse",
+                {"400", "404", "409"},
+            ),
+            ("/ball-annotation-sessions/{session_id}/finalize", "post"): (
+                "finalize_ball_annotation_session",
+                "200",
+                "BallAnnotationFinalResultResponse",
+                {"400", "404", "409"},
+            ),
+            ("/ball-annotation-sessions/{session_id}/result", "get"): (
+                "get_ball_annotation_result",
+                "200",
+                "BallAnnotationFinalResultResponse",
+                {"400", "404", "409"},
+            ),
+        }
+        expected_operations = set(json_operations) | {
+            (
+                "/ball-annotation-sessions/{session_id}/frames/{frame_index}",
+                "get",
+            )
+        }
+        actual_operations = {
+            (path, method)
+            for path, path_item in paths.items()
+            if path.startswith("/ball-annotation-sessions")
+            for method in path_item
+            if method in {"delete", "get", "patch", "post", "put"}
+        }
+        self.assertEqual(expected_operations, actual_operations)
+
+        for (path, method), (
+            operation_id,
+            success_status,
+            response_schema,
+            error_statuses,
+        ) in json_operations.items():
+            with self.subTest(path=path, method=method):
+                operation = paths[path][method]
+                self.assertEqual(operation_id, operation["operationId"])
+                self.assertEqual(
+                    {success_status, "422", *error_statuses},
+                    set(operation["responses"]),
+                )
+                self.assertEqual(
+                    f"#/components/schemas/{response_schema}",
+                    operation["responses"][success_status]["content"]["application/json"]["schema"]["$ref"],
+                )
+                success_headers = operation["responses"][success_status]["headers"]
+                self.assertIn("Cache-Control", success_headers)
+                self.assertEqual(
+                    ["no-store"],
+                    success_headers["Cache-Control"]["schema"]["enum"],
+                )
+                if operation_id == "put_ball_annotation":
+                    self.assertIn("ETag", success_headers)
+                for status_code in error_statuses:
+                    self.assertEqual(
+                        error_ref,
+                        operation["responses"][status_code]["content"]["application/json"]["schema"]["$ref"],
+                    )
+
+        request_refs = {
+            ("/ball-annotation-sessions", "post"): "BallAnnotationSessionCreateRequest",
+            (
+                "/ball-annotation-sessions/{session_id}/annotations/{frame_index}",
+                "put",
+            ): "BallAnnotationRevisionRequest",
+            (
+                "/ball-annotation-sessions/{session_id}/propagation-jobs",
+                "post",
+            ): "BallPropagationCreateRequest",
+            (
+                "/ball-annotation-sessions/{session_id}/finalize",
+                "post",
+            ): "BallAnnotationFinalizeRequest",
+        }
+        for (path, method), request_schema in request_refs.items():
+            self.assertEqual(
+                f"#/components/schemas/{request_schema}",
+                paths[path][method]["requestBody"]["content"]["application/json"]["schema"]["$ref"],
+            )
+
+        frame_get = paths["/ball-annotation-sessions/{session_id}/frames/{frame_index}"]["get"]
+        self.assertEqual("get_ball_annotation_frame", frame_get["operationId"])
+        frame_success = frame_get["responses"]["200"]
+        self.assertEqual(
+            {"200", "400", "404", "409", "422"},
+            set(frame_get["responses"]),
+        )
+        self.assertEqual({"image/jpeg"}, set(frame_success["content"]))
+        self.assertEqual(
+            {"type": "string", "format": "binary"},
+            frame_success["content"]["image/jpeg"]["schema"],
+        )
+        self.assertEqual(
+            {
+                "Cache-Control",
+                "Content-Length",
+                "ETag",
+                "X-Content-SHA256",
+                "X-Source-Frame-Index",
+            },
+            set(frame_success["headers"]),
+        )
+        for status_code in ("400", "404", "409"):
+            self.assertEqual(
+                error_ref,
+                frame_get["responses"][status_code]["content"]["application/json"]["schema"]["$ref"],
+            )
+
+        for path, method in (
+            (
+                "/ball-annotation-sessions/{session_id}/annotations/{frame_index}",
+                "put",
+            ),
+            ("/ball-annotation-sessions/{session_id}/propagation-jobs", "post"),
+        ):
+            operation = paths[path][method]
+            if_match = next(parameter for parameter in operation["parameters"] if parameter["name"] == "If-Match")
+            self.assertEqual("header", if_match["in"])
+            self.assertTrue(if_match["required"])
+            self.assertIn("Strong ETag", if_match["description"])
+
+        strict_schemas = (
+            "BallApiErrorDetail",
+            "BallApiErrorResponse",
+            "BallAnnotationSessionCreateRequest",
+            "BallAnnotationSessionResponse",
+            "BallAnnotationRevisionRequest",
+            "BallAnnotationRevisionResponse",
+            "BallPropagationCreateRequest",
+            "BallPropagationJobResponse",
+            "BallAnnotationFinalizeRequest",
+            "BallAnnotationFinalResultResponse",
+            "BallTruePresentationTimestampView",
+        )
+        for schema_name in strict_schemas:
+            with self.subTest(schema_name=schema_name):
+                self.assertFalse(document["components"]["schemas"][schema_name]["additionalProperties"])
+
+        schemas = document["components"]["schemas"]
+        semantic_schemas = {
+            "BallAnnotationRevisionRequest": {
+                "suggestion_kind",
+                "suggestion_id",
+                "accepted_suggestion_job_id",
+                "accepted_suggestion_sha256",
+                "dismissed_suggestion_kind",
+                "dismissed_suggestion_id",
+                "dismissed_suggestion_job_id",
+                "dismissed_suggestion_sha256",
+            },
+            "BallSuggestedCandidateView": {
+                "suggestion_job_id",
+                "suggestion_sha256",
+                "decision",
+            },
+            "BallAnnotationFrameView": {"true_presentation_timestamp"},
+            "BallSourceFrameTimingBindingView": {"true_presentation_timestamp", "timing_binding_sha256"},
+            "BallPropagationSuggestionView": {
+                "suggestion_job_id",
+                "suggestion_sha256",
+                "pending_human_confirmation",
+                "human_confirmation",
+                "human_decision",
+            },
+            "BallSamplingManifestView": {
+                "selection_authority",
+                "candidate_universe_authority",
+                "manifest_sha256",
+            },
+            "BallFeasibilityMetricProfileView": {
+                "apparent_size_rule",
+                "matching_rule",
+                "exploratory_small_n_threshold",
+            },
+            "BallFeasibilityApparentSizeRuleView": {
+                "far_max_source_height_divisor",
+                "mid_max_source_height_divisor",
+                "near_max_source_height_multiplier",
+            },
+            "BallFeasibilityMatchingRuleView": {
+                "source_height_cap_divisor",
+                "confirmed_box_diagonal_multiplier",
+            },
+            "BallFeasibilityFrameView": {
+                "metric_eligible",
+                "top1_hit",
+                "top5_hit",
+                "raw_candidate_count",
+                "scored_candidate_count",
+                "diagnostic_codes",
+            },
+            "BallAnnotationPackageView": {
+                "detector_candidate_evidence",
+                "detector_candidate_evidence_sha256",
+                "propagation_reports",
+                "propagation_reports_sha256",
+            },
+            "BallCheckFeasibilityReportView": {
+                "strata_metrics",
+                "contradictions",
+                "resolution",
+                "report_sha256",
+            },
+            "BallCheckSealedEvidenceView": {"dataset_expansion_eligibility"},
+            "BallSealedPropagationReportView": {
+                "decision_counts",
+                "suggestions",
+                "report_sha256",
+            },
+        }
+        for schema_name, required_properties in semantic_schemas.items():
+            with self.subTest(schema_name=schema_name):
+                schema = schemas[schema_name]
+                self.assertFalse(schema["additionalProperties"])
+                self.assertLessEqual(
+                    required_properties,
+                    set(schema["properties"]),
+                )
+
+        revision_properties = schemas["BallAnnotationRevisionRequest"]["properties"]
+        for field_name in (
+            "accepted_suggestion_sha256",
+            "dismissed_suggestion_sha256",
+        ):
+            digest_schema = revision_properties[field_name]["anyOf"][0]
+            self.assertEqual("^[0-9a-f]{64}$", digest_schema["pattern"])
+        radius_schema = schemas["BallFeasibilityCandidateDiagnosticView"]["properties"]["evaluation_radius_source_px"]
+        self.assertEqual(0.0, radius_schema["anyOf"][0]["exclusiveMinimum"])
+        self.assertEqual({"type": "null"}, radius_schema["anyOf"][1])
+        true_pts = schemas["BallTruePresentationTimestampView"]
+        self.assertEqual(
+            {"status", "value_seconds", "method"},
+            set(true_pts["required"]),
+        )
+        self.assertEqual("not_collected", true_pts["properties"]["status"]["const"])
+        self.assertEqual("null", true_pts["properties"]["value_seconds"]["type"])
+        self.assertEqual("null", true_pts["properties"]["method"]["type"])
+
+    def test_generated_path_encoder_accepts_numeric_frames_and_preserves_segmented_strings(self) -> None:
+        react_api = Path("lib/api-client-react/src/generated/api.ts").read_text(encoding="utf-8")
+
+        self.assertIn(
+            "function encodePathSegmented(path: string | number): string {",
+            react_api,
+        )
+        self.assertRegex(
+            react_api,
+            r'return\s+String\(path\)\s*\.split\("/"\)\s*'
+            r"\.map\(\(segment\) => encodeURIComponent\(segment\)\)\s*"
+            r'\.join\("/"\);',
+        )
+        self.assertIn("${encodePathSegmented(frameIndex)}", react_api)
+        self.assertIn("${encodePathSegmented(sessionId)}", react_api)
+
+    def test_custom_fetch_exposes_identity_scoped_response_metadata(self) -> None:
+        custom_fetch = Path("lib/api-client-react/src/custom-fetch.ts").read_text(encoding="utf-8")
+        index = Path("lib/api-client-react/src/index.ts").read_text(encoding="utf-8")
+
+        self.assertRegex(
+            custom_fetch,
+            r"new WeakMap<\s*object,\s*CustomFetchResponseMetadata\s*>\(\)",
+        )
+        self.assertIn("Object.freeze({", custom_fetch)
+        self.assertIn("headers: new Headers(response.headers)", custom_fetch)
+        self.assertIn('typeof value === "function"', custom_fetch)
+        self.assertIn("customFetchResponseMetadata.set(value, metadata)", custom_fetch)
+        self.assertIn("customFetchResponseMetadata.get(value)", custom_fetch)
+        self.assertNotIn("Object.assign(value", custom_fetch)
+        self.assertNotIn("Object.defineProperty(value", custom_fetch)
+        self.assertIn("getCustomFetchResponseMetadata", index)
+        self.assertIn("CustomFetchResponseMetadata", index)
+
     def test_frontend_paths_only_accept_api_v1_prefix_boundary(self) -> None:
         paths = _frontend_paths(
             {
@@ -194,21 +517,18 @@ class ExportOpenApiTests(unittest.TestCase):
             )
         self.assertEqual(
             "^[0-9a-f]{64}$",
-            schema["properties"]["code_commit_blob_files"]["anyOf"][0]
-            ["additionalProperties"]["pattern"],
+            schema["properties"]["code_commit_blob_files"]["anyOf"][0]["additionalProperties"]["pattern"],
         )
         self.assertEqual(
             "exact_or_crlf_to_lf_commit_blob",
             schema["properties"]["code_commit_binding_kind"]["anyOf"][0]["const"],
         )
 
-        react_schemas = Path("lib/api-client-react/src/generated/api.schemas.ts").read_text(
+        react_schemas = Path("lib/api-client-react/src/generated/api.schemas.ts").read_text(encoding="utf-8")
+        zod_api = Path("lib/api-zod/src/generated/api.ts").read_text(encoding="utf-8")
+        zod_type = Path("lib/api-zod/src/generated/types/detectorProbeExecutionBundleView.ts").read_text(
             encoding="utf-8"
         )
-        zod_api = Path("lib/api-zod/src/generated/api.ts").read_text(encoding="utf-8")
-        zod_type = Path(
-            "lib/api-zod/src/generated/types/detectorProbeExecutionBundleView.ts"
-        ).read_text(encoding="utf-8")
         for field in fields:
             self.assertIn(field, react_schemas)
             self.assertIn(field, zod_api)
@@ -334,9 +654,9 @@ class ExportOpenApiTests(unittest.TestCase):
             },
             set(lineage_blocker["properties"]["blocker_code"]["enum"]),
         )
-        lineage_error_response = paths[
-            "/runs/{run_id}/broadcast/config-lineage-reconfirmation"
-        ]["post"]["responses"]["409"]
+        lineage_error_response = paths["/runs/{run_id}/broadcast/config-lineage-reconfirmation"]["post"]["responses"][
+            "409"
+        ]
         self.assertEqual(
             "#/components/schemas/BroadcastConfigLineageBlockerResponse",
             lineage_error_response["content"]["application/json"]["schema"]["$ref"],

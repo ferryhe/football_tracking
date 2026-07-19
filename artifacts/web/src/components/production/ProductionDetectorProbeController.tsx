@@ -21,8 +21,14 @@ import {
   detectorProbeJobView,
   detectorProbeStorageKey,
 } from "@/lib/productionDetectorProbe";
+import { ballAnnotationStorageKey } from "@/lib/productionBallAnnotation";
 
 import { ProductionDetectorProbePanel } from "./ProductionDetectorProbePanel";
+import {
+  ProductionBallAnnotationController,
+  recoverBallAnnotationLaunch,
+  type BallAnnotationLaunchRecovery,
+} from "./ProductionBallAnnotationController";
 
 const NO_STORE_REQUEST = {
   cache: "no-store" as const,
@@ -86,6 +92,8 @@ const PERSISTENT_STORAGE_ERROR =
   "Persistent browser recovery storage is unavailable. No detector-probe job was started.";
 const PENDING_READBACK_ERROR =
   "The saved exact create intent could not be re-verified. No new POST was sent; an earlier create result may still be unresolved.";
+const INVALID_ANNOTATION_CONTINUATION_ERROR =
+  "The saved annotation continuation is invalid. Discard it before retrying or branching this detector-probe lineage.";
 
 function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -329,6 +337,11 @@ export function ProductionDetectorProbeController({
 }: ProductionDetectorProbeControllerProps) {
   const queryClient = useQueryClient();
   const [storage] = useState(storageFactory);
+  const [annotationLaunch, setAnnotationLaunch] =
+    useState<BallAnnotationLaunchRecovery | null>(null);
+  const [annotationRecoveryError, setAnnotationRecoveryError] = useState<
+    string | null
+  >(null);
   const storageKey = useMemo(
     () => detectorProbeStorageKey(workflowId, parentTrialId),
     [parentTrialId, workflowId],
@@ -394,6 +407,7 @@ export function ProductionDetectorProbeController({
           serialized: JSON.stringify(nextRecovery.pendingCreate),
         }
       : null;
+    setAnnotationRecoveryError(null);
     setRecovery(nextRecovery);
     setOperationError(
       nextRecovery.pendingCreate
@@ -483,6 +497,34 @@ export function ProductionDetectorProbeController({
 
   useEffect(() => {
     if (
+      annotationLaunch ||
+      !mappedJob.job ||
+      mappedJob.job.status !== "ready"
+    ) {
+      return;
+    }
+    try {
+      const recovered = recoverBallAnnotationLaunch(storage, workflowId, [
+        mappedJob.job.jobId,
+      ]);
+      if (recovered) {
+        if (
+          !mappedJob.job.selectedProfileIds.includes(recovered.lockedProfileId)
+        ) {
+          throw new Error(
+            "Saved annotation profile is outside probe authority.",
+          );
+        }
+        setAnnotationLaunch(recovered);
+      }
+      setAnnotationRecoveryError(null);
+    } catch {
+      setAnnotationRecoveryError(INVALID_ANNOTATION_CONTINUATION_ERROR);
+    }
+  }, [annotationLaunch, mappedJob.job, storage, workflowId]);
+
+  useEffect(() => {
+    if (
       !mappedJob.job ||
       !recovery.entry ||
       recovery.entry.immutable_identity !== null
@@ -511,13 +553,15 @@ export function ProductionDetectorProbeController({
   const recoveryIssue: {
     kind: RecoveryIssueKind;
     message: string;
-  } | null = recovery.error
-    ? { kind: "invalid_pointer", message: recovery.error }
-    : mappedJob.error
-      ? { kind: "integrity", message: mappedJob.error }
-      : transportJobError
-        ? { kind: "transport", message: transportJobError }
-        : null;
+  } | null = annotationRecoveryError
+    ? { kind: "invalid_pointer", message: annotationRecoveryError }
+    : recovery.error
+      ? { kind: "invalid_pointer", message: recovery.error }
+      : mappedJob.error
+        ? { kind: "integrity", message: mappedJob.error }
+        : transportJobError
+          ? { kind: "transport", message: transportJobError }
+          : null;
   const catalogState =
     catalogError !== null
       ? "failed"
@@ -525,6 +569,8 @@ export function ProductionDetectorProbeController({
         ? "loading"
         : "ready";
   const actionsBlocked = Boolean(
+    annotationLaunch !== null ||
+    annotationRecoveryError !== null ||
     !storage.isPersistent ||
     recovery.pendingCreate ||
     pendingCreateRef.current ||
@@ -695,6 +741,13 @@ export function ProductionDetectorProbeController({
     retryFromJobId?: string,
     retryFrameIndices?: number[],
   ): void {
+    if (annotationLaunch || annotationRecoveryError) {
+      setOperationError(
+        annotationRecoveryError ??
+          "Detector-probe lineage is locked while its annotation continuation is active. Use the annotation session's server-authorized recovery action instead of creating an ordinary probe retry.",
+      );
+      return;
+    }
     if (
       mutationInFlightRef.current ||
       pendingCreateRef.current ||
@@ -719,6 +772,7 @@ export function ProductionDetectorProbeController({
 
   async function cancel(requestedJobId: string): Promise<void> {
     if (
+      annotationRecoveryError !== null ||
       mutationInFlightRef.current ||
       pendingCreateRef.current !== null ||
       requestedJobId !== jobId ||
@@ -761,6 +815,13 @@ export function ProductionDetectorProbeController({
     retryFromJobId: string;
     profileIds: string[];
   }): void {
+    if (annotationLaunch || annotationRecoveryError) {
+      setOperationError(
+        annotationRecoveryError ??
+          "Detector-probe lineage is locked while its annotation continuation is active. Ordinary retry cannot replace that lineage.",
+      );
+      return;
+    }
     if (
       pendingCreateRef.current !== null ||
       request.retryFromJobId !== jobId ||
@@ -787,6 +848,19 @@ export function ProductionDetectorProbeController({
   }
 
   function discardRecovery(): void {
+    if (annotationRecoveryError !== null && jobId !== null) {
+      const annotationKey = ballAnnotationStorageKey(workflowId, jobId);
+      storage.removeItem(annotationKey);
+      if (storage.getItem(annotationKey) !== null) {
+        setOperationError(
+          "The invalid annotation continuation could not be removed from durable storage. Detector-probe actions remain blocked.",
+        );
+        return;
+      }
+      setAnnotationRecoveryError(null);
+      setOperationError(null);
+      return;
+    }
     if (recovery.error === null) return;
     storage.removeItem(storageKey);
     immutableIdentityRef.current = null;
@@ -802,26 +876,46 @@ export function ProductionDetectorProbeController({
   }
 
   return (
-    <ProductionDetectorProbePanel
-      models={catalog.models}
-      catalogState={catalogState}
-      catalogError={catalogError}
-      operationError={operationError}
-      recoveryError={recoveryIssue?.message ?? null}
-      recoveryErrorKind={recoveryIssue?.kind ?? null}
-      exactCreatePending={pendingCreateRef.current !== null}
-      job={mappedJob.job}
-      mutationPending={
-        mutationPending || createMutation.isPending || cancelMutation.isPending
-      }
-      actionsBlocked={actionsBlocked}
-      onStart={start}
-      onCancel={(requestedJobId) => void cancel(requestedJobId)}
-      onRetry={retry}
-      onDiscardRecovery={discardRecovery}
-      onRefreshRecovery={() => void jobQuery.refetch()}
-      onReloadCatalog={() => void catalogQuery.refetch()}
-      onRetryCreate={pendingCreateRef.current ? retrySameCreate : undefined}
-    />
+    <div className="min-w-0 space-y-6">
+      <ProductionDetectorProbePanel
+        models={catalog.models}
+        catalogState={catalogState}
+        catalogError={catalogError}
+        operationError={operationError}
+        recoveryError={recoveryIssue?.message ?? null}
+        recoveryErrorKind={recoveryIssue?.kind ?? null}
+        exactCreatePending={pendingCreateRef.current !== null}
+        job={mappedJob.job}
+        mutationPending={
+          mutationPending ||
+          createMutation.isPending ||
+          cancelMutation.isPending
+        }
+        actionsBlocked={actionsBlocked}
+        lineageLocked={annotationLaunch !== null}
+        onStart={start}
+        onCancel={(requestedJobId) => void cancel(requestedJobId)}
+        onRetry={retry}
+        onDiscardRecovery={discardRecovery}
+        onRefreshRecovery={() => void jobQuery.refetch()}
+        onReloadCatalog={() => void catalogQuery.refetch()}
+        onRetryCreate={pendingCreateRef.current ? retrySameCreate : undefined}
+        onStartDevelopmentAnnotation={(developmentJobId, profileId) =>
+          annotationRecoveryError === null &&
+          setAnnotationLaunch({
+            developmentProbeJobIds: [developmentJobId],
+            lockedProfileId: profileId,
+          })
+        }
+      />
+      {annotationLaunch && (
+        <ProductionBallAnnotationController
+          workflowId={workflowId}
+          developmentProbeJobIds={annotationLaunch.developmentProbeJobIds}
+          lockedProfileId={annotationLaunch.lockedProfileId}
+          storage={storage}
+        />
+      )}
+    </div>
   );
 }
