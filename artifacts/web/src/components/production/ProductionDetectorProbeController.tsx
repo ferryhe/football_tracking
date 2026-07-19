@@ -42,6 +42,7 @@ interface ProductionDetectorProbeControllerProps {
   parentTrialId: string;
   frameIndices?: number[];
   storageFactory?: () => SafeBrowserStorage;
+  onStartNewDevelopmentBatch: () => void;
 }
 
 interface StoredProbeRecovery {
@@ -329,11 +330,19 @@ function sameFrames(left: readonly number[], right: readonly number[]) {
   );
 }
 
-export function ProductionDetectorProbeController({
+export function ProductionDetectorProbeController(
+  props: ProductionDetectorProbeControllerProps,
+) {
+  const scopeKey = JSON.stringify([props.workflowId, props.parentTrialId]);
+  return <ScopedProductionDetectorProbeController key={scopeKey} {...props} />;
+}
+
+function ScopedProductionDetectorProbeController({
   workflowId,
   parentTrialId,
   frameIndices,
   storageFactory = createSafeBrowserStorage,
+  onStartNewDevelopmentBatch,
 }: ProductionDetectorProbeControllerProps) {
   const queryClient = useQueryClient();
   const [storage] = useState(storageFactory);
@@ -388,6 +397,16 @@ export function ProductionDetectorProbeController({
     recovery.entry?.immutable_identity ?? null,
   );
   const pointerPersistenceBlockedRef = useRef(false);
+
+  useEffect(
+    () => () => {
+      scopeRef.current = {
+        storageKey: scopeRef.current.storageKey,
+        generation: scopeRef.current.generation + 1,
+      };
+    },
+    [],
+  );
 
   useEffect(() => {
     const { generation } = scopeRef.current;
@@ -914,6 +933,7 @@ export function ProductionDetectorProbeController({
           developmentProbeJobIds={annotationLaunch.developmentProbeJobIds}
           lockedProfileId={annotationLaunch.lockedProfileId}
           storage={storage}
+          onStartNewDevelopmentBatch={onStartNewDevelopmentBatch}
         />
       )}
     </div>

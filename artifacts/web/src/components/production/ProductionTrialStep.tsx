@@ -301,6 +301,8 @@ export function ProductionTrialStep({
   const latestPendingConfigRef = useRef(pendingConfig);
   const latestConfirmedConfigRef = useRef(confirmedConfig);
   const unlockButtonRef = useRef<HTMLButtonElement>(null);
+  const trialSettingsRef = useRef<HTMLFieldSetElement>(null);
+  const trialStartFrameRef = useRef<HTMLInputElement>(null);
   const operationContext = canonicalJson({ workflowId, source, calibration });
   const operationContextRef = useRef(operationContext);
 
@@ -1648,6 +1650,21 @@ export function ProductionTrialStep({
     }
   })();
 
+  function focusTrialSettings(): void {
+    const settings = trialSettingsRef.current;
+    if (!settings) return;
+    if (locked && unlockButtonRef.current) {
+      unlockButtonRef.current.focus({ preventScroll: true });
+      unlockButtonRef.current.scrollIntoView?.({
+        behavior: "smooth",
+        block: "start",
+      });
+      return;
+    }
+    trialStartFrameRef.current?.focus({ preventScroll: true });
+    settings.scrollIntoView?.({ behavior: "smooth", block: "start" });
+  }
+
   return (
     <div className="space-y-5" data-testid="production-trial-step">
       {message && (
@@ -1666,7 +1683,10 @@ export function ProductionTrialStep({
       )}
 
       <fieldset
-        className="grid gap-4 sm:grid-cols-2"
+        ref={trialSettingsRef}
+        id="production-trial-settings"
+        data-testid="production-trial-settings"
+        className="scroll-mt-4 grid gap-4 sm:grid-cols-2"
         disabled={requestIntentLocked}
       >
         <legend className="sr-only">{t.production.stages.trial}</legend>
@@ -1702,6 +1722,7 @@ export function ProductionTrialStep({
             {t.production.trialStartFrame}
           </Label>
           <Input
+            ref={trialStartFrameRef}
             id="trial-start-frame"
             inputMode="numeric"
             value={startFrame}
@@ -2454,6 +2475,7 @@ export function ProductionTrialStep({
         <ProductionDetectorProbeController
           workflowId={workflowId}
           parentTrialId={latestAuthoritativeRun.run_id}
+          onStartNewDevelopmentBatch={focusTrialSettings}
         />
       )}
 
