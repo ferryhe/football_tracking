@@ -40,6 +40,8 @@ pnpm validate:full-video -- --run-dir python_backend/outputs/runs/<视频>/<run-
 
 入口会自行选择根 `.venv`、把 `python_backend` 放到导入路径最前面并固定工作目录。`python_backend/start_ui.cmd` 和底层 Python 脚本只保留兼容性，不是另一套正式操作方式。
 
+`pnpm start` 会给后端最多 180 秒完成有界的持久状态恢复。在检测器或 review-proxy 工作后首次冷启动时，`Waiting for application startup` 可能持续一分钟以上；除非启动器达到有界的健康检查失败并指向 `backend.log`，不要中途终止。
+
 ## 3. 页面分工
 
 - **广播成片 `/broadcast`**：P3 全场交付的推荐入口，包含设置、证据复核、重算、渲染和交付。
