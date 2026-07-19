@@ -1,6 +1,6 @@
 # Step 3 Tiny-Ball Detection, Tuning, and Camera-Adaptation Plan
 
-**Status:** Execution active · PR-T3 ready for managed publication
+**Status:** Execution active · PR-T3 open · CI and remote review active
 
 **Date:** 2026-07-17
 
@@ -14,7 +14,7 @@
 - Delivery order: `PR-T1 → PR-T2 → PR-T3 → PR-T4 → PR-T5`
 - Current PR: PR-T3 · Point/Box Annotation and 20–50-Frame Feasibility
 - Current branch: `codex/tiny-ball-annotation-feasibility`
-- Current phase: PR-T1 and PR-T2 merged and cleaned up · PR-T3 specification review is COMPLIANT · frontend and final whole-diff reviews are APPROVE · all cross-process lease/TOCTOU findings are closed with an independent security APPROVE · the official local gates are green · the honest real-video result remains sealed as `insufficient_evidence` with every downstream authorization false · PR-T3 is ready for managed publication
+- Current phase: PR-T1 and PR-T2 merged and cleaned up · PR-T3 is open as GitHub PR #114 · specification review is COMPLIANT · frontend, backend security, and final whole-diff reviews are APPROVE · official local gates are green · the honest real-video result remains sealed as `insufficient_evidence` with every downstream authorization false · CI and the mandatory remote-feedback window are active
 - Managed workflow authorized: 2026-07-17
 - Heartbeat: active · `tiny-ball-step3-managed-pr-heartbeat` · every 15 minutes
 - Merge rule: implementation, specification review, quality review, local/CI checks, then a complete 10-minute remote-feedback window; any material corrective push restarts that window
@@ -36,7 +36,7 @@
 | --- | --- | --- | --- | --- | --- |
 | PR-T1 | `codex/tiny-ball-trial-diagnosis` | completed · Copilot corrections resolved · spec APPROVE · quality/security APPROVE · replacement CI passed | https://github.com/ferryhe/football_tracking/pull/112 | complete 2026-07-18T02:12:00Z–2026-07-18T02:22:27Z | `6a9db0e` · 2026-07-18T02:23:04Z |
 | PR-T2 | `codex/tiny-ball-detector-registry-probes` | completed · replacement Node/Python CI passed · spec COMPLIANT · quality/security APPROVE · branches cleaned | https://github.com/ferryhe/football_tracking/pull/113 | complete 2026-07-18T13:28:50.4578869Z–13:39:00.559Z | `0ba5a802` · 2026-07-18T13:39:51Z |
-| PR-T3 | `codex/tiny-ball-annotation-feasibility` | active · ready to publish · spec COMPLIANT · frontend/backend/final quality APPROVE · full local gates passed | pending | not started | pending |
+| PR-T3 | `codex/tiny-ball-annotation-feasibility` | open · local gates passed · spec COMPLIANT · frontend/backend/final quality APPROVE · CI/feedback pending | https://github.com/ferryhe/football_tracking/pull/114 | active from 2026-07-19T15:51:00Z | pending |
 | PR-T4 | pending | not started | pending | not started | pending |
 | PR-T5 | pending | not started | pending | not started | pending |
 
