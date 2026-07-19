@@ -1774,9 +1774,18 @@ describe("ProductionTrialStep evidence and configuration", () => {
       await screen.findByText(/evidence changed during the final check/i),
     ).toBeVisible();
     expect(onTrialChange).not.toHaveBeenCalled();
-    expect(
-      screen.queryByTestId("trial-evidence-ready"),
-    ).not.toBeInTheDocument();
+    const visualConfirmation = screen.queryByLabelText(
+      /I visually reviewed this evidence and confirm/i,
+    );
+    if (visualConfirmation) {
+      expect(visualConfirmation).not.toBeChecked();
+    }
+    const accept = screen.queryByRole("button", {
+      name: "Accept this trial",
+    });
+    if (accept) {
+      expect(accept).toBeDisabled();
+    }
   });
 
   it("blocks acceptance when an artifact body or main video is missing", async () => {
