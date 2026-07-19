@@ -614,13 +614,14 @@ class DetectorReviewProxyMultiprocessLeaseTests(unittest.TestCase):
         coordinator._refresh_jobs_from_disk = blocked_refresh
         coordinator._auto_start_workers = True
         coordinator._start_dispatcher()
-        owner_file = coordinator._owner_lease._target_handle
+        owner_lease = coordinator._owner_lease
+        self.assertIsNotNone(owner_lease)
         try:
             self.assertTrue(entered_refresh.wait(5), "dispatcher did not enter trailing refresh")
             with mock.patch.object(coordinator._dispatcher, "join", return_value=None):
                 coordinator.close()
             self.assertIsNotNone(coordinator._owner_lease)
-            self.assertFalse(owner_file.closed)
+            self.assertFalse(owner_lease._released)
             contender = coordinator._owner_lease_object.acquire(blocking=False)
             self.assertIsNone(contender, "close released the owner while dispatcher refresh was active")
 
@@ -628,7 +629,7 @@ class DetectorReviewProxyMultiprocessLeaseTests(unittest.TestCase):
             coordinator._dispatcher.join(5)
             self.assertFalse(coordinator._dispatcher.is_alive())
             self.assertIsNone(coordinator._owner_lease)
-            self.assertTrue(owner_file.closed)
+            self.assertTrue(owner_lease._released)
         finally:
             release_refresh.set()
             if coordinator._dispatcher is not None:
@@ -694,7 +695,6 @@ class DetectorReviewProxyMultiprocessLeaseTests(unittest.TestCase):
         )
         dead_owner_held = dead_owner_lease.acquire(blocking=False)
         self.assertIsNotNone(dead_owner_held)
-        dead_owner_file = dead_owner_held._target_handle
         execution_held = coordinator._try_acquire_execution_lease()
         self.assertIsNotNone(execution_held)
         snapshot = {
@@ -709,7 +709,9 @@ class DetectorReviewProxyMultiprocessLeaseTests(unittest.TestCase):
             with self.assertRaisesRegex(DetectorDevelopmentError, "synthetic job lease failure"):
                 coordinator._recover_orphaned_job(snapshot, execution_held)
             self.assertTrue(dead_owner_held._released)
-            self.assertTrue(dead_owner_file.closed)
+            reacquired = dead_owner_lease.acquire(blocking=False)
+            self.assertIsNotNone(reacquired)
+            reacquired.release()
         finally:
             if not dead_owner_held._released:
                 dead_owner_held.release()

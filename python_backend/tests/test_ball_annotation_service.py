@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import tempfile
@@ -9,8 +10,6 @@ from pathlib import Path
 from typing import Any, Callable
 from unittest.mock import patch
 
-import cv2
-import numpy as np
 from audited_authority_test_support import patched_audited_t2_probe_bindings
 
 from football_tracking.api.schemas import BallAnnotationPackageView
@@ -42,16 +41,24 @@ from football_tracking.review_proxy_mapping import build_review_proxy_manifest
 LOCKED_PROFILE = "official-coco-yolo11s-sahi"
 CONTROL_PROFILE = "current-coco-yolov8n-direct"
 _ACTIVE_FAKE_AUDIT_BINDINGS: dict[str, dict[str, str]] | None = None
+_JPEG_FIXTURE = base64.b64decode(
+    "/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAIBAQEBAQIBAQECAgICAgQDAgICAgUEBAMEBgUGBgYFBgYGBwkIBgcJBwYGCAsI"
+    "CQoKCgoKBggLDAsKDAkKCgr/2wBDAQICAgICAgUDAwUKBwYHCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoK"
+    "CgoKCgoKCgoKCgoKCgr/wAARCAAgAEADASIAAhEBAxEB/8QAHwAAAQUBAQEBAQEAAAAAAAAAAAECAwQFBgcICQoL/8QAtRAA"
+    "AgEDAwIEAwUFBAQAAAF9AQIDAAQRBRIhMUEGE1FhByJxFDKBkaEII0KxwRVS0fAkM2JyggkKFhcYGRolJicoKSo0NTY3ODk6"
+    "Q0RFRkdISUpTVFVWV1hZWmNkZWZnaGlqc3R1dnd4eXqDhIWGh4iJipKTlJWWl5iZmqKjpKWmp6ipqrKztLW2t7i5usLDxMXG"
+    "x8jJytLT1NXW19jZ2uHi4+Tl5ufo6erx8vP09fb3+Pn6/8QAHwEAAwEBAQEBAQEBAQAAAAAAAAECAwQFBgcICQoL/8QAtREA"
+    "AgECBAQDBAcFBAQAAQJ3AAECAxEEBSExBhJBUQdhcRMiMoEIFEKRobHBCSMzUvAVYnLRChYkNOEl8RcYGRomJygpKjU2Nzg5"
+    "OkNERUZHSElKU1RVVldYWVpjZGVmZ2hpanN0dXZ3eHl6goOEhYaHiImKkpOUlZaXmJmaoqOkpaanqKmqsrO0tba3uLm6wsPE"
+    "xcbHyMnK0tPU1dbX2Nna4uPk5ebn6Onq8vP09fb3+Pn6/9oADAMBAAIRAxEAPwD5Hoor6A+H3w+/YQ1H9hDxd478d/FvXrT4"
+    "xWmvQR6FoUNgpQoVk8uKOPftnt5VEjT3LMj27xRKsZyiXv8AOWHw8sTKSUkrJvVpbK9lfdvoj+TcLhZ4ucoxlFWi5e80r2V7"
+    "K+7fRHz/AEUUVgcoUUUUAFFFFABRRRQAUUUUAFFFFABRRRQB/9k=",
+    validate=True,
+)
 
 
 def _jpeg() -> bytes:
-    image = np.zeros((32, 64, 3), dtype=np.uint8)
-    image[:, :] = (16, 128, 16)
-    cv2.circle(image, (12, 12), 2, (240, 240, 240), -1)
-    ok, encoded = cv2.imencode(".jpg", image)
-    if not ok:
-        raise AssertionError("JPEG fixture could not be encoded")
-    return encoded.tobytes()
+    return _JPEG_FIXTURE
 
 
 def _audited_probe_binding(job: dict[str, Any]) -> dict[str, str]:

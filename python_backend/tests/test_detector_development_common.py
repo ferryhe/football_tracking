@@ -379,41 +379,50 @@ class TrustedRegularFileReadTests(unittest.TestCase):
             self.assertEqual("path_unavailable", raised.exception.code)
 
     def test_ancestor_disappearance_during_recheck_remains_fail_closed(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            parent = root / "control"
-            parent.mkdir()
-            target = parent / "cancel.json"
-            target.write_bytes(b'{"cancel_requested":false}\n')
-            original_snapshot = common.snapshot_identity_is_current
-            disappeared = False
+        for operation in ("read", "hash"):
+            with self.subTest(operation=operation), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                parent = root / "control"
+                parent.mkdir()
+                target = parent / "cancel.json"
+                target.write_bytes(b'{"cancel_requested":false}\n')
+                original_snapshot = common.snapshot_identity_is_current
+                disappeared = False
 
-            def remove_parent(path: Path, expected: tuple[int, int, int, int, int]) -> bool:
-                nonlocal disappeared
-                if path != target:
-                    return original_snapshot(path, expected)
-                if path == target and not disappeared:
-                    disappeared = True
-                    shutil.rmtree(parent)
-                return True
+                def remove_parent(path: Path, expected: tuple[int, int, int, int, int]) -> bool:
+                    nonlocal disappeared
+                    if path != target:
+                        return original_snapshot(path, expected)
+                    if not disappeared:
+                        disappeared = True
+                        shutil.rmtree(parent)
+                    return True
 
-            with (
-                patch.object(
-                    common,
-                    "snapshot_identity_is_current",
-                    side_effect=remove_parent,
-                ),
-                self.assertRaises(DetectorDevelopmentError) as raised,
-            ):
-                read_regular_bytes(
-                    target,
-                    "worker cancellation",
-                    max_bytes=1024,
-                    trusted_root=root,
-                )
+                with (
+                    patch.object(
+                        common,
+                        "snapshot_identity_is_current",
+                        side_effect=remove_parent,
+                    ),
+                    self.assertRaises(DetectorDevelopmentError) as raised,
+                ):
+                    if operation == "read":
+                        read_regular_bytes(
+                            target,
+                            "worker cancellation",
+                            max_bytes=1024,
+                            trusted_root=root,
+                        )
+                    else:
+                        hash_regular_file(
+                            target,
+                            "worker cancellation",
+                            max_bytes=1024,
+                            trusted_root=root,
+                        )
 
-            self.assertTrue(disappeared)
-            self.assertEqual("source_changed", raised.exception.code)
+                self.assertTrue(disappeared)
+                self.assertEqual("source_changed", raised.exception.code)
 
     def test_atomic_write_retries_bounded_windows_sharing_collisions(self) -> None:
         for winerror in (5, 32):

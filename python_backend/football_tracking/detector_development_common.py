@@ -627,6 +627,13 @@ def hash_regular_file(
                         and regular_file_change_identity(path, label) == expected
                         and _ancestor_identities_are_current(ancestors)
                     )
+                except DetectorDevelopmentError as exc:
+                    if exc.code != "path_unavailable":
+                        raise
+                    raise DetectorDevelopmentError(
+                        "source_changed",
+                        f"{label} changed while it was read",
+                    ) from exc
                 except OSError as exc:
                     raise DetectorDevelopmentError("source_changed", f"{label} changed while it was read") from exc
                 if not identity_is_current:
@@ -669,6 +676,13 @@ def read_regular_bytes(
                         and regular_file_change_identity(path, label) == expected
                         and _ancestor_identities_are_current(ancestors)
                     )
+                except DetectorDevelopmentError as exc:
+                    if exc.code != "path_unavailable":
+                        raise
+                    raise DetectorDevelopmentError(
+                        "source_changed",
+                        f"{label} changed while it was read",
+                    ) from exc
                 except OSError as exc:
                     raise DetectorDevelopmentError("source_changed", f"{label} changed while it was read") from exc
                 if not identity_is_current:

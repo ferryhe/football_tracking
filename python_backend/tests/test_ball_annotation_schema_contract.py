@@ -59,6 +59,17 @@ def _build_ball_annotation_contract_examples() -> dict[str, object]:
         observed = datetime(2026, 7, 18, tzinfo=timezone.utc) + timedelta(seconds=next(timestamp_counter))
         return observed.isoformat()
 
+    def deterministic_match_template(
+        _image: object,
+        _template: object,
+        center: tuple[float, float],
+        _search_radius: int,
+    ) -> tuple[tuple[float, float], float]:
+        # The golden exercises the API contract, while the propagation suite
+        # exercises OpenCV. Patch-release float drift must not rewrite every
+        # downstream example digest or the check sampler's fixture frames.
+        return center, 1.0
+
     with (
         tempfile.TemporaryDirectory() as temporary,
         mock_patch(
@@ -68,6 +79,10 @@ def _build_ball_annotation_contract_examples() -> dict[str, object]:
         mock_patch(
             "football_tracking.ball_annotation_service.utc_now_iso",
             side_effect=deterministic_utc_now_iso,
+        ),
+        mock_patch(
+            "football_tracking.ball_annotation_propagation._match_template",
+            side_effect=deterministic_match_template,
         ),
         patched_audited_t2_probe_bindings() as audit_bindings,
     ):
