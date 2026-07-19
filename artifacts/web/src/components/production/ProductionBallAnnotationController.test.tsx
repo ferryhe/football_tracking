@@ -619,7 +619,10 @@ function sessionPointer(role: "development" | "check" = "development") {
   });
 }
 
-function renderController(storage = memoryStorage()) {
+function renderController(
+  storage = memoryStorage(),
+  onStartNewDevelopmentBatch = vi.fn(),
+) {
   return render(
     <LanguageProvider>
       <ProductionBallAnnotationController
@@ -627,6 +630,7 @@ function renderController(storage = memoryStorage()) {
         developmentProbeJobIds={["probe-ready-1"]}
         lockedProfileId="official-coco-yolo11s-sahi"
         storage={storage}
+        onStartNewDevelopmentBatch={onStartNewDevelopmentBatch}
       />
     </LanguageProvider>,
   );
@@ -2363,6 +2367,82 @@ describe("ProductionBallAnnotationController", () => {
     expect(await screen.findByText("strict dashboard rendered")).toBeVisible();
     expect(mocks.parseFinal).toHaveBeenCalledOnce();
   });
+
+  it.each([
+    [
+      "en",
+      "Start a new development evidence batch",
+      /adjust the start frame and frame count, then complete a new bounded trial/i,
+    ],
+    [
+      "zh",
+      "开始新的开发证据批次",
+      /调整起始帧和帧数，然后完成一次新的有限试跑/,
+    ],
+  ] as const)(
+    "offers a %s continuation CTA only after the check is finalized",
+    async (language, buttonName, description) => {
+      window.localStorage.setItem("app-language", language);
+      mocks.parseSession.mockReturnValue(parsedSession("check", "finalized"));
+      vi.stubGlobal(
+        "fetch",
+        vi
+          .fn()
+          .mockResolvedValueOnce(json({ session: true }))
+          .mockResolvedValueOnce(json({ result: true })),
+      );
+      const onStartNewDevelopmentBatch = vi.fn();
+      const storage = memoryStorage({
+        "football-tracking.ball-annotation.v1.workflow-1.probe-ready-1":
+          sessionPointer("check"),
+      });
+      const sealedPointer = storage.getItem(
+        "football-tracking.ball-annotation.v1.workflow-1.probe-ready-1",
+      );
+
+      renderController(storage, onStartNewDevelopmentBatch);
+      expect(await screen.findByText(description)).toBeVisible();
+      await userEvent
+        .setup()
+        .click(screen.getByRole("button", { name: buttonName }));
+
+      expect(onStartNewDevelopmentBatch).toHaveBeenCalledOnce();
+      expect(
+        storage.getItem(
+          "football-tracking.ball-annotation.v1.workflow-1.probe-ready-1",
+        ),
+      ).toBe(sealedPointer);
+    },
+  );
+
+  it.each([
+    ["development", "finalized"],
+    ["check", "annotating"],
+  ] as const)(
+    "does not offer a new development batch for a %s session in %s status",
+    async (role, status) => {
+      mocks.parseSession.mockReturnValue(parsedSession(role, status));
+      const responses = [json({ session: true })];
+      if (status === "finalized") responses.push(json({ result: true }));
+      vi.stubGlobal(
+        "fetch",
+        vi.fn().mockImplementation(() => responses.shift()),
+      );
+      renderController(
+        memoryStorage({
+          "football-tracking.ball-annotation.v1.workflow-1.probe-ready-1":
+            sessionPointer(role),
+        }),
+      );
+
+      await screen.findByTestId("annotation-panel");
+      expect(
+        screen.queryByRole("button", {
+          name: "Start a new development evidence batch",
+        }),
+      ).not.toBeInTheDocument();
+    },
+  );
 
   it("surfaces finalize and finalized-result failures without losing the session", async () => {
     const finalizeFetch = vi

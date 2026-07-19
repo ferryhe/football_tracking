@@ -634,6 +634,7 @@ interface ProductionBallAnnotationControllerProps {
   developmentProbeJobIds: string[];
   lockedProfileId: string;
   storage: SafeBrowserStorage;
+  onStartNewDevelopmentBatch: () => void;
 }
 
 export function ProductionBallAnnotationController({
@@ -641,6 +642,7 @@ export function ProductionBallAnnotationController({
   developmentProbeJobIds,
   lockedProfileId,
   storage,
+  onStartNewDevelopmentBatch,
 }: ProductionBallAnnotationControllerProps) {
   const { language } = useLanguage();
   const initialProbeIds = useMemo(
@@ -742,6 +744,9 @@ export function ProductionBallAnnotationController({
           startCheck: "开始未见帧检查",
           resume: "恢复未完成的创建请求",
           prepareCheck: "开发标注完成，准备未见帧检查",
+          newDevelopmentBatch: "开始新的开发证据批次",
+          newDevelopmentBatchDescription:
+            "当前未见帧检查已封存。请返回试跑设置，调整起始帧和帧数，然后完成一次新的有限试跑。旧的封存会话将保持不变。",
           fullVideoPreset: "设为单光照全片快捷方案",
           quota: "抽帧配额",
           intervals: "原片帧区间（例如 0-999, 1200-1400）",
@@ -762,6 +767,9 @@ export function ProductionBallAnnotationController({
           startCheck: "Start unseen-frame check",
           resume: "Resume exact pending create",
           prepareCheck: "Development complete — prepare unseen-frame check",
+          newDevelopmentBatch: "Start a new development evidence batch",
+          newDevelopmentBatchDescription:
+            "This unseen-frame check is sealed. Return to trial settings, adjust the start frame and frame count, then complete a new bounded trial. The existing sealed session will remain unchanged.",
           fullVideoPreset: "Use single-light full-video preset",
           quota: "Sampling quota",
           intervals: "Source-frame intervals (for example 0-999, 1200-1400)",
@@ -1894,6 +1902,22 @@ export function ProductionBallAnnotationController({
         onFinalize={() => void finalize()}
       />
       {dashboard && <ProductionFeasibilityDashboard view={dashboard} />}
+      {session.view.dataRole === "check" &&
+        session.view.status === "finalized" && (
+          <Alert data-testid="new-development-evidence-batch">
+            <AlertTitle>{labels.newDevelopmentBatch}</AlertTitle>
+            <AlertDescription className="space-y-3">
+              <p>{labels.newDevelopmentBatchDescription}</p>
+              <Button
+                type="button"
+                variant="outline"
+                onClick={onStartNewDevelopmentBatch}
+              >
+                {labels.newDevelopmentBatch}
+              </Button>
+            </AlertDescription>
+          </Alert>
+        )}
       {session.view.dataRole === "development" &&
         session.view.status === "finalized" && (
           <Button

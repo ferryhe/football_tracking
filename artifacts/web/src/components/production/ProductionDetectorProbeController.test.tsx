@@ -327,12 +327,14 @@ function controllerTree(
   storageFactory?: React.ComponentProps<
     typeof ProductionDetectorProbeController
   >["storageFactory"],
+  workflowId = "workflow-1",
 ) {
   return (
     <LanguageProvider>
       <ProductionDetectorProbeController
-        workflowId="workflow-1"
+        workflowId={workflowId}
         parentTrialId={parentTrialId}
+        onStartNewDevelopmentBatch={vi.fn()}
         {...(frameIndices === null ? {} : { frameIndices })}
         {...(storageFactory ? { storageFactory } : {})}
       />
@@ -1461,6 +1463,118 @@ describe("ProductionDetectorProbeController", () => {
       ),
     ).toMatchObject({ state: "pending_create", parent_trial_id: "trial-1" });
   });
+
+  it.each([
+    ["a new parent trial", "workflow-1", "trial-2", "launch"],
+    ["a new workflow", "workflow-2", "trial-1", "error"],
+  ])(
+    "drops annotation authority synchronously for %s and starts only in the new scope",
+    async (_label, nextWorkflowId, nextParentTrialId, oldAuthority) => {
+      const oldJobId = "probe-sealed-check";
+      const oldAnnotationKey = ballAnnotationStorageKey("workflow-1", oldJobId);
+      const oldAnnotationPointer =
+        oldAuthority === "launch"
+          ? JSON.stringify({
+              schema_version: "1.0",
+              artifact_type: "ball_annotation_session_pointer",
+              state: "session_pointer",
+              workflow_id: "workflow-1",
+              development_probe_job_ids: [oldJobId],
+              locked_profile_id: PROFILE_IDS[0],
+              session_id: "sealed-check-session",
+              data_role: "check",
+            })
+          : "not-json";
+      localStorage.setItem(
+        detectorProbeStorageKey("workflow-1", "trial-1"),
+        storedRecovery(oldJobId),
+      );
+      localStorage.setItem(oldAnnotationKey, oldAnnotationPointer);
+      const createBodies: Array<Record<string, unknown>> = [];
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+          const url = String(input);
+          const method = init?.method ?? "GET";
+          if (url === "/api/detector-models") return json(catalogFixture());
+          if (url === `/api/detector-probes/${oldJobId}`) {
+            return json(jobFixture(oldJobId, "ready"));
+          }
+          if (url === "/api/detector-probes" && method === "POST") {
+            const request = JSON.parse(String(init?.body)) as Record<
+              string,
+              unknown
+            >;
+            createBodies.push(request);
+            return json(
+              {
+                job_id: "probe-new-scope",
+                request_sha256: sha("e"),
+                status: "queued",
+                status_url: "/api/v1/detector-probes/probe-new-scope",
+                cancel_url: "/api/v1/detector-probes/probe-new-scope/cancel",
+                retry_from_job_id: null,
+              },
+              202,
+            );
+          }
+          if (url === "/api/detector-probes/probe-new-scope") {
+            const nextJob = jobFixture("probe-new-scope", "queued");
+            nextJob.frozen_request.parent_trial_id = nextParentTrialId;
+            return json(nextJob);
+          }
+          if (url.startsWith("/api/ball-annotation-sessions/")) {
+            return json({ detail: "sealed session stays historical" }, 409);
+          }
+          throw new Error(`Unexpected request: ${method} ${url}`);
+        }),
+      );
+
+      const view = renderController();
+      if (oldAuthority === "launch") {
+        expect(
+          await screen.findByTestId("ball-annotation-setup"),
+        ).toBeVisible();
+      } else {
+        expect(
+          await screen.findByText(/saved annotation continuation is invalid/i),
+        ).toBeVisible();
+      }
+
+      view.rerender(
+        <QueryClientProvider client={view.queryClient}>
+          {controllerTree(
+            nextParentTrialId,
+            FRAME_INDICES,
+            undefined,
+            nextWorkflowId,
+          )}
+        </QueryClientProvider>,
+      );
+
+      expect(
+        screen.queryByTestId("ball-annotation-setup"),
+      ).not.toBeInTheDocument();
+      expect(
+        screen.queryByText(/saved annotation continuation is invalid/i),
+      ).not.toBeInTheDocument();
+      const start = await screen.findByRole("button", {
+        name: "Run bounded comparison",
+      });
+      expect(start).toBeEnabled();
+      await view.user.click(start);
+      await waitFor(() => expect(createBodies).toHaveLength(1));
+      expect(createBodies[0]).toMatchObject({
+        parent_trial_id: nextParentTrialId,
+      });
+      expect(
+        localStorage.getItem(
+          detectorProbeStorageKey(nextWorkflowId, nextParentTrialId),
+        ),
+      ).toContain('"job_id":"probe-new-scope"');
+      expect(localStorage.getItem(oldAnnotationKey)).toBe(oldAnnotationPointer);
+    },
+  );
 
   it("offers an explicit catalog refetch before enabling model actions", async () => {
     let catalogReads = 0;

@@ -1832,6 +1832,55 @@ describe("ProductionTrialStep evidence and configuration", () => {
     expect(detectorControllerRender).toHaveBeenLastCalledWith({
       workflowId: "workflow-a",
       parentTrialId: "trial-1",
+      onStartNewDevelopmentBatch: expect.any(Function),
+    });
+  });
+
+  it("provides an accessible stable trial-settings target for a new evidence batch", async () => {
+    const { state } = await trialWithAttempt("completed");
+    installReadableEvidence();
+    installTrialGate(ALL_LOST_GATE);
+    renderStep({ trial: state });
+    await screen.findByTestId("detector-probe-controller");
+    const detectorProps = detectorControllerRender.mock.lastCall?.[0] as {
+      onStartNewDevelopmentBatch: () => void;
+    };
+    const settings = screen.getByTestId("production-trial-settings");
+    const scrollIntoView = vi.fn();
+    settings.scrollIntoView = scrollIntoView;
+
+    act(() => detectorProps.onStartNewDevelopmentBatch());
+
+    expect(settings).toHaveAttribute("id", "production-trial-settings");
+    expect(settings).toHaveAccessibleName("Trial and tuning");
+    expect(screen.getByLabelText("Start frame")).toHaveFocus();
+    expect(scrollIntoView).toHaveBeenCalledWith({
+      behavior: "smooth",
+      block: "start",
+    });
+  });
+
+  it("focuses the unlock action when a new evidence batch starts from locked settings", async () => {
+    const state = await acceptedTrial();
+    installTrialGate(ALL_LOST_GATE);
+    renderStep({ trial: state });
+    await screen.findByTestId("detector-probe-controller");
+    const detectorProps = detectorControllerRender.mock.lastCall?.[0] as {
+      onStartNewDevelopmentBatch: () => void;
+    };
+    const unlock = screen.getByRole("button", {
+      name: "Unlock trial settings",
+    });
+    const scrollIntoView = vi.fn();
+    unlock.scrollIntoView = scrollIntoView;
+
+    act(() => detectorProps.onStartNewDevelopmentBatch());
+
+    expect(screen.getByLabelText("Start frame")).toBeDisabled();
+    expect(unlock).toHaveFocus();
+    expect(scrollIntoView).toHaveBeenCalledWith({
+      behavior: "smooth",
+      block: "start",
     });
   });
 
@@ -1909,6 +1958,7 @@ describe("ProductionTrialStep evidence and configuration", () => {
     expect(detectorControllerRender).toHaveBeenLastCalledWith({
       workflowId: "workflow-a",
       parentTrialId: "trial-1",
+      onStartNewDevelopmentBatch: expect.any(Function),
     });
   });
 
