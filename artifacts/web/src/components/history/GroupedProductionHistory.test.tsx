@@ -661,11 +661,13 @@ describe("GroupedProductionHistory", () => {
     await user.click(
       screen.getByTestId("timeline-toggle-production_full_historical-sibling"),
     );
-    expect(
-      await screen.findByTestId(
-        "current-config-status-production_full_historical-sibling",
-      ),
-    ).toHaveTextContent(/lineage does not match/i);
+    await waitFor(() =>
+      expect(
+        screen.getByTestId(
+          "current-config-status-production_full_historical-sibling",
+        ),
+      ).toHaveTextContent(/lineage does not match/i),
+    );
     expect(mocks.getConfig).toHaveBeenCalledTimes(2);
   });
 
