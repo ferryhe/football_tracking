@@ -12,7 +12,7 @@
 
 - Program status: active
 - Delivery order: `PR-T1 → PR-T2 → PR-T3 → PR-T4 → PR-T5`
-- Current PR: PR-T3E · finalized-check evidence-continuation UX repair · local validation and independent reviews complete · preparing managed PR
+- Current PR: PR-T3E · GitHub PR #118 · finalized-check evidence-continuation UX repair · local validation and independent reviews complete · Node/Python CI and remote-feedback window pending
 - Current branch: `codex/tiny-ball-evidence-continuation-ux` · fresh repair branch from the merged PR-T3R baseline; no PR-T4 implementation branch exists
 - Current phase: PR-T3E keeps each detector/annotation continuation strictly scoped to its workflow and parent trial, adds a finalized-check-only bilingual path back to the bounded-trial settings for a new development evidence batch, and preserves the old sealed session unchanged · PR-T4 remains unauthorized
 - Managed workflow authorized: 2026-07-17
@@ -46,7 +46,7 @@
 | PR-T2 | `codex/tiny-ball-detector-registry-probes` | completed · replacement Node/Python CI passed · spec COMPLIANT · quality/security APPROVE · branches cleaned | https://github.com/ferryhe/football_tracking/pull/113 | complete 2026-07-18T13:28:50.4578869Z–13:39:00.559Z | `0ba5a802` · 2026-07-18T13:39:51Z |
 | PR-T3 | `codex/tiny-ball-annotation-feasibility` | completed · spec COMPLIANT · frontend/backend/final quality APPROVE · replacement Node/Python CI passed · branches cleaned | https://github.com/ferryhe/football_tracking/pull/114 | gate 2026-07-19T16:48:00Z–16:58:00Z · final fetch 16:58:40Z · zero actionable feedback | `8bd18841` · 2026-07-19T16:59:13Z |
 | PR-T3R | `codex/tiny-ball-startup-budget` | completed · independent spec COMPLIANT · independent quality APPROVE · Node/Python CI passed · branches cleaned · PR-T4 remains unauthorized | https://github.com/ferryhe/football_tracking/pull/116 | complete 2026-07-19T18:10:16Z–18:20:16Z · final fetch 18:23:28Z · zero actionable feedback | `89e1912d` · 2026-07-19T18:24:03Z |
-| PR-T3E | `codex/tiny-ball-evidence-continuation-ux` | active · local validation passed · spec COMPLIANT · quality/security APPROVE · preparing managed PR · PR-T4 remains unauthorized | pending | not started | pending |
+| PR-T3E | `codex/tiny-ball-evidence-continuation-ux` | active · local validation passed · spec COMPLIANT · quality/security APPROVE · Node/Python CI and remote-feedback window pending · PR-T4 remains unauthorized | https://github.com/ferryhe/football_tracking/pull/118 | pending final push | pending |
 | PR-T4 | pending | not started | pending | not started | pending |
 | PR-T5 | pending | not started | pending | not started | pending |
 
