@@ -3,7 +3,7 @@
 - Program: Step 3 Tiny-Ball Detection, Tuning, and Camera Adaptation
 - Canonical plan: docs/superpowers/plans/2026-07-17-step-3-tiny-ball-detection-and-camera-adaptation-plan.md
 - Program status: active · five-PR program approved · PR-T3 complete · PR-T3R operational launcher repair active · PR-T4 execution authorization withheld by the feasibility gate
-- Current PR: PR-T3R launcher startup-budget repair in development · PR-T4 not started and not authorized
+- Current PR: PR-T3R launcher startup-budget repair open as GitHub PR #116 · PR-T4 not started and not authorized
 - Current branch: `codex/tiny-ball-startup-budget` · repair-only branch from merged `main`; it does not advance the product sequence
 - Current phase: PR-T1, PR-T2, and PR-T3 are merged and cleaned up · the merged T3 backend successfully completes real-data startup, but sealed 11 GB evidence recovery exceeds the launcher's fixed 45-second health budget, causing `pnpm start` to terminate a healthy startup before it becomes ready · PR-T3R will add a bounded backend-specific startup budget while retaining the existing frontend budget and identity-safe cleanup · the honest real-video result remains sealed as `insufficient_evidence` with every downstream authorization false · additional development annotations and a new frozen unseen 20–50-frame check are still required before PR-T4 may start
 - Approval: the user authorized the final independently reviewed plan and the established managed-PR operating method on 2026-07-17.
@@ -42,7 +42,7 @@
 | PR-T1 | codex/tiny-ball-trial-diagnosis | completed · Copilot corrections resolved · spec APPROVE · quality/security APPROVE · replacement CI passed | https://github.com/ferryhe/football_tracking/pull/112 | complete 2026-07-18T02:12:00Z–2026-07-18T02:22:27Z | `6a9db0e` · 2026-07-18T02:23:04Z |
 | PR-T2 | codex/tiny-ball-detector-registry-probes | completed · replacement Node/Python CI passed · spec COMPLIANT · quality/security APPROVE · branches cleaned | https://github.com/ferryhe/football_tracking/pull/113 | complete 2026-07-18T13:28:50.4578869Z–13:39:00.559Z | `0ba5a802` · 2026-07-18T13:39:51Z |
 | PR-T3 | codex/tiny-ball-annotation-feasibility | completed · spec COMPLIANT · frontend/backend/final quality APPROVE · replacement Node/Python CI passed · branches cleaned | https://github.com/ferryhe/football_tracking/pull/114 | gate 2026-07-19T16:48:00Z–16:58:00Z · final fetch 16:58:40Z · zero actionable feedback | `8bd18841` · 2026-07-19T16:59:13Z |
-| PR-T3R | codex/tiny-ball-startup-budget | in development · repair-only launcher startup budget · PR-T4 remains unauthorized | pending | not started | pending |
+| PR-T3R | codex/tiny-ball-startup-budget | open · independent spec COMPLIANT · independent quality APPROVE · awaiting Node/Python CI and complete remote-feedback window · PR-T4 remains unauthorized | https://github.com/ferryhe/football_tracking/pull/116 | begins after final status push | pending |
 | PR-T4 | pending | not started | pending | not started | pending |
 | PR-T5 | pending | not started | pending | not started | pending |
 
