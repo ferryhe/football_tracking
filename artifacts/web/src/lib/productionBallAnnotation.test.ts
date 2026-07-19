@@ -4830,7 +4830,7 @@ describe("strict ball annotation response parsing", () => {
         /propagation|tracker|seed|target|intent|result|suggestion|accounting/i,
       );
     }
-  });
+  }, 30_000);
 
   it("rejects propagation reports in a one-time check package", () => {
     const golden = ballAnnotationApiGolden as unknown as Record<string, any>;
@@ -5500,7 +5500,7 @@ describe("strict ball annotation response parsing", () => {
         name,
       ).toThrow(expected);
     }
-  });
+  }, 30_000);
 
   it("fails closed at each aggregate feasibility authority boundary", () => {
     const golden = ballAnnotationApiGolden as unknown as Record<string, any>;

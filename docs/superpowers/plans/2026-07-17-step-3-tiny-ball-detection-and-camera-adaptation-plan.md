@@ -644,6 +644,7 @@ Each branch starts only after its predecessor is merged and from that latest cle
 **Execution result (2026-07-19)**
 
 - The complete PR-T3 implementation and local test matrix pass, including the official 2,263-test backend route, 1,237 frontend tests, TypeScript/build gates, 44 Chromium scenarios, strict no-resource-leak proxy regression, and independent specification/security/final-quality approval.
+- Initial GitHub run `29693623734` exposed no product or assertion failure: only two intentionally exhaustive frontend security matrices exceeded Vitest's default five-second test limit on Linux after 1,235 assertions passed. A scoped correction gives only those two matrices a bounded 30-second limit; the focused pair and the full 1,237-test frontend route pass locally with unchanged coverage, and replacement CI is required before merge.
 - The real source was annotated and sealed honestly: the 20-frame check produced five metric-eligible positives, Top-1/Top-5 recall of 3/5, insufficient support/interval bounds, and status `insufficient_evidence`.
 - PR-T3 therefore demonstrates the required fail-closed contract and may proceed through review/merge. PR-T4 remains unauthorized until a new frozen unseen check returns `feasibility_passed` with `may_expand_to_100_300_boxes=true`; no check labels may enter training.
 
