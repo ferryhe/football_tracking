@@ -1200,6 +1200,2818 @@ export interface AssetGroup {
   is_unbound?: boolean;
 }
 
+export type BallAnnotationFinalPackagePointerViewStatus =
+  (typeof BallAnnotationFinalPackagePointerViewStatus)[keyof typeof BallAnnotationFinalPackagePointerViewStatus];
+
+export const BallAnnotationFinalPackagePointerViewStatus = {
+  not_applicable: "not_applicable",
+  insufficient_evidence: "insufficient_evidence",
+  feasibility_passed: "feasibility_passed",
+  feasibility_failed: "feasibility_failed",
+} as const;
+
+export interface BallAnnotationFinalPackagePointerView {
+  result_url: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  manifest_sha256: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  package_sha256: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  report_sha256: string;
+  status: BallAnnotationFinalPackagePointerViewStatus;
+}
+
+export type BallAnnotationNormalizedSessionRequestViewDataRole =
+  (typeof BallAnnotationNormalizedSessionRequestViewDataRole)[keyof typeof BallAnnotationNormalizedSessionRequestViewDataRole];
+
+export const BallAnnotationNormalizedSessionRequestViewDataRole = {
+  development: "development",
+  check: "check",
+} as const;
+
+export type BallScaleApplicabilityViewStratum =
+  (typeof BallScaleApplicabilityViewStratum)[keyof typeof BallScaleApplicabilityViewStratum];
+
+export const BallScaleApplicabilityViewStratum = {
+  near: "near",
+  mid: "mid",
+  far: "far",
+} as const;
+
+export type BallScaleApplicabilityViewStatus =
+  (typeof BallScaleApplicabilityViewStatus)[keyof typeof BallScaleApplicabilityViewStatus];
+
+export const BallScaleApplicabilityViewStatus = {
+  applicable: "applicable",
+  not_applicable: "not_applicable",
+} as const;
+
+export interface BallApplicabilityEvidenceView {
+  declared_before_reveal: true;
+  /**
+   * @minLength 3
+   * @maxLength 500
+   */
+  note: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  evidence_sha256: string;
+}
+
+export interface BallScaleApplicabilityView {
+  stratum: BallScaleApplicabilityViewStratum;
+  status: BallScaleApplicabilityViewStatus;
+  evidence: BallApplicabilityEvidenceView;
+}
+
+export type BallLightingApplicabilityViewStratum =
+  (typeof BallLightingApplicabilityViewStratum)[keyof typeof BallLightingApplicabilityViewStratum];
+
+export const BallLightingApplicabilityViewStratum = {
+  bright_sun: "bright_sun",
+  shadow: "shadow",
+  backlight: "backlight",
+  twilight: "twilight",
+  artificial_light: "artificial_light",
+} as const;
+
+export type BallLightingApplicabilityViewStatus =
+  (typeof BallLightingApplicabilityViewStatus)[keyof typeof BallLightingApplicabilityViewStatus];
+
+export const BallLightingApplicabilityViewStatus = {
+  applicable: "applicable",
+  not_applicable: "not_applicable",
+} as const;
+
+export interface BallFrameIntervalRequest {
+  /** @minimum 0 */
+  start_frame: number;
+  /** @minimum 0 */
+  end_frame: number;
+}
+
+export interface BallLightingApplicabilityView {
+  stratum: BallLightingApplicabilityViewStratum;
+  status: BallLightingApplicabilityViewStatus;
+  /**
+   * @minimum 0
+   * @maximum 50
+   */
+  quota: number;
+  /** @maxItems 32 */
+  frame_intervals: BallFrameIntervalRequest[];
+  evidence: BallApplicabilityEvidenceView;
+}
+
+export interface BallStrataApplicabilityView {
+  /**
+   * @minItems 3
+   * @maxItems 3
+   */
+  scale: BallScaleApplicabilityView[];
+  /**
+   * @minItems 5
+   * @maxItems 5
+   */
+  lighting: BallLightingApplicabilityView[];
+}
+
+export type BallAnnotationNormalizedSessionRequestViewApplicableScaleStrataItem =
+  (typeof BallAnnotationNormalizedSessionRequestViewApplicableScaleStrataItem)[keyof typeof BallAnnotationNormalizedSessionRequestViewApplicableScaleStrataItem];
+
+export const BallAnnotationNormalizedSessionRequestViewApplicableScaleStrataItem =
+  {
+    near: "near",
+    mid: "mid",
+    far: "far",
+  } as const;
+
+export type BallAnnotationNormalizedSessionRequestViewApplicableLightingStrataItem =
+  (typeof BallAnnotationNormalizedSessionRequestViewApplicableLightingStrataItem)[keyof typeof BallAnnotationNormalizedSessionRequestViewApplicableLightingStrataItem];
+
+export const BallAnnotationNormalizedSessionRequestViewApplicableLightingStrataItem =
+  {
+    bright_sun: "bright_sun",
+    shadow: "shadow",
+    backlight: "backlight",
+    twilight: "twilight",
+    artificial_light: "artificial_light",
+  } as const;
+
+export interface BallAnnotationNormalizedSessionRequestView {
+  data_role: BallAnnotationNormalizedSessionRequestViewDataRole;
+  /**
+   * @minItems 1
+   * @maxItems 8
+   */
+  development_probe_job_ids: string[];
+  /** @pattern ^[a-z0-9][a-z0-9._-]{0,119}$ */
+  locked_profile_id: string;
+  target_frame_count?: number | null;
+  sampling_profile_id: "tiny_ball_temporal_groups_v1";
+  metric_profile_id: "tiny_ball_feasibility_metric_v1";
+  /** @pattern ^[a-z0-9][a-z0-9._-]{0,119}$ */
+  operator_id: string;
+  strata_applicability: BallStrataApplicabilityView;
+  retry_from_session_id?: string | null;
+  development_package_session_id?: string | null;
+  development_package_sha256?: string | null;
+  applicable_scale_strata: BallAnnotationNormalizedSessionRequestViewApplicableScaleStrataItem[];
+  applicable_lighting_strata: BallAnnotationNormalizedSessionRequestViewApplicableLightingStrataItem[];
+}
+
+export interface BallAnnotationSessionRequestAuthorityView {
+  schema_version: "1.0";
+  artifact_type: "ball_annotation_session_request_authority";
+  /** @pattern ^[a-z0-9][a-z0-9._-]{0,119}$ */
+  session_id: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  request_sha256: string;
+  normalized_request: BallAnnotationNormalizedSessionRequestView;
+  /** @pattern ^[0-9a-f]{64}$ */
+  authority_sha256: string;
+}
+
+export type BallAnnotationPackageViewDataRole =
+  (typeof BallAnnotationPackageViewDataRole)[keyof typeof BallAnnotationPackageViewDataRole];
+
+export const BallAnnotationPackageViewDataRole = {
+  development: "development",
+  check: "check",
+} as const;
+
+export interface BallSourceBindingView {
+  /** @pattern ^[a-z0-9][a-z0-9._-]{0,119}$ */
+  source_id: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  sha256: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  file_identity_sha256: string;
+  /** @exclusiveMinimum 0 */
+  size_bytes: number;
+  /** @exclusiveMinimum 0 */
+  width: number;
+  /** @exclusiveMinimum 0 */
+  height: number;
+  /** @exclusiveMinimum 0 */
+  frame_count: number;
+  /** @pattern ^[0-9a-f]{64}$ */
+  tracking_contract_sha256: string;
+  relative_path: string;
+  tracking_contract_relative_path: string;
+  /** @exclusiveMinimum 0 */
+  fps: number;
+}
+
+export type BallDecodeBindingViewRequestedDecodeMode =
+  (typeof BallDecodeBindingViewRequestedDecodeMode)[keyof typeof BallDecodeBindingViewRequestedDecodeMode];
+
+export const BallDecodeBindingViewRequestedDecodeMode = {
+  sequential: "sequential",
+  preroll: "preroll",
+  direct: "direct",
+} as const;
+
+export type BallDecodeBindingViewEffectiveDecodeMode =
+  (typeof BallDecodeBindingViewEffectiveDecodeMode)[keyof typeof BallDecodeBindingViewEffectiveDecodeMode];
+
+export const BallDecodeBindingViewEffectiveDecodeMode = {
+  sequential: "sequential",
+  preroll_verified: "preroll_verified",
+  direct_verified: "direct_verified",
+  sequential_fallback: "sequential_fallback",
+} as const;
+
+export type BallDecodeBindingViewPositionVerification =
+  (typeof BallDecodeBindingViewPositionVerification)[keyof typeof BallDecodeBindingViewPositionVerification];
+
+export const BallDecodeBindingViewPositionVerification = {
+  opencv_next_frame_index_with_025_tolerance:
+    "opencv_next_frame_index_with_0.25_tolerance",
+  verified_review_proxy_frame_index_mapping_v1:
+    "verified_review_proxy_frame_index_mapping_v1",
+} as const;
+
+export interface BallDecodeBindingView {
+  /** @exclusiveMinimum 0 */
+  width: number;
+  /** @exclusiveMinimum 0 */
+  height: number;
+  /** @exclusiveMinimum 0 */
+  frame_count: number;
+  /** @exclusiveMinimum 0 */
+  fps: number;
+  requested_decode_mode: BallDecodeBindingViewRequestedDecodeMode;
+  effective_decode_mode: BallDecodeBindingViewEffectiveDecodeMode;
+  position_verification: BallDecodeBindingViewPositionVerification;
+}
+
+export type BallAnnotationLineageViewDevelopmentProbeReportSha256s = {
+  [key: string]: unknown;
+};
+
+export type BallAnnotationLineageViewDevelopmentProbeResultManifestSha256s = {
+  [key: string]: unknown;
+};
+
+export type BallAnnotationLineageViewDevelopmentProbeExecutionBundleSha256s = {
+  [key: string]: unknown;
+};
+
+export type BallAnnotationLineageViewDevelopmentProbeFrozenProfilesSha256s = {
+  [key: string]: unknown;
+};
+
+export interface BallAnnotationLineageView {
+  /** @pattern ^[a-z0-9][a-z0-9._-]{0,119}$ */
+  parent_trial_id: string;
+  /**
+   * @minItems 1
+   * @maxItems 8
+   */
+  development_probe_job_ids: string[];
+  development_probe_report_sha256s: BallAnnotationLineageViewDevelopmentProbeReportSha256s;
+  development_probe_result_manifest_sha256s: BallAnnotationLineageViewDevelopmentProbeResultManifestSha256s;
+  development_probe_execution_bundle_sha256s: BallAnnotationLineageViewDevelopmentProbeExecutionBundleSha256s;
+  development_probe_frozen_profiles_sha256s: BallAnnotationLineageViewDevelopmentProbeFrozenProfilesSha256s;
+  decode: BallDecodeBindingView;
+  /** @pattern ^[0-9a-f]{64}$ */
+  runtime_environment_sha256: string;
+}
+
+export type BallDetectorProbeAuthorityViewAuditAnchorKind =
+  (typeof BallDetectorProbeAuthorityViewAuditAnchorKind)[keyof typeof BallDetectorProbeAuthorityViewAuditAnchorKind];
+
+export const BallDetectorProbeAuthorityViewAuditAnchorKind = {
+  audited_t2_legacy: "audited_t2_legacy",
+  embedded_job_record: "embedded_job_record",
+} as const;
+
+export type BallDetectorProbeAuthorityViewFrozenRequest = {
+  [key: string]: unknown;
+};
+
+export type BallDetectorProbeAuthorityViewFrozenProfilesItem = {
+  [key: string]: unknown;
+};
+
+export type BallDetectorProbeAuthorityViewProbeReport = {
+  [key: string]: unknown;
+};
+
+export type BallDetectorProbeAuthorityViewProbeResultManifest = {
+  [key: string]: unknown;
+};
+
+export type BallDetectorProbeAuthorityViewProbeJobRecord = {
+  [key: string]: unknown;
+};
+
+export interface BallDetectorProbeAuthorityView {
+  schema_version: "1.0";
+  artifact_type: "detector_probe_job_authority";
+  /** @pattern ^[a-z0-9][a-z0-9._-]{0,119}$ */
+  job_id: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  request_sha256: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  intent_sha256: string;
+  semantic_intent_sha256: string | null;
+  /** @pattern ^[0-9a-f]{64}$ */
+  resource_sha256: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  frozen_profiles_sha256: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  execution_bundle_sha256: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  runtime_environment_sha256: string;
+  retry_from_job_id: string | null;
+  retry_kind: string | null;
+  frozen_request: BallDetectorProbeAuthorityViewFrozenRequest;
+  frozen_profiles: BallDetectorProbeAuthorityViewFrozenProfilesItem[];
+  /** @pattern ^[0-9a-f]{64}$ */
+  probe_report_sha256: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  probe_result_manifest_sha256: string;
+  probe_report: BallDetectorProbeAuthorityViewProbeReport;
+  probe_result_manifest: BallDetectorProbeAuthorityViewProbeResultManifest;
+  probe_job_record: BallDetectorProbeAuthorityViewProbeJobRecord;
+  /** @pattern ^[0-9a-f]{64}$ */
+  canonical_job_record_sha256: string;
+  audit_anchor_kind: BallDetectorProbeAuthorityViewAuditAnchorKind;
+  /** @pattern ^[0-9a-f]{64}$ */
+  job_record_authority_sha256: string;
+}
+
+export interface DetectorReviewProxySourceView {
+  /** @pattern ^[0-9a-f]{64}$ */
+  sha256: string;
+  /** @exclusiveMinimum 0 */
+  size_bytes: number;
+  /** @exclusiveMinimum 0 */
+  width: number;
+  /** @exclusiveMinimum 0 */
+  height: number;
+  /** @exclusiveMinimum 0 */
+  fps: number;
+  /** @exclusiveMinimum 0 */
+  frame_count: number;
+  /** @minLength 1 */
+  codec: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  file_identity_sha256: string;
+}
+
+export interface DetectorReviewProxyMediaView {
+  /** @pattern ^[0-9a-f]{64}$ */
+  sha256: string;
+  /** @exclusiveMinimum 0 */
+  size_bytes: number;
+  /** @exclusiveMinimum 0 */
+  width: number;
+  /** @exclusiveMinimum 0 */
+  height: number;
+  /** @exclusiveMinimum 0 */
+  fps: number;
+  /** @exclusiveMinimum 0 */
+  frame_count: number;
+  /** @minLength 1 */
+  codec: string;
+}
+
+export type DetectorReviewProxyManifestViewRequestedDecodeMode =
+  (typeof DetectorReviewProxyManifestViewRequestedDecodeMode)[keyof typeof DetectorReviewProxyManifestViewRequestedDecodeMode];
+
+export const DetectorReviewProxyManifestViewRequestedDecodeMode = {
+  sequential: "sequential",
+  preroll: "preroll",
+  direct: "direct",
+} as const;
+
+export type DetectorReviewProxyManifestViewEffectiveDecodeMode =
+  (typeof DetectorReviewProxyManifestViewEffectiveDecodeMode)[keyof typeof DetectorReviewProxyManifestViewEffectiveDecodeMode];
+
+export const DetectorReviewProxyManifestViewEffectiveDecodeMode = {
+  sequential: "sequential",
+  preroll_verified: "preroll_verified",
+  direct_verified: "direct_verified",
+  sequential_fallback: "sequential_fallback",
+} as const;
+
+export interface DetectorReviewProxyCoordinateTransformView {
+  kind: "uniform_source_to_proxy_scale_v1";
+  /** @exclusiveMinimum 0 */
+  scale_x: number;
+  /** @exclusiveMinimum 0 */
+  scale_y: number;
+  /**
+   * @minItems 2
+   * @maxItems 2
+   */
+  source_origin: [0, 0];
+  /**
+   * @minItems 2
+   * @maxItems 2
+   */
+  proxy_origin: [0, 0];
+}
+
+export type DetectorReviewProxyMappingViewSourceTimingStatus =
+  (typeof DetectorReviewProxyMappingViewSourceTimingStatus)[keyof typeof DetectorReviewProxyMappingViewSourceTimingStatus];
+
+export const DetectorReviewProxyMappingViewSourceTimingStatus = {
+  observed: "observed",
+  not_collected: "not_collected",
+} as const;
+
+export const DetectorReviewProxyMappingIntegrityViewValue = {
+  status: "ok",
+  gray: false,
+  low_information: false,
+  likely_corrupt: false,
+} as const;
+export type DetectorReviewProxyMappingIntegrityView =
+  typeof DetectorReviewProxyMappingIntegrityViewValue;
+
+export interface DetectorReviewProxyMappingView {
+  /** @minimum 0 */
+  source_frame_index: number;
+  source_timing_status: DetectorReviewProxyMappingViewSourceTimingStatus;
+  source_decoder_pos_msec?: number | null;
+  /** @minimum 0 */
+  proxy_frame_index: number;
+  proxy_timing_basis: "verified_cfr_frame_index_time_v1";
+  proxy_cfr_time_msec: number;
+  /** @pattern ^[0-9a-f]{64}$ */
+  source_frame_sha256: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  proxy_frame_sha256: string;
+  media_integrity: DetectorReviewProxyMappingIntegrityView;
+}
+
+export interface DetectorReviewProxyManifestView {
+  schema_version: "1.0";
+  artifact_type: "ball_review_proxy";
+  source: DetectorReviewProxySourceView;
+  proxy: DetectorReviewProxyMediaView;
+  /** @pattern ^[0-9a-f]{64}$ */
+  decoder_fingerprint_sha256: string;
+  requested_decode_mode: DetectorReviewProxyManifestViewRequestedDecodeMode;
+  effective_decode_mode: DetectorReviewProxyManifestViewEffectiveDecodeMode;
+  /** @minimum 0 */
+  map_time_tolerance_msec: number;
+  declared_offset_msec: number;
+  coordinate_transform: DetectorReviewProxyCoordinateTransformView;
+  /**
+   * @minItems 1
+   * @maxItems 50
+   */
+  expected_frame_indices: number[];
+  /**
+   * @minItems 1
+   * @maxItems 50
+   */
+  mappings: DetectorReviewProxyMappingView[];
+  /** @pattern ^[0-9a-f]{64}$ */
+  mapping_sha256: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  integrity_report_sha256: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  manifest_sha256: string;
+}
+
+export type BallHistoricalProbeAuthorityViewProbeReport = {
+  [key: string]: unknown;
+};
+
+export type BallHistoricalProbeAuthorityViewProbeResultManifest = {
+  [key: string]: unknown;
+};
+
+export interface BallHistoricalProbeAuthorityView {
+  /** @pattern ^[a-z0-9][a-z0-9._-]{0,119}$ */
+  probe_job_id: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  probe_report_sha256: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  probe_result_manifest_sha256: string;
+  probe_report: BallHistoricalProbeAuthorityViewProbeReport;
+  probe_result_manifest: BallHistoricalProbeAuthorityViewProbeResultManifest;
+  /** @pattern ^[0-9a-f]{64}$ */
+  source_frame_evidence_sha256: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  candidate_evidence_sha256: string;
+}
+
+export type BallFrameReviewProxyAuthorityViewProbeReport = {
+  [key: string]: unknown;
+};
+
+export type BallFrameReviewProxyAuthorityViewProbeResultManifest = {
+  [key: string]: unknown;
+};
+
+export interface BallFrameReviewProxyAuthorityView {
+  /** @pattern ^[a-z0-9][a-z0-9._-]{0,119}$ */
+  probe_job_id: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  probe_report_sha256: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  probe_result_manifest_sha256: string;
+  probe_report: BallFrameReviewProxyAuthorityViewProbeReport;
+  probe_result_manifest: BallFrameReviewProxyAuthorityViewProbeResultManifest;
+  review_proxy_manifest: DetectorReviewProxyManifestView;
+  historical_probe_authority?: BallHistoricalProbeAuthorityView | null;
+}
+
+export interface BallDevelopmentPackageBindingView {
+  /** @pattern ^[a-z0-9][a-z0-9._-]{0,119}$ */
+  session_id: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  package_sha256: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  attempt_family_sha256: string;
+}
+
+export interface BallProfileBindingView {
+  /** @pattern ^[a-z0-9][a-z0-9._-]{0,119}$ */
+  profile_id: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  profile_sha256: string;
+  /** @pattern ^[a-z0-9][a-z0-9._-]{0,119}$ */
+  model_id: string;
+  model_version: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  model_descriptor_sha256: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  weights_sha256: string;
+}
+
+export type BallSamplingManifestViewSelectionProfileId =
+  (typeof BallSamplingManifestViewSelectionProfileId)[keyof typeof BallSamplingManifestViewSelectionProfileId];
+
+export const BallSamplingManifestViewSelectionProfileId = {
+  development_probe_frames_v1: "development_probe_frames_v1",
+  tiny_ball_temporal_block_hash_v1: "tiny_ball_temporal_block_hash_v1",
+} as const;
+
+export type BallSamplingManifestViewLightingStratificationMode =
+  (typeof BallSamplingManifestViewLightingStratificationMode)[keyof typeof BallSamplingManifestViewLightingStratificationMode];
+
+export const BallSamplingManifestViewLightingStratificationMode = {
+  not_applicable_development_evidence: "not_applicable_development_evidence",
+  predeclared_frame_intervals_and_quota_v1:
+    "predeclared_frame_intervals_and_quota_v1",
+} as const;
+
+export type BallSamplingScaleAuthorityViewStratum =
+  (typeof BallSamplingScaleAuthorityViewStratum)[keyof typeof BallSamplingScaleAuthorityViewStratum];
+
+export const BallSamplingScaleAuthorityViewStratum = {
+  near: "near",
+  mid: "mid",
+  far: "far",
+} as const;
+
+export type BallSamplingScaleAuthorityViewStatus =
+  (typeof BallSamplingScaleAuthorityViewStatus)[keyof typeof BallSamplingScaleAuthorityViewStatus];
+
+export const BallSamplingScaleAuthorityViewStatus = {
+  applicable: "applicable",
+  not_applicable: "not_applicable",
+} as const;
+
+export interface BallSamplingScaleAuthorityView {
+  stratum: BallSamplingScaleAuthorityViewStratum;
+  status: BallSamplingScaleAuthorityViewStatus;
+}
+
+export type BallSamplingLightingAuthorityViewStratum =
+  (typeof BallSamplingLightingAuthorityViewStratum)[keyof typeof BallSamplingLightingAuthorityViewStratum];
+
+export const BallSamplingLightingAuthorityViewStratum = {
+  bright_sun: "bright_sun",
+  shadow: "shadow",
+  backlight: "backlight",
+  twilight: "twilight",
+  artificial_light: "artificial_light",
+} as const;
+
+export type BallSamplingLightingAuthorityViewStatus =
+  (typeof BallSamplingLightingAuthorityViewStatus)[keyof typeof BallSamplingLightingAuthorityViewStatus];
+
+export const BallSamplingLightingAuthorityViewStatus = {
+  applicable: "applicable",
+  not_applicable: "not_applicable",
+} as const;
+
+export interface BallSamplingLightingAuthorityView {
+  stratum: BallSamplingLightingAuthorityViewStratum;
+  status: BallSamplingLightingAuthorityViewStatus;
+  /**
+   * @minimum 0
+   * @maximum 50
+   */
+  quota: number;
+  /** @maxItems 32 */
+  frame_intervals: BallFrameIntervalRequest[];
+}
+
+export interface BallSamplingSelectionAuthorityView {
+  schema_version: "1.0";
+  artifact_type: "ball_annotation_sampling_selection_authority";
+  /** @pattern ^[0-9a-f]{64}$ */
+  attempt_family_sha256: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  development_package_sha256: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  source_sha256: string;
+  /** @pattern ^[a-z0-9][a-z0-9._-]{0,119}$ */
+  locked_profile_id: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  locked_profile_sha256: string;
+  sampling_profile_id: "tiny_ball_temporal_groups_v1";
+  metric_profile_id: "tiny_ball_feasibility_metric_v1";
+  /** @pattern ^[0-9a-f]{64}$ */
+  metric_profile_sha256: string;
+  /**
+   * @minimum 20
+   * @maximum 50
+   */
+  target_frame_count: number;
+  /**
+   * @minItems 3
+   * @maxItems 3
+   */
+  scale_applicability: BallSamplingScaleAuthorityView[];
+  /**
+   * @minItems 5
+   * @maxItems 5
+   */
+  lighting_applicability: BallSamplingLightingAuthorityView[];
+}
+
+export type BallCandidateUniverseLightingViewStratum =
+  (typeof BallCandidateUniverseLightingViewStratum)[keyof typeof BallCandidateUniverseLightingViewStratum];
+
+export const BallCandidateUniverseLightingViewStratum = {
+  bright_sun: "bright_sun",
+  shadow: "shadow",
+  backlight: "backlight",
+  twilight: "twilight",
+  artificial_light: "artificial_light",
+} as const;
+
+export interface BallCandidateUniverseLightingView {
+  stratum: BallCandidateUniverseLightingViewStratum;
+  /**
+   * @minimum 3
+   * @maximum 50
+   */
+  quota: number;
+  /**
+   * @minItems 1
+   * @maxItems 32
+   */
+  frame_intervals: BallFrameIntervalRequest[];
+}
+
+export interface BallCandidateUniverseExcludedGroupView {
+  /** @pattern ^[0-9a-f]{64}$ */
+  group_id: string;
+  profile_id: "tiny_ball_temporal_groups_v1";
+  /** @pattern ^[0-9a-f]{64}$ */
+  source_sha256: string;
+  /** @minimum 0 */
+  seed_frame_index: number;
+  /** @minimum 0 */
+  start_frame: number;
+  /** @minimum 0 */
+  end_frame: number;
+  /**
+   * @minItems 2
+   * @maxItems 2
+   */
+  derivative_family: number[];
+  /** @pattern ^[0-9a-f]{64}$ */
+  canonical_moment_id: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  derivative_family_id: string;
+  ancestry_profile: "source-proxy-crop-tile-propagation-closure-v1";
+}
+
+export interface BallCandidateUniverseAuthorityView {
+  schema_version: "1.0";
+  artifact_type: "ball_annotation_candidate_universe";
+  /** @pattern ^[0-9a-f]{64}$ */
+  source_sha256: string;
+  /** @minimum 0 */
+  start_frame: number;
+  /** @minimum 0 */
+  end_frame: number;
+  /** @exclusiveMinimum 0 */
+  candidate_frame_count: number;
+  grouping_profile_id: "tiny_ball_temporal_groups_v1";
+  selection_profile_id: "tiny_ball_temporal_block_hash_v1";
+  /**
+   * @minItems 1
+   * @maxItems 5
+   */
+  lighting_strata: BallCandidateUniverseLightingView[];
+  excluded_temporal_groups: BallCandidateUniverseExcludedGroupView[];
+}
+
+export type BallSamplingManifestViewDataRole =
+  (typeof BallSamplingManifestViewDataRole)[keyof typeof BallSamplingManifestViewDataRole];
+
+export const BallSamplingManifestViewDataRole = {
+  development: "development",
+  check: "check",
+} as const;
+
+export interface BallSamplingTemporalGroupView {
+  /** @pattern ^[0-9a-f]{64}$ */
+  group_id: string;
+  profile_id: "tiny_ball_temporal_groups_v1";
+  /** @pattern ^[0-9a-f]{64}$ */
+  source_sha256: string;
+  /** @minimum 0 */
+  seed_frame_index: number;
+  /** @minimum 0 */
+  start_frame: number;
+  /** @minimum 0 */
+  end_frame: number;
+  /**
+   * @minItems 2
+   * @maxItems 2
+   */
+  derivative_family: number[];
+  /** @pattern ^[0-9a-f]{64}$ */
+  canonical_moment_id: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  derivative_family_id: string;
+  ancestry_profile: "source-proxy-crop-tile-propagation-closure-v1";
+  /** @minimum 0 */
+  frame_index: number;
+  pre_reveal_lighting_stratum?:
+    | "bright_sun"
+    | "shadow"
+    | "backlight"
+    | "twilight"
+    | "artificial_light"
+    | null;
+}
+
+export interface BallSamplingManifestView {
+  schema_version: "1.0";
+  artifact_type: "ball_annotation_sampling_manifest";
+  profile_id: "tiny_ball_temporal_groups_v1";
+  selection_profile_id: BallSamplingManifestViewSelectionProfileId;
+  scale_stratification_mode: "post_reveal_support_gate_only";
+  lighting_stratification_mode: BallSamplingManifestViewLightingStratificationMode;
+  /** @pattern ^[0-9a-f]{64}$ */
+  selection_seed_sha256: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  candidate_universe_sha256: string;
+  /** @minimum 0 */
+  candidate_universe_start_frame: number;
+  /** @minimum 0 */
+  candidate_universe_end_frame: number;
+  selection_authority?: BallSamplingSelectionAuthorityView | null;
+  candidate_universe_authority?: BallCandidateUniverseAuthorityView | null;
+  metric_profile_id: "tiny_ball_feasibility_metric_v1";
+  /** @pattern ^[0-9a-f]{64}$ */
+  metric_profile_sha256: string;
+  data_role: BallSamplingManifestViewDataRole;
+  /** @exclusiveMinimum 0 */
+  target_frame_count: number;
+  /** @minItems 1 */
+  frame_indices: number[];
+  /** @minItems 1 */
+  groups: BallSamplingTemporalGroupView[];
+  excluded_development_groups: BallSamplingTemporalGroupView[];
+  locked_before_probe: boolean;
+  /** @pattern ^[0-9a-f]{64}$ */
+  source_sha256: string;
+  /** @pattern ^[a-z0-9][a-z0-9._-]{0,119}$ */
+  locked_profile_id: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  locked_profile_sha256: string;
+  strata_applicability: BallStrataApplicabilityView;
+  /** @pattern ^[0-9a-f]{64}$ */
+  manifest_sha256: string;
+}
+
+export interface BallCheckProbeAuthorityView {
+  /** @pattern ^[a-z0-9][a-z0-9._-]{0,119}$ */
+  job_id: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  request_sha256: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  intent_sha256: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  result_manifest_sha256: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  report_sha256: string;
+  /** @pattern ^[a-z0-9][a-z0-9._-]{0,119}$ */
+  parent_trial_id: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  runtime_environment_sha256: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  execution_bundle_sha256: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  frozen_profiles_sha256: string;
+  locked_profile: BallProfileBindingView;
+  control_profile: BallProfileBindingView;
+}
+
+export interface BallDetectorCandidateOriginView {
+  /** @pattern ^[a-z0-9][a-z0-9._-]{0,119}$ */
+  probe_job_id: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  probe_report_sha256: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  probe_result_manifest_sha256: string;
+  /** @pattern ^[a-z0-9][a-z0-9._-]{0,119}$ */
+  source_artifact_id: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  candidate_evidence_sha256: string;
+}
+
+export interface BallDetectorCandidateReviewMediaView {
+  /** @pattern ^[a-z0-9][a-z0-9._-]{0,119}$ */
+  probe_job_id: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  probe_report_sha256: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  probe_result_manifest_sha256: string;
+  /** @pattern ^[a-z0-9][a-z0-9._-]{0,119}$ */
+  source_artifact_id: string;
+  proxy_binding_sha256: string | null;
+}
+
+export interface BallBoxSourcePx {
+  /** @minimum 0 */
+  left: number;
+  /** @minimum 0 */
+  top: number;
+  /** @exclusiveMinimum 0 */
+  right: number;
+  /** @exclusiveMinimum 0 */
+  bottom: number;
+}
+
+export interface BallSuggestedCandidateAuthorityView {
+  /** @pattern ^[a-z0-9][a-z0-9._-]{0,119}$ */
+  candidate_id: string;
+  /** @pattern ^[a-z0-9][a-z0-9._-]{0,119}$ */
+  profile_id: string;
+  /**
+   * @minimum 1
+   * @maximum 5
+   */
+  rank: number;
+  bbox_source_px: BallBoxSourcePx;
+  /**
+   * @minimum 0
+   * @maximum 1
+   */
+  confidence: number;
+  annotation_state: "suggested";
+  training_use: "excluded";
+  truth_status: "unconfirmed_suggestion";
+  /** @pattern ^[a-z0-9][a-z0-9._-]{0,119}$ */
+  suggestion_job_id: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  suggestion_sha256: string;
+}
+
+export type BallDetectorCandidateDecisionViewDecision =
+  (typeof BallDetectorCandidateDecisionViewDecision)[keyof typeof BallDetectorCandidateDecisionViewDecision];
+
+export const BallDetectorCandidateDecisionViewDecision = {
+  accepted_human_annotation: "accepted_human_annotation",
+  dismissed_manual_annotation: "dismissed_manual_annotation",
+} as const;
+
+export interface BallDetectorCandidateDecisionView {
+  decision: BallDetectorCandidateDecisionViewDecision;
+  /** @pattern ^[a-z0-9][a-z0-9._-]{0,119}$ */
+  revision_id: string;
+  /** @exclusiveMinimum 0 */
+  revision: number;
+  /** @pattern ^[a-z0-9][a-z0-9._-]{0,119}$ */
+  operator_id: string;
+  decided_at: string;
+}
+
+export interface BallDetectorCandidateEvidenceView {
+  /** @minimum 0 */
+  frame_index: number;
+  candidate_origin: BallDetectorCandidateOriginView;
+  review_media: BallDetectorCandidateReviewMediaView;
+  candidate: BallSuggestedCandidateAuthorityView;
+  /** @pattern ^[0-9a-f]{64}$ */
+  candidate_sha256: string;
+  decision: BallDetectorCandidateDecisionView | null;
+}
+
+export interface BallPointSourcePx {
+  /** @minimum 0 */
+  x: number;
+  /** @minimum 0 */
+  y: number;
+}
+
+export type BallEffectiveAnnotationViewPresence =
+  (typeof BallEffectiveAnnotationViewPresence)[keyof typeof BallEffectiveAnnotationViewPresence];
+
+export const BallEffectiveAnnotationViewPresence = {
+  present: "present",
+  absent: "absent",
+  unknown: "unknown",
+} as const;
+
+export type BallEffectiveAnnotationViewVisibility =
+  (typeof BallEffectiveAnnotationViewVisibility)[keyof typeof BallEffectiveAnnotationViewVisibility];
+
+export const BallEffectiveAnnotationViewVisibility = {
+  visible: "visible",
+  partial: "partial",
+  unresolvable: "unresolvable",
+  not_applicable: "not_applicable",
+} as const;
+
+export type BallEffectiveAnnotationViewTrainingUse =
+  (typeof BallEffectiveAnnotationViewTrainingUse)[keyof typeof BallEffectiveAnnotationViewTrainingUse];
+
+export const BallEffectiveAnnotationViewTrainingUse = {
+  positive: "positive",
+  background: "background",
+  excluded: "excluded",
+} as const;
+
+export type BallEffectiveAnnotationViewAnnotationState =
+  (typeof BallEffectiveAnnotationViewAnnotationState)[keyof typeof BallEffectiveAnnotationViewAnnotationState];
+
+export const BallEffectiveAnnotationViewAnnotationState = {
+  suggested: "suggested",
+  confirmed: "confirmed",
+} as const;
+
+export type BallEffectiveAnnotationViewScaleStratum =
+  (typeof BallEffectiveAnnotationViewScaleStratum)[keyof typeof BallEffectiveAnnotationViewScaleStratum];
+
+export const BallEffectiveAnnotationViewScaleStratum = {
+  near: "near",
+  mid: "mid",
+  far: "far",
+  not_applicable: "not_applicable",
+} as const;
+
+export type BallEffectiveAnnotationViewLightingTag =
+  (typeof BallEffectiveAnnotationViewLightingTag)[keyof typeof BallEffectiveAnnotationViewLightingTag];
+
+export const BallEffectiveAnnotationViewLightingTag = {
+  bright_sun: "bright_sun",
+  shadow: "shadow",
+  backlight: "backlight",
+  twilight: "twilight",
+  artificial_light: "artificial_light",
+  not_applicable: "not_applicable",
+} as const;
+
+export type BallEffectiveAnnotationViewMotionOcclusionTagsItem =
+  (typeof BallEffectiveAnnotationViewMotionOcclusionTagsItem)[keyof typeof BallEffectiveAnnotationViewMotionOcclusionTagsItem];
+
+export const BallEffectiveAnnotationViewMotionOcclusionTagsItem = {
+  ground: "ground",
+  airborne: "airborne",
+  motion_blurred: "motion_blurred",
+  occluded: "occluded",
+  reappearance: "reappearance",
+  stationary: "stationary",
+} as const;
+
+export type BallEffectiveAnnotationViewProvenance =
+  (typeof BallEffectiveAnnotationViewProvenance)[keyof typeof BallEffectiveAnnotationViewProvenance];
+
+export const BallEffectiveAnnotationViewProvenance = {
+  manual_human_annotation: "manual_human_annotation",
+  detector_candidate_human_confirmed: "detector_candidate_human_confirmed",
+  propagation_suggestion_human_confirmed:
+    "propagation_suggestion_human_confirmed",
+  suggestion_dismissed_manual: "suggestion_dismissed_manual",
+} as const;
+
+export interface BallEffectiveAnnotationView {
+  point_source_px: BallPointSourcePx | null;
+  bbox_source_px: BallBoxSourcePx | null;
+  presence: BallEffectiveAnnotationViewPresence;
+  visibility: BallEffectiveAnnotationViewVisibility;
+  training_use: BallEffectiveAnnotationViewTrainingUse;
+  annotation_state: BallEffectiveAnnotationViewAnnotationState;
+  scale_stratum: BallEffectiveAnnotationViewScaleStratum;
+  lighting_tag: BallEffectiveAnnotationViewLightingTag;
+  /** @maxItems 6 */
+  motion_occlusion_tags: BallEffectiveAnnotationViewMotionOcclusionTagsItem[];
+  provenance: BallEffectiveAnnotationViewProvenance;
+  /** @minimum 0 */
+  frame_index: number;
+}
+
+export type BallSealedAnnotationRevisionViewOperation =
+  (typeof BallSealedAnnotationRevisionViewOperation)[keyof typeof BallSealedAnnotationRevisionViewOperation];
+
+export const BallSealedAnnotationRevisionViewOperation = {
+  set: "set",
+  delete: "delete",
+  undo: "undo",
+} as const;
+
+export type BallAnnotationPayloadPresence =
+  (typeof BallAnnotationPayloadPresence)[keyof typeof BallAnnotationPayloadPresence];
+
+export const BallAnnotationPayloadPresence = {
+  present: "present",
+  absent: "absent",
+  unknown: "unknown",
+} as const;
+
+export type BallAnnotationPayloadVisibility =
+  (typeof BallAnnotationPayloadVisibility)[keyof typeof BallAnnotationPayloadVisibility];
+
+export const BallAnnotationPayloadVisibility = {
+  visible: "visible",
+  partial: "partial",
+  unresolvable: "unresolvable",
+  not_applicable: "not_applicable",
+} as const;
+
+export type BallAnnotationPayloadTrainingUse =
+  (typeof BallAnnotationPayloadTrainingUse)[keyof typeof BallAnnotationPayloadTrainingUse];
+
+export const BallAnnotationPayloadTrainingUse = {
+  positive: "positive",
+  background: "background",
+  excluded: "excluded",
+} as const;
+
+export type BallAnnotationPayloadAnnotationState =
+  (typeof BallAnnotationPayloadAnnotationState)[keyof typeof BallAnnotationPayloadAnnotationState];
+
+export const BallAnnotationPayloadAnnotationState = {
+  suggested: "suggested",
+  confirmed: "confirmed",
+} as const;
+
+export type BallAnnotationPayloadScaleStratum =
+  (typeof BallAnnotationPayloadScaleStratum)[keyof typeof BallAnnotationPayloadScaleStratum];
+
+export const BallAnnotationPayloadScaleStratum = {
+  near: "near",
+  mid: "mid",
+  far: "far",
+  not_applicable: "not_applicable",
+} as const;
+
+export type BallAnnotationPayloadLightingTag =
+  (typeof BallAnnotationPayloadLightingTag)[keyof typeof BallAnnotationPayloadLightingTag];
+
+export const BallAnnotationPayloadLightingTag = {
+  bright_sun: "bright_sun",
+  shadow: "shadow",
+  backlight: "backlight",
+  twilight: "twilight",
+  artificial_light: "artificial_light",
+  not_applicable: "not_applicable",
+} as const;
+
+export type BallAnnotationPayloadMotionOcclusionTagsItem =
+  (typeof BallAnnotationPayloadMotionOcclusionTagsItem)[keyof typeof BallAnnotationPayloadMotionOcclusionTagsItem];
+
+export const BallAnnotationPayloadMotionOcclusionTagsItem = {
+  ground: "ground",
+  airborne: "airborne",
+  motion_blurred: "motion_blurred",
+  occluded: "occluded",
+  reappearance: "reappearance",
+  stationary: "stationary",
+} as const;
+
+export type BallAnnotationPayloadProvenance =
+  (typeof BallAnnotationPayloadProvenance)[keyof typeof BallAnnotationPayloadProvenance];
+
+export const BallAnnotationPayloadProvenance = {
+  manual_human_annotation: "manual_human_annotation",
+  detector_candidate_human_confirmed: "detector_candidate_human_confirmed",
+  propagation_suggestion_human_confirmed:
+    "propagation_suggestion_human_confirmed",
+  suggestion_dismissed_manual: "suggestion_dismissed_manual",
+} as const;
+
+export interface BallAnnotationPayload {
+  point_source_px: BallPointSourcePx | null;
+  bbox_source_px: BallBoxSourcePx | null;
+  presence: BallAnnotationPayloadPresence;
+  visibility: BallAnnotationPayloadVisibility;
+  training_use: BallAnnotationPayloadTrainingUse;
+  annotation_state: BallAnnotationPayloadAnnotationState;
+  scale_stratum: BallAnnotationPayloadScaleStratum;
+  lighting_tag: BallAnnotationPayloadLightingTag;
+  /** @maxItems 6 */
+  motion_occlusion_tags: BallAnnotationPayloadMotionOcclusionTagsItem[];
+  provenance: BallAnnotationPayloadProvenance;
+}
+
+export interface BallSealedAnnotationRevisionView {
+  schema_version: "1.0";
+  artifact_type: "ball_annotation_revision";
+  /** @pattern ^[a-z0-9][a-z0-9._-]{0,119}$ */
+  revision_id: string;
+  /** @pattern ^[a-z0-9][a-z0-9._-]{0,119}$ */
+  session_id: string;
+  /** @minimum 0 */
+  frame_index: number;
+  /** @exclusiveMinimum 0 */
+  revision: number;
+  operation: BallSealedAnnotationRevisionViewOperation;
+  /** @pattern ^[a-z0-9][a-z0-9._-]{0,119}$ */
+  mutation_id: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  mutation_sha256: string;
+  /** @minimum 0 */
+  expected_revision: number;
+  supersedes_revision: number | null;
+  undo_revision: number | null;
+  accepted_suggestion_kind: "detector_candidate" | "propagation" | null;
+  accepted_suggestion_id: string | null;
+  accepted_suggestion_job_id: string | null;
+  accepted_suggestion_sha256: string | null;
+  dismissed_suggestion_kind: "detector_candidate" | "propagation" | null;
+  dismissed_suggestion_id: string | null;
+  dismissed_suggestion_job_id: string | null;
+  dismissed_suggestion_sha256: string | null;
+  previous_effective_annotation: BallAnnotationPayload | null;
+  effective_annotation: BallAnnotationPayload | null;
+  /** @pattern ^[a-z0-9][a-z0-9._-]{0,119}$ */
+  operator_id: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  annotation_etag: string;
+  created_at: string;
+}
+
+export type BallSealedFrameEvidenceViewFrameRole =
+  (typeof BallSealedFrameEvidenceViewFrameRole)[keyof typeof BallSealedFrameEvidenceViewFrameRole];
+
+export const BallSealedFrameEvidenceViewFrameRole = {
+  primary: "primary",
+  supplemental: "supplemental",
+} as const;
+
+export interface BallFrameEvidenceSourceView {
+  /** @pattern ^[0-9a-f]{64}$ */
+  sha256: string;
+  /** @exclusiveMinimum 0 */
+  width: number;
+  /** @exclusiveMinimum 0 */
+  height: number;
+}
+
+export interface BallFrameEvidenceJpegView {
+  /** @pattern ^[0-9a-f]{64}$ */
+  sha256: string;
+  /** @exclusiveMinimum 0 */
+  size_bytes: number;
+  media_type: "image/jpeg";
+}
+
+export interface BallCanonicalTemporalGroupView {
+  /** @pattern ^[0-9a-f]{64}$ */
+  group_id: string;
+  profile_id: "tiny_ball_temporal_groups_v1";
+  /** @pattern ^[0-9a-f]{64}$ */
+  source_sha256: string;
+  /** @minimum 0 */
+  seed_frame_index: number;
+  /** @minimum 0 */
+  start_frame: number;
+  /** @minimum 0 */
+  end_frame: number;
+  /**
+   * @minItems 2
+   * @maxItems 2
+   */
+  derivative_family: number[];
+  /** @pattern ^[0-9a-f]{64}$ */
+  canonical_moment_id: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  derivative_family_id: string;
+  ancestry_profile: "source-proxy-crop-tile-propagation-closure-v1";
+}
+
+export interface BallTemporalDerivativeView {
+  artifact_type: "propagation";
+  /** @pattern ^[a-z0-9][a-z0-9._-]{0,119}$ */
+  artifact_id: string;
+  inheritance_rule: "inherit-source-group-without-regrouping-v1";
+}
+
+export interface BallInheritedTemporalGroupView {
+  /** @pattern ^[0-9a-f]{64}$ */
+  group_id: string;
+  profile_id: "tiny_ball_temporal_groups_v1";
+  /** @pattern ^[0-9a-f]{64}$ */
+  source_sha256: string;
+  /** @minimum 0 */
+  seed_frame_index: number;
+  /** @minimum 0 */
+  start_frame: number;
+  /** @minimum 0 */
+  end_frame: number;
+  /**
+   * @minItems 2
+   * @maxItems 2
+   */
+  derivative_family: number[];
+  /** @pattern ^[0-9a-f]{64}$ */
+  canonical_moment_id: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  derivative_family_id: string;
+  ancestry_profile: "source-proxy-crop-tile-propagation-closure-v1";
+  derivative: BallTemporalDerivativeView;
+  /** @pattern ^[0-9a-f]{64}$ */
+  derivative_binding_sha256: string;
+}
+
+export interface BallSourceFrameProbeEvidenceView {
+  schema_version: "1.0";
+  artifact_type: "ball_source_frame_probe_evidence";
+  /** @pattern ^[a-z0-9][a-z0-9._-]{0,119}$ */
+  probe_job_id: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  probe_report_sha256: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  probe_result_manifest_sha256: string;
+  /** @pattern ^[a-z0-9][a-z0-9._-]{0,119}$ */
+  artifact_id: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  artifact_sha256: string;
+  /** @exclusiveMinimum 0 */
+  artifact_size_bytes: number;
+  artifact_media_type: "image/jpeg";
+  /** @pattern ^[0-9a-f]{64}$ */
+  binding_sha256: string;
+}
+
+export type BallSourceFrameTimingBindingViewTimingProfileId =
+  (typeof BallSourceFrameTimingBindingViewTimingProfileId)[keyof typeof BallSourceFrameTimingBindingViewTimingProfileId];
+
+export const BallSourceFrameTimingBindingViewTimingProfileId = {
+  verified_decoder_pos_msec_after_frame_position_v1:
+    "verified_decoder_pos_msec_after_frame_position_v1",
+  source_pos_msec_not_collected_proxy_cfr_verified_v1:
+    "source_pos_msec_not_collected_proxy_cfr_verified_v1",
+} as const;
+
+export type BallSourceFrameTimingBindingViewTimingStatus =
+  (typeof BallSourceFrameTimingBindingViewTimingStatus)[keyof typeof BallSourceFrameTimingBindingViewTimingStatus];
+
+export const BallSourceFrameTimingBindingViewTimingStatus = {
+  observed: "observed",
+  not_collected: "not_collected",
+} as const;
+
+export type BallSourceFrameTimingBindingViewEffectiveDecodeMode =
+  (typeof BallSourceFrameTimingBindingViewEffectiveDecodeMode)[keyof typeof BallSourceFrameTimingBindingViewEffectiveDecodeMode];
+
+export const BallSourceFrameTimingBindingViewEffectiveDecodeMode = {
+  sequential: "sequential",
+  preroll_verified: "preroll_verified",
+  direct_verified: "direct_verified",
+  sequential_fallback: "sequential_fallback",
+} as const;
+
+export interface BallTruePresentationTimestampView {
+  status: "not_collected";
+  /** @nullable */
+  value_seconds: null;
+  /** @nullable */
+  method: null;
+}
+
+export type BallSourceFrameTimingBindingViewPositionVerification =
+  (typeof BallSourceFrameTimingBindingViewPositionVerification)[keyof typeof BallSourceFrameTimingBindingViewPositionVerification];
+
+export const BallSourceFrameTimingBindingViewPositionVerification = {
+  opencv_next_frame_index_with_025_tolerance:
+    "opencv_next_frame_index_with_0.25_tolerance",
+  verified_review_proxy_frame_index_mapping_v1:
+    "verified_review_proxy_frame_index_mapping_v1",
+} as const;
+
+export type BallCrossDecodeObservationViewEffectiveDecodeMode =
+  (typeof BallCrossDecodeObservationViewEffectiveDecodeMode)[keyof typeof BallCrossDecodeObservationViewEffectiveDecodeMode];
+
+export const BallCrossDecodeObservationViewEffectiveDecodeMode = {
+  sequential: "sequential",
+  preroll_verified: "preroll_verified",
+  direct_verified: "direct_verified",
+  sequential_fallback: "sequential_fallback",
+} as const;
+
+export interface BallCrossDecodeObservationView {
+  effective_decode_mode: BallCrossDecodeObservationViewEffectiveDecodeMode;
+  /** @minimum 0 */
+  decoded_frame_position: number;
+  decoder_reported_pos_msec: number;
+  /** @pattern ^[0-9a-f]{64}$ */
+  source_frame_jpeg_sha256: string;
+}
+
+export interface BallCrossDecodeVerificationView {
+  method: "decoder_pos_msec_and_frame_digest_agreement_v1";
+  /** @minimum 0 */
+  tolerance_msec: number;
+  /**
+   * @minItems 2
+   * @maxItems 4
+   */
+  observations: BallCrossDecodeObservationView[];
+  /** @pattern ^[0-9a-f]{64}$ */
+  verification_sha256: string;
+}
+
+export interface BallSourceFrameTimingBindingView {
+  schema_version: "1.0";
+  artifact_type: "ball_source_frame_timing_binding";
+  timing_profile_id: BallSourceFrameTimingBindingViewTimingProfileId;
+  timing_status: BallSourceFrameTimingBindingViewTimingStatus;
+  /** @pattern ^[0-9a-f]{64}$ */
+  source_sha256: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  runtime_environment_sha256: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  source_frame_jpeg_sha256: string;
+  /** @minimum 0 */
+  frame_index: number;
+  /** @minimum 0 */
+  decoded_frame_position: number;
+  /** @exclusiveMinimum 0 */
+  fps: number;
+  effective_decode_mode: BallSourceFrameTimingBindingViewEffectiveDecodeMode;
+  decoder_reported_pos_msec: number | null;
+  decoder_time_seconds: number | null;
+  decoder_timing_observation_method:
+    | "opencv_cap_prop_pos_msec_after_verified_frame_read"
+    | null;
+  /** @minimum 0 */
+  display_time_seconds: number;
+  display_time_derivation: "frame_index_divided_by_fps_for_display_only_not_source_pts";
+  true_presentation_timestamp: BallTruePresentationTimestampView;
+  position_verification: BallSourceFrameTimingBindingViewPositionVerification;
+  cross_decode_verification: BallCrossDecodeVerificationView | null;
+  /** @pattern ^[0-9a-f]{64}$ */
+  timing_binding_sha256: string;
+}
+
+export interface BallProxyMediaBindingView {
+  /** @pattern ^[0-9a-f]{64}$ */
+  sha256: string;
+  /** @exclusiveMinimum 0 */
+  size_bytes: number;
+  /** @exclusiveMinimum 0 */
+  width: number;
+  /** @exclusiveMinimum 0 */
+  height: number;
+}
+
+export type BallProxyMappedFrameViewTimingStatus =
+  (typeof BallProxyMappedFrameViewTimingStatus)[keyof typeof BallProxyMappedFrameViewTimingStatus];
+
+export const BallProxyMappedFrameViewTimingStatus = {
+  observed: "observed",
+  not_collected: "not_collected",
+} as const;
+
+export interface BallProxyMappedFrameView {
+  /** @minimum 0 */
+  frame_index: number;
+  timing_status: BallProxyMappedFrameViewTimingStatus;
+  decoder_reported_pos_msec?: number | null;
+  /** @pattern ^[0-9a-f]{64}$ */
+  sha256: string;
+}
+
+export interface BallProxyCfrMappedFrameView {
+  /** @minimum 0 */
+  frame_index: number;
+  timing_basis: "verified_cfr_frame_index_time_v1";
+  cfr_time_msec: number;
+  /** @pattern ^[0-9a-f]{64}$ */
+  sha256: string;
+}
+
+export type BallProxyTimeMappingViewMethod =
+  (typeof BallProxyTimeMappingViewMethod)[keyof typeof BallProxyTimeMappingViewMethod];
+
+export const BallProxyTimeMappingViewMethod = {
+  explicit_per_frame_decoder_pos_msec_map_v1:
+    "explicit_per_frame_decoder_pos_msec_map_v1",
+  exact_frame_index_to_verified_proxy_cfr_v1:
+    "exact_frame_index_to_verified_proxy_cfr_v1",
+} as const;
+
+export type BallProxyTimeMappingViewSourceTimingStatus =
+  (typeof BallProxyTimeMappingViewSourceTimingStatus)[keyof typeof BallProxyTimeMappingViewSourceTimingStatus];
+
+export const BallProxyTimeMappingViewSourceTimingStatus = {
+  observed: "observed",
+  not_collected: "not_collected",
+} as const;
+
+export interface BallProxyTimeMappingView {
+  method: BallProxyTimeMappingViewMethod;
+  source_timing_status: BallProxyTimeMappingViewSourceTimingStatus;
+  proxy_timing_basis: "verified_cfr_frame_index_time_v1";
+  declared_offset_msec: number;
+  observed_offset_msec?: number | null;
+  residual_msec?: number | null;
+  /** @minimum 0 */
+  tolerance_msec: number;
+}
+
+export interface BallReviewProxyFrameBindingView {
+  schema_version: "1.0";
+  artifact_type: "ball_review_proxy_frame_binding";
+  proxy: BallProxyMediaBindingView;
+  /** @pattern ^[0-9a-f]{64}$ */
+  map_sha256: string;
+  source_frame: BallProxyMappedFrameView;
+  proxy_frame: BallProxyCfrMappedFrameView;
+  /** @minimum 0 */
+  map_time_tolerance_msec: number;
+  declared_offset_msec: number;
+  time_mapping: BallProxyTimeMappingView;
+  /** @pattern ^[0-9a-f]{64}$ */
+  binding_sha256: string;
+}
+
+export interface BallSupplementalPropagationEvidenceView {
+  schema_version: "1.0";
+  artifact_type: "ball_supplemental_propagation_evidence";
+  /** @pattern ^[a-z0-9][a-z0-9._-]{0,119}$ */
+  propagation_job_id: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  propagation_report_sha256: string;
+  /** @pattern ^[a-z0-9][a-z0-9._-]{0,119}$ */
+  neighbor_probe_job_id: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  neighbor_probe_report_sha256: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  neighbor_probe_result_manifest_sha256: string;
+  /** @pattern ^[a-z0-9][a-z0-9._-]{0,119}$ */
+  neighbor_artifact_id: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  neighbor_artifact_sha256: string;
+  /** @exclusiveMinimum 0 */
+  neighbor_artifact_size_bytes: number;
+  /** @pattern ^[0-9a-f]{64}$ */
+  propagation_intent_sha256: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  seed_binding_sha256: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  tracker_profile_sha256: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  propagation_frame_result_sha256: string;
+  suggestion_id: string | null;
+  suggestion_sha256: string | null;
+  /** @pattern ^[0-9a-f]{64}$ */
+  temporal_group_derivative_binding_sha256: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  binding_sha256: string;
+}
+
+export interface BallSealedFrameEvidenceView {
+  schema_version: "1.0";
+  artifact_type: "ball_sealed_frame_evidence";
+  /** @minimum 0 */
+  frame_index: number;
+  frame_role: BallSealedFrameEvidenceViewFrameRole;
+  source: BallFrameEvidenceSourceView;
+  source_frame_jpeg: BallFrameEvidenceJpegView;
+  temporal_group:
+    | BallCanonicalTemporalGroupView
+    | BallInheritedTemporalGroupView;
+  probe_evidence: BallSourceFrameProbeEvidenceView;
+  timing_binding: BallSourceFrameTimingBindingView;
+  proxy_binding: BallReviewProxyFrameBindingView | null;
+  propagation_evidence: BallSupplementalPropagationEvidenceView | null;
+  /** @exclusiveMinimum 0 */
+  effective_revision: number;
+  /** @pattern ^[0-9a-f]{64}$ */
+  effective_annotation_sha256: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  revision_chain_sha256: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  frame_evidence_sha256: string;
+}
+
+export interface BallImmutableFrameMediaView {
+  /** @minimum 0 */
+  frame_index: number;
+  /** @pattern ^frames/[0-9]{9}\.jpg$ */
+  relative_path: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  sha256: string;
+  /** @exclusiveMinimum 0 */
+  size_bytes: number;
+  media_type: "image/jpeg";
+  /** @exclusiveMinimum 0 */
+  width: number;
+  /** @exclusiveMinimum 0 */
+  height: number;
+}
+
+export interface BallPropagationSeedBindingView {
+  /** @minimum 0 */
+  frame_index: number;
+  /** @exclusiveMinimum 0 */
+  annotation_revision: number;
+  /** @pattern ^[0-9a-f]{64}$ */
+  annotation_etag: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  annotation_sha256: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  source_frame_sha256: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  temporal_group_id: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  sampling_manifest_sha256: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  tracker_profile_sha256: string;
+}
+
+export interface BallPropagationTrackerProfileView {
+  profile_id: "tiny_ball_bounded_template_flow_v1";
+  version: "1.0";
+  radius_frames_max: 2;
+  search_radius_source_px: 24;
+  /**
+   * @minimum 0
+   * @maximum 1
+   */
+  minimum_match_score: number;
+  /**
+   * @minimum 0
+   * @maximum 1
+   */
+  minimum_backward_match_score: number;
+  /** @exclusiveMinimum 0 */
+  maximum_forward_backward_error_px: number;
+  /** @pattern ^[0-9a-f]{64}$ */
+  profile_sha256: string;
+}
+
+export type BallPropagationFrameResultViewDirection =
+  (typeof BallPropagationFrameResultViewDirection)[keyof typeof BallPropagationFrameResultViewDirection];
+
+export const BallPropagationFrameResultViewDirection = {
+  backward: "backward",
+  forward: "forward",
+} as const;
+
+export type BallPropagationFrameResultViewStatus =
+  (typeof BallPropagationFrameResultViewStatus)[keyof typeof BallPropagationFrameResultViewStatus];
+
+export const BallPropagationFrameResultViewStatus = {
+  success: "success",
+  failed: "failed",
+} as const;
+
+export interface BallPropagationHumanConfirmationView {
+  /** @pattern ^[a-z0-9][a-z0-9._-]{0,119}$ */
+  revision_id: string;
+  /** @exclusiveMinimum 0 */
+  revision: number;
+  /** @pattern ^[a-z0-9][a-z0-9._-]{0,119}$ */
+  operator_id: string;
+  /** @minimum 0 */
+  center_error_px: number;
+  iou?: number | null;
+  corrected: boolean;
+  confirmed_at: string;
+}
+
+export interface BallPropagationHumanDecisionView {
+  decision: "dismissed_manual_annotation";
+  /** @pattern ^[a-z0-9][a-z0-9._-]{0,119}$ */
+  revision_id: string;
+  /** @exclusiveMinimum 0 */
+  revision: number;
+  /** @pattern ^[a-z0-9][a-z0-9._-]{0,119}$ */
+  operator_id: string;
+  decided_at: string;
+}
+
+export interface BallPropagationFrameResultView {
+  /** @minimum 0 */
+  frame_index: number;
+  direction: BallPropagationFrameResultViewDirection;
+  status: BallPropagationFrameResultViewStatus;
+  failure_code: string | null;
+  /** @pattern ^[0-9a-f]{64}$ */
+  source_frame_sha256: string;
+  suggestion_id: string | null;
+  match_score?: number | null;
+  backward_match_score?: number | null;
+  forward_backward_error_px?: number | null;
+  step_displacement_px?: number | null;
+  pending_human_confirmation: boolean;
+  human_confirmation?: BallPropagationHumanConfirmationView | null;
+  human_decision?: BallPropagationHumanDecisionView | null;
+}
+
+export type BallPropagationSuggestionViewVisibility =
+  (typeof BallPropagationSuggestionViewVisibility)[keyof typeof BallPropagationSuggestionViewVisibility];
+
+export const BallPropagationSuggestionViewVisibility = {
+  visible: "visible",
+  partial: "partial",
+} as const;
+
+export interface BallPropagationSelfCheckView {
+  /**
+   * @minimum -1
+   * @maximum 1
+   */
+  match_score: number;
+  /**
+   * @minimum -1
+   * @maximum 1
+   */
+  backward_match_score: number;
+  /** @minimum 0 */
+  forward_backward_error_px: number;
+  /** @minimum 0 */
+  step_displacement_px: number;
+}
+
+export interface BallPropagationSuggestionView {
+  /** @pattern ^[a-z0-9][a-z0-9._-]{0,119}$ */
+  suggestion_id: string;
+  /** @minimum 0 */
+  frame_index: number;
+  /** @pattern ^[0-9a-f]{64}$ */
+  temporal_group_id: string;
+  temporal_group: BallInheritedTemporalGroupView;
+  point_source_px: BallPointSourcePx | null;
+  bbox_source_px: BallBoxSourcePx | null;
+  presence: "present";
+  visibility: BallPropagationSuggestionViewVisibility;
+  training_use: "excluded";
+  annotation_state: "suggested";
+  provenance: "tiny_ball_bounded_template_flow_v1";
+  /** @pattern ^[0-9a-f]{64}$ */
+  source_frame_sha256: string;
+  self_check: BallPropagationSelfCheckView;
+  /** @pattern ^[a-z0-9][a-z0-9._-]{0,119}$ */
+  suggestion_job_id: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  suggestion_sha256: string;
+  pending_human_confirmation: boolean;
+  human_confirmation?: BallPropagationHumanConfirmationView | null;
+  human_decision?: BallPropagationHumanDecisionView | null;
+}
+
+export interface BallPropagationSummaryView {
+  attempted_by_direction: Partial<Record<"backward" | "forward", number>>;
+  succeeded_by_direction: Partial<Record<"backward" | "forward", number>>;
+  /**
+   * @minimum 0
+   * @maximum 4
+   */
+  attempted_frame_count: number;
+  /**
+   * @minimum 0
+   * @maximum 4
+   */
+  succeeded_frame_count: number;
+  /**
+   * @minimum 0
+   * @maximum 1
+   */
+  self_check_coverage: number;
+  /**
+   * @minimum 0
+   * @maximum 2
+   */
+  self_checked_max_safe_window_frames: number;
+  /**
+   * @minimum 0
+   * @maximum 4
+   */
+  human_validated_frame_count: number;
+  /**
+   * @minimum 0
+   * @maximum 4
+   */
+  human_dismissed_frame_count: number;
+  /**
+   * @minimum 0
+   * @maximum 4
+   */
+  pending_human_confirmation_count: number;
+  human_validated_center_error_px?: number | null;
+  human_validated_iou?: number | null;
+  human_validated_safe_span_frames?: number | null;
+  pending_human_confirmation: boolean;
+}
+
+export interface BallPropagationDecisionCountsView {
+  /**
+   * @minimum 0
+   * @maximum 4
+   */
+  confirmed: number;
+  /**
+   * @minimum 0
+   * @maximum 4
+   */
+  dismissed: number;
+  /**
+   * @minimum 0
+   * @maximum 4
+   */
+  pending: number;
+}
+
+export interface BallSealedPropagationReportView {
+  schema_version: "1.0";
+  artifact_type: "ball_propagation_report";
+  /** @pattern ^[a-z0-9][a-z0-9._-]{0,119}$ */
+  job_id: string;
+  /** @pattern ^[a-z0-9][a-z0-9._-]{0,119}$ */
+  session_id: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  intent_sha256: string;
+  /** @pattern ^[a-z0-9][a-z0-9._-]{0,119}$ */
+  mutation_id: string;
+  /** @minimum 0 */
+  seed_frame_index: number;
+  /** @exclusiveMinimum 0 */
+  expected_seed_revision: number;
+  /**
+   * @minimum 1
+   * @maximum 2
+   */
+  radius_frames: number;
+  seed_binding: BallPropagationSeedBindingView;
+  /** @pattern ^[0-9a-f]{64}$ */
+  seed_binding_sha256: string;
+  /**
+   * @minItems 1
+   * @maxItems 4
+   */
+  target_frame_indices: number[];
+  tracker_profile: BallPropagationTrackerProfileView;
+  /** @pattern ^[0-9a-f]{64}$ */
+  tracker_profile_sha256: string;
+  /** @pattern ^[a-z0-9][a-z0-9._-]{0,119}$ */
+  neighbor_probe_job_id: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  neighbor_probe_report_sha256: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  neighbor_probe_result_manifest_sha256: string;
+  /**
+   * @minItems 1
+   * @maxItems 4
+   */
+  frame_results: BallPropagationFrameResultView[];
+  /** @maxItems 4 */
+  suggestions: BallPropagationSuggestionView[];
+  summary: BallPropagationSummaryView;
+  decision_counts: BallPropagationDecisionCountsView;
+  created_at: string;
+  updated_at: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  report_sha256: string;
+}
+
+export type BallDatasetExpansionEligibilityViewReasonsItem =
+  (typeof BallDatasetExpansionEligibilityViewReasonsItem)[keyof typeof BallDatasetExpansionEligibilityViewReasonsItem];
+
+export const BallDatasetExpansionEligibilityViewReasonsItem = {
+  check_role_is_evaluation_only: "check_role_is_evaluation_only",
+  pending_suggestion_decisions: "pending_suggestion_decisions",
+  no_localizable_positive_seed: "no_localizable_positive_seed",
+} as const;
+
+export interface BallDatasetExpansionValidationEvidenceView {
+  all_frames_human_confirmed: true;
+  all_primary_roles_complete: true;
+  all_supplemental_roles_complete: true;
+  /** @pattern ^[0-9a-f]{64}$ */
+  exact_frame_media_sha256: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  frame_evidence_sha256: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  revision_chain_sha256: string;
+  /** @minimum 0 */
+  pending_detector_candidate_count: number;
+  /** @minimum 0 */
+  pending_propagation_suggestion_count: number;
+  /** @minimum 0 */
+  pending_suggestion_decision_count: number;
+  /** @minimum 0 */
+  localizable_positive_seed_count: number;
+}
+
+export interface BallDatasetExpansionEligibilityView {
+  eligible: boolean;
+  reasons: BallDatasetExpansionEligibilityViewReasonsItem[];
+  validation_evidence: BallDatasetExpansionValidationEvidenceView;
+}
+
+export interface BallAnnotationPackageView {
+  schema_version: "1.0";
+  artifact_type: "ball_annotation_package";
+  /** @pattern ^[a-z0-9][a-z0-9._-]{0,119}$ */
+  session_id: string;
+  session_request_authority: BallAnnotationSessionRequestAuthorityView;
+  data_role: BallAnnotationPackageViewDataRole;
+  source: BallSourceBindingView;
+  lineage: BallAnnotationLineageView;
+  /** @maxItems 8 */
+  detector_probe_authorities: BallDetectorProbeAuthorityView[];
+  frame_review_proxy_authority: BallFrameReviewProxyAuthorityView | null;
+  /** @pattern ^[0-9a-f]{64}$ */
+  attempt_family_sha256: string;
+  development_package_binding: BallDevelopmentPackageBindingView | null;
+  /** @pattern ^[a-z0-9][a-z0-9._-]{0,119}$ */
+  operator_id: string;
+  locked_profile: BallProfileBindingView;
+  /** @pattern ^[a-z0-9][a-z0-9._-]{0,119}$ */
+  control_profile_id: string;
+  control_profile: BallProfileBindingView;
+  sampling_profile_id: "tiny_ball_temporal_groups_v1";
+  metric_profile_id: "tiny_ball_feasibility_metric_v1";
+  /** @pattern ^[0-9a-f]{64}$ */
+  metric_profile_sha256: string;
+  sampling_manifest: BallSamplingManifestView;
+  check_probe_job_id: string | null;
+  check_probe_authority: BallCheckProbeAuthorityView | null;
+  detector_candidate_evidence: BallDetectorCandidateEvidenceView[];
+  /** @pattern ^[0-9a-f]{64}$ */
+  detector_candidate_evidence_sha256: string;
+  /** @minItems 1 */
+  effective_annotations: BallEffectiveAnnotationView[];
+  /** @minItems 1 */
+  revision_chain: BallSealedAnnotationRevisionView[];
+  /** @maxItems 20 */
+  supplemental_frame_indices: number[];
+  /**
+   * @minItems 1
+   * @maxItems 70
+   */
+  frame_evidence: BallSealedFrameEvidenceView[];
+  /** @pattern ^[0-9a-f]{64}$ */
+  frame_evidence_sha256: string;
+  /**
+   * @minItems 1
+   * @maxItems 70
+   */
+  frame_media: BallImmutableFrameMediaView[];
+  /** @pattern ^[0-9a-f]{64}$ */
+  frame_media_sha256: string;
+  /** @maxItems 20 */
+  propagation_reports: BallSealedPropagationReportView[];
+  /** @pattern ^[0-9a-f]{64}$ */
+  propagation_reports_sha256: string;
+  created_at: string;
+  training_eligible: false;
+  may_seed_dataset_expansion: boolean;
+  dataset_expansion_eligibility: BallDatasetExpansionEligibilityView;
+  qualification_eligible: false;
+  pr4a_pr4b_truth_compatible: false;
+  /** @pattern ^[0-9a-f]{64}$ */
+  package_sha256: string;
+}
+
+export interface BallDevelopmentSealedEvidenceView {
+  /** @pattern ^[0-9a-f]{64}$ */
+  annotation_package_sha256: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  sampling_manifest_sha256: string;
+  /** @nullable */
+  check_probe_job_id: null;
+  /** @nullable */
+  check_probe_report_sha256: null;
+  /** @pattern ^[0-9a-f]{64}$ */
+  attempt_family_sha256: string;
+  dataset_expansion_eligibility: BallDatasetExpansionEligibilityView;
+}
+
+export interface BallFeasibilityAuthorizationsView {
+  may_expand_to_100_300_boxes: boolean;
+  trial_eligible: false;
+  source_segment_qualified: false;
+  camera_qualified: false;
+  production_approved: false;
+  full_run_authorized: false;
+}
+
+export interface BallDevelopmentFeasibilityReportView {
+  schema_version: "1.0";
+  artifact_type: "ball_feasibility_report";
+  /** @pattern ^[a-z0-9][a-z0-9._-]{0,119}$ */
+  session_id: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  attempt_family_sha256: string;
+  /** @nullable */
+  development_package_binding: null;
+  status: "not_applicable";
+  reason: "development_package_is_not_one_time_check_evidence";
+  sealed_evidence: BallDevelopmentSealedEvidenceView;
+  authorizations: BallFeasibilityAuthorizationsView;
+  /** @pattern ^[0-9a-f]{64}$ */
+  report_sha256: string;
+}
+
+export const BallFeasibilityApparentSizeRuleViewValue = {
+  name: "source-height-bound-ball-diagonal-v1",
+  plausible_diagonal_min_source_px: 1,
+  far_max_source_height_divisor: 80,
+  mid_max_source_height_divisor: 40,
+  near_max_source_height_multiplier: 0.075,
+  aspect_ratio_min: 0.25,
+  aspect_ratio_max: 4,
+} as const;
+export type BallFeasibilityApparentSizeRuleView =
+  typeof BallFeasibilityApparentSizeRuleViewValue;
+
+export const BallFeasibilityMatchingRuleViewValue = {
+  name: "confirmed-box-center-region-v1",
+  minimum_radius_source_px: 4,
+  confirmed_box_diagonal_multiplier: 0.75,
+  source_height_cap_divisor: 45,
+  one_to_one: true,
+} as const;
+export type BallFeasibilityMatchingRuleView =
+  typeof BallFeasibilityMatchingRuleViewValue;
+
+export type BallFeasibilityIntervalsViewFalseCandidateRangeItem =
+  (typeof BallFeasibilityIntervalsViewFalseCandidateRangeItem)[keyof typeof BallFeasibilityIntervalsViewFalseCandidateRangeItem];
+
+export const BallFeasibilityIntervalsViewFalseCandidateRangeItem = {
+  NUMBER_0: 0,
+  NUMBER_5: 5,
+} as const;
+
+export interface BallFeasibilityIntervalsView {
+  confidence: 0.95;
+  recall: "one-sided-wilson-score-v1";
+  false_candidates: "bounded-hoeffding-upper-v1";
+  /**
+   * @minItems 2
+   * @maxItems 2
+   */
+  false_candidate_range: BallFeasibilityIntervalsViewFalseCandidateRangeItem[];
+}
+
+export interface BallFeasibilityMetricProfileView {
+  profile_id: "tiny_ball_feasibility_metric_v1";
+  candidate_budget: 5;
+  top1_recall_target: 0.6;
+  top5_recall_target: 0.8;
+  minimum_total_frames: 20;
+  maximum_total_frames: 50;
+  minimum_localizable_positives: 15;
+  minimum_confirmed_absent: 5;
+  minimum_applicable_stratum_positives: 3;
+  exploratory_small_n_threshold: 10;
+  apparent_size_rule: BallFeasibilityApparentSizeRuleView;
+  matching_rule: BallFeasibilityMatchingRuleView;
+  intervals: BallFeasibilityIntervalsView;
+}
+
+export interface BallFeasibilityComputedSourceBoundsView {
+  /** @exclusiveMinimum 0 */
+  source_height_px: number;
+  /** @exclusiveMinimum 0 */
+  plausible_diagonal_min_source_px: number;
+  /** @exclusiveMinimum 0 */
+  far_diagonal_max_source_px: number;
+  /** @exclusiveMinimum 0 */
+  mid_diagonal_max_source_px: number;
+  /** @exclusiveMinimum 0 */
+  near_diagonal_max_source_px: number;
+  /** @exclusiveMinimum 0 */
+  plausible_diagonal_max_source_px: number;
+  /** @exclusiveMinimum 0 */
+  aspect_ratio_min: number;
+  /** @exclusiveMinimum 0 */
+  aspect_ratio_max: number;
+  /** @exclusiveMinimum 0 */
+  matching_radius_cap_source_px: number;
+}
+
+export type BallCheckFeasibilityReportViewStatus =
+  (typeof BallCheckFeasibilityReportViewStatus)[keyof typeof BallCheckFeasibilityReportViewStatus];
+
+export const BallCheckFeasibilityReportViewStatus = {
+  insufficient_evidence: "insufficient_evidence",
+  feasibility_passed: "feasibility_passed",
+  feasibility_failed: "feasibility_failed",
+} as const;
+
+export interface BallFeasibilityScaleSupportView {
+  /** @minimum 0 */
+  near: number;
+  /** @minimum 0 */
+  mid: number;
+  /** @minimum 0 */
+  far: number;
+}
+
+export interface BallFeasibilityLightingSupportView {
+  /** @minimum 0 */
+  bright_sun: number;
+  /** @minimum 0 */
+  shadow: number;
+  /** @minimum 0 */
+  backlight: number;
+  /** @minimum 0 */
+  twilight: number;
+  /** @minimum 0 */
+  artificial_light: number;
+}
+
+export type BallFeasibilitySupportViewApplicableScaleStrataItem =
+  (typeof BallFeasibilitySupportViewApplicableScaleStrataItem)[keyof typeof BallFeasibilitySupportViewApplicableScaleStrataItem];
+
+export const BallFeasibilitySupportViewApplicableScaleStrataItem = {
+  near: "near",
+  mid: "mid",
+  far: "far",
+} as const;
+
+export type BallFeasibilitySupportViewApplicableLightingStrataItem =
+  (typeof BallFeasibilitySupportViewApplicableLightingStrataItem)[keyof typeof BallFeasibilitySupportViewApplicableLightingStrataItem];
+
+export const BallFeasibilitySupportViewApplicableLightingStrataItem = {
+  bright_sun: "bright_sun",
+  shadow: "shadow",
+  backlight: "backlight",
+  twilight: "twilight",
+  artificial_light: "artificial_light",
+} as const;
+
+export interface BallFeasibilitySupportView {
+  /** @minimum 0 */
+  total_frames: number;
+  /** @minimum 0 */
+  localizable_positives: number;
+  /** @minimum 0 */
+  confirmed_absent: number;
+  /** @minimum 0 */
+  excluded_or_unresolvable: number;
+  scale: BallFeasibilityScaleSupportView;
+  lighting: BallFeasibilityLightingSupportView;
+  applicable_scale_strata: BallFeasibilitySupportViewApplicableScaleStrataItem[];
+  applicable_lighting_strata: BallFeasibilitySupportViewApplicableLightingStrataItem[];
+  missing: string[];
+}
+
+export interface BallFeasibilityRawMetricView {
+  /** @minimum 0 */
+  numerator: number;
+  /** @minimum 0 */
+  denominator: number;
+}
+
+export interface BallFeasibilityRecallMetricView {
+  raw: BallFeasibilityRawMetricView;
+  /**
+   * @minimum 0
+   * @maximum 1
+   */
+  point_estimate: number;
+  /**
+   * @minimum 0
+   * @maximum 1
+   */
+  one_sided_95_lower: number;
+}
+
+export interface BallFeasibilityUpperMetricView {
+  raw: BallFeasibilityRawMetricView;
+  /**
+   * @minimum 0
+   * @maximum 5
+   */
+  point_estimate: number;
+  /**
+   * @minimum 0
+   * @maximum 5
+   */
+  one_sided_95_upper: number;
+}
+
+export interface BallFeasibilityPointMetricView {
+  raw: BallFeasibilityRawMetricView;
+  /** @minimum 0 */
+  point_estimate: number;
+}
+
+export interface BallFeasibilityMetricsView {
+  top1_recall: BallFeasibilityRecallMetricView;
+  top5_recall: BallFeasibilityRecallMetricView;
+  false_candidates_per_evaluable_frame: BallFeasibilityUpperMetricView;
+  candidates_per_evaluable_frame: BallFeasibilityPointMetricView;
+  raw_candidates_per_evaluable_frame: BallFeasibilityPointMetricView;
+}
+
+export interface BallFeasibilityStratumSupportView {
+  /** @minimum 0 */
+  localizable_positives: number;
+  /** @minimum 0 */
+  confirmed_absent: number;
+  /** @minimum 0 */
+  evaluable_frames: number;
+}
+
+export interface BallFeasibilityCandidateTotalsView {
+  /** @minimum 0 */
+  false: number;
+  /** @minimum 0 */
+  scored: number;
+  /** @minimum 0 */
+  raw: number;
+}
+
+export interface BallFeasibilityStratumMetricView {
+  support: BallFeasibilityStratumSupportView;
+  top1_recall: BallFeasibilityRecallMetricView;
+  top5_recall: BallFeasibilityRecallMetricView;
+  candidate_totals: BallFeasibilityCandidateTotalsView;
+  false_candidates_per_evaluable_frame: BallFeasibilityUpperMetricView;
+  exploratory_small_n: boolean;
+}
+
+export interface BallFeasibilityScaleMetricsView {
+  near: BallFeasibilityStratumMetricView;
+  mid: BallFeasibilityStratumMetricView;
+  far: BallFeasibilityStratumMetricView;
+}
+
+export interface BallFeasibilityLightingMetricsView {
+  bright_sun: BallFeasibilityStratumMetricView;
+  shadow: BallFeasibilityStratumMetricView;
+  backlight: BallFeasibilityStratumMetricView;
+  twilight: BallFeasibilityStratumMetricView;
+  artificial_light: BallFeasibilityStratumMetricView;
+}
+
+export interface BallFeasibilityMotionOcclusionMetricsView {
+  none: BallFeasibilityStratumMetricView;
+  ground: BallFeasibilityStratumMetricView;
+  airborne: BallFeasibilityStratumMetricView;
+  motion_blurred: BallFeasibilityStratumMetricView;
+  occluded: BallFeasibilityStratumMetricView;
+  reappearance: BallFeasibilityStratumMetricView;
+  stationary: BallFeasibilityStratumMetricView;
+}
+
+export interface BallFeasibilityStrataMetricsView {
+  scale: BallFeasibilityScaleMetricsView;
+  lighting: BallFeasibilityLightingMetricsView;
+  motion_occlusion: BallFeasibilityMotionOcclusionMetricsView;
+}
+
+export type BallFeasibilityFrameViewPresence =
+  (typeof BallFeasibilityFrameViewPresence)[keyof typeof BallFeasibilityFrameViewPresence];
+
+export const BallFeasibilityFrameViewPresence = {
+  present: "present",
+  absent: "absent",
+  unknown: "unknown",
+} as const;
+
+export interface BallFeasibilityCandidateDiagnosticView {
+  /**
+   * @minimum 1
+   * @maximum 5
+   */
+  rank: number;
+  matched: boolean;
+  center_distance_source_px?: number | null;
+  iou?: number | null;
+  evaluation_radius_source_px?: number | null;
+}
+
+export type BallFeasibilityFrameViewObservedLightingTag =
+  (typeof BallFeasibilityFrameViewObservedLightingTag)[keyof typeof BallFeasibilityFrameViewObservedLightingTag];
+
+export const BallFeasibilityFrameViewObservedLightingTag = {
+  bright_sun: "bright_sun",
+  shadow: "shadow",
+  backlight: "backlight",
+  twilight: "twilight",
+  artificial_light: "artificial_light",
+  not_applicable: "not_applicable",
+} as const;
+
+export type BallFeasibilityFrameViewFrozenLightingStratum =
+  (typeof BallFeasibilityFrameViewFrozenLightingStratum)[keyof typeof BallFeasibilityFrameViewFrozenLightingStratum];
+
+export const BallFeasibilityFrameViewFrozenLightingStratum = {
+  bright_sun: "bright_sun",
+  shadow: "shadow",
+  backlight: "backlight",
+  twilight: "twilight",
+  artificial_light: "artificial_light",
+} as const;
+
+export type BallFeasibilityFrameViewObservedScaleStratum =
+  (typeof BallFeasibilityFrameViewObservedScaleStratum)[keyof typeof BallFeasibilityFrameViewObservedScaleStratum];
+
+export const BallFeasibilityFrameViewObservedScaleStratum = {
+  near: "near",
+  mid: "mid",
+  far: "far",
+  not_applicable: "not_applicable",
+} as const;
+
+export type BallFeasibilityFrameViewMotionOcclusionTagsItem =
+  (typeof BallFeasibilityFrameViewMotionOcclusionTagsItem)[keyof typeof BallFeasibilityFrameViewMotionOcclusionTagsItem];
+
+export const BallFeasibilityFrameViewMotionOcclusionTagsItem = {
+  ground: "ground",
+  airborne: "airborne",
+  motion_blurred: "motion_blurred",
+  occluded: "occluded",
+  reappearance: "reappearance",
+  stationary: "stationary",
+} as const;
+
+export interface BallFeasibilityFrameView {
+  /** @minimum 0 */
+  frame_index: number;
+  presence: BallFeasibilityFrameViewPresence;
+  metric_eligible: boolean;
+  /**
+   * @minimum 0
+   * @maximum 5
+   */
+  scored_candidate_count: number;
+  /** @minimum 0 */
+  raw_candidate_count: number;
+  top1_hit: boolean | null;
+  top5_hit: boolean | null;
+  /** @maxItems 5 */
+  candidate_diagnostics: BallFeasibilityCandidateDiagnosticView[];
+  observed_lighting_tag: BallFeasibilityFrameViewObservedLightingTag;
+  frozen_lighting_stratum: BallFeasibilityFrameViewFrozenLightingStratum;
+  observed_scale_stratum: BallFeasibilityFrameViewObservedScaleStratum;
+  derived_scale_stratum: "near" | "mid" | "far" | null;
+  bbox_diagonal_source_px?: number | null;
+  bbox_aspect_ratio?: number | null;
+  /** @maxItems 6 */
+  motion_occlusion_tags: BallFeasibilityFrameViewMotionOcclusionTagsItem[];
+  /** @maxItems 8 */
+  diagnostic_codes: string[];
+}
+
+export interface BallFeasibilityContradictionView {
+  /** @minimum 0 */
+  frame_index: number;
+  /**
+   * @minItems 1
+   * @maxItems 8
+   */
+  diagnostic_codes: string[];
+}
+
+export type BallFeasibilityResolutionViewReasonCodesItem =
+  (typeof BallFeasibilityResolutionViewReasonCodesItem)[keyof typeof BallFeasibilityResolutionViewReasonCodesItem];
+
+export const BallFeasibilityResolutionViewReasonCodesItem = {
+  annotation_plausibility_contradiction:
+    "annotation_plausibility_contradiction",
+  scale_strata_mismatch: "scale_strata_mismatch",
+  lighting_strata_mismatch: "lighting_strata_mismatch",
+} as const;
+
+export interface BallFeasibilityResolutionView {
+  requires_new_attempt: boolean;
+  /** @maxItems 3 */
+  reason_codes: BallFeasibilityResolutionViewReasonCodesItem[];
+  /** @minimum 0 */
+  raw_annotation_plausibility_contradiction_count: number;
+  /** @minimum 0 */
+  raw_scale_mismatch_count: number;
+  /** @minimum 0 */
+  raw_lighting_mismatch_count: number;
+}
+
+export type BallCheckFeasibilityReportViewLimitationsItem =
+  (typeof BallCheckFeasibilityReportViewLimitationsItem)[keyof typeof BallCheckFeasibilityReportViewLimitationsItem];
+
+export const BallCheckFeasibilityReportViewLimitationsItem = {
+  one_time_directional_feasibility_only:
+    "one_time_directional_feasibility_only",
+  small_support_is_exploratory: "small_support_is_exploratory",
+  revealed_group_must_be_retired_for_all_profiles:
+    "revealed_group_must_be_retired_for_all_profiles",
+} as const;
+
+export interface BallCheckSealedEvidenceView {
+  /** @pattern ^[0-9a-f]{64}$ */
+  annotation_package_sha256: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  sampling_manifest_sha256: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  sampling_lock_sha256: string;
+  /** @pattern ^[a-z0-9][a-z0-9._-]{0,119}$ */
+  check_probe_job_id: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  check_probe_report_sha256: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  attempt_family_sha256: string;
+  /** @pattern ^[a-z0-9][a-z0-9._-]{0,119}$ */
+  development_annotation_session_id: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  development_annotation_package_sha256: string;
+  dataset_expansion_eligibility: BallDatasetExpansionEligibilityView;
+}
+
+export interface BallCheckFeasibilityReportView {
+  schema_version: "1.0";
+  artifact_type: "ball_feasibility_report";
+  /** @pattern ^[a-z0-9][a-z0-9._-]{0,119}$ */
+  session_id: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  source_sha256: string;
+  /** @pattern ^[a-z0-9][a-z0-9._-]{0,119}$ */
+  locked_profile_id: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  locked_profile_sha256: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  sampling_manifest_sha256: string;
+  metric_profile: BallFeasibilityMetricProfileView;
+  /** @pattern ^[0-9a-f]{64}$ */
+  metric_profile_sha256: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  attempt_family_sha256: string;
+  development_package_binding: BallDevelopmentPackageBindingView;
+  computed_source_px_bounds: BallFeasibilityComputedSourceBoundsView;
+  status: BallCheckFeasibilityReportViewStatus;
+  support: BallFeasibilitySupportView;
+  metrics: BallFeasibilityMetricsView;
+  strata_metrics: BallFeasibilityStrataMetricsView;
+  /**
+   * @minItems 20
+   * @maxItems 50
+   */
+  frames: BallFeasibilityFrameView[];
+  /** @maxItems 50 */
+  contradictions: BallFeasibilityContradictionView[];
+  resolution: BallFeasibilityResolutionView;
+  authorizations: BallFeasibilityAuthorizationsView;
+  /**
+   * @minItems 3
+   * @maxItems 3
+   */
+  limitations: BallCheckFeasibilityReportViewLimitationsItem[];
+  sealed_evidence: BallCheckSealedEvidenceView;
+  /** @pattern ^[0-9a-f]{64}$ */
+  report_sha256: string;
+}
+
+export interface BallAnnotationFinalResultResponse {
+  package: BallAnnotationPackageView;
+  feasibility_report:
+    | BallDevelopmentFeasibilityReportView
+    | BallCheckFeasibilityReportView;
+}
+
+export interface BallAnnotationFinalizeRequest {
+  /** @pattern ^[a-z0-9][a-z0-9._-]{0,119}$ */
+  mutation_id: string;
+}
+
+export type BallAnnotationFrameViewSourceTimingStatus =
+  (typeof BallAnnotationFrameViewSourceTimingStatus)[keyof typeof BallAnnotationFrameViewSourceTimingStatus];
+
+export const BallAnnotationFrameViewSourceTimingStatus = {
+  observed: "observed",
+  not_collected: "not_collected",
+} as const;
+
+export type BallAnnotationFrameViewFrameRole =
+  (typeof BallAnnotationFrameViewFrameRole)[keyof typeof BallAnnotationFrameViewFrameRole];
+
+export const BallAnnotationFrameViewFrameRole = {
+  primary_sample: "primary_sample",
+  propagation_target: "propagation_target",
+} as const;
+
+export type BallSuggestedCandidateViewDecision =
+  (typeof BallSuggestedCandidateViewDecision)[keyof typeof BallSuggestedCandidateViewDecision];
+
+export const BallSuggestedCandidateViewDecision = {
+  pending: "pending",
+  accepted: "accepted",
+  dismissed: "dismissed",
+} as const;
+
+export interface BallSuggestedCandidateView {
+  /** @pattern ^[a-z0-9][a-z0-9._-]{0,119}$ */
+  candidate_id: string;
+  /** @pattern ^[a-z0-9][a-z0-9._-]{0,119}$ */
+  profile_id: string;
+  /**
+   * @minimum 1
+   * @maximum 5
+   */
+  rank: number;
+  bbox_source_px: BallBoxSourcePx;
+  /**
+   * @minimum 0
+   * @maximum 1
+   */
+  confidence: number;
+  annotation_state: "suggested";
+  training_use: "excluded";
+  truth_status: "unconfirmed_suggestion";
+  /** @pattern ^[a-z0-9][a-z0-9._-]{0,119}$ */
+  suggestion_job_id: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  suggestion_sha256: string;
+  decision: BallSuggestedCandidateViewDecision;
+}
+
+export interface BallAnnotationFrameView {
+  /** @minimum 0 */
+  frame_index: number;
+  /** @pattern ^[0-9a-f]{64}$ */
+  source_frame_sha256: string;
+  /** @exclusiveMinimum 0 */
+  source_frame_size_bytes: number;
+  /** @maxItems 5 */
+  suggested_candidates: BallSuggestedCandidateView[];
+  source_timing_status: BallAnnotationFrameViewSourceTimingStatus;
+  decoder_reported_pos_msec?: number | null;
+  decoder_time_seconds?: number | null;
+  /** @minimum 0 */
+  display_time_seconds: number;
+  true_presentation_timestamp: BallTruePresentationTimestampView;
+  proxy_binding: BallReviewProxyFrameBindingView | null;
+  /** @pattern ^[0-9a-f]{64}$ */
+  temporal_group_id: string;
+  frame_url: string;
+  /** @minimum 0 */
+  annotation_revision: number;
+  /** @pattern ^[0-9a-f]{64}$ */
+  annotation_etag: string;
+  current_annotation: BallAnnotationPayload | null;
+  frame_role: BallAnnotationFrameViewFrameRole;
+  primary_sample: boolean;
+  /** @maxItems 20 */
+  propagation_job_ids: string[];
+  /** @maxItems 20 */
+  propagation_suggestions: BallPropagationSuggestionView[];
+}
+
+export interface BallAnnotationProgressView {
+  /** @minimum 0 */
+  annotated_frames: number;
+  /** @minimum 0 */
+  total_frames: number;
+  /** @minimum 0 */
+  unconfirmed_suggestions: number;
+  /** @minimum 0 */
+  primary_annotated_frames: number;
+  /** @minimum 0 */
+  primary_total_frames: number;
+  /** @minimum 0 */
+  supplemental_annotated_frames: number;
+  /** @minimum 0 */
+  supplemental_total_frames: number;
+  /** @minimum 0 */
+  unconfirmed_propagation_suggestions: number;
+}
+
+export type BallAnnotationRetryLineageViewMode =
+  (typeof BallAnnotationRetryLineageViewMode)[keyof typeof BallAnnotationRetryLineageViewMode];
+
+export const BallAnnotationRetryLineageViewMode = {
+  same_authority: "same_authority",
+  worker_runtime_reexecution: "worker_runtime_reexecution",
+  review_proxy_decode_upgrade: "review_proxy_decode_upgrade",
+} as const;
+
+export interface BallAnnotationRetryLineageView {
+  mode: BallAnnotationRetryLineageViewMode;
+  /** @pattern ^[a-z0-9][a-z0-9._-]{0,119}$ */
+  previous_session_id: string;
+  previous_error_code: string | null;
+  previous_blocker_code: string | null;
+  /** @pattern ^[0-9a-f]{64}$ */
+  previous_lineage_sha256: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  current_lineage_sha256: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  sampling_manifest_sha256: string;
+}
+
+export type BallAnnotationRevisionRequestOperation =
+  (typeof BallAnnotationRevisionRequestOperation)[keyof typeof BallAnnotationRevisionRequestOperation];
+
+export const BallAnnotationRevisionRequestOperation = {
+  set: "set",
+  delete: "delete",
+  undo: "undo",
+} as const;
+
+export interface BallAnnotationRevisionRequest {
+  /** @pattern ^[a-z0-9][a-z0-9._-]{0,119}$ */
+  mutation_id: string;
+  /** @minimum 0 */
+  expected_revision: number;
+  operation: BallAnnotationRevisionRequestOperation;
+  undo_revision?: number | null;
+  annotation: BallAnnotationPayload | null;
+  suggestion_kind?: "detector_candidate" | "propagation" | null;
+  suggestion_id?: string | null;
+  accepted_suggestion_job_id?: string | null;
+  accepted_suggestion_sha256?: string | null;
+  dismissed_suggestion_kind?: "detector_candidate" | "propagation" | null;
+  dismissed_suggestion_id?: string | null;
+  dismissed_suggestion_job_id?: string | null;
+  dismissed_suggestion_sha256?: string | null;
+}
+
+export type BallAnnotationRevisionResponseOperation =
+  (typeof BallAnnotationRevisionResponseOperation)[keyof typeof BallAnnotationRevisionResponseOperation];
+
+export const BallAnnotationRevisionResponseOperation = {
+  set: "set",
+  delete: "delete",
+  undo: "undo",
+} as const;
+
+export interface BallAnnotationRevisionResponse {
+  schema_version: "1.0";
+  artifact_type: "ball_annotation_revision";
+  /** @pattern ^[a-z0-9][a-z0-9._-]{0,119}$ */
+  revision_id: string;
+  /** @pattern ^[a-z0-9][a-z0-9._-]{0,119}$ */
+  session_id: string;
+  /** @minimum 0 */
+  frame_index: number;
+  /** @exclusiveMinimum 0 */
+  revision: number;
+  operation: BallAnnotationRevisionResponseOperation;
+  /** @pattern ^[a-z0-9][a-z0-9._-]{0,119}$ */
+  mutation_id: string;
+  /** @minimum 0 */
+  expected_revision: number;
+  supersedes_revision: number | null;
+  undo_revision: number | null;
+  accepted_suggestion_kind: "detector_candidate" | "propagation" | null;
+  accepted_suggestion_id: string | null;
+  accepted_suggestion_job_id: string | null;
+  accepted_suggestion_sha256: string | null;
+  dismissed_suggestion_kind: "detector_candidate" | "propagation" | null;
+  dismissed_suggestion_id: string | null;
+  dismissed_suggestion_job_id: string | null;
+  dismissed_suggestion_sha256: string | null;
+  effective_annotation: BallAnnotationPayload | null;
+  /** @pattern ^[a-z0-9][a-z0-9._-]{0,119}$ */
+  operator_id: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  annotation_etag: string;
+  created_at: string;
+}
+
+export type BallAnnotationSessionCreateRequestDataRole =
+  (typeof BallAnnotationSessionCreateRequestDataRole)[keyof typeof BallAnnotationSessionCreateRequestDataRole];
+
+export const BallAnnotationSessionCreateRequestDataRole = {
+  development: "development",
+  check: "check",
+} as const;
+
+export type BallScaleApplicabilityRequestStratum =
+  (typeof BallScaleApplicabilityRequestStratum)[keyof typeof BallScaleApplicabilityRequestStratum];
+
+export const BallScaleApplicabilityRequestStratum = {
+  near: "near",
+  mid: "mid",
+  far: "far",
+} as const;
+
+export type BallScaleApplicabilityRequestStatus =
+  (typeof BallScaleApplicabilityRequestStatus)[keyof typeof BallScaleApplicabilityRequestStatus];
+
+export const BallScaleApplicabilityRequestStatus = {
+  applicable: "applicable",
+  not_applicable: "not_applicable",
+} as const;
+
+export interface BallScaleApplicabilityRequest {
+  stratum: BallScaleApplicabilityRequestStratum;
+  status: BallScaleApplicabilityRequestStatus;
+  /**
+   * @minLength 3
+   * @maxLength 500
+   */
+  evidence_note: string;
+}
+
+export type BallLightingApplicabilityRequestStratum =
+  (typeof BallLightingApplicabilityRequestStratum)[keyof typeof BallLightingApplicabilityRequestStratum];
+
+export const BallLightingApplicabilityRequestStratum = {
+  bright_sun: "bright_sun",
+  shadow: "shadow",
+  backlight: "backlight",
+  twilight: "twilight",
+  artificial_light: "artificial_light",
+} as const;
+
+export type BallLightingApplicabilityRequestStatus =
+  (typeof BallLightingApplicabilityRequestStatus)[keyof typeof BallLightingApplicabilityRequestStatus];
+
+export const BallLightingApplicabilityRequestStatus = {
+  applicable: "applicable",
+  not_applicable: "not_applicable",
+} as const;
+
+export interface BallLightingApplicabilityRequest {
+  stratum: BallLightingApplicabilityRequestStratum;
+  status: BallLightingApplicabilityRequestStatus;
+  /**
+   * @minLength 3
+   * @maxLength 500
+   */
+  evidence_note: string;
+  /**
+   * Development/not-applicable uses 0; every applicable check lighting stratum requires at least 3.
+   * @minimum 0
+   * @maximum 50
+   */
+  quota: number;
+  /** @maxItems 32 */
+  frame_intervals: BallFrameIntervalRequest[];
+}
+
+export interface BallStrataApplicabilityRequest {
+  /**
+   * @minItems 3
+   * @maxItems 3
+   */
+  scale: BallScaleApplicabilityRequest[];
+  /**
+   * @minItems 5
+   * @maxItems 5
+   */
+  lighting: BallLightingApplicabilityRequest[];
+}
+
+export interface BallAnnotationSessionCreateRequest {
+  data_role: BallAnnotationSessionCreateRequestDataRole;
+  /**
+   * @minItems 1
+   * @maxItems 8
+   */
+  development_probe_job_ids: string[];
+  /** @pattern ^[a-z0-9][a-z0-9._-]{0,119}$ */
+  locked_profile_id: string;
+  target_frame_count?: number | null;
+  sampling_profile_id: "tiny_ball_temporal_groups_v1";
+  metric_profile_id: "tiny_ball_feasibility_metric_v1";
+  /** @pattern ^[a-z0-9][a-z0-9._-]{0,119}$ */
+  operator_id: string;
+  strata_applicability: BallStrataApplicabilityRequest;
+  retry_from_session_id?: string | null;
+  development_package_session_id?: string | null;
+  development_package_sha256?: string | null;
+}
+
+export type BallAnnotationSessionResponseDataRole =
+  (typeof BallAnnotationSessionResponseDataRole)[keyof typeof BallAnnotationSessionResponseDataRole];
+
+export const BallAnnotationSessionResponseDataRole = {
+  development: "development",
+  check: "check",
+} as const;
+
+export type BallAnnotationSessionResponseStatus =
+  (typeof BallAnnotationSessionResponseStatus)[keyof typeof BallAnnotationSessionResponseStatus];
+
+export const BallAnnotationSessionResponseStatus = {
+  sampling_locked: "sampling_locked",
+  check_probe_queued: "check_probe_queued",
+  check_probe_running: "check_probe_running",
+  check_probe_committing: "check_probe_committing",
+  annotating: "annotating",
+  finalizing: "finalizing",
+  blocked: "blocked",
+  finalized: "finalized",
+} as const;
+
+export type BallAnnotationSessionResponseApplicableScaleStrataItem =
+  (typeof BallAnnotationSessionResponseApplicableScaleStrataItem)[keyof typeof BallAnnotationSessionResponseApplicableScaleStrataItem];
+
+export const BallAnnotationSessionResponseApplicableScaleStrataItem = {
+  near: "near",
+  mid: "mid",
+  far: "far",
+} as const;
+
+export type BallAnnotationSessionResponseApplicableLightingStrataItem =
+  (typeof BallAnnotationSessionResponseApplicableLightingStrataItem)[keyof typeof BallAnnotationSessionResponseApplicableLightingStrataItem];
+
+export const BallAnnotationSessionResponseApplicableLightingStrataItem = {
+  bright_sun: "bright_sun",
+  shadow: "shadow",
+  backlight: "backlight",
+  twilight: "twilight",
+  artificial_light: "artificial_light",
+} as const;
+
+export interface BallReviewProxyRepairCapabilityView {
+  eligible: true;
+  action: "generate_verified_review_proxy";
+  create_url: "/api/v1/detector-review-proxy-repairs";
+  /** @pattern ^[a-z0-9][a-z0-9._-]{0,119}$ */
+  parent_probe_job_id: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  parent_probe_report_sha256: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  parent_probe_result_manifest_sha256: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  parent_probe_record_sha256: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  blocked_session_record_sha256: string;
+}
+
+export interface BallAnnotationSessionResponse {
+  schema_version: "1.0";
+  artifact_type: "ball_annotation_session";
+  /** @pattern ^[a-z0-9][a-z0-9._-]{0,119}$ */
+  session_id: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  idempotency_key: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  request_sha256: string;
+  data_role: BallAnnotationSessionResponseDataRole;
+  status: BallAnnotationSessionResponseStatus;
+  stage: string;
+  source: BallSourceBindingView;
+  lineage: BallAnnotationLineageView;
+  locked_profile: BallProfileBindingView;
+  /** @pattern ^[a-z0-9][a-z0-9._-]{0,119}$ */
+  control_profile_id: string;
+  control_profile: BallProfileBindingView;
+  sampling_profile_id: "tiny_ball_temporal_groups_v1";
+  metric_profile_id: "tiny_ball_feasibility_metric_v1";
+  /** @pattern ^[0-9a-f]{64}$ */
+  metric_profile_sha256: string;
+  sampling_manifest: BallSamplingManifestView;
+  /** @pattern ^[a-z0-9][a-z0-9._-]{0,119}$ */
+  operator_id: string;
+  applicable_scale_strata: BallAnnotationSessionResponseApplicableScaleStrataItem[];
+  applicable_lighting_strata: BallAnnotationSessionResponseApplicableLightingStrataItem[];
+  retry_from_session_id: string | null;
+  retry_lineage: BallAnnotationRetryLineageView | null;
+  /** @pattern ^[0-9a-f]{64}$ */
+  attempt_family_sha256: string;
+  development_package_binding: BallDevelopmentPackageBindingView | null;
+  check_probe_job_id: string | null;
+  check_probe_authority: BallCheckProbeAuthorityView | null;
+  /** @maxItems 70 */
+  frames: BallAnnotationFrameView[];
+  final_package: BallAnnotationFinalPackagePointerView | null;
+  error_code: string | null;
+  blocker_code: string | null;
+  review_proxy_repair?: BallReviewProxyRepairCapabilityView | null;
+  created_at: string;
+  updated_at: string;
+  progress: BallAnnotationProgressView;
+}
+
+export interface BallApiErrorDetail {
+  code: string;
+  message: string;
+}
+
+export interface BallApiErrorResponse {
+  detail: BallApiErrorDetail;
+}
+
 export interface BallAuditPoint {
   x: number;
   y: number;
@@ -1268,6 +4080,83 @@ export interface BallAuditReport {
   sources?: BallAuditSource[];
   tracklets?: BallAuditTracklet[];
   review_events?: BallAuditReviewEvent[];
+}
+
+export interface BallPropagationCreateRequest {
+  /** @pattern ^[a-z0-9][a-z0-9._-]{0,119}$ */
+  mutation_id: string;
+  /** @minimum 0 */
+  seed_frame_index: number;
+  /**
+   * @minimum 1
+   * @maximum 2
+   */
+  radius_frames: number;
+  /** @exclusiveMinimum 0 */
+  expected_seed_revision: number;
+}
+
+export type BallPropagationJobResponseStatus =
+  (typeof BallPropagationJobResponseStatus)[keyof typeof BallPropagationJobResponseStatus];
+
+export const BallPropagationJobResponseStatus = {
+  queued: "queued",
+  waiting_probe: "waiting_probe",
+  committing: "committing",
+  ready: "ready",
+  failed: "failed",
+  blocked: "blocked",
+  cancelled: "cancelled",
+} as const;
+
+export interface BallPropagationJobResponse {
+  schema_version: "1.0";
+  artifact_type: "ball_propagation_job";
+  /** @pattern ^[a-z0-9][a-z0-9._-]{0,119}$ */
+  job_id: string;
+  /** @pattern ^[a-z0-9][a-z0-9._-]{0,119}$ */
+  session_id: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  intent_sha256: string;
+  /** @pattern ^[a-z0-9][a-z0-9._-]{0,119}$ */
+  mutation_id: string;
+  /** @minimum 0 */
+  seed_frame_index: number;
+  /** @exclusiveMinimum 0 */
+  expected_seed_revision: number;
+  /**
+   * @minimum 1
+   * @maximum 2
+   */
+  radius_frames: number;
+  seed_binding: BallPropagationSeedBindingView;
+  /**
+   * @minItems 1
+   * @maxItems 4
+   */
+  target_frame_indices: number[];
+  tracker_profile: BallPropagationTrackerProfileView;
+  neighbor_probe_job_id: string | null;
+  status: BallPropagationJobResponseStatus;
+  stage: string;
+  /** @maxItems 4 */
+  frame_results: BallPropagationFrameResultView[];
+  summary: BallPropagationSummaryView | null;
+  /** @maxItems 4 */
+  suggestions: BallPropagationSuggestionView[];
+  error_code: string | null;
+  neighbor_probe_cancel_status:
+    | "not_started"
+    | "cancelled"
+    | "cancel_requested"
+    | "already_terminal"
+    | "cancel_failed"
+    | null;
+  neighbor_probe_cancel_error_code: string | null;
+  created_at: string;
+  updated_at: string;
+  status_url: string;
+  cancel_url: string;
 }
 
 export type BroadcastConfigLineageBlockerResponseBlockerCode =
@@ -2141,6 +5030,27 @@ export interface DetectorProbeCandidateView {
   merge_reason: "retained_top_k";
 }
 
+export type DetectorProbeContinuationExecutionBindingViewCodeFiles = {
+  [key: string]: string;
+};
+
+export type DetectorProbeContinuationExecutionBindingViewRuntime = {
+  [key: string]: string;
+};
+
+export interface DetectorProbeContinuationExecutionBindingView {
+  schema_version: "1.0";
+  artifact_type: "detector_review_proxy_continuation_execution_binding";
+  code_files: DetectorProbeContinuationExecutionBindingViewCodeFiles;
+  /** @pattern ^[0-9a-f]{64}$ */
+  code_bundle_sha256: string;
+  runtime: DetectorProbeContinuationExecutionBindingViewRuntime;
+  /** @pattern ^[0-9a-f]{64}$ */
+  runtime_sha256: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  binding_sha256: string;
+}
+
 export interface DetectorProbeCreateRequest {
   /** @pattern ^[a-z0-9][a-z0-9._-]{0,119}$ */
   parent_trial_id: string;
@@ -2197,6 +5107,33 @@ export const DetectorProbeDecodeViewEffectiveDecodeMode = {
   sequential_fallback: "sequential_fallback",
 } as const;
 
+export type DetectorProbeDecodeViewPositionVerification =
+  (typeof DetectorProbeDecodeViewPositionVerification)[keyof typeof DetectorProbeDecodeViewPositionVerification];
+
+export const DetectorProbeDecodeViewPositionVerification = {
+  opencv_next_frame_index_with_025_tolerance:
+    "opencv_next_frame_index_with_0.25_tolerance",
+  verified_review_proxy_frame_index_mapping_v1:
+    "verified_review_proxy_frame_index_mapping_v1",
+} as const;
+
+export type DetectorProbeFrameTimingObservationViewObservationMethod =
+  (typeof DetectorProbeFrameTimingObservationViewObservationMethod)[keyof typeof DetectorProbeFrameTimingObservationViewObservationMethod];
+
+export const DetectorProbeFrameTimingObservationViewObservationMethod = {
+  opencv_cap_prop_pos_msec_after_verified_frame_read:
+    "opencv_cap_prop_pos_msec_after_verified_frame_read",
+  verified_review_proxy_frame_index_mapping_v1:
+    "verified_review_proxy_frame_index_mapping_v1",
+} as const;
+
+export interface DetectorProbeFrameTimingObservationView {
+  /** @minimum 0 */
+  frame_index: number;
+  decoder_reported_pos_msec: number;
+  observation_method: DetectorProbeFrameTimingObservationViewObservationMethod;
+}
+
 export interface DetectorProbeDecodeView {
   /** @exclusiveMinimum 0 */
   width: number;
@@ -2213,7 +5150,8 @@ export interface DetectorProbeDecodeView {
    * @maxItems 50
    */
   verified_frame_indices: number[];
-  position_verification: "opencv_next_frame_index_with_0.25_tolerance";
+  position_verification: DetectorProbeDecodeViewPositionVerification;
+  frame_timing_observations?: DetectorProbeFrameTimingObservationView[] | null;
 }
 
 export type DetectorProbeExecutionBundleViewInstalledRuntime = {
@@ -2423,17 +5361,50 @@ export interface DetectorProbeFrameEvidenceView {
   effective_decode_mode: DetectorProbeFrameEvidenceViewEffectiveDecodeMode;
   /** @minimum 0 */
   decoded_frame_position: number;
+  decoder_reported_pos_msec?: number | null;
+  decoder_timing_observation_method?:
+    | "opencv_cap_prop_pos_msec_after_verified_frame_read"
+    | "verified_review_proxy_frame_index_mapping_v1"
+    | null;
   media_integrity: DetectorProbeMediaIntegrityView;
   source_artifact_url: string;
   /** @pattern ^[0-9a-f]{64}$ */
   source_frame_sha256: string;
   /** @exclusiveMinimum 0 */
   source_frame_size_bytes: number;
+  proxy_artifact_url?: string | null;
+  proxy_frame_sha256?: string | null;
+  proxy_frame_size_bytes?: number | null;
   /**
    * @minItems 2
    * @maxItems 6
    */
   profile_results: DetectorProbeProfileEvidenceView[];
+}
+
+export interface DetectorProbeInheritedEvidenceView {
+  /** @pattern ^[a-z0-9][a-z0-9._-]{0,119}$ */
+  parent_probe_job_id: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  parent_probe_request_sha256: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  parent_probe_intent_sha256: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  parent_probe_semantic_intent_sha256: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  parent_probe_report_sha256: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  parent_probe_result_manifest_sha256: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  parent_probe_record_sha256: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  parent_execution_bundle_sha256: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  parent_runtime_environment_sha256: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  source_frame_evidence_sha256: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  candidate_evidence_sha256: string;
 }
 
 export type DetectorProbeJobResponseStatus =
@@ -2499,6 +5470,45 @@ export const FrozenDetectorProbeRequestViewRequestedDecodeMode = {
   direct: "direct",
 } as const;
 
+export type DetectorProbeRepairEvidenceViewSampledFrameSha256s = {
+  [key: string]: unknown;
+};
+
+export interface DetectorProbeRepairEvidenceView {
+  schema_version: "1.0";
+  /** @pattern ^[a-z0-9][a-z0-9._-]{0,119}$ */
+  repair_id: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  repair_request_sha256: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  repair_report_sha256: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  repair_result_manifest_sha256: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  proxy_media_sha256: string;
+  /** @exclusiveMinimum 0 */
+  proxy_size_bytes: number;
+  /** @pattern ^[0-9a-f]{64}$ */
+  repair_execution_binding_sha256: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  repair_code_bundle_sha256: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  repair_runtime_sha256: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  repair_decoder_fingerprint_sha256: string;
+  sampled_frame_sha256s: DetectorProbeRepairEvidenceViewSampledFrameSha256s;
+}
+
+export interface DetectorProbeReviewProxyUpgradeBindingView {
+  schema_version: "1.0";
+  retry_kind: "review_proxy_decode_upgrade";
+  inherited_evidence: DetectorProbeInheritedEvidenceView;
+  repair_evidence: DetectorProbeRepairEvidenceView;
+  continuation_execution_binding: DetectorProbeContinuationExecutionBindingView;
+  /** @pattern ^[0-9a-f]{64}$ */
+  binding_sha256: string;
+}
+
 export type FrozenDetectorProbeRequestViewProfileSha256s = {
   [key: string]: unknown;
 };
@@ -2561,6 +5571,9 @@ export interface FrozenDetectorProbeRequestView {
   top_k: 5;
   requested_decode_mode: FrozenDetectorProbeRequestViewRequestedDecodeMode;
   retry_from_job_id?: string | null;
+  annotation_sampling_manifest_sha256?: string | null;
+  retry_kind?: "review_proxy_decode_upgrade" | null;
+  review_proxy_upgrade?: DetectorProbeReviewProxyUpgradeBindingView | null;
 }
 
 export type FrozenDetectorProfileViewMode =
@@ -2637,7 +5650,10 @@ export interface DetectorProbeLineageView {
   runtime_environment_sha256: string;
   /** @pattern ^[0-9a-f]{64}$ */
   intent_sha256: string;
+  semantic_intent_sha256?: string | null;
   retry_from_job_id: string | null;
+  retry_kind?: "review_proxy_decode_upgrade" | null;
+  review_proxy_upgrade?: DetectorProbeReviewProxyUpgradeBindingView | null;
 }
 
 export interface DetectorProbeReportView {
@@ -2661,10 +5677,11 @@ export interface DetectorProbeReportView {
    */
   frames: DetectorProbeFrameEvidenceView[];
   decode: DetectorProbeDecodeView;
+  review_proxy_manifest?: DetectorReviewProxyManifestView | null;
   execution: DetectorProbeExecutionView;
   /**
    * @minItems 3
-   * @maxItems 350
+   * @maxItems 400
    */
   artifacts: DetectorProbeArtifactView[];
   created_at: string;
@@ -2683,6 +5700,7 @@ export interface DetectorProbeJobResponse {
   request_sha256: string;
   /** @pattern ^[0-9a-f]{64}$ */
   intent_sha256: string;
+  semantic_intent_sha256?: string | null;
   /** @pattern ^[0-9a-f]{64}$ */
   frozen_profiles_sha256: string;
   status: DetectorProbeJobResponseStatus;
@@ -2705,6 +5723,268 @@ export interface DetectorProbeJobResponse {
   status_url: string;
   cancel_url: string;
   can_cancel: boolean;
+}
+
+export interface DetectorReviewProxyRepairAuthorityView {
+  /** @pattern ^[a-z0-9][a-z0-9._-]{0,119}$ */
+  blocked_session_id: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  blocked_session_request_sha256: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  blocked_session_record_sha256: string;
+  /** @pattern ^[a-z0-9][a-z0-9._-]{0,119}$ */
+  parent_probe_job_id: string;
+  /**
+   * @minItems 1
+   * @maxItems 7
+   */
+  development_probe_job_ids: string[];
+  /** @pattern ^[0-9a-f]{64}$ */
+  parent_probe_request_sha256: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  parent_probe_intent_sha256: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  parent_probe_semantic_intent_sha256: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  parent_probe_report_sha256: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  parent_probe_result_manifest_sha256: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  parent_probe_record_sha256: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  parent_execution_bundle_sha256: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  parent_runtime_environment_sha256: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  source_frame_evidence_sha256: string;
+  /** @pattern ^[a-z0-9][a-z0-9._-]{0,119}$ */
+  source_id: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  source_sha256: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  source_file_identity_sha256: string;
+  /** @exclusiveMinimum 0 */
+  source_size_bytes: number;
+  /** @exclusiveMinimum 0 */
+  source_width: number;
+  /** @exclusiveMinimum 0 */
+  source_height: number;
+  /** @exclusiveMinimum 0 */
+  source_frame_count: number;
+  /** @exclusiveMinimum 0 */
+  source_fps: number;
+  /** @pattern ^[a-z0-9][a-z0-9._-]{0,119}$ */
+  locked_profile_id: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  locked_profile_sha256: string;
+  /**
+   * @minItems 1
+   * @maxItems 50
+   */
+  frame_indices: number[];
+  /** @pattern ^[0-9a-f]{64}$ */
+  sampling_manifest_sha256: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  temporal_groups_sha256: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  candidate_evidence_sha256: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  replacement_request_authority_sha256: string;
+}
+
+export interface DetectorReviewProxyRepairChildProbeView {
+  /** @pattern ^[a-z0-9][a-z0-9._-]{0,119}$ */
+  job_id: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  request_sha256: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  intent_sha256: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  semantic_intent_sha256: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  resource_sha256: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  frozen_profiles_sha256: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  report_sha256: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  result_manifest_sha256: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  execution_bundle_sha256: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  runtime_environment_sha256: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  continuation_execution_binding_sha256: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  continuation_code_bundle_sha256: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  continuation_runtime_sha256: string;
+  /** @pattern ^[a-z0-9][a-z0-9._-]{0,119}$ */
+  retry_from_job_id: string;
+  retry_kind: "review_proxy_decode_upgrade";
+  status_url: string;
+  report_url: string;
+}
+
+export interface DetectorReviewProxyRepairCreateRequest {
+  /** @pattern ^[a-z0-9][a-z0-9._-]{0,119}$ */
+  blocked_session_id: string;
+}
+
+export const DetectorReviewProxyRepairEligibilityViewValue = {
+  eligible: true,
+  action: "generate_verified_review_proxy",
+  blocker_code: "review_proxy_required",
+} as const;
+export type DetectorReviewProxyRepairEligibilityView =
+  typeof DetectorReviewProxyRepairEligibilityViewValue;
+
+export type DetectorReviewProxyRepairJobResponseStatus =
+  (typeof DetectorReviewProxyRepairJobResponseStatus)[keyof typeof DetectorReviewProxyRepairJobResponseStatus];
+
+export const DetectorReviewProxyRepairJobResponseStatus = {
+  queued: "queued",
+  running: "running",
+  committing: "committing",
+  ready: "ready",
+  failed: "failed",
+  blocked: "blocked",
+  cancelled: "cancelled",
+} as const;
+
+export type DetectorReviewProxyRepairJobResponseStage =
+  (typeof DetectorReviewProxyRepairJobResponseStage)[keyof typeof DetectorReviewProxyRepairJobResponseStage];
+
+export const DetectorReviewProxyRepairJobResponseStage = {
+  proxy_queued: "proxy_queued",
+  queued: "queued",
+  running: "running",
+  verifying_source: "verifying_source",
+  transcoding: "transcoding",
+  independent_verification: "independent_verification",
+  recovered_after_restart: "recovered_after_restart",
+  proxy_committing: "proxy_committing",
+  proxy_ready: "proxy_ready",
+  continuation_intent: "continuation_intent",
+  child_probe_ready: "child_probe_ready",
+  replacement_session_ready: "replacement_session_ready",
+  groups_published: "groups_published",
+  ready: "ready",
+  failed: "failed",
+  blocked: "blocked",
+  cancelled: "cancelled",
+} as const;
+
+export interface DetectorReviewProxyRepairProgressView {
+  /**
+   * @minimum 0
+   * @maximum 6
+   */
+  stage_completed: number;
+  stage_total: 6;
+  /** @minimum 0 */
+  source_frames_completed: number;
+  /** @exclusiveMinimum 0 */
+  source_frames_total: number;
+  updated_at: string;
+}
+
+export interface DetectorReviewProxyRepairProxyResultView {
+  /** @pattern ^[a-z0-9][a-z0-9._-]{0,119}$ */
+  review_proxy_id: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  review_proxy_manifest_sha256: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  proxy_media_sha256: string;
+  /** @exclusiveMinimum 0 */
+  proxy_size_bytes: number;
+  proxy_width: 2560;
+  proxy_height: 720;
+  /** @exclusiveMinimum 0 */
+  proxy_frame_count: number;
+  /** @exclusiveMinimum 0 */
+  proxy_fps: number;
+  /** @pattern ^[0-9a-f]{64}$ */
+  mapping_sha256: string;
+  /**
+   * @maximum 50
+   * @exclusiveMinimum 0
+   */
+  sampled_artifact_count: number;
+  /** @pattern ^[0-9a-f]{64}$ */
+  encoder_binding_sha256: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  repair_execution_binding_sha256: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  repair_code_bundle_sha256: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  repair_runtime_sha256: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  repair_decoder_fingerprint_sha256: string;
+}
+
+export interface DetectorReviewProxyRepairSessionView {
+  /** @pattern ^[a-z0-9][a-z0-9._-]{0,119}$ */
+  session_id: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  request_sha256: string;
+  status: "annotating";
+  /** @pattern ^[a-z0-9][a-z0-9._-]{0,119}$ */
+  retry_from_session_id: string;
+  retry_mode: "review_proxy_decode_upgrade";
+  /** @pattern ^[0-9a-f]{64}$ */
+  attempt_family_sha256: string;
+  /**
+   * @minItems 2
+   * @maxItems 8
+   */
+  development_probe_job_ids: string[];
+  status_url: string;
+}
+
+export interface DetectorReviewProxyRepairResultView {
+  proxy: DetectorReviewProxyRepairProxyResultView;
+  child_probe: DetectorReviewProxyRepairChildProbeView;
+  replacement_session: DetectorReviewProxyRepairSessionView;
+  /** @pattern ^[0-9a-f]{64}$ */
+  parent_probe_record_sha256_after: string;
+}
+
+export interface DetectorReviewProxyRepairJobResponse {
+  schema_version: "1.0";
+  artifact_type: "detector_review_proxy_repair_job";
+  /** @pattern ^[a-z0-9][a-z0-9._-]{0,119}$ */
+  repair_id: string;
+  /** @pattern ^[a-z0-9][a-z0-9._-]{0,119}$ */
+  attempt_root_repair_id: string;
+  /** @minimum 1 */
+  attempt_number: number;
+  retry_from_repair_id: string | null;
+  /** @pattern ^[0-9a-f]{64}$ */
+  idempotency_key: string;
+  /** @pattern ^[0-9a-f]{64}$ */
+  request_sha256: string;
+  status: DetectorReviewProxyRepairJobResponseStatus;
+  stage: DetectorReviewProxyRepairJobResponseStage;
+  preset_id: "h264-cfr-720p-v1";
+  eligibility: DetectorReviewProxyRepairEligibilityView;
+  authority: DetectorReviewProxyRepairAuthorityView;
+  progress: DetectorReviewProxyRepairProgressView;
+  can_cancel: boolean;
+  can_retry: boolean;
+  result: DetectorReviewProxyRepairResultView | null;
+  error_code: string | null;
+  blocker_code: string | null;
+  recovery_action: "retry" | "resume" | null;
+  created_at: string;
+  updated_at: string;
+  status_url: string;
+  cancel_url: string;
+  retry_url: string;
+}
+
+export interface DetectorReviewProxyRepairRetryRequest {
+  [key: string]: unknown;
 }
 
 export type EventCandidateEvidence = { [key: string]: unknown };

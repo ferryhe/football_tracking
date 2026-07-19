@@ -8,8 +8,20 @@ export type BodyType<T> = T;
 
 export type AuthTokenGetter = () => Promise<string | null> | string | null;
 
+export type CustomFetchResponseMetadata = Readonly<{
+  status: number;
+  statusText: string;
+  headers: Headers;
+  method: string;
+  url: string;
+}>;
+
 const NO_BODY_STATUS = new Set([204, 205, 304]);
 const DEFAULT_JSON_ACCEPT = "application/json, application/problem+json";
+const customFetchResponseMetadata = new WeakMap<
+  object,
+  CustomFetchResponseMetadata
+>();
 
 // ---------------------------------------------------------------------------
 // Module-level configuration
@@ -48,7 +60,10 @@ function isRequest(input: RequestInfo | URL): input is Request {
   return typeof Request !== "undefined" && input instanceof Request;
 }
 
-function resolveMethod(input: RequestInfo | URL, explicitMethod?: string): string {
+function resolveMethod(
+  input: RequestInfo | URL,
+  explicitMethod?: string,
+): string {
   if (explicitMethod) return explicitMethod.toUpperCase();
   if (isRequest(input)) return input.method.toUpperCase();
   return "GET";
@@ -78,6 +93,37 @@ function resolveUrl(input: RequestInfo | URL): string {
   return input.url;
 }
 
+function isMetadataKey(value: unknown): value is object {
+  return (
+    value !== null && (typeof value === "object" || typeof value === "function")
+  );
+}
+
+function attachResponseMetadata(
+  value: unknown,
+  response: Response,
+  requestInfo: { method: string; url: string },
+): void {
+  if (!isMetadataKey(value)) return;
+
+  const metadata: CustomFetchResponseMetadata = Object.freeze({
+    status: response.status,
+    statusText: response.statusText,
+    headers: new Headers(response.headers),
+    method: requestInfo.method,
+    url: response.url || requestInfo.url,
+  });
+  customFetchResponseMetadata.set(value, metadata);
+}
+
+export function getCustomFetchResponseMetadata(
+  value: unknown,
+): CustomFetchResponseMetadata | undefined {
+  return isMetadataKey(value)
+    ? customFetchResponseMetadata.get(value)
+    : undefined;
+}
+
 function mergeHeaders(...sources: Array<HeadersInit | undefined>): Headers {
   const headers = new Headers();
 
@@ -97,17 +143,19 @@ function getMediaType(headers: Headers): string | null {
 }
 
 function isJsonMediaType(mediaType: string | null): boolean {
-  return mediaType === "application/json" || Boolean(mediaType?.endsWith("+json"));
+  return (
+    mediaType === "application/json" || Boolean(mediaType?.endsWith("+json"))
+  );
 }
 
 function isTextMediaType(mediaType: string | null): boolean {
   return Boolean(
     mediaType &&
-      (mediaType.startsWith("text/") ||
-        mediaType === "application/xml" ||
-        mediaType === "text/xml" ||
-        mediaType.endsWith("+xml") ||
-        mediaType === "application/x-www-form-urlencoded"),
+    (mediaType.startsWith("text/") ||
+      mediaType === "application/xml" ||
+      mediaType === "text/xml" ||
+      mediaType.endsWith("+xml") ||
+      mediaType === "application/x-www-form-urlencoded"),
   );
 }
 
@@ -251,7 +299,10 @@ async function parseJsonBody(
   }
 }
 
-async function parseErrorBody(response: Response, method: string): Promise<unknown> {
+async function parseErrorBody(
+  response: Response,
+  method: string,
+): Promise<unknown> {
   if (hasNoBody(response, method)) {
     return null;
   }
@@ -260,7 +311,9 @@ async function parseErrorBody(response: Response, method: string): Promise<unkno
 
   // Fall back to text when blob() is unavailable (e.g. some React Native builds).
   if (mediaType && !isJsonMediaType(mediaType) && !isTextMediaType(mediaType)) {
-    return typeof response.blob === "function" ? response.blob() : response.text();
+    return typeof response.blob === "function"
+      ? response.blob()
+      : response.text();
   }
 
   const raw = await response.text();
@@ -315,7 +368,7 @@ async function parseSuccessBody(
       if (typeof response.blob !== "function") {
         throw new TypeError(
           "Blob responses are not supported in this runtime. " +
-            "Use responseType \"json\" or \"text\" instead.",
+            'Use responseType "json" or "text" instead.',
         );
       }
       return response.blob();
@@ -335,7 +388,10 @@ export async function customFetch<T = unknown>(
     throw new TypeError(`customFetch: ${method} requests cannot have a body.`);
   }
 
-  const headers = mergeHeaders(isRequest(input) ? input.headers : undefined, headersInit);
+  const headers = mergeHeaders(
+    isRequest(input) ? input.headers : undefined,
+    headersInit,
+  );
 
   if (
     typeof init.body === "string" &&
@@ -367,5 +423,7 @@ export async function customFetch<T = unknown>(
     throw new ApiError(response, errorData, requestInfo);
   }
 
-  return (await parseSuccessBody(response, responseType, requestInfo)) as T;
+  const data = await parseSuccessBody(response, responseType, requestInfo);
+  attachResponseMetadata(data, response, requestInfo);
+  return data as T;
 }

@@ -21,6 +21,7 @@ export interface DetectorProbeJobResponse {
   request_sha256: string;
   /** @pattern ^[0-9a-f]{64}$ */
   intent_sha256: string;
+  semantic_intent_sha256?: string | null;
   /** @pattern ^[0-9a-f]{64}$ */
   frozen_profiles_sha256: string;
   status: DetectorProbeJobResponseStatus;

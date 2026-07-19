@@ -1,0 +1,31 @@
+{
+  "schema_version": "1.0",
+  "job_ids": [
+    "probe-308adcc1feaa99cc-bddecb26d127",
+    "probe-b59e904ee0b8a14f-e2aee08f414e"
+  ],
+  "execution_bundle_sha256": "fe8ffe2aca1d83f5b3ed19d6fff96999fa3224d3688147c23e1622fe58947494",
+  "runtime_environment_sha256": "6ae75ef83b968801c2c0f16a628e9eba94fe88aed27384c2896d08c7e90054d3",
+  "code_bundle_sha256": "aa23d207df609403a6abde6de3435914ed4c27bc151498069c2821fa3a6ef5e1",
+  "code_commit": "7b8d45e121184f6bebe22e9a1fed4c9dca8a3a50",
+  "code_commit_blob_bundle_sha256": "4d381c6de23caa97e08fb6602e6876d425f2f16043d95aacb8b912eb4f59c59e",
+  "code_bundle_paths": [
+    "football_tracking/__init__.py",
+    "football_tracking/ai_contracts.py",
+    "football_tracking/ai_improvement_prompt_contract.py",
+    "football_tracking/api/__init__.py",
+    "football_tracking/api/schemas.py",
+    "football_tracking/candidate_dataset.py",
+    "football_tracking/config.py",
+    "football_tracking/detector.py",
+    "football_tracking/detector_candidate_contract.py",
+    "football_tracking/detector_development_common.py",
+    "football_tracking/detector_model_registry.py",
+    "football_tracking/detector_probe.py",
+    "football_tracking/detector_probe_runner.py",
+    "football_tracking/detector_probe_worker.py",
+    "football_tracking/media_integrity.py",
+    "football_tracking/tracking_contracts.py",
+    "football_tracking/types.py"
+  ]
+}

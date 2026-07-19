@@ -5,7 +5,9 @@
  * OpenAPI spec version: 0.1.0
  */
 import type { DetectorProbeDecodeViewEffectiveDecodeMode } from "./detectorProbeDecodeViewEffectiveDecodeMode";
+import type { DetectorProbeDecodeViewPositionVerification } from "./detectorProbeDecodeViewPositionVerification";
 import type { DetectorProbeDecodeViewRequestedDecodeMode } from "./detectorProbeDecodeViewRequestedDecodeMode";
+import type { DetectorProbeFrameTimingObservationView } from "./detectorProbeFrameTimingObservationView";
 
 export interface DetectorProbeDecodeView {
   /** @exclusiveMinimum 0 */
@@ -23,5 +25,6 @@ export interface DetectorProbeDecodeView {
    * @maxItems 50
    */
   verified_frame_indices: number[];
-  position_verification: "opencv_next_frame_index_with_0.25_tolerance";
+  position_verification: DetectorProbeDecodeViewPositionVerification;
+  frame_timing_observations?: DetectorProbeFrameTimingObservationView[] | null;
 }

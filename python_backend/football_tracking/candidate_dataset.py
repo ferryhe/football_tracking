@@ -95,18 +95,18 @@ def decode_verified_frames(
             raise CandidateDatasetError("requested frame exceeds the verified source frame count")
         _raise_if_decode_cancelled(cancel_callback)
         effective = requested_decode_mode
+        timing_observations: dict[int, dict[str, Any]] = {}
         try:
             if requested_decode_mode == "sequential":
                 if indices[-1] + 1 > MAX_DECODE_WORK_FRAMES:
-                    raise CandidateDatasetError(
-                        "sequential decode exceeds the verified work limit"
-                    )
+                    raise CandidateDatasetError("sequential decode exceeds the verified work limit")
                 frames = _read_selected_sequential(
                     capture,
                     indices,
                     actual["width"],
                     actual["height"],
                     cancel_callback=cancel_callback,
+                    timing_observations=timing_observations,
                 )
             elif requested_decode_mode == "preroll":
                 frames = _read_selected_segmented(
@@ -115,6 +115,7 @@ def decode_verified_frames(
                     actual["width"],
                     actual["height"],
                     cancel_callback=cancel_callback,
+                    timing_observations=timing_observations,
                 )
                 effective = "preroll_verified"
             else:
@@ -124,26 +125,29 @@ def decode_verified_frames(
                     actual["width"],
                     actual["height"],
                     cancel_callback=cancel_callback,
+                    timing_observations=timing_observations,
                 )
                 effective = "direct_verified"
         except _SeekError:
             capture.release()
             if indices[-1] + 1 > MAX_DECODE_WORK_FRAMES:
-                raise CandidateDatasetError(
-                    "bounded fallback cannot sequentially reach the selected late frame"
-                )
+                raise CandidateDatasetError("bounded fallback cannot sequentially reach the selected late frame")
             fallback = cv2.VideoCapture(str(path))
             captures.append(fallback)
             if not fallback.isOpened():
                 raise CandidateDatasetError("sequential fallback could not open the source video")
+            timing_observations.clear()
             frames = _read_selected_sequential(
                 fallback,
                 indices,
                 actual["width"],
                 actual["height"],
                 cancel_callback=cancel_callback,
+                timing_observations=timing_observations,
             )
             effective = "sequential_fallback"
+        if set(timing_observations) != set(indices):
+            raise CandidateDatasetError("verified decode did not capture decoder timing for every selected frame")
         return frames, {
             **actual,
             "fps": fps,
@@ -151,6 +155,7 @@ def decode_verified_frames(
             "effective_decode_mode": effective,
             "verified_frame_indices": indices,
             "position_verification": "opencv_next_frame_index_with_0.25_tolerance",
+            "frame_timing_observations": [timing_observations[index] for index in indices],
         }
     except CandidateDatasetError:
         raise
@@ -170,6 +175,7 @@ def _read_selected_sequential(
     height: int,
     *,
     cancel_callback: Callable[[], bool] | None = None,
+    timing_observations: dict[int, dict[str, Any]] | None = None,
 ) -> dict[int, np.ndarray]:
     if not math.isclose(float(capture.get(cv2.CAP_PROP_POS_FRAMES)), 0.0, abs_tol=0.25):
         raise CandidateDatasetError("sequential decode did not start at frame 0")
@@ -187,6 +193,7 @@ def _read_selected_sequential(
         ):
             raise CandidateDatasetError(f"sequential decoded frame position {frame_index} was not verified")
         if frame_index in required:
+            _record_decoder_timing(capture, frame_index, timing_observations)
             frames[frame_index] = _validate_frame(frame, frame_index, width, height)
             _observe_frame_cache(len(frames))
     if set(frames) != required:
@@ -201,6 +208,7 @@ def _read_selected_segmented(
     height: int,
     *,
     cancel_callback: Callable[[], bool] | None = None,
+    timing_observations: dict[int, dict[str, Any]] | None = None,
 ) -> dict[int, np.ndarray]:
     groups: list[list[int]] = []
     for index in indices:
@@ -238,21 +246,16 @@ def _read_selected_segmented(
             _raise_if_decode_cancelled(cancel_callback)
             ok, frame = capture.read()
             if not ok or frame is None:
-                raise _SeekError(
-                    f"bounded segment ended before required frame {frame_index}"
-                )
+                raise _SeekError(f"bounded segment ended before required frame {frame_index}")
             if not math.isclose(
                 float(capture.get(cv2.CAP_PROP_POS_FRAMES)),
                 float(frame_index + 1),
                 abs_tol=0.25,
             ):
-                raise _SeekError(
-                    f"bounded segment frame position {frame_index} was not verified"
-                )
+                raise _SeekError(f"bounded segment frame position {frame_index} was not verified")
             if frame_index in required:
-                result[frame_index] = _validate_frame(
-                    frame, frame_index, width, height
-                )
+                _record_decoder_timing(capture, frame_index, timing_observations)
+                result[frame_index] = _validate_frame(frame, frame_index, width, height)
                 _observe_frame_cache(len(result))
     if set(result) != set(indices):
         raise CandidateDatasetError("segmented decode did not emit every requested frame")
@@ -742,6 +745,7 @@ def _read_candidate_direct(
     height: int,
     *,
     cancel_callback: Callable[[], bool] | None = None,
+    timing_observations: dict[int, dict[str, Any]] | None = None,
 ) -> dict[int, np.ndarray]:
     result: dict[int, np.ndarray] = {}
     for index in indices:
@@ -755,9 +759,27 @@ def _read_candidate_direct(
             raise _SeekError(f"frame {index} could not be decoded after seek")
         if not math.isclose(float(capture.get(cv2.CAP_PROP_POS_FRAMES)), float(index + 1), abs_tol=0.25):
             raise _SeekError(f"decoded frame position {index} was not verified")
+        _record_decoder_timing(capture, index, timing_observations)
         result[index] = _validate_frame(frame, index, width, height)
         _observe_frame_cache(len(result))
     return result
+
+
+def _record_decoder_timing(
+    capture: Any,
+    frame_index: int,
+    observations: dict[int, dict[str, Any]] | None,
+) -> None:
+    if observations is None:
+        return
+    raw_pos_msec = float(capture.get(cv2.CAP_PROP_POS_MSEC))
+    if not math.isfinite(raw_pos_msec):
+        raise CandidateDatasetError(f"decoder did not report finite POS_MSEC for selected frame {frame_index}")
+    observations[frame_index] = {
+        "frame_index": frame_index,
+        "decoder_reported_pos_msec": raw_pos_msec,
+        "observation_method": "opencv_cap_prop_pos_msec_after_verified_frame_read",
+    }
 
 
 def _read_candidate_preroll(capture: Any, indices: list[int], width: int, height: int) -> dict[int, np.ndarray]:

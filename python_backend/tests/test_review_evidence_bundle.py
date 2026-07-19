@@ -111,9 +111,7 @@ class ReviewEvidenceBundleTests(unittest.TestCase):
             "model_manifest.v1.json",
             raw_sha256=model_sha256,
             semantic_key="model_manifest",
-            declaring_manifest=PurePosixPath(
-                "policy-qualification/policy/selective_policy.v1.json"
-            ),
+            declaring_manifest=PurePosixPath("policy-qualification/policy/selective_policy.v1.json"),
             declaring_package="policy_qualification",
             package_root=package_roots["policy_qualification"],
             package_roots=package_roots,
@@ -154,12 +152,8 @@ class ReviewEvidenceBundleTests(unittest.TestCase):
 
         annotation_contract_sha256 = "4" * 64
         annotation_derived_sha256 = "5" * 64
-        annotation_direct = (
-            "model-development/annotations/tracking_contract.v2.json"
-        )
-        annotation_authoritative = (
-            "model-development/dataset/tracking_contract.v2.json"
-        )
+        annotation_direct = "model-development/annotations/tracking_contract.v2.json"
+        annotation_authoritative = "model-development/dataset/tracking_contract.v2.json"
         inventory.update(
             {
                 annotation_direct: {"sha256": annotation_derived_sha256},
@@ -173,9 +167,7 @@ class ReviewEvidenceBundleTests(unittest.TestCase):
                 "tracking_contract.v2.json",
                 raw_sha256=annotation_contract_sha256,
                 semantic_key="source_contract",
-                declaring_manifest=PurePosixPath(
-                    "model-development/annotations/annotation_resolution.v1.json"
-                ),
+                declaring_manifest=PurePosixPath("model-development/annotations/annotation_resolution.v1.json"),
                 declaring_package="model_development",
                 package_root=package_roots["model_development"],
                 package_roots=package_roots,
@@ -192,9 +184,7 @@ class ReviewEvidenceBundleTests(unittest.TestCase):
             "tracking_contract.v2.json",
             raw_sha256=annotation_contract_sha256,
             semantic_key="source_contract",
-            declaring_manifest=PurePosixPath(
-                "model-development/annotations/annotation_resolution.v1.json"
-            ),
+            declaring_manifest=PurePosixPath("model-development/annotations/annotation_resolution.v1.json"),
             declaring_package="model_development",
             package_root=package_roots["model_development"],
             package_roots=package_roots,
@@ -264,9 +254,7 @@ class ReviewEvidenceBundleTests(unittest.TestCase):
                 run_id: str,
                 request: dict[str, object],
             ) -> dict[str, object]:
-                raise AssertionError(
-                    f"unexpected service call for {run_id}: {request}"
-                )
+                raise AssertionError(f"unexpected service call for {run_id}: {request}")
 
         app = FastAPI()
         app.include_router(broadcast_router)
@@ -460,10 +448,7 @@ class ReviewEvidenceBundleTests(unittest.TestCase):
                     service.reconfirm_broadcast_config_lineage("run-fixture", request)
             self.assertEqual(CONFIG_LINEAGE_CONFLICT, conflict.exception.code)
 
-            circular_bindings = {
-                name: {}
-                for name in config_lineage_module._REQUIRED_WORKFLOW_BINDINGS
-            }
+            circular_bindings = {name: {} for name in config_lineage_module._REQUIRED_WORKFLOW_BINDINGS}
             circular_bindings["workflow_id"] = "workflow-1"
             circular_bindings["historical_full_runs"] = []
             circular_bindings["request"] = circular_bindings
@@ -707,9 +692,7 @@ class ReviewEvidenceBundleTests(unittest.TestCase):
         smuggled_source.write_bytes(smuggled_payload)
         policy_descriptor = draft["packages"]["policy_qualification"]
         policy_descriptor["smuggled_target_labels_path"] = smuggled_relative
-        policy_descriptor["smuggled_target_labels_sha256"] = hashlib.sha256(
-            smuggled_payload
-        ).hexdigest()
+        policy_descriptor["smuggled_target_labels_sha256"] = hashlib.sha256(smuggled_payload).hexdigest()
         self._write_json(self.source / "review_evidence_bundle.draft.json", draft)
 
         with self.assertRaises(ReviewEvidenceBundleError) as build_caught:
@@ -719,12 +702,10 @@ class ReviewEvidenceBundleTests(unittest.TestCase):
         smuggled_published = clean.root / smuggled_relative
         smuggled_published.write_bytes(smuggled_payload)
         manifest = json.loads(clean.manifest_path.read_text(encoding="utf-8"))
-        manifest["packages"]["policy_qualification"][
-            "smuggled_target_labels_path"
-        ] = smuggled_relative
-        manifest["packages"]["policy_qualification"][
-            "smuggled_target_labels_sha256"
-        ] = hashlib.sha256(smuggled_payload).hexdigest()
+        manifest["packages"]["policy_qualification"]["smuggled_target_labels_path"] = smuggled_relative
+        manifest["packages"]["policy_qualification"]["smuggled_target_labels_sha256"] = hashlib.sha256(
+            smuggled_payload
+        ).hexdigest()
         manifest["inventory"].append(
             {
                 "path": smuggled_relative,
@@ -746,9 +727,7 @@ class ReviewEvidenceBundleTests(unittest.TestCase):
         ):
             with self.subTest(missing_field=missing_field):
                 draft = self._write_fixture()
-                queue_relative = (
-                    "model-development/annotation_adjudication_queue.v1.json"
-                )
+                queue_relative = "model-development/annotation_adjudication_queue.v1.json"
                 queue_path = self.source / queue_relative
                 self._write_json(
                     queue_path,
@@ -788,18 +767,14 @@ class ReviewEvidenceBundleTests(unittest.TestCase):
                     self.source,
                     self.root / f"clean-alias-{package_name}",
                 )
-                queue_relative = (
-                    f"{package_root}/annotation_adjudication_queue.v1.json"
-                )
+                queue_relative = f"{package_root}/annotation_adjudication_queue.v1.json"
                 binary_truth = b"candidate-1\x00match_ball\x00target-truth"
                 queue_path = self.source / queue_relative
                 queue_path.write_bytes(binary_truth)
                 draft["packages"][package_name].update(
                     {
                         "adjudication_queue_path": queue_relative,
-                        "adjudication_queue_sha256": hashlib.sha256(
-                            binary_truth
-                        ).hexdigest(),
+                        "adjudication_queue_sha256": hashlib.sha256(binary_truth).hexdigest(),
                     }
                 )
                 self._write_json(
@@ -821,15 +796,11 @@ class ReviewEvidenceBundleTests(unittest.TestCase):
 
                 published_queue = clean.root / queue_relative
                 published_queue.write_bytes(binary_truth)
-                manifest = json.loads(
-                    clean.manifest_path.read_text(encoding="utf-8")
-                )
+                manifest = json.loads(clean.manifest_path.read_text(encoding="utf-8"))
                 manifest["packages"][package_name].update(
                     {
                         "adjudication_queue_path": queue_relative,
-                        "adjudication_queue_sha256": hashlib.sha256(
-                            binary_truth
-                        ).hexdigest(),
+                        "adjudication_queue_sha256": hashlib.sha256(binary_truth).hexdigest(),
                     }
                 )
                 manifest["inventory"].append(
@@ -841,9 +812,7 @@ class ReviewEvidenceBundleTests(unittest.TestCase):
                 )
                 manifest["inventory"].sort(key=lambda row: row["path"])
                 self._write_json(clean.manifest_path, manifest)
-                with self.assertRaises(
-                    ReviewEvidenceBundleError
-                ) as validate_caught:
+                with self.assertRaises(ReviewEvidenceBundleError) as validate_caught:
                     validate_review_evidence_bundle(clean.root)
                 self.assertEqual(
                     "invalid_package_descriptor",
@@ -887,18 +856,12 @@ class ReviewEvidenceBundleTests(unittest.TestCase):
                     )
                 finally:
                     queue_path.unlink()
-                manifest = json.loads(
-                    built.manifest_path.read_text(encoding="utf-8")
-                )
+                manifest = json.loads(built.manifest_path.read_text(encoding="utf-8"))
                 descriptor = manifest["packages"][package_name]
                 annotation_relative = descriptor["annotation_resolution_path"]
                 annotation_path = built.root / annotation_relative
-                annotation = json.loads(
-                    annotation_path.read_text(encoding="utf-8")
-                )
-                annotation["linked_artifacts"][
-                    "adjudication_queue"
-                ] = "renamed-adjudication-queue.json"
+                annotation = json.loads(annotation_path.read_text(encoding="utf-8"))
+                annotation["linked_artifacts"]["adjudication_queue"] = "renamed-adjudication-queue.json"
                 self._write_json(annotation_path, annotation)
                 self._refresh_published_file_binding(
                     manifest,
@@ -953,16 +916,10 @@ class ReviewEvidenceBundleTests(unittest.TestCase):
                         queue_overrides=overrides,
                     )
                     try:
-                        with self.assertRaises(
-                            ReviewEvidenceBundleError
-                        ) as caught:
+                        with self.assertRaises(ReviewEvidenceBundleError) as caught:
                             build_review_evidence_bundle(
                                 self.source,
-                                self.root
-                                / (
-                                    "invalid-queue-build-"
-                                    f"{package_name}-{case_name}"
-                                ),
+                                self.root / (f"invalid-queue-build-{package_name}-{case_name}"),
                             )
                         self.assertEqual(
                             "invalid_authority_manifest",
@@ -984,28 +941,19 @@ class ReviewEvidenceBundleTests(unittest.TestCase):
                     try:
                         built = build_review_evidence_bundle(
                             self.source,
-                            self.root
-                            / (
-                                "invalid-queue-published-"
-                                f"{package_name}-{case_name}"
-                            ),
+                            self.root / (f"invalid-queue-published-{package_name}-{case_name}"),
                         )
                     finally:
                         queue_path.unlink()
-                    manifest = json.loads(
-                        built.manifest_path.read_text(encoding="utf-8")
-                    )
+                    manifest = json.loads(built.manifest_path.read_text(encoding="utf-8"))
                     descriptor = manifest["packages"][package_name]
                     queue_relative = (
                         PurePosixPath(descriptor["annotation_resolution_path"])
-                        .parent
-                        .joinpath(ADJUDICATION_QUEUE_NAME)
+                        .parent.joinpath(ADJUDICATION_QUEUE_NAME)
                         .as_posix()
                     )
                     published_queue = built.root / queue_relative
-                    queue = json.loads(
-                        published_queue.read_text(encoding="utf-8")
-                    )
+                    queue = json.loads(published_queue.read_text(encoding="utf-8"))
                     queue.update(overrides)
                     self._write_json(published_queue, queue)
                     self._refresh_published_file_binding(
@@ -1015,9 +963,7 @@ class ReviewEvidenceBundleTests(unittest.TestCase):
                     )
                     self._write_json(built.manifest_path, manifest)
 
-                    with self.assertRaises(
-                        ReviewEvidenceBundleError
-                    ) as caught:
+                    with self.assertRaises(ReviewEvidenceBundleError) as caught:
                         validate_review_evidence_bundle(built.root)
                     self.assertEqual(
                         "invalid_authority_manifest",
@@ -1045,16 +991,12 @@ class ReviewEvidenceBundleTests(unittest.TestCase):
                 descriptor = validated.manifest["packages"][package_name]
                 expected_relative = (
                     PurePosixPath(descriptor["annotation_resolution_path"])
-                    .parent
-                    .joinpath(ADJUDICATION_QUEUE_NAME)
+                    .parent.joinpath(ADJUDICATION_QUEUE_NAME)
                     .as_posix()
                 )
                 self.assertIn(
                     expected_relative,
-                    {
-                        row["path"]
-                        for row in validated.manifest["inventory"]
-                    },
+                    {row["path"] for row in validated.manifest["inventory"]},
                 )
 
     def test_unlinked_adjudication_queue_is_rejected_for_both_packages(
@@ -1064,30 +1006,20 @@ class ReviewEvidenceBundleTests(unittest.TestCase):
             with self.subTest(package_name=package_name):
                 draft = self._write_fixture()
                 descriptor = draft["packages"][package_name]
-                annotation_relative = PurePosixPath(
-                    descriptor["annotation_resolution_path"]
-                )
-                queue_path = (
-                    self.source
-                    / annotation_relative.parent
-                    / ADJUDICATION_QUEUE_NAME
-                )
+                annotation_relative = PurePosixPath(descriptor["annotation_resolution_path"])
+                queue_path = self.source / annotation_relative.parent / ADJUDICATION_QUEUE_NAME
                 self._write_json(
                     queue_path,
                     {
                         "schema_version": "1.0",
-                        "artifact_type": (
-                            "candidate_annotation_adjudication_queue"
-                        ),
+                        "artifact_type": ("candidate_annotation_adjudication_queue"),
                         "source_resolution": annotation_relative.name,
                         "candidate_count": 0,
                         "candidates": [],
                     },
                 )
                 try:
-                    with self.assertRaises(
-                        ReviewEvidenceBundleError
-                    ) as caught:
+                    with self.assertRaises(ReviewEvidenceBundleError) as caught:
                         build_review_evidence_bundle(
                             self.source,
                             self.root / f"unlinked-queue-{package_name}",
@@ -1105,12 +1037,8 @@ class ReviewEvidenceBundleTests(unittest.TestCase):
         draft = self._write_fixture()
         for package_name in ("model_development", "policy_qualification"):
             descriptor = draft["packages"][package_name]
-            descriptor["previous_vote_ledger_path"] = descriptor[
-                "vote_ledger_path"
-            ]
-            descriptor["previous_vote_ledger_sha256"] = descriptor[
-                "vote_ledger_sha256"
-            ]
+            descriptor["previous_vote_ledger_path"] = descriptor["vote_ledger_path"]
+            descriptor["previous_vote_ledger_sha256"] = descriptor["vote_ledger_sha256"]
         self._write_json(
             self.source / "review_evidence_bundle.draft.json",
             draft,
@@ -1323,24 +1251,13 @@ class ReviewEvidenceBundleTests(unittest.TestCase):
         ):
             built = build_review_evidence_bundle(self.source, self.root / "target-published")
             validated = validate_review_evidence_bundle(built.root)
-            model_manifest_path = (
-                self.source
-                / draft["packages"]["model_development"]["manifest_path"]
-            )
+            model_manifest_path = self.source / draft["packages"]["model_development"]["manifest_path"]
             original_model_manifest = model_manifest_path.read_bytes()
             original_queue = queue_path.read_bytes()
-            original_draft = (
-                self.source / "review_evidence_bundle.draft.json"
-            ).read_bytes()
-            smuggled_nested_path = (
-                model_manifest_path.parent / "smuggled-target-labels.bin"
-            )
-            smuggled_nested_path.write_bytes(
-                b"candidate-1\x00match_ball\x00nested-target-truth"
-            )
-            model_manifest = json.loads(
-                model_manifest_path.read_text(encoding="utf-8")
-            )
+            original_draft = (self.source / "review_evidence_bundle.draft.json").read_bytes()
+            smuggled_nested_path = model_manifest_path.parent / "smuggled-target-labels.bin"
+            smuggled_nested_path.write_bytes(b"candidate-1\x00match_ball\x00nested-target-truth")
+            model_manifest = json.loads(model_manifest_path.read_text(encoding="utf-8"))
             model_manifest["unrecognized_authority"] = {
                 "path": smuggled_nested_path.name,
                 "sha256": sha256_file(smuggled_nested_path),
@@ -1366,16 +1283,10 @@ class ReviewEvidenceBundleTests(unittest.TestCase):
             finally:
                 model_manifest_path.write_bytes(original_model_manifest)
                 queue_path.write_bytes(original_queue)
-                (
-                    self.source / "review_evidence_bundle.draft.json"
-                ).write_bytes(original_draft)
+                (self.source / "review_evidence_bundle.draft.json").write_bytes(original_draft)
                 smuggled_nested_path.unlink()
                 queue = json.loads(queue_path.read_text(encoding="utf-8"))
-                draft = json.loads(
-                    (
-                        self.source / "review_evidence_bundle.draft.json"
-                    ).read_text(encoding="utf-8")
-                )
+                draft = json.loads((self.source / "review_evidence_bundle.draft.json").read_text(encoding="utf-8"))
             legacy_digests = {
                 sha256_file(self.source / target_artifacts["target_audit_labels"]),
                 "1" * 64,
@@ -1391,12 +1302,7 @@ class ReviewEvidenceBundleTests(unittest.TestCase):
                     },
                 )
                 self.assertGreater(leaked_path.stat().st_size, 128 * 1024)
-                self.assertTrue(
-                    all(
-                        digest not in leaked_path.read_text(encoding="utf-8")
-                        for digest in legacy_digests
-                    )
-                )
+                self.assertTrue(all(digest not in leaked_path.read_text(encoding="utf-8") for digest in legacy_digests))
                 try:
                     with (
                         self.subTest(package_root=package_root),
@@ -1436,10 +1342,7 @@ class ReviewEvidenceBundleTests(unittest.TestCase):
         published_scan_sets = []
         for call in leakage_validation.call_args_list:
             scan_root = Path(call.kwargs["plan_path"]).parents[1]
-            scanned = {
-                Path(path).relative_to(scan_root)
-                for path in call.args[1]
-            }
+            scanned = {Path(path).relative_to(scan_root) for path in call.args[1]}
             if scan_root == built.root:
                 published_scan_sets.append(scanned)
             for relative in scanned:
@@ -1452,9 +1355,7 @@ class ReviewEvidenceBundleTests(unittest.TestCase):
             if path.is_file()
         }
         self.assertTrue(published_scan_sets)
-        self.assertTrue(
-            all(scanned == expected_published_scan for scanned in published_scan_sets)
-        )
+        self.assertTrue(all(scanned == expected_published_scan for scanned in published_scan_sets))
 
     def test_builder_rebases_nested_producer_queue_onto_bundle_root(self) -> None:
         draft = self._write_fixture()
@@ -2125,9 +2026,7 @@ class ReviewEvidenceBundleTests(unittest.TestCase):
             app.include_router(broadcast_router)
             app.dependency_overrides[get_service] = lambda: service
             client = TestClient(app)
-            discovered = client.get(
-                "/runs/run-fixture/broadcast/review-evidence"
-            )
+            discovered = client.get("/runs/run-fixture/broadcast/review-evidence")
             missing_reviewer = client.post(
                 "/runs/run-fixture/broadcast/config-lineage-reconfirmation",
                 json={
@@ -3527,9 +3426,7 @@ class ReviewEvidenceBundleTests(unittest.TestCase):
         queue_overrides: dict[str, object] | None = None,
     ) -> Path:
         descriptor = draft["packages"][package_name]
-        annotation_relative = PurePosixPath(
-            descriptor["annotation_resolution_path"]
-        )
+        annotation_relative = PurePosixPath(descriptor["annotation_resolution_path"])
         annotation_path = self.source / annotation_relative
         candidates = [
             {
@@ -3541,20 +3438,14 @@ class ReviewEvidenceBundleTests(unittest.TestCase):
         annotation["adjudication_queue"] = candidates
         annotation["linked_artifacts"] = {
             "adjudication_queue": linked_name,
-            "derived_tracking_contract": PurePosixPath(
-                descriptor["resolved_contract_path"]
-            ).name,
+            "derived_tracking_contract": PurePosixPath(descriptor["resolved_contract_path"]).name,
         }
         self._write_json(annotation_path, annotation)
-        descriptor["annotation_resolution_sha256"] = sha256_file(
-            annotation_path
-        )
+        descriptor["annotation_resolution_sha256"] = sha256_file(annotation_path)
         if package_name == "policy_qualification":
             queue_path = self.source / "selective_review_queue.v1.json"
             review_queue = json.loads(queue_path.read_text(encoding="utf-8"))
-            review_queue["bindings"]["annotation_resolution"][
-                "sha256"
-            ] = sha256_file(annotation_path)
+            review_queue["bindings"]["annotation_resolution"]["sha256"] = sha256_file(annotation_path)
             self._write_json(queue_path, review_queue)
             draft["queue"]["sha256"] = sha256_file(queue_path)
 
@@ -3604,9 +3495,7 @@ class ReviewEvidenceBundleTests(unittest.TestCase):
         queue_relative = manifest["queue"]["path"]
         queue_path = root / queue_relative
         review_queue = json.loads(queue_path.read_text(encoding="utf-8"))
-        review_queue["bindings"]["annotation_resolution"][
-            "sha256"
-        ] = sha256_file(root / annotation_relative)
+        review_queue["bindings"]["annotation_resolution"]["sha256"] = sha256_file(root / annotation_relative)
         self._write_json(queue_path, review_queue)
         self._refresh_published_file_binding(
             manifest,
@@ -3699,13 +3588,9 @@ class ReviewEvidenceBundleTests(unittest.TestCase):
                 "schema_version": "1.0",
                 "artifact_type": "candidate_classifier_model",
                 "weights_path": "model.pt",
-                "weights_sha256": sha256_file(
-                    self.source / "model-development/model.pt"
-                ),
+                "weights_sha256": sha256_file(self.source / "model-development/model.pt"),
                 "training_report_path": "training.json",
-                "training_report_sha256": sha256_file(
-                    self.source / "model-development/training.json"
-                ),
+                "training_report_sha256": sha256_file(self.source / "model-development/training.json"),
             },
         )
         for relative in (

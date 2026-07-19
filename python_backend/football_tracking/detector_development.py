@@ -58,17 +58,10 @@ class DetectorDevelopmentService:
             for model in catalog["models"]:
                 descriptor = model.get("descriptor") if isinstance(model, dict) else None
                 if not isinstance(descriptor, dict):
-                    raise DetectorDevelopmentError(
-                        "invalid_registry", "Detector catalog model descriptor is invalid"
-                    )
+                    raise DetectorDevelopmentError("invalid_registry", "Detector catalog model descriptor is invalid")
                 identity = (descriptor.get("model_id"), descriptor.get("version"))
-                if (
-                    not all(isinstance(item, str) and item for item in identity)
-                    or identity in identities
-                ):
-                    raise DetectorDevelopmentError(
-                        "invalid_registry", "Detector catalog model identity is duplicated"
-                    )
+                if not all(isinstance(item, str) and item for item in identity) or identity in identities:
+                    raise DetectorDevelopmentError("invalid_registry", "Detector catalog model identity is duplicated")
                 identities.add(identity)
             return catalog
 
@@ -78,15 +71,67 @@ class DetectorDevelopmentService:
         with self._catalog_import_lock:
             return import_detector_model(self.repo_root, request)
 
-    def create_probe(self, request: dict[str, Any]) -> dict[str, Any]:
+    def create_probe(
+        self,
+        request: dict[str, Any],
+        *,
+        _expected_profile_sha256s: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
         with self._lifecycle_lock:
             coordinator = self._probes()
-        return coordinator.create_probe(request)
+        return coordinator.create_probe(
+            request,
+            _expected_profile_sha256s=_expected_profile_sha256s,
+        )
 
     def get_probe(self, job_id: str) -> dict[str, Any]:
         with self._lifecycle_lock:
             coordinator = self._probes()
         return coordinator.get_probe(job_id)
+
+    def get_verified_probe(self, job_id: str) -> dict[str, Any]:
+        with self._lifecycle_lock:
+            coordinator = self._probes()
+        return coordinator.get_verified_probe(job_id)
+
+    def get_verified_probe_job_record(self, job_id: str) -> dict[str, Any]:
+        with self._lifecycle_lock:
+            coordinator = self._probes()
+        return coordinator.get_verified_probe_job_record(job_id)
+
+    def get_review_proxy_upgrade_parent(self, job_id: str) -> dict[str, Any]:
+        with self._lifecycle_lock:
+            coordinator = self._probes()
+        return coordinator.get_review_proxy_upgrade_parent(job_id)
+
+    def get_review_proxy_upgrade_child(self, parent_job_id: str) -> dict[str, Any] | None:
+        with self._lifecycle_lock:
+            coordinator = self._probes()
+        return coordinator.get_review_proxy_upgrade_child(parent_job_id)
+
+    def create_review_proxy_upgrade_child(
+        self,
+        parent_job_id: str,
+        *,
+        repair_evidence: dict[str, Any],
+        proxy_media: dict[str, Any],
+        proxy_sample_bytes: dict[int, bytes],
+        expected_child_plan: dict[str, Any],
+    ) -> dict[str, Any]:
+        with self._lifecycle_lock:
+            coordinator = self._probes()
+        return coordinator.create_review_proxy_upgrade_child(
+            parent_job_id,
+            repair_evidence=repair_evidence,
+            proxy_media=proxy_media,
+            proxy_sample_bytes=proxy_sample_bytes,
+            expected_child_plan=expected_child_plan,
+        )
+
+    def review_proxy_upgrade_child_plan(self, parent_job_id: str, *, repair_evidence: dict[str, Any]) -> dict[str, Any]:
+        with self._lifecycle_lock:
+            coordinator = self._probes()
+        return coordinator.review_proxy_upgrade_child_plan(parent_job_id, repair_evidence=repair_evidence)
 
     def cancel_probe(self, job_id: str) -> dict[str, Any]:
         with self._lifecycle_lock:
@@ -103,9 +148,7 @@ class DetectorDevelopmentService:
             coordinator = self._probes()
         return coordinator.get_probe_artifact(job_id, artifact_id)
 
-    def read_probe_artifact(
-        self, job_id: str, artifact_id: str
-    ) -> tuple[bytes, str, str]:
+    def read_probe_artifact(self, job_id: str, artifact_id: str) -> tuple[bytes, str, str]:
         with self._lifecycle_lock:
             coordinator = self._probes()
         return coordinator.read_probe_artifact(job_id, artifact_id)
@@ -132,18 +175,14 @@ class DetectorDevelopmentService:
                     auto_start_workers=self._auto_start_workers,
                     catalog_provider=self._catalog_provider,
                     worker_deadline_seconds=self._worker_deadline_seconds,
-                    worker_heartbeat_timeout_seconds=(
-                        self._worker_heartbeat_timeout_seconds
-                    ),
+                    worker_heartbeat_timeout_seconds=(self._worker_heartbeat_timeout_seconds),
                     worker_command_factory=self._worker_command_factory,
                 )
             return self._probe_coordinator
 
     def _require_open(self) -> None:
         if self._closed:
-            raise DetectorDevelopmentError(
-                "service_closed", "Detector development service is closed"
-            )
+            raise DetectorDevelopmentError("service_closed", "Detector development service is closed")
 
 
 __all__ = [

@@ -34,7 +34,7 @@ export default defineConfig({
     },
   ],
   webServer: {
-    command: "pnpm run dev",
+    command: "node node_modules/vite/bin/vite.js --config vite.config.ts",
     cwd: import.meta.dirname,
     env: {
       ...process.env,

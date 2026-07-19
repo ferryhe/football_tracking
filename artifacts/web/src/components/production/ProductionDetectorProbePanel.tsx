@@ -149,6 +149,7 @@ export interface ProductionDetectorProbePanelProps {
   job: DetectorProbeJobView | null;
   mutationPending: boolean;
   actionsBlocked?: boolean;
+  lineageLocked?: boolean;
   exactCreatePending?: boolean;
   onStart: (profileIds: string[]) => void;
   onCancel: (jobId: string) => void;
@@ -157,6 +158,10 @@ export interface ProductionDetectorProbePanelProps {
   onRefreshRecovery?: () => void;
   onReloadCatalog?: () => void;
   onRetryCreate?: () => void;
+  onStartDevelopmentAnnotation?: (
+    jobId: string,
+    lockedProfileId: string,
+  ) => void;
 }
 
 function profileIdentity(models: readonly DetectorProbeModelView[]) {
@@ -288,7 +293,7 @@ function detectorProbeLabels(language: "en" | "zh") {
       candidateCaveat:
         "证据图片全部验证后，如显示候选框，它们也只是未经人工确认的检测器输出，不代表已经找到足球；正确性由下一步标注验证确认。",
       t3Next:
-        "下一步进入 20–50 帧可行性检查：在近、中、远距离和不同光照帧上指出或框出足球，再判断是否训练机位适配模型。",
+        "先把这些已展示帧用于开发标注。开发完成后，再通过数据隔离动作冻结一份全新的 20–50 帧未见帧检查清单并启动后台探针；本页展示帧不得回选。",
       evidenceMissing:
         "就绪报告没有完整且成功执行的同帧证据，因此不能作为可信对比。请通过显式重试创建子任务。",
       evidenceImagesLoading:
@@ -305,11 +310,19 @@ function detectorProbeLabels(language: "en" | "zh") {
         "已保留当前任务指针。重新读取成功前不会启动或替换后台任务。",
       reloadCatalog: "重新加载模型目录",
       retryCreate: "按原请求重试创建",
+      lineageLocked:
+        "该探针已进入标注续接链路。这里只保留历史证据与父子谱系；普通探针重试已禁用，请使用标注会话中由服务器授权的恢复操作。",
       previousFrame: "上一帧",
       nextFrame: "下一帧",
       framePosition: (current: number, total: number) =>
         `证据帧 ${current} / ${total}`,
       resultManifestSha: "结果清单 SHA-256",
+      lockedProfile: "开发标注锁定配置",
+      annotationBoundary:
+        "这些帧已经展示，只能用于开发标注；模型建议仍然是未确认项。",
+      dataIsolatedCheckBoundary:
+        "开发标注完成后，必须通过数据隔离动作先冻结一份全新的 20–50 帧未见帧检查清单，再启动新的后台探针；本页展示帧不得进入该检查。",
+      startDevelopmentAnnotation: "用已展示帧开始开发标注",
     };
   }
   return {
@@ -382,7 +395,7 @@ function detectorProbeLabels(language: "en" | "zh") {
     candidateCaveat:
       "After every evidence image is verified, any displayed candidate boxes are still unverified detector output, not confirmation that the football was found. T3 annotation determines correctness.",
     t3Next:
-      "Next, start the 20–50-frame feasibility check: point to or box the ball across near, medium, far, and varied-light frames before deciding whether to train a camera-adapted detector.",
+      "First use these revealed frames for development annotation. After development, a data-isolated action must freeze a new 20–50-frame unseen-frame check manifest and start a new background probe; no displayed frame may be reselected.",
     evidenceMissing:
       "The ready report is missing complete, successfully executed same-frame evidence and cannot be treated as a trustworthy comparison. Retry explicitly to create a child job.",
     evidenceImagesLoading:
@@ -399,11 +412,20 @@ function detectorProbeLabels(language: "en" | "zh") {
       "The current job pointer is retained. No backend job will be started or replaced until refresh succeeds.",
     reloadCatalog: "Reload model registry",
     retryCreate: "Retry the exact create request",
+    lineageLocked:
+      "This probe is now part of an annotation continuation. Its historical evidence and parent/child lineage remain visible, but ordinary probe retry is disabled; use only the server-authorized recovery action in the annotation session.",
     previousFrame: "Previous frame",
     nextFrame: "Next frame",
     framePosition: (current: number, total: number) =>
       `Evidence frame ${current} of ${total}`,
     resultManifestSha: "Result manifest SHA-256",
+    lockedProfile: "Locked profile for development annotation",
+    annotationBoundary:
+      "These displayed frames are already revealed. They can support development annotation only; suggestions remain unconfirmed.",
+    dataIsolatedCheckBoundary:
+      "After development annotation, a data-isolated action must first freeze a new 20–50-frame unseen-frame check manifest, then run a new background probe. None of these displayed frames may be selected into that check.",
+    startDevelopmentAnnotation:
+      "Start development annotation on displayed frames",
   };
 }
 
@@ -454,6 +476,7 @@ export function ProductionDetectorProbePanel({
   job,
   mutationPending,
   actionsBlocked = false,
+  lineageLocked = false,
   exactCreatePending = false,
   onStart,
   onCancel,
@@ -462,6 +485,7 @@ export function ProductionDetectorProbePanel({
   onRefreshRecovery,
   onReloadCatalog,
   onRetryCreate,
+  onStartDevelopmentAnnotation,
 }: ProductionDetectorProbePanelProps) {
   const { language } = useLanguage();
   const labels = detectorProbeLabels(language);
@@ -485,6 +509,7 @@ export function ProductionDetectorProbePanel({
     : "";
   const evidenceJobIdentity = `${job?.jobId ?? "none"}:${job?.resultManifestSha256 ?? "none"}`;
   const [activeFrameOffset, setActiveFrameOffset] = useState(0);
+  const [lockedProfileId, setLockedProfileId] = useState("");
   const activeFrameIndex = Math.min(
     activeFrameOffset,
     Math.max(0, (job?.frames.length ?? 1) - 1),
@@ -512,6 +537,14 @@ export function ProductionDetectorProbePanel({
     setLoadedArtifactUrls(new Set());
     setFailedArtifactUrls(new Set());
   }, [evidenceJobIdentity]);
+
+  useEffect(() => {
+    setLockedProfileId((current) =>
+      job?.selectedProfileIds.includes(current)
+        ? current
+        : (job?.selectedProfileIds[0] ?? ""),
+    );
+  }, [jobSelectionIdentity]);
 
   useEffect(() => {
     setSelectedProfileIds((current) => {
@@ -562,10 +595,11 @@ export function ProductionDetectorProbePanel({
     ),
   );
   const showStart =
-    !job ||
-    (job.status === "ready" &&
-      !job.noProfilesProducedCandidates &&
-      !sameSelectionAsJob);
+    !lineageLocked &&
+    (!job ||
+      (job.status === "ready" &&
+        !job.noProfilesProducedCandidates &&
+        !sameSelectionAsJob));
 
   function toggleProfile(profileId: string, checked: boolean) {
     setSelectedProfileIds((current) =>
@@ -602,7 +636,7 @@ export function ProductionDetectorProbePanel({
   }
 
   function repeatTerminalComparison() {
-    if (!job) return;
+    if (!job || lineageLocked) return;
     if (sameSelectionAsJob) {
       onRetry({
         retryFromJobId: job.jobId,
@@ -643,6 +677,12 @@ export function ProductionDetectorProbePanel({
             </p>
           )}
         </div>
+
+        {lineageLocked && (
+          <Alert>
+            <AlertDescription>{labels.lineageLocked}</AlertDescription>
+          </Alert>
+        )}
 
         {catalogState === "failed" && (
           <Alert variant="destructive">
@@ -991,7 +1031,12 @@ export function ProductionDetectorProbePanel({
                 type="button"
                 variant="outline"
                 onClick={repeatTerminalComparison}
-                disabled={mutationPending || !selectionValid || actionsBlocked}
+                disabled={
+                  mutationPending ||
+                  !selectionValid ||
+                  actionsBlocked ||
+                  lineageLocked
+                }
               >
                 {sameSelectionAsJob ? (
                   <RotateCcw className="mr-2 h-4 w-4" aria-hidden="true" />
@@ -1012,7 +1057,12 @@ export function ProductionDetectorProbePanel({
                 type="button"
                 variant="outline"
                 onClick={repeatTerminalComparison}
-                disabled={mutationPending || !selectionValid || actionsBlocked}
+                disabled={
+                  mutationPending ||
+                  !selectionValid ||
+                  actionsBlocked ||
+                  lineageLocked
+                }
               >
                 {sameSelectionAsJob ? (
                   <RotateCcw className="mr-2 h-4 w-4" aria-hidden="true" />
@@ -1041,7 +1091,10 @@ export function ProductionDetectorProbePanel({
                     variant="outline"
                     onClick={repeatTerminalComparison}
                     disabled={
-                      mutationPending || !selectionValid || actionsBlocked
+                      mutationPending ||
+                      !selectionValid ||
+                      actionsBlocked ||
+                      lineageLocked
                     }
                   >
                     {sameSelectionAsJob ? (
@@ -1061,6 +1114,45 @@ export function ProductionDetectorProbePanel({
             {labels.candidateCaveat}
           </p>
         )}
+
+        {job?.status === "ready" &&
+          trustworthyReadyEvidence &&
+          onStartDevelopmentAnnotation && (
+            <section className="min-w-0 space-y-3 rounded-lg border p-4">
+              <p className="text-sm">{labels.annotationBoundary}</p>
+              <p className="text-sm text-muted-foreground">
+                {labels.dataIsolatedCheckBoundary}
+              </p>
+              <div className="min-w-0 space-y-1">
+                <Label htmlFor="detector-probe-locked-profile">
+                  {labels.lockedProfile}
+                </Label>
+                <select
+                  id="detector-probe-locked-profile"
+                  className="min-h-9 min-w-0 w-full max-w-full rounded-md border bg-background px-2 font-mono text-sm"
+                  value={lockedProfileId}
+                  onChange={(event) => setLockedProfileId(event.target.value)}
+                >
+                  {job.selectedProfileIds.map((profileId) => (
+                    <option key={profileId} value={profileId}>
+                      {profileId}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <Button
+                type="button"
+                variant="outline"
+                className="h-auto min-w-0 max-w-full whitespace-normal text-left"
+                disabled={!lockedProfileId || mutationPending || actionsBlocked}
+                onClick={() =>
+                  onStartDevelopmentAnnotation(job.jobId, lockedProfileId)
+                }
+              >
+                {labels.startDevelopmentAnnotation}
+              </Button>
+            </section>
+          )}
 
         {job?.status === "ready" && readyEvidenceComplete && activeFrame && (
           <div className="min-w-0 space-y-5">
@@ -1292,7 +1384,10 @@ export function ProductionDetectorProbePanel({
                   variant="outline"
                   onClick={repeatTerminalComparison}
                   disabled={
-                    mutationPending || !selectionValid || actionsBlocked
+                    mutationPending ||
+                    !selectionValid ||
+                    actionsBlocked ||
+                    lineageLocked
                   }
                 >
                   {sameSelectionAsJob ? (

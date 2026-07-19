@@ -38,9 +38,7 @@ def _error(control: Path, worker_id: str, code: str) -> int:
     return 74
 
 
-def _heartbeat(
-    stop: threading.Event, control: Path, worker_id: str, parent_pid: int
-) -> None:
+def _heartbeat(stop: threading.Event, control: Path, worker_id: str, parent_pid: int) -> None:
     sequence = 0
     while not stop.wait(0.05):
         sequence += 1
@@ -57,9 +55,7 @@ def _heartbeat(
         )
 
 
-def _successful_output(
-    request: dict[str, Any], profiles: list[dict[str, Any]], staging: Path
-) -> dict[str, Any]:
+def _successful_output(request: dict[str, Any], profiles: list[dict[str, Any]], staging: Path) -> dict[str, Any]:
     fixture = staging / "test-worker-fixture.jpg"
     jpeg = fixture.read_bytes()
     fixture.unlink()
@@ -77,11 +73,7 @@ def _successful_output(
         frame_path.write_bytes(jpeg)
         profile_results = []
         for profile in profiles:
-            overlay_path = (
-                staging
-                / "overlays"
-                / f"{frame_index:09d}-{profile['profile_id']}.jpg"
-            )
+            overlay_path = staging / "overlays" / f"{frame_index:09d}-{profile['profile_id']}.jpg"
             overlay_path.parent.mkdir(parents=True, exist_ok=True)
             overlay_path.write_bytes(jpeg)
             candidate = {
@@ -92,9 +84,7 @@ def _successful_output(
                 "checkpoint_class_name": "sports ball",
                 "source": f"yolo_{profile['mode']}",
                 "coordinate_reason": (
-                    "direct_source_coordinates"
-                    if profile["mode"] == "direct"
-                    else "sahi_tile_offset_applied"
+                    "direct_source_coordinates" if profile["mode"] == "direct" else "sahi_tile_offset_applied"
                 ),
                 "merge_reason": "retained_top_k",
             }
@@ -110,20 +100,18 @@ def _successful_output(
                     "display_candidate": candidate,
                     "filter_reasons": {},
                     "failure_code": None,
-                    "raw_overlay_relative_path": overlay_path.relative_to(
-                        staging
-                    ).as_posix(),
+                    "raw_overlay_relative_path": overlay_path.relative_to(staging).as_posix(),
                 }
             )
         frames.append(
             {
                 "frame_index": frame_index,
-                "source_frame_relative_path": frame_path.relative_to(
-                    staging
-                ).as_posix(),
+                "source_frame_relative_path": frame_path.relative_to(staging).as_posix(),
                 "requested_decode_mode": requested_mode,
                 "effective_decode_mode": effective_mode,
                 "decoded_frame_position": frame_index,
+                "decoder_reported_pos_msec": frame_index * 1000.0 / 30.0,
+                "decoder_timing_observation_method": "opencv_cap_prop_pos_msec_after_verified_frame_read",
                 "media_integrity": {
                     "path": None,
                     "status": "ok",
@@ -162,6 +150,14 @@ def _successful_output(
             "effective_decode_mode": effective_mode,
             "verified_frame_indices": request["frame_indices"],
             "position_verification": "opencv_next_frame_index_with_0.25_tolerance",
+            "frame_timing_observations": [
+                {
+                    "frame_index": frame_index,
+                    "decoder_reported_pos_msec": frame_index * 1000.0 / 30.0,
+                    "observation_method": "opencv_cap_prop_pos_msec_after_verified_frame_read",
+                }
+                for frame_index in request["frame_indices"]
+            ],
         },
         "execution": {
             "device": request["_execution_environment"]["device"],

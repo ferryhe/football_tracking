@@ -29,6 +29,17 @@ class TrustedRegularFileReadTests(unittest.TestCase):
         error.winerror = winerror
         return error
 
+    @staticmethod
+    def _current_thread_only(effect, fallback):
+        owner = threading.get_ident()
+
+        def scoped(*args, **kwargs):
+            if threading.get_ident() == owner:
+                return effect(*args, **kwargs)
+            return fallback(*args, **kwargs)
+
+        return scoped
+
     def _create_directory_link(self, link: Path, target: Path) -> None:
         if os.name == "nt":
             completed = subprocess.run(
@@ -38,9 +49,7 @@ class TrustedRegularFileReadTests(unittest.TestCase):
                 check=False,
             )
             if completed.returncode != 0:
-                self.skipTest(
-                    f"directory junction unavailable: {completed.stderr or completed.stdout}"
-                )
+                self.skipTest(f"directory junction unavailable: {completed.stderr or completed.stdout}")
             return
         try:
             link.symlink_to(target, target_is_directory=True)
@@ -73,7 +82,7 @@ class TrustedRegularFileReadTests(unittest.TestCase):
 
             def replace_sibling(path: Path, expected: tuple[int, int, int, int, int]) -> bool:
                 nonlocal replaced
-                if not replaced:
+                if path == target and not replaced:
                     replaced = True
                     os.replace(replacement, sibling)
                 return original_snapshot(path, expected)
@@ -112,7 +121,7 @@ class TrustedRegularFileReadTests(unittest.TestCase):
 
             def replace_sibling(path: Path, expected: tuple[int, int, int, int, int]) -> bool:
                 nonlocal replaced
-                if not replaced:
+                if path == target and not replaced:
                     replaced = True
                     os.replace(replacement, sibling)
                 return original_snapshot(path, expected)
@@ -148,7 +157,15 @@ class TrustedRegularFileReadTests(unittest.TestCase):
                 trusted_root=control,
             )
             original_check = common._ancestor_identities_are_current
+            expected_cancel_ancestors = common._capture_ancestor_identities(
+                control / "cancel.json",
+                control,
+                "detector probe worker cancellation",
+            )
+            original_exit = probe_worker.os._exit
+            forced_exit_codes: list[int] = []
             inside_heartbeat = False
+            heartbeat_published = False
             heartbeat_writes = 0
 
             class OneHeartbeat:
@@ -159,8 +176,8 @@ class TrustedRegularFileReadTests(unittest.TestCase):
                     return self.calls > 1
 
             def publish_heartbeat_then_check(identities) -> bool:
-                nonlocal inside_heartbeat, heartbeat_writes
-                if inside_heartbeat:
+                nonlocal inside_heartbeat, heartbeat_published, heartbeat_writes
+                if identities != expected_cancel_ancestors or inside_heartbeat or heartbeat_published:
                     return original_check(identities)
                 inside_heartbeat = True
                 try:
@@ -171,10 +188,16 @@ class TrustedRegularFileReadTests(unittest.TestCase):
                         os.getpid(),
                         lambda: True,
                     )
+                    heartbeat_published = True
                     heartbeat_writes += 1
                 finally:
                     inside_heartbeat = False
                 return original_check(identities)
+
+            scoped_exit = self._current_thread_only(
+                forced_exit_codes.append,
+                original_exit,
+            )
 
             with (
                 patch.object(
@@ -182,14 +205,12 @@ class TrustedRegularFileReadTests(unittest.TestCase):
                     "_ancestor_identities_are_current",
                     side_effect=publish_heartbeat_then_check,
                 ),
-                patch.object(probe_worker.os, "_exit") as forced_exit,
+                patch.object(probe_worker.os, "_exit", side_effect=scoped_exit),
             ):
                 self.assertFalse(probe_worker._cancel_requested(control, worker_id))
 
-            forced_exit.assert_not_called()
-            heartbeat = json.loads(
-                (control / "heartbeat.json").read_text(encoding="utf-8")
-            )
+            self.assertEqual([], forced_exit_codes)
+            heartbeat = json.loads((control / "heartbeat.json").read_text(encoding="utf-8"))
             self.assertEqual(1, heartbeat_writes)
             self.assertEqual(worker_id, heartbeat["worker_id"])
             self.assertEqual(1, heartbeat["sequence"])
@@ -206,7 +227,7 @@ class TrustedRegularFileReadTests(unittest.TestCase):
 
             def replace_target(path: Path, expected: tuple[int, int, int, int, int]) -> bool:
                 nonlocal replaced
-                if not replaced:
+                if path == target and not replaced:
                     replaced = True
                     os.replace(replacement, target)
                 return original_snapshot(path, expected)
@@ -237,11 +258,14 @@ class TrustedRegularFileReadTests(unittest.TestCase):
             target = parent / "cancel.json"
             target.write_bytes(b'{"cancel_requested":false}\n')
             moved_parent = root / "control-old"
+            original_snapshot = common.snapshot_identity_is_current
             replaced = False
 
-            def replace_parent(_path: Path, _expected: tuple[int, int, int, int, int]) -> bool:
+            def replace_parent(path: Path, expected: tuple[int, int, int, int, int]) -> bool:
                 nonlocal replaced
-                if not replaced:
+                if path != target:
+                    return original_snapshot(path, expected)
+                if path == target and not replaced:
                     replaced = True
                     parent.rename(moved_parent)
                     shutil.copytree(moved_parent, parent)
@@ -302,12 +326,11 @@ class TrustedRegularFileReadTests(unittest.TestCase):
                     raise PermissionError("controlled ancestor lstat failure")
                 return original_lstat(path)
 
-            def enable_failure(
-                path: Path, expected: tuple[int, int, int, int, int]
-            ) -> bool:
+            def enable_failure(path: Path, expected: tuple[int, int, int, int, int]) -> bool:
                 nonlocal reject_parent_lstat
                 current = original_snapshot(path, expected)
-                reject_parent_lstat = True
+                if path == target:
+                    reject_parent_lstat = True
                 return current
 
             with (
@@ -362,13 +385,14 @@ class TrustedRegularFileReadTests(unittest.TestCase):
             parent.mkdir()
             target = parent / "cancel.json"
             target.write_bytes(b'{"cancel_requested":false}\n')
+            original_snapshot = common.snapshot_identity_is_current
             disappeared = False
 
-            def remove_parent(
-                _path: Path, _expected: tuple[int, int, int, int, int]
-            ) -> bool:
+            def remove_parent(path: Path, expected: tuple[int, int, int, int, int]) -> bool:
                 nonlocal disappeared
-                if not disappeared:
+                if path != target:
+                    return original_snapshot(path, expected)
+                if path == target and not disappeared:
                     disappeared = True
                     shutil.rmtree(parent)
                 return True
@@ -398,57 +422,65 @@ class TrustedRegularFileReadTests(unittest.TestCase):
                 destination = root / "heartbeat.json"
                 atomic_write_json(destination, {"sequence": 0}, trusted_root=root)
                 original_replace = common.os.replace
+                original_classifier = common._is_windows_atomic_replace_sharing_error
+                original_sleep = common.time.sleep
+                failure = self._sharing_error(winerror)
                 attempts = 0
+                bounded_sleeps: list[float] = []
 
                 def flaky_replace(source: Path, target: Path) -> None:
                     nonlocal attempts
+                    if Path(target) != destination:
+                        original_replace(source, target)
+                        return
                     attempts += 1
                     if attempts < 3:
-                        raise self._sharing_error(winerror)
+                        raise failure
                     original_replace(source, target)
+
+                def classify_sharing_error(exc: PermissionError) -> bool:
+                    if exc is failure:
+                        return True
+                    return original_classifier(exc)
+
+                scoped_sleep = self._current_thread_only(
+                    bounded_sleeps.append,
+                    original_sleep,
+                )
 
                 with (
                     patch.object(common.os, "replace", side_effect=flaky_replace),
                     patch.object(
                         common,
                         "_is_windows_atomic_replace_sharing_error",
-                        return_value=True,
+                        side_effect=self._current_thread_only(
+                            classify_sharing_error,
+                            original_classifier,
+                        ),
                         create=True,
                     ),
-                    patch.object(common.time, "sleep") as bounded_sleep,
+                    patch.object(common.time, "sleep", side_effect=scoped_sleep),
                 ):
                     atomic_write_json(destination, {"sequence": 1}, trusted_root=root)
 
                 self.assertEqual(3, attempts)
-                self.assertEqual(2, bounded_sleep.call_count)
+                self.assertEqual(2, len(bounded_sleeps))
                 self.assertEqual(
                     {"sequence": 1},
                     json.loads(destination.read_text(encoding="utf-8")),
                 )
 
     def test_atomic_write_sharing_classifier_is_windows_and_code_specific(self) -> None:
-        with patch.object(common.os, "name", "nt"):
-            self.assertTrue(
-                common._is_windows_atomic_replace_sharing_error(
-                    self._sharing_error(5)
-                )
-            )
-            self.assertTrue(
-                common._is_windows_atomic_replace_sharing_error(
-                    self._sharing_error(32)
-                )
-            )
-            self.assertFalse(
-                common._is_windows_atomic_replace_sharing_error(
-                    self._sharing_error(33)
-                )
-            )
-        with patch.object(common.os, "name", "posix"):
-            self.assertFalse(
-                common._is_windows_atomic_replace_sharing_error(
-                    self._sharing_error(5)
-                )
-            )
+        expected_windows = os.name == "nt"
+        self.assertEqual(
+            expected_windows,
+            common._is_windows_atomic_replace_sharing_error(self._sharing_error(5)),
+        )
+        self.assertEqual(
+            expected_windows,
+            common._is_windows_atomic_replace_sharing_error(self._sharing_error(32)),
+        )
+        self.assertFalse(common._is_windows_atomic_replace_sharing_error(self._sharing_error(33)))
 
     def test_atomic_write_persistent_sharing_collision_is_bounded_and_cleans_temp(
         self,
@@ -457,27 +489,43 @@ class TrustedRegularFileReadTests(unittest.TestCase):
             root = Path(temporary)
             destination = root / "heartbeat.json"
             atomic_write_json(destination, {"sequence": 0}, trusted_root=root)
+            original_replace = common.os.replace
+            original_classifier = common._is_windows_atomic_replace_sharing_error
+            original_monotonic = common.time.monotonic
+            failure = self._sharing_error()
             attempts = 0
+            ticks = iter((100.0, 101.0))
 
-            def locked_replace(_source: Path, _target: Path) -> None:
+            def locked_replace(source: Path, target: Path) -> None:
                 nonlocal attempts
+                if Path(target) != destination:
+                    original_replace(source, target)
+                    return
                 attempts += 1
-                raise self._sharing_error()
+                raise failure
+
+            def classify_sharing_error(exc: PermissionError) -> bool:
+                if exc is failure:
+                    return True
+                return original_classifier(exc)
+
+            scoped_monotonic = self._current_thread_only(
+                lambda: next(ticks),
+                original_monotonic,
+            )
 
             with (
                 patch.object(common.os, "replace", side_effect=locked_replace),
                 patch.object(
                     common,
                     "_is_windows_atomic_replace_sharing_error",
-                    return_value=True,
+                    side_effect=self._current_thread_only(
+                        classify_sharing_error,
+                        original_classifier,
+                    ),
                     create=True,
                 ),
-                patch.object(
-                    common,
-                    "_WINDOWS_ATOMIC_REPLACE_RETRY_SECONDS",
-                    0.0,
-                    create=True,
-                ),
+                patch.object(common.time, "monotonic", side_effect=scoped_monotonic),
                 self.assertRaises(PermissionError),
             ):
                 atomic_write_json(destination, {"sequence": 1}, trusted_root=root)
@@ -494,30 +542,55 @@ class TrustedRegularFileReadTests(unittest.TestCase):
             root = Path(temporary)
             destination = root / "heartbeat.json"
             atomic_write_json(destination, {"sequence": 0}, trusted_root=root)
+            original_replace = common.os.replace
+            original_classifier = common._is_windows_atomic_replace_sharing_error
+            original_monotonic = common.time.monotonic
+            original_sleep = common.time.sleep
+            failure = self._sharing_error()
+            attempts = 0
+            bounded_sleeps: list[float] = []
+            ticks = iter((100.0, 100.5, 101.0))
+
+            def locked_replace(source: Path, target: Path) -> None:
+                nonlocal attempts
+                if Path(target) != destination:
+                    original_replace(source, target)
+                    return
+                attempts += 1
+                raise failure
+
+            def classify_sharing_error(exc: PermissionError) -> bool:
+                if exc is failure:
+                    return True
+                return original_classifier(exc)
+
+            scoped_monotonic = self._current_thread_only(
+                lambda: next(ticks),
+                original_monotonic,
+            )
+            scoped_sleep = self._current_thread_only(
+                bounded_sleeps.append,
+                original_sleep,
+            )
 
             with (
-                patch.object(
-                    common.os,
-                    "replace",
-                    side_effect=self._sharing_error(),
-                ) as replace,
+                patch.object(common.os, "replace", side_effect=locked_replace),
                 patch.object(
                     common,
                     "_is_windows_atomic_replace_sharing_error",
-                    return_value=True,
+                    side_effect=self._current_thread_only(
+                        classify_sharing_error,
+                        original_classifier,
+                    ),
                 ),
-                patch.object(
-                    common.time,
-                    "monotonic",
-                    side_effect=(100.0, 100.5, 101.0),
-                ),
-                patch.object(common.time, "sleep") as bounded_sleep,
+                patch.object(common.time, "monotonic", side_effect=scoped_monotonic),
+                patch.object(common.time, "sleep", side_effect=scoped_sleep),
                 self.assertRaises(PermissionError),
             ):
                 atomic_write_json(destination, {"sequence": 1}, trusted_root=root)
 
-            self.assertEqual(1, replace.call_count)
-            bounded_sleep.assert_called_once_with(0.005)
+            self.assertEqual(1, attempts)
+            self.assertEqual([0.005], bounded_sleeps)
 
     def test_atomic_write_does_not_retry_nonsharing_or_disk_full_errors(self) -> None:
         cases = (
@@ -528,19 +601,32 @@ class TrustedRegularFileReadTests(unittest.TestCase):
             with self.subTest(failure=type(failure).__name__), tempfile.TemporaryDirectory() as temporary:
                 root = Path(temporary)
                 destination = root / "job.json"
+                original_replace = common.os.replace
+                original_classifier = common._is_windows_atomic_replace_sharing_error
                 attempts = 0
 
-                def failed_replace(_source: Path, _target: Path) -> None:
+                def failed_replace(source: Path, target: Path) -> None:
                     nonlocal attempts
+                    if Path(target) != destination:
+                        original_replace(source, target)
+                        return
                     attempts += 1
                     raise failure
+
+                def classify_sharing_error(exc: PermissionError) -> bool:
+                    if exc is failure:
+                        return retryable
+                    return original_classifier(exc)
 
                 with (
                     patch.object(common.os, "replace", side_effect=failed_replace),
                     patch.object(
                         common,
                         "_is_windows_atomic_replace_sharing_error",
-                        return_value=retryable,
+                        side_effect=self._current_thread_only(
+                            classify_sharing_error,
+                            original_classifier,
+                        ),
                         create=True,
                     ),
                     self.assertRaises(type(failure)),
@@ -554,89 +640,168 @@ class TrustedRegularFileReadTests(unittest.TestCase):
             root = Path(temporary)
             destination = root / "heartbeat.json"
             atomic_write_json(destination, {"sequence": 0}, trusted_root=root)
+            original_replace = common.os.replace
+            original_classifier = common._is_windows_atomic_replace_sharing_error
+            original_ancestor_check = common._ancestor_identities_are_current
+            original_sleep = common.time.sleep
+            expected_ancestors = common._capture_ancestor_identities(
+                destination,
+                root,
+                "atomic JSON",
+            )
+            failure = self._sharing_error()
             checks = iter((True, False))
+            attempts = 0
+            bounded_sleeps: list[float] = []
+
+            def locked_replace(source: Path, target: Path) -> None:
+                nonlocal attempts
+                if Path(target) != destination:
+                    original_replace(source, target)
+                    return
+                attempts += 1
+                raise failure
+
+            def classify_sharing_error(exc: PermissionError) -> bool:
+                if exc is failure:
+                    return True
+                return original_classifier(exc)
+
+            def controlled_ancestor_check(identities) -> bool:
+                if identities != expected_ancestors:
+                    return original_ancestor_check(identities)
+                return next(checks)
+
+            scoped_sleep = self._current_thread_only(
+                bounded_sleeps.append,
+                original_sleep,
+            )
 
             with (
-                patch.object(
-                    common.os,
-                    "replace",
-                    side_effect=self._sharing_error(),
-                ) as replace,
+                patch.object(common.os, "replace", side_effect=locked_replace),
                 patch.object(
                     common,
                     "_is_windows_atomic_replace_sharing_error",
-                    return_value=True,
+                    side_effect=self._current_thread_only(
+                        classify_sharing_error,
+                        original_classifier,
+                    ),
                     create=True,
                 ),
                 patch.object(
                     common,
                     "_ancestor_identities_are_current",
-                    side_effect=lambda _identities: next(checks),
+                    side_effect=controlled_ancestor_check,
                 ),
-                patch.object(common.time, "sleep"),
+                patch.object(common.time, "sleep", side_effect=scoped_sleep),
                 self.assertRaises(DetectorDevelopmentError) as raised,
             ):
                 atomic_write_json(destination, {"sequence": 1}, trusted_root=root)
 
             self.assertEqual("source_changed", raised.exception.code)
-            self.assertEqual(1, replace.call_count)
+            self.assertEqual(1, attempts)
+            self.assertEqual([0.005], bounded_sleeps)
 
     def test_atomic_write_rejects_temporary_tamper_during_sharing_retry(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             destination = root / "heartbeat.json"
             atomic_write_json(destination, {"sequence": 0}, trusted_root=root)
+            original_replace = common.os.replace
+            original_classifier = common._is_windows_atomic_replace_sharing_error
+            original_sleep = common.time.sleep
+            failure = self._sharing_error()
             attempts = 0
+            bounded_sleeps: list[float] = []
 
-            def tamper_then_lock(source: Path, _target: Path) -> None:
+            def tamper_then_lock(source: Path, target: Path) -> None:
                 nonlocal attempts
+                if Path(target) != destination:
+                    original_replace(source, target)
+                    return
                 attempts += 1
                 source.write_text('{"tampered":true}\n', encoding="utf-8")
-                raise self._sharing_error()
+                raise failure
+
+            def classify_sharing_error(exc: PermissionError) -> bool:
+                if exc is failure:
+                    return True
+                return original_classifier(exc)
+
+            scoped_sleep = self._current_thread_only(
+                bounded_sleeps.append,
+                original_sleep,
+            )
 
             with (
                 patch.object(common.os, "replace", side_effect=tamper_then_lock),
                 patch.object(
                     common,
                     "_is_windows_atomic_replace_sharing_error",
-                    return_value=True,
+                    side_effect=self._current_thread_only(
+                        classify_sharing_error,
+                        original_classifier,
+                    ),
                     create=True,
                 ),
-                patch.object(common.time, "sleep"),
+                patch.object(common.time, "sleep", side_effect=scoped_sleep),
                 self.assertRaises(DetectorDevelopmentError) as raised,
             ):
                 atomic_write_json(destination, {"sequence": 1}, trusted_root=root)
 
             self.assertEqual("source_changed", raised.exception.code)
             self.assertEqual(1, attempts)
+            self.assertEqual([0.005], bounded_sleeps)
 
     def test_atomic_write_rejects_destination_tamper_during_sharing_retry(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             destination = root / "heartbeat.json"
             atomic_write_json(destination, {"sequence": 0}, trusted_root=root)
+            original_replace = common.os.replace
+            original_classifier = common._is_windows_atomic_replace_sharing_error
+            original_sleep = common.time.sleep
+            failure = self._sharing_error()
             attempts = 0
+            bounded_sleeps: list[float] = []
 
-            def tamper_then_lock(_source: Path, target: Path) -> None:
+            def tamper_then_lock(source: Path, target: Path) -> None:
                 nonlocal attempts
+                if Path(target) != destination:
+                    original_replace(source, target)
+                    return
                 attempts += 1
                 target.write_text('{"sequence":999}\n', encoding="utf-8")
-                raise self._sharing_error()
+                raise failure
+
+            def classify_sharing_error(exc: PermissionError) -> bool:
+                if exc is failure:
+                    return True
+                return original_classifier(exc)
+
+            scoped_sleep = self._current_thread_only(
+                bounded_sleeps.append,
+                original_sleep,
+            )
 
             with (
                 patch.object(common.os, "replace", side_effect=tamper_then_lock),
                 patch.object(
                     common,
                     "_is_windows_atomic_replace_sharing_error",
-                    return_value=True,
+                    side_effect=self._current_thread_only(
+                        classify_sharing_error,
+                        original_classifier,
+                    ),
                 ),
-                patch.object(common.time, "sleep"),
+                patch.object(common.time, "sleep", side_effect=scoped_sleep),
                 self.assertRaises(DetectorDevelopmentError) as raised,
             ):
                 atomic_write_json(destination, {"sequence": 1}, trusted_root=root)
 
             self.assertEqual("source_changed", raised.exception.code)
             self.assertEqual(1, attempts)
+            self.assertEqual([0.005], bounded_sleeps)
 
     def test_atomic_write_rejects_destination_reparse_during_sharing_retry(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -644,13 +809,31 @@ class TrustedRegularFileReadTests(unittest.TestCase):
             destination = root / "heartbeat.json"
             external = root / "external"
             external.mkdir()
+            original_replace = common.os.replace
+            original_classifier = common._is_windows_atomic_replace_sharing_error
+            original_sleep = common.time.sleep
+            failure = self._sharing_error()
             attempts = 0
+            bounded_sleeps: list[float] = []
 
-            def link_then_lock(_source: Path, target: Path) -> None:
+            def link_then_lock(source: Path, target: Path) -> None:
                 nonlocal attempts
+                if Path(target) != destination:
+                    original_replace(source, target)
+                    return
                 attempts += 1
                 self._create_directory_link(target, external)
-                raise self._sharing_error()
+                raise failure
+
+            def classify_sharing_error(exc: PermissionError) -> bool:
+                if exc is failure:
+                    return True
+                return original_classifier(exc)
+
+            scoped_sleep = self._current_thread_only(
+                bounded_sleeps.append,
+                original_sleep,
+            )
 
             try:
                 with (
@@ -658,9 +841,12 @@ class TrustedRegularFileReadTests(unittest.TestCase):
                     patch.object(
                         common,
                         "_is_windows_atomic_replace_sharing_error",
-                        return_value=True,
+                        side_effect=self._current_thread_only(
+                            classify_sharing_error,
+                            original_classifier,
+                        ),
                     ),
-                    patch.object(common.time, "sleep"),
+                    patch.object(common.time, "sleep", side_effect=scoped_sleep),
                     self.assertRaises(DetectorDevelopmentError) as raised,
                 ):
                     atomic_write_json(
@@ -673,6 +859,7 @@ class TrustedRegularFileReadTests(unittest.TestCase):
 
             self.assertEqual("unsafe_path", raised.exception.code)
             self.assertEqual(1, attempts)
+            self.assertEqual([0.005], bounded_sleeps)
 
     @unittest.skipUnless(os.name == "nt", "Windows sharing semantics only")
     def test_atomic_heartbeat_write_survives_concurrent_same_path_reads(self) -> None:

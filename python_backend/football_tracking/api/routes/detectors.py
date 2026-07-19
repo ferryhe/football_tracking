@@ -10,6 +10,9 @@ from football_tracking.api.schemas import (
     DetectorProbeCreateRequest,
     DetectorProbeCreateResponse,
     DetectorProbeJobResponse,
+    DetectorReviewProxyRepairCreateRequest,
+    DetectorReviewProxyRepairJobResponse,
+    DetectorReviewProxyRepairRetryRequest,
 )
 from football_tracking.api.service import ApiService
 from football_tracking.detector_development_common import DetectorDevelopmentError
@@ -128,3 +131,100 @@ def get_detector_probe_artifact(
             "X-Content-SHA256": digest,
         },
     )
+
+
+@router.post(
+    "/detector-review-proxy-repairs",
+    response_model=DetectorReviewProxyRepairJobResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+def create_detector_review_proxy_repair(
+    request: DetectorReviewProxyRepairCreateRequest,
+    response: Response,
+    service: ApiService = Depends(get_service),
+) -> DetectorReviewProxyRepairJobResponse:
+    try:
+        result = service.create_detector_review_proxy_repair(request.model_dump(mode="json"))
+        response.headers["Cache-Control"] = "no-store"
+        return DetectorReviewProxyRepairJobResponse.model_validate(result)
+    except (KeyError, DetectorDevelopmentError) as exc:
+        if isinstance(exc, DetectorDevelopmentError):
+            raise _development_error(exc) from exc
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "code": "repair_authority_not_found",
+                "message": "Review-proxy repair authority was not found",
+            },
+        ) from exc
+
+
+@router.get(
+    "/detector-review-proxy-repairs/{repair_id}",
+    response_model=DetectorReviewProxyRepairJobResponse,
+)
+def get_detector_review_proxy_repair(
+    repair_id: str,
+    response: Response,
+    service: ApiService = Depends(get_service),
+) -> DetectorReviewProxyRepairJobResponse:
+    try:
+        result = service.get_detector_review_proxy_repair(repair_id)
+        response.headers["Cache-Control"] = "no-store"
+        return DetectorReviewProxyRepairJobResponse.model_validate(result)
+    except (KeyError, DetectorDevelopmentError) as exc:
+        if isinstance(exc, DetectorDevelopmentError):
+            raise _development_error(exc) from exc
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "repair_not_found", "message": "Review-proxy repair was not found"},
+        ) from exc
+
+
+@router.post(
+    "/detector-review-proxy-repairs/{repair_id}/cancel",
+    response_model=DetectorReviewProxyRepairJobResponse,
+)
+def cancel_detector_review_proxy_repair(
+    repair_id: str,
+    response: Response,
+    service: ApiService = Depends(get_service),
+) -> DetectorReviewProxyRepairJobResponse:
+    try:
+        result = service.cancel_detector_review_proxy_repair(repair_id)
+        response.headers["Cache-Control"] = "no-store"
+        return DetectorReviewProxyRepairJobResponse.model_validate(result)
+    except (KeyError, DetectorDevelopmentError) as exc:
+        if isinstance(exc, DetectorDevelopmentError):
+            raise _development_error(exc) from exc
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "repair_not_found", "message": "Review-proxy repair was not found"},
+        ) from exc
+
+
+@router.post(
+    "/detector-review-proxy-repairs/{repair_id}/retry",
+    response_model=DetectorReviewProxyRepairJobResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+def retry_detector_review_proxy_repair(
+    repair_id: str,
+    _request: DetectorReviewProxyRepairRetryRequest,
+    response: Response,
+    service: ApiService = Depends(get_service),
+) -> DetectorReviewProxyRepairJobResponse:
+    try:
+        result = service.retry_detector_review_proxy_repair(repair_id)
+        response.headers["Cache-Control"] = "no-store"
+        return DetectorReviewProxyRepairJobResponse.model_validate(result)
+    except (KeyError, DetectorDevelopmentError) as exc:
+        if isinstance(exc, DetectorDevelopmentError):
+            raise _development_error(exc) from exc
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "code": "repair_not_found",
+                "message": "Review-proxy repair was not found",
+            },
+        ) from exc

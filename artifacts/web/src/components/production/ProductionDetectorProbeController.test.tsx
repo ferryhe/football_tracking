@@ -12,6 +12,7 @@ import {
   buildDetectorProbeRequest,
   detectorProbeStorageKey,
 } from "@/lib/productionDetectorProbe";
+import { ballAnnotationStorageKey } from "@/lib/productionBallAnnotation";
 import {
   DETECTOR_PROBE_FRAME_INDICES,
   DETECTOR_PROBE_PROFILE_IDS,
@@ -589,6 +590,19 @@ describe("ProductionDetectorProbeController", () => {
         "No selected profile produced retained candidate boxes in this bounded comparison.",
       ),
     ).toBeVisible();
+    const ordinaryRetry = screen.getByRole("button", {
+      name: "Retry comparison",
+    });
+    expect(ordinaryRetry).toBeEnabled();
+    await user.click(
+      screen.getByRole("button", {
+        name: "Start development annotation on displayed frames",
+      }),
+    );
+    expect(ordinaryRetry).toBeDisabled();
+    expect(
+      screen.getByText(/historical evidence and parent\/child lineage/i),
+    ).toBeVisible();
     expect(screen.getAllByRole("img", { name: /Source frame/ })).toHaveLength(
       1,
     );
@@ -735,6 +749,51 @@ describe("ProductionDetectorProbeController", () => {
     expect(
       localStorage.getItem(detectorProbeStorageKey("workflow-1", "trial-1")),
     ).toBeNull();
+  });
+
+  it("fails closed on a corrupt saved annotation continuation until explicit discard", async () => {
+    const jobId = "probe-corrupt-continuation";
+    const annotationKey = ballAnnotationStorageKey("workflow-1", jobId);
+    localStorage.setItem(
+      detectorProbeStorageKey("workflow-1", "trial-1"),
+      storedRecovery(jobId),
+    );
+    localStorage.setItem(annotationKey, "not-json");
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url === "/api/detector-models") return json(catalogFixture());
+        if (url === `/api/detector-probes/${jobId}`) {
+          return json(jobFixture(jobId, "ready"));
+        }
+        throw new Error(`Unexpected request: ${url}`);
+      }),
+    );
+
+    const { user } = renderController();
+    expect(
+      await screen.findByText(/saved annotation continuation is invalid/i),
+    ).toBeVisible();
+    loadAllEvidenceImages();
+    const retry = await screen.findByRole("button", {
+      name: "Retry comparison",
+    });
+    const annotate = screen.getByRole("button", {
+      name: "Start development annotation on displayed frames",
+    });
+    expect(retry).toBeDisabled();
+    expect(annotate).toBeDisabled();
+
+    await user.click(
+      screen.getByRole("button", {
+        name: "Discard invalid local recovery pointer",
+      }),
+    );
+
+    expect(localStorage.getItem(annotationKey)).toBeNull();
+    expect(retry).toBeEnabled();
+    expect(annotate).toBeEnabled();
   });
 
   it("retains a valid pointer across GET 503 and offers explicit refetch without discard", async () => {

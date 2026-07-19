@@ -31,7 +31,16 @@ import type {
   ApiErrorResponse,
   ArtifactSummary,
   AssetGroup,
+  BallAnnotationFinalResultResponse,
+  BallAnnotationFinalizeRequest,
+  BallAnnotationRevisionRequest,
+  BallAnnotationRevisionResponse,
+  BallAnnotationSessionCreateRequest,
+  BallAnnotationSessionResponse,
+  BallApiErrorResponse,
   BallAuditReport,
+  BallPropagationCreateRequest,
+  BallPropagationJobResponse,
   BroadcastConfigLineageBlockerResponse,
   BroadcastConfigLineageReconfirmationRequest,
   BroadcastConfigLineageReconfirmationResponse,
@@ -59,6 +68,9 @@ import type {
   DetectorProbeCreateRequest,
   DetectorProbeCreateResponse,
   DetectorProbeJobResponse,
+  DetectorReviewProxyRepairCreateRequest,
+  DetectorReviewProxyRepairJobResponse,
+  DetectorReviewProxyRepairRetryRequest,
   EventCandidateReport,
   FieldPreviewRequest,
   FieldPreviewResponse,
@@ -92,9 +104,13 @@ type Awaited<O> = O extends AwaitedInput<infer T> ? T : never;
 
 type SecondParameter<T extends (...args: never) => unknown> = Parameters<T>[1];
 
-function encodePathSegmented(path: string): string {
-  return path.split("/").map((segment) => encodeURIComponent(segment)).join("/");
+function encodePathSegmented(path: string | number): string {
+  return String(path)
+    .split("/")
+    .map((segment) => encodeURIComponent(segment))
+    .join("/");
 }
+
 /**
  * @summary Config Diff
  */
@@ -529,6 +545,919 @@ export const useRecommend = <
 > => {
   return useMutation(getRecommendMutationOptions(options));
 };
+
+/**
+ * @summary Create Ball Annotation Session
+ */
+export const getCreateBallAnnotationSessionUrl = () => {
+  return `/api/ball-annotation-sessions`;
+};
+
+export const createBallAnnotationSession = async (
+  ballAnnotationSessionCreateRequest: BallAnnotationSessionCreateRequest,
+  options?: RequestInit,
+): Promise<BallAnnotationSessionResponse> => {
+  return customFetch<BallAnnotationSessionResponse>(
+    getCreateBallAnnotationSessionUrl(),
+    {
+      ...options,
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...options?.headers },
+      body: JSON.stringify(ballAnnotationSessionCreateRequest),
+    },
+  );
+};
+
+export const getCreateBallAnnotationSessionMutationOptions = <
+  TError = ErrorType<BallApiErrorResponse | HTTPValidationError>,
+  TContext = unknown,
+>(options?: {
+  mutation?: UseMutationOptions<
+    Awaited<ReturnType<typeof createBallAnnotationSession>>,
+    TError,
+    { data: BodyType<BallAnnotationSessionCreateRequest> },
+    TContext
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}): UseMutationOptions<
+  Awaited<ReturnType<typeof createBallAnnotationSession>>,
+  TError,
+  { data: BodyType<BallAnnotationSessionCreateRequest> },
+  TContext
+> => {
+  const mutationKey = ["createBallAnnotationSession"];
+  const { mutation: mutationOptions, request: requestOptions } = options
+    ? options.mutation &&
+      "mutationKey" in options.mutation &&
+      options.mutation.mutationKey
+      ? options
+      : { ...options, mutation: { ...options.mutation, mutationKey } }
+    : { mutation: { mutationKey }, request: undefined };
+
+  const mutationFn: MutationFunction<
+    Awaited<ReturnType<typeof createBallAnnotationSession>>,
+    { data: BodyType<BallAnnotationSessionCreateRequest> }
+  > = (props) => {
+    const { data } = props ?? {};
+
+    return createBallAnnotationSession(data, requestOptions);
+  };
+
+  return { mutationFn, ...mutationOptions };
+};
+
+export type CreateBallAnnotationSessionMutationResult = NonNullable<
+  Awaited<ReturnType<typeof createBallAnnotationSession>>
+>;
+export type CreateBallAnnotationSessionMutationBody =
+  BodyType<BallAnnotationSessionCreateRequest>;
+export type CreateBallAnnotationSessionMutationError = ErrorType<
+  BallApiErrorResponse | HTTPValidationError
+>;
+
+/**
+ * @summary Create Ball Annotation Session
+ */
+export const useCreateBallAnnotationSession = <
+  TError = ErrorType<BallApiErrorResponse | HTTPValidationError>,
+  TContext = unknown,
+>(options?: {
+  mutation?: UseMutationOptions<
+    Awaited<ReturnType<typeof createBallAnnotationSession>>,
+    TError,
+    { data: BodyType<BallAnnotationSessionCreateRequest> },
+    TContext
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}): UseMutationResult<
+  Awaited<ReturnType<typeof createBallAnnotationSession>>,
+  TError,
+  { data: BodyType<BallAnnotationSessionCreateRequest> },
+  TContext
+> => {
+  return useMutation(getCreateBallAnnotationSessionMutationOptions(options));
+};
+
+/**
+ * @summary Get Ball Annotation Session
+ */
+export const getGetBallAnnotationSessionUrl = (sessionId: string) => {
+  return `/api/ball-annotation-sessions/${encodePathSegmented(sessionId)}`;
+};
+
+export const getBallAnnotationSession = async (
+  sessionId: string,
+  options?: RequestInit,
+): Promise<BallAnnotationSessionResponse> => {
+  return customFetch<BallAnnotationSessionResponse>(
+    getGetBallAnnotationSessionUrl(sessionId),
+    {
+      ...options,
+      method: "GET",
+    },
+  );
+};
+
+export const getGetBallAnnotationSessionQueryKey = (sessionId: string) => {
+  return [
+    `/api/ball-annotation-sessions/${encodePathSegmented(sessionId)}`,
+  ] as const;
+};
+
+export const getGetBallAnnotationSessionQueryOptions = <
+  TData = Awaited<ReturnType<typeof getBallAnnotationSession>>,
+  TError = ErrorType<BallApiErrorResponse | HTTPValidationError>,
+>(
+  sessionId: string,
+  options?: {
+    query?: UseQueryOptions<
+      Awaited<ReturnType<typeof getBallAnnotationSession>>,
+      TError,
+      TData
+    >;
+    request?: SecondParameter<typeof customFetch>;
+  },
+) => {
+  const { query: queryOptions, request: requestOptions } = options ?? {};
+
+  const queryKey =
+    queryOptions?.queryKey ?? getGetBallAnnotationSessionQueryKey(sessionId);
+
+  const queryFn: QueryFunction<
+    Awaited<ReturnType<typeof getBallAnnotationSession>>
+  > = ({ signal }) =>
+    getBallAnnotationSession(sessionId, { signal, ...requestOptions });
+
+  return {
+    queryKey,
+    queryFn,
+    enabled: !!sessionId,
+    ...queryOptions,
+  } as UseQueryOptions<
+    Awaited<ReturnType<typeof getBallAnnotationSession>>,
+    TError,
+    TData
+  > & { queryKey: QueryKey };
+};
+
+export type GetBallAnnotationSessionQueryResult = NonNullable<
+  Awaited<ReturnType<typeof getBallAnnotationSession>>
+>;
+export type GetBallAnnotationSessionQueryError = ErrorType<
+  BallApiErrorResponse | HTTPValidationError
+>;
+
+/**
+ * @summary Get Ball Annotation Session
+ */
+
+export function useGetBallAnnotationSession<
+  TData = Awaited<ReturnType<typeof getBallAnnotationSession>>,
+  TError = ErrorType<BallApiErrorResponse | HTTPValidationError>,
+>(
+  sessionId: string,
+  options?: {
+    query?: UseQueryOptions<
+      Awaited<ReturnType<typeof getBallAnnotationSession>>,
+      TError,
+      TData
+    >;
+    request?: SecondParameter<typeof customFetch>;
+  },
+): UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+  const queryOptions = getGetBallAnnotationSessionQueryOptions(
+    sessionId,
+    options,
+  );
+
+  const query = useQuery(queryOptions) as UseQueryResult<TData, TError> & {
+    queryKey: QueryKey;
+  };
+
+  return { ...query, queryKey: queryOptions.queryKey };
+}
+
+/**
+ * @summary Put Ball Annotation
+ */
+export const getPutBallAnnotationUrl = (
+  sessionId: string,
+  frameIndex: number,
+) => {
+  return `/api/ball-annotation-sessions/${encodePathSegmented(sessionId)}/annotations/${encodePathSegmented(frameIndex)}`;
+};
+
+export const putBallAnnotation = async (
+  sessionId: string,
+  frameIndex: number,
+  ballAnnotationRevisionRequest: BallAnnotationRevisionRequest,
+  options?: RequestInit,
+): Promise<BallAnnotationRevisionResponse> => {
+  return customFetch<BallAnnotationRevisionResponse>(
+    getPutBallAnnotationUrl(sessionId, frameIndex),
+    {
+      ...options,
+      method: "PUT",
+      headers: { "Content-Type": "application/json", ...options?.headers },
+      body: JSON.stringify(ballAnnotationRevisionRequest),
+    },
+  );
+};
+
+export const getPutBallAnnotationMutationOptions = <
+  TError = ErrorType<BallApiErrorResponse | HTTPValidationError>,
+  TContext = unknown,
+>(options?: {
+  mutation?: UseMutationOptions<
+    Awaited<ReturnType<typeof putBallAnnotation>>,
+    TError,
+    {
+      sessionId: string;
+      frameIndex: number;
+      data: BodyType<BallAnnotationRevisionRequest>;
+    },
+    TContext
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}): UseMutationOptions<
+  Awaited<ReturnType<typeof putBallAnnotation>>,
+  TError,
+  {
+    sessionId: string;
+    frameIndex: number;
+    data: BodyType<BallAnnotationRevisionRequest>;
+  },
+  TContext
+> => {
+  const mutationKey = ["putBallAnnotation"];
+  const { mutation: mutationOptions, request: requestOptions } = options
+    ? options.mutation &&
+      "mutationKey" in options.mutation &&
+      options.mutation.mutationKey
+      ? options
+      : { ...options, mutation: { ...options.mutation, mutationKey } }
+    : { mutation: { mutationKey }, request: undefined };
+
+  const mutationFn: MutationFunction<
+    Awaited<ReturnType<typeof putBallAnnotation>>,
+    {
+      sessionId: string;
+      frameIndex: number;
+      data: BodyType<BallAnnotationRevisionRequest>;
+    }
+  > = (props) => {
+    const { sessionId, frameIndex, data } = props ?? {};
+
+    return putBallAnnotation(sessionId, frameIndex, data, requestOptions);
+  };
+
+  return { mutationFn, ...mutationOptions };
+};
+
+export type PutBallAnnotationMutationResult = NonNullable<
+  Awaited<ReturnType<typeof putBallAnnotation>>
+>;
+export type PutBallAnnotationMutationBody =
+  BodyType<BallAnnotationRevisionRequest>;
+export type PutBallAnnotationMutationError = ErrorType<
+  BallApiErrorResponse | HTTPValidationError
+>;
+
+/**
+ * @summary Put Ball Annotation
+ */
+export const usePutBallAnnotation = <
+  TError = ErrorType<BallApiErrorResponse | HTTPValidationError>,
+  TContext = unknown,
+>(options?: {
+  mutation?: UseMutationOptions<
+    Awaited<ReturnType<typeof putBallAnnotation>>,
+    TError,
+    {
+      sessionId: string;
+      frameIndex: number;
+      data: BodyType<BallAnnotationRevisionRequest>;
+    },
+    TContext
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}): UseMutationResult<
+  Awaited<ReturnType<typeof putBallAnnotation>>,
+  TError,
+  {
+    sessionId: string;
+    frameIndex: number;
+    data: BodyType<BallAnnotationRevisionRequest>;
+  },
+  TContext
+> => {
+  return useMutation(getPutBallAnnotationMutationOptions(options));
+};
+
+/**
+ * @summary Finalize Ball Annotation Session
+ */
+export const getFinalizeBallAnnotationSessionUrl = (sessionId: string) => {
+  return `/api/ball-annotation-sessions/${encodePathSegmented(sessionId)}/finalize`;
+};
+
+export const finalizeBallAnnotationSession = async (
+  sessionId: string,
+  ballAnnotationFinalizeRequest: BallAnnotationFinalizeRequest,
+  options?: RequestInit,
+): Promise<BallAnnotationFinalResultResponse> => {
+  return customFetch<BallAnnotationFinalResultResponse>(
+    getFinalizeBallAnnotationSessionUrl(sessionId),
+    {
+      ...options,
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...options?.headers },
+      body: JSON.stringify(ballAnnotationFinalizeRequest),
+    },
+  );
+};
+
+export const getFinalizeBallAnnotationSessionMutationOptions = <
+  TError = ErrorType<BallApiErrorResponse | HTTPValidationError>,
+  TContext = unknown,
+>(options?: {
+  mutation?: UseMutationOptions<
+    Awaited<ReturnType<typeof finalizeBallAnnotationSession>>,
+    TError,
+    { sessionId: string; data: BodyType<BallAnnotationFinalizeRequest> },
+    TContext
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}): UseMutationOptions<
+  Awaited<ReturnType<typeof finalizeBallAnnotationSession>>,
+  TError,
+  { sessionId: string; data: BodyType<BallAnnotationFinalizeRequest> },
+  TContext
+> => {
+  const mutationKey = ["finalizeBallAnnotationSession"];
+  const { mutation: mutationOptions, request: requestOptions } = options
+    ? options.mutation &&
+      "mutationKey" in options.mutation &&
+      options.mutation.mutationKey
+      ? options
+      : { ...options, mutation: { ...options.mutation, mutationKey } }
+    : { mutation: { mutationKey }, request: undefined };
+
+  const mutationFn: MutationFunction<
+    Awaited<ReturnType<typeof finalizeBallAnnotationSession>>,
+    { sessionId: string; data: BodyType<BallAnnotationFinalizeRequest> }
+  > = (props) => {
+    const { sessionId, data } = props ?? {};
+
+    return finalizeBallAnnotationSession(sessionId, data, requestOptions);
+  };
+
+  return { mutationFn, ...mutationOptions };
+};
+
+export type FinalizeBallAnnotationSessionMutationResult = NonNullable<
+  Awaited<ReturnType<typeof finalizeBallAnnotationSession>>
+>;
+export type FinalizeBallAnnotationSessionMutationBody =
+  BodyType<BallAnnotationFinalizeRequest>;
+export type FinalizeBallAnnotationSessionMutationError = ErrorType<
+  BallApiErrorResponse | HTTPValidationError
+>;
+
+/**
+ * @summary Finalize Ball Annotation Session
+ */
+export const useFinalizeBallAnnotationSession = <
+  TError = ErrorType<BallApiErrorResponse | HTTPValidationError>,
+  TContext = unknown,
+>(options?: {
+  mutation?: UseMutationOptions<
+    Awaited<ReturnType<typeof finalizeBallAnnotationSession>>,
+    TError,
+    { sessionId: string; data: BodyType<BallAnnotationFinalizeRequest> },
+    TContext
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}): UseMutationResult<
+  Awaited<ReturnType<typeof finalizeBallAnnotationSession>>,
+  TError,
+  { sessionId: string; data: BodyType<BallAnnotationFinalizeRequest> },
+  TContext
+> => {
+  return useMutation(getFinalizeBallAnnotationSessionMutationOptions(options));
+};
+
+/**
+ * @summary Get Ball Annotation Frame
+ */
+export const getGetBallAnnotationFrameUrl = (
+  sessionId: string,
+  frameIndex: number,
+) => {
+  return `/api/ball-annotation-sessions/${encodePathSegmented(sessionId)}/frames/${encodePathSegmented(frameIndex)}`;
+};
+
+export const getBallAnnotationFrame = async (
+  sessionId: string,
+  frameIndex: number,
+  options?: RequestInit,
+): Promise<Blob> => {
+  return customFetch<Blob>(
+    getGetBallAnnotationFrameUrl(sessionId, frameIndex),
+    {
+      ...options,
+      method: "GET",
+    },
+  );
+};
+
+export const getGetBallAnnotationFrameQueryKey = (
+  sessionId: string,
+  frameIndex: number,
+) => {
+  return [
+    `/api/ball-annotation-sessions/${encodePathSegmented(sessionId)}/frames/${encodePathSegmented(frameIndex)}`,
+  ] as const;
+};
+
+export const getGetBallAnnotationFrameQueryOptions = <
+  TData = Awaited<ReturnType<typeof getBallAnnotationFrame>>,
+  TError = ErrorType<BallApiErrorResponse | HTTPValidationError>,
+>(
+  sessionId: string,
+  frameIndex: number,
+  options?: {
+    query?: UseQueryOptions<
+      Awaited<ReturnType<typeof getBallAnnotationFrame>>,
+      TError,
+      TData
+    >;
+    request?: SecondParameter<typeof customFetch>;
+  },
+) => {
+  const { query: queryOptions, request: requestOptions } = options ?? {};
+
+  const queryKey =
+    queryOptions?.queryKey ??
+    getGetBallAnnotationFrameQueryKey(sessionId, frameIndex);
+
+  const queryFn: QueryFunction<
+    Awaited<ReturnType<typeof getBallAnnotationFrame>>
+  > = ({ signal }) =>
+    getBallAnnotationFrame(sessionId, frameIndex, {
+      signal,
+      ...requestOptions,
+    });
+
+  return {
+    queryKey,
+    queryFn,
+    enabled:
+      typeof sessionId === "string" &&
+      sessionId.trim().length > 0 &&
+      Number.isSafeInteger(frameIndex) &&
+      frameIndex >= 0,
+    ...queryOptions,
+  } as UseQueryOptions<
+    Awaited<ReturnType<typeof getBallAnnotationFrame>>,
+    TError,
+    TData
+  > & { queryKey: QueryKey };
+};
+
+export type GetBallAnnotationFrameQueryResult = NonNullable<
+  Awaited<ReturnType<typeof getBallAnnotationFrame>>
+>;
+export type GetBallAnnotationFrameQueryError = ErrorType<
+  BallApiErrorResponse | HTTPValidationError
+>;
+
+/**
+ * @summary Get Ball Annotation Frame
+ */
+
+export function useGetBallAnnotationFrame<
+  TData = Awaited<ReturnType<typeof getBallAnnotationFrame>>,
+  TError = ErrorType<BallApiErrorResponse | HTTPValidationError>,
+>(
+  sessionId: string,
+  frameIndex: number,
+  options?: {
+    query?: UseQueryOptions<
+      Awaited<ReturnType<typeof getBallAnnotationFrame>>,
+      TError,
+      TData
+    >;
+    request?: SecondParameter<typeof customFetch>;
+  },
+): UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+  const queryOptions = getGetBallAnnotationFrameQueryOptions(
+    sessionId,
+    frameIndex,
+    options,
+  );
+
+  const query = useQuery(queryOptions) as UseQueryResult<TData, TError> & {
+    queryKey: QueryKey;
+  };
+
+  return { ...query, queryKey: queryOptions.queryKey };
+}
+
+/**
+ * @summary Create Ball Propagation Job
+ */
+export const getCreateBallPropagationJobUrl = (sessionId: string) => {
+  return `/api/ball-annotation-sessions/${encodePathSegmented(sessionId)}/propagation-jobs`;
+};
+
+export const createBallPropagationJob = async (
+  sessionId: string,
+  ballPropagationCreateRequest: BallPropagationCreateRequest,
+  options?: RequestInit,
+): Promise<BallPropagationJobResponse> => {
+  return customFetch<BallPropagationJobResponse>(
+    getCreateBallPropagationJobUrl(sessionId),
+    {
+      ...options,
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...options?.headers },
+      body: JSON.stringify(ballPropagationCreateRequest),
+    },
+  );
+};
+
+export const getCreateBallPropagationJobMutationOptions = <
+  TError = ErrorType<BallApiErrorResponse | HTTPValidationError>,
+  TContext = unknown,
+>(options?: {
+  mutation?: UseMutationOptions<
+    Awaited<ReturnType<typeof createBallPropagationJob>>,
+    TError,
+    { sessionId: string; data: BodyType<BallPropagationCreateRequest> },
+    TContext
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}): UseMutationOptions<
+  Awaited<ReturnType<typeof createBallPropagationJob>>,
+  TError,
+  { sessionId: string; data: BodyType<BallPropagationCreateRequest> },
+  TContext
+> => {
+  const mutationKey = ["createBallPropagationJob"];
+  const { mutation: mutationOptions, request: requestOptions } = options
+    ? options.mutation &&
+      "mutationKey" in options.mutation &&
+      options.mutation.mutationKey
+      ? options
+      : { ...options, mutation: { ...options.mutation, mutationKey } }
+    : { mutation: { mutationKey }, request: undefined };
+
+  const mutationFn: MutationFunction<
+    Awaited<ReturnType<typeof createBallPropagationJob>>,
+    { sessionId: string; data: BodyType<BallPropagationCreateRequest> }
+  > = (props) => {
+    const { sessionId, data } = props ?? {};
+
+    return createBallPropagationJob(sessionId, data, requestOptions);
+  };
+
+  return { mutationFn, ...mutationOptions };
+};
+
+export type CreateBallPropagationJobMutationResult = NonNullable<
+  Awaited<ReturnType<typeof createBallPropagationJob>>
+>;
+export type CreateBallPropagationJobMutationBody =
+  BodyType<BallPropagationCreateRequest>;
+export type CreateBallPropagationJobMutationError = ErrorType<
+  BallApiErrorResponse | HTTPValidationError
+>;
+
+/**
+ * @summary Create Ball Propagation Job
+ */
+export const useCreateBallPropagationJob = <
+  TError = ErrorType<BallApiErrorResponse | HTTPValidationError>,
+  TContext = unknown,
+>(options?: {
+  mutation?: UseMutationOptions<
+    Awaited<ReturnType<typeof createBallPropagationJob>>,
+    TError,
+    { sessionId: string; data: BodyType<BallPropagationCreateRequest> },
+    TContext
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}): UseMutationResult<
+  Awaited<ReturnType<typeof createBallPropagationJob>>,
+  TError,
+  { sessionId: string; data: BodyType<BallPropagationCreateRequest> },
+  TContext
+> => {
+  return useMutation(getCreateBallPropagationJobMutationOptions(options));
+};
+
+/**
+ * @summary Get Ball Propagation Job
+ */
+export const getGetBallPropagationJobUrl = (
+  sessionId: string,
+  jobId: string,
+) => {
+  return `/api/ball-annotation-sessions/${encodePathSegmented(sessionId)}/propagation-jobs/${encodePathSegmented(jobId)}`;
+};
+
+export const getBallPropagationJob = async (
+  sessionId: string,
+  jobId: string,
+  options?: RequestInit,
+): Promise<BallPropagationJobResponse> => {
+  return customFetch<BallPropagationJobResponse>(
+    getGetBallPropagationJobUrl(sessionId, jobId),
+    {
+      ...options,
+      method: "GET",
+    },
+  );
+};
+
+export const getGetBallPropagationJobQueryKey = (
+  sessionId: string,
+  jobId: string,
+) => {
+  return [
+    `/api/ball-annotation-sessions/${encodePathSegmented(sessionId)}/propagation-jobs/${encodePathSegmented(jobId)}`,
+  ] as const;
+};
+
+export const getGetBallPropagationJobQueryOptions = <
+  TData = Awaited<ReturnType<typeof getBallPropagationJob>>,
+  TError = ErrorType<BallApiErrorResponse | HTTPValidationError>,
+>(
+  sessionId: string,
+  jobId: string,
+  options?: {
+    query?: UseQueryOptions<
+      Awaited<ReturnType<typeof getBallPropagationJob>>,
+      TError,
+      TData
+    >;
+    request?: SecondParameter<typeof customFetch>;
+  },
+) => {
+  const { query: queryOptions, request: requestOptions } = options ?? {};
+
+  const queryKey =
+    queryOptions?.queryKey ??
+    getGetBallPropagationJobQueryKey(sessionId, jobId);
+
+  const queryFn: QueryFunction<
+    Awaited<ReturnType<typeof getBallPropagationJob>>
+  > = ({ signal }) =>
+    getBallPropagationJob(sessionId, jobId, { signal, ...requestOptions });
+
+  return {
+    queryKey,
+    queryFn,
+    enabled: !!(sessionId && jobId),
+    ...queryOptions,
+  } as UseQueryOptions<
+    Awaited<ReturnType<typeof getBallPropagationJob>>,
+    TError,
+    TData
+  > & { queryKey: QueryKey };
+};
+
+export type GetBallPropagationJobQueryResult = NonNullable<
+  Awaited<ReturnType<typeof getBallPropagationJob>>
+>;
+export type GetBallPropagationJobQueryError = ErrorType<
+  BallApiErrorResponse | HTTPValidationError
+>;
+
+/**
+ * @summary Get Ball Propagation Job
+ */
+
+export function useGetBallPropagationJob<
+  TData = Awaited<ReturnType<typeof getBallPropagationJob>>,
+  TError = ErrorType<BallApiErrorResponse | HTTPValidationError>,
+>(
+  sessionId: string,
+  jobId: string,
+  options?: {
+    query?: UseQueryOptions<
+      Awaited<ReturnType<typeof getBallPropagationJob>>,
+      TError,
+      TData
+    >;
+    request?: SecondParameter<typeof customFetch>;
+  },
+): UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+  const queryOptions = getGetBallPropagationJobQueryOptions(
+    sessionId,
+    jobId,
+    options,
+  );
+
+  const query = useQuery(queryOptions) as UseQueryResult<TData, TError> & {
+    queryKey: QueryKey;
+  };
+
+  return { ...query, queryKey: queryOptions.queryKey };
+}
+
+/**
+ * @summary Cancel Ball Propagation Job
+ */
+export const getCancelBallPropagationJobUrl = (
+  sessionId: string,
+  jobId: string,
+) => {
+  return `/api/ball-annotation-sessions/${encodePathSegmented(sessionId)}/propagation-jobs/${encodePathSegmented(jobId)}/cancel`;
+};
+
+export const cancelBallPropagationJob = async (
+  sessionId: string,
+  jobId: string,
+  options?: RequestInit,
+): Promise<BallPropagationJobResponse> => {
+  return customFetch<BallPropagationJobResponse>(
+    getCancelBallPropagationJobUrl(sessionId, jobId),
+    {
+      ...options,
+      method: "POST",
+    },
+  );
+};
+
+export const getCancelBallPropagationJobMutationOptions = <
+  TError = ErrorType<BallApiErrorResponse | HTTPValidationError>,
+  TContext = unknown,
+>(options?: {
+  mutation?: UseMutationOptions<
+    Awaited<ReturnType<typeof cancelBallPropagationJob>>,
+    TError,
+    { sessionId: string; jobId: string },
+    TContext
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}): UseMutationOptions<
+  Awaited<ReturnType<typeof cancelBallPropagationJob>>,
+  TError,
+  { sessionId: string; jobId: string },
+  TContext
+> => {
+  const mutationKey = ["cancelBallPropagationJob"];
+  const { mutation: mutationOptions, request: requestOptions } = options
+    ? options.mutation &&
+      "mutationKey" in options.mutation &&
+      options.mutation.mutationKey
+      ? options
+      : { ...options, mutation: { ...options.mutation, mutationKey } }
+    : { mutation: { mutationKey }, request: undefined };
+
+  const mutationFn: MutationFunction<
+    Awaited<ReturnType<typeof cancelBallPropagationJob>>,
+    { sessionId: string; jobId: string }
+  > = (props) => {
+    const { sessionId, jobId } = props ?? {};
+
+    return cancelBallPropagationJob(sessionId, jobId, requestOptions);
+  };
+
+  return { mutationFn, ...mutationOptions };
+};
+
+export type CancelBallPropagationJobMutationResult = NonNullable<
+  Awaited<ReturnType<typeof cancelBallPropagationJob>>
+>;
+
+export type CancelBallPropagationJobMutationError = ErrorType<
+  BallApiErrorResponse | HTTPValidationError
+>;
+
+/**
+ * @summary Cancel Ball Propagation Job
+ */
+export const useCancelBallPropagationJob = <
+  TError = ErrorType<BallApiErrorResponse | HTTPValidationError>,
+  TContext = unknown,
+>(options?: {
+  mutation?: UseMutationOptions<
+    Awaited<ReturnType<typeof cancelBallPropagationJob>>,
+    TError,
+    { sessionId: string; jobId: string },
+    TContext
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}): UseMutationResult<
+  Awaited<ReturnType<typeof cancelBallPropagationJob>>,
+  TError,
+  { sessionId: string; jobId: string },
+  TContext
+> => {
+  return useMutation(getCancelBallPropagationJobMutationOptions(options));
+};
+
+/**
+ * @summary Get Ball Annotation Result
+ */
+export const getGetBallAnnotationResultUrl = (sessionId: string) => {
+  return `/api/ball-annotation-sessions/${encodePathSegmented(sessionId)}/result`;
+};
+
+export const getBallAnnotationResult = async (
+  sessionId: string,
+  options?: RequestInit,
+): Promise<BallAnnotationFinalResultResponse> => {
+  return customFetch<BallAnnotationFinalResultResponse>(
+    getGetBallAnnotationResultUrl(sessionId),
+    {
+      ...options,
+      method: "GET",
+    },
+  );
+};
+
+export const getGetBallAnnotationResultQueryKey = (sessionId: string) => {
+  return [
+    `/api/ball-annotation-sessions/${encodePathSegmented(sessionId)}/result`,
+  ] as const;
+};
+
+export const getGetBallAnnotationResultQueryOptions = <
+  TData = Awaited<ReturnType<typeof getBallAnnotationResult>>,
+  TError = ErrorType<BallApiErrorResponse | HTTPValidationError>,
+>(
+  sessionId: string,
+  options?: {
+    query?: UseQueryOptions<
+      Awaited<ReturnType<typeof getBallAnnotationResult>>,
+      TError,
+      TData
+    >;
+    request?: SecondParameter<typeof customFetch>;
+  },
+) => {
+  const { query: queryOptions, request: requestOptions } = options ?? {};
+
+  const queryKey =
+    queryOptions?.queryKey ?? getGetBallAnnotationResultQueryKey(sessionId);
+
+  const queryFn: QueryFunction<
+    Awaited<ReturnType<typeof getBallAnnotationResult>>
+  > = ({ signal }) =>
+    getBallAnnotationResult(sessionId, { signal, ...requestOptions });
+
+  return {
+    queryKey,
+    queryFn,
+    enabled: !!sessionId,
+    ...queryOptions,
+  } as UseQueryOptions<
+    Awaited<ReturnType<typeof getBallAnnotationResult>>,
+    TError,
+    TData
+  > & { queryKey: QueryKey };
+};
+
+export type GetBallAnnotationResultQueryResult = NonNullable<
+  Awaited<ReturnType<typeof getBallAnnotationResult>>
+>;
+export type GetBallAnnotationResultQueryError = ErrorType<
+  BallApiErrorResponse | HTTPValidationError
+>;
+
+/**
+ * @summary Get Ball Annotation Result
+ */
+
+export function useGetBallAnnotationResult<
+  TData = Awaited<ReturnType<typeof getBallAnnotationResult>>,
+  TError = ErrorType<BallApiErrorResponse | HTTPValidationError>,
+>(
+  sessionId: string,
+  options?: {
+    query?: UseQueryOptions<
+      Awaited<ReturnType<typeof getBallAnnotationResult>>,
+      TError,
+      TData
+    >;
+    request?: SecondParameter<typeof customFetch>;
+  },
+): UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+  const queryOptions = getGetBallAnnotationResultQueryOptions(
+    sessionId,
+    options,
+  );
+
+  const query = useQuery(queryOptions) as UseQueryResult<TData, TError> & {
+    queryKey: QueryKey;
+  };
+
+  return { ...query, queryKey: queryOptions.queryKey };
+}
 
 /**
  * @summary List Configs
@@ -1323,7 +2252,9 @@ export const getGetDetectorProbeArtifactQueryKey = (
   jobId: string,
   artifactId: string,
 ) => {
-  return [`/api/detector-probes/${encodePathSegmented(jobId)}/artifacts/${encodePathSegmented(artifactId)}`] as const;
+  return [
+    `/api/detector-probes/${encodePathSegmented(jobId)}/artifacts/${encodePathSegmented(artifactId)}`,
+  ] as const;
 };
 
 export const getGetDetectorProbeArtifactQueryOptions = <
@@ -1486,6 +2417,379 @@ export const useCancelDetectorProbe = <
   TContext
 > => {
   return useMutation(getCancelDetectorProbeMutationOptions(options));
+};
+
+/**
+ * @summary Create Detector Review Proxy Repair
+ */
+export const getCreateDetectorReviewProxyRepairUrl = () => {
+  return `/api/detector-review-proxy-repairs`;
+};
+
+export const createDetectorReviewProxyRepair = async (
+  detectorReviewProxyRepairCreateRequest: DetectorReviewProxyRepairCreateRequest,
+  options?: RequestInit,
+): Promise<DetectorReviewProxyRepairJobResponse> => {
+  return customFetch<DetectorReviewProxyRepairJobResponse>(
+    getCreateDetectorReviewProxyRepairUrl(),
+    {
+      ...options,
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...options?.headers },
+      body: JSON.stringify(detectorReviewProxyRepairCreateRequest),
+    },
+  );
+};
+
+export const getCreateDetectorReviewProxyRepairMutationOptions = <
+  TError = ErrorType<HTTPValidationError>,
+  TContext = unknown,
+>(options?: {
+  mutation?: UseMutationOptions<
+    Awaited<ReturnType<typeof createDetectorReviewProxyRepair>>,
+    TError,
+    { data: BodyType<DetectorReviewProxyRepairCreateRequest> },
+    TContext
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}): UseMutationOptions<
+  Awaited<ReturnType<typeof createDetectorReviewProxyRepair>>,
+  TError,
+  { data: BodyType<DetectorReviewProxyRepairCreateRequest> },
+  TContext
+> => {
+  const mutationKey = ["createDetectorReviewProxyRepair"];
+  const { mutation: mutationOptions, request: requestOptions } = options
+    ? options.mutation &&
+      "mutationKey" in options.mutation &&
+      options.mutation.mutationKey
+      ? options
+      : { ...options, mutation: { ...options.mutation, mutationKey } }
+    : { mutation: { mutationKey }, request: undefined };
+
+  const mutationFn: MutationFunction<
+    Awaited<ReturnType<typeof createDetectorReviewProxyRepair>>,
+    { data: BodyType<DetectorReviewProxyRepairCreateRequest> }
+  > = (props) => {
+    const { data } = props ?? {};
+
+    return createDetectorReviewProxyRepair(data, requestOptions);
+  };
+
+  return { mutationFn, ...mutationOptions };
+};
+
+export type CreateDetectorReviewProxyRepairMutationResult = NonNullable<
+  Awaited<ReturnType<typeof createDetectorReviewProxyRepair>>
+>;
+export type CreateDetectorReviewProxyRepairMutationBody =
+  BodyType<DetectorReviewProxyRepairCreateRequest>;
+export type CreateDetectorReviewProxyRepairMutationError =
+  ErrorType<HTTPValidationError>;
+
+/**
+ * @summary Create Detector Review Proxy Repair
+ */
+export const useCreateDetectorReviewProxyRepair = <
+  TError = ErrorType<HTTPValidationError>,
+  TContext = unknown,
+>(options?: {
+  mutation?: UseMutationOptions<
+    Awaited<ReturnType<typeof createDetectorReviewProxyRepair>>,
+    TError,
+    { data: BodyType<DetectorReviewProxyRepairCreateRequest> },
+    TContext
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}): UseMutationResult<
+  Awaited<ReturnType<typeof createDetectorReviewProxyRepair>>,
+  TError,
+  { data: BodyType<DetectorReviewProxyRepairCreateRequest> },
+  TContext
+> => {
+  return useMutation(
+    getCreateDetectorReviewProxyRepairMutationOptions(options),
+  );
+};
+
+/**
+ * @summary Get Detector Review Proxy Repair
+ */
+export const getGetDetectorReviewProxyRepairUrl = (repairId: string) => {
+  return `/api/detector-review-proxy-repairs/${encodePathSegmented(repairId)}`;
+};
+
+export const getDetectorReviewProxyRepair = async (
+  repairId: string,
+  options?: RequestInit,
+): Promise<DetectorReviewProxyRepairJobResponse> => {
+  return customFetch<DetectorReviewProxyRepairJobResponse>(
+    getGetDetectorReviewProxyRepairUrl(repairId),
+    {
+      ...options,
+      method: "GET",
+    },
+  );
+};
+
+export const getGetDetectorReviewProxyRepairQueryKey = (repairId: string) => {
+  return [
+    `/api/detector-review-proxy-repairs/${encodePathSegmented(repairId)}`,
+  ] as const;
+};
+
+export const getGetDetectorReviewProxyRepairQueryOptions = <
+  TData = Awaited<ReturnType<typeof getDetectorReviewProxyRepair>>,
+  TError = ErrorType<HTTPValidationError>,
+>(
+  repairId: string,
+  options?: {
+    query?: UseQueryOptions<
+      Awaited<ReturnType<typeof getDetectorReviewProxyRepair>>,
+      TError,
+      TData
+    >;
+    request?: SecondParameter<typeof customFetch>;
+  },
+) => {
+  const { query: queryOptions, request: requestOptions } = options ?? {};
+
+  const queryKey =
+    queryOptions?.queryKey ?? getGetDetectorReviewProxyRepairQueryKey(repairId);
+
+  const queryFn: QueryFunction<
+    Awaited<ReturnType<typeof getDetectorReviewProxyRepair>>
+  > = ({ signal }) =>
+    getDetectorReviewProxyRepair(repairId, { signal, ...requestOptions });
+
+  return {
+    queryKey,
+    queryFn,
+    enabled: !!repairId,
+    ...queryOptions,
+  } as UseQueryOptions<
+    Awaited<ReturnType<typeof getDetectorReviewProxyRepair>>,
+    TError,
+    TData
+  > & { queryKey: QueryKey };
+};
+
+export type GetDetectorReviewProxyRepairQueryResult = NonNullable<
+  Awaited<ReturnType<typeof getDetectorReviewProxyRepair>>
+>;
+export type GetDetectorReviewProxyRepairQueryError =
+  ErrorType<HTTPValidationError>;
+
+/**
+ * @summary Get Detector Review Proxy Repair
+ */
+
+export function useGetDetectorReviewProxyRepair<
+  TData = Awaited<ReturnType<typeof getDetectorReviewProxyRepair>>,
+  TError = ErrorType<HTTPValidationError>,
+>(
+  repairId: string,
+  options?: {
+    query?: UseQueryOptions<
+      Awaited<ReturnType<typeof getDetectorReviewProxyRepair>>,
+      TError,
+      TData
+    >;
+    request?: SecondParameter<typeof customFetch>;
+  },
+): UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+  const queryOptions = getGetDetectorReviewProxyRepairQueryOptions(
+    repairId,
+    options,
+  );
+
+  const query = useQuery(queryOptions) as UseQueryResult<TData, TError> & {
+    queryKey: QueryKey;
+  };
+
+  return { ...query, queryKey: queryOptions.queryKey };
+}
+
+/**
+ * @summary Cancel Detector Review Proxy Repair
+ */
+export const getCancelDetectorReviewProxyRepairUrl = (repairId: string) => {
+  return `/api/detector-review-proxy-repairs/${encodePathSegmented(repairId)}/cancel`;
+};
+
+export const cancelDetectorReviewProxyRepair = async (
+  repairId: string,
+  options?: RequestInit,
+): Promise<DetectorReviewProxyRepairJobResponse> => {
+  return customFetch<DetectorReviewProxyRepairJobResponse>(
+    getCancelDetectorReviewProxyRepairUrl(repairId),
+    {
+      ...options,
+      method: "POST",
+    },
+  );
+};
+
+export const getCancelDetectorReviewProxyRepairMutationOptions = <
+  TError = ErrorType<HTTPValidationError>,
+  TContext = unknown,
+>(options?: {
+  mutation?: UseMutationOptions<
+    Awaited<ReturnType<typeof cancelDetectorReviewProxyRepair>>,
+    TError,
+    { repairId: string },
+    TContext
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}): UseMutationOptions<
+  Awaited<ReturnType<typeof cancelDetectorReviewProxyRepair>>,
+  TError,
+  { repairId: string },
+  TContext
+> => {
+  const mutationKey = ["cancelDetectorReviewProxyRepair"];
+  const { mutation: mutationOptions, request: requestOptions } = options
+    ? options.mutation &&
+      "mutationKey" in options.mutation &&
+      options.mutation.mutationKey
+      ? options
+      : { ...options, mutation: { ...options.mutation, mutationKey } }
+    : { mutation: { mutationKey }, request: undefined };
+
+  const mutationFn: MutationFunction<
+    Awaited<ReturnType<typeof cancelDetectorReviewProxyRepair>>,
+    { repairId: string }
+  > = (props) => {
+    const { repairId } = props ?? {};
+
+    return cancelDetectorReviewProxyRepair(repairId, requestOptions);
+  };
+
+  return { mutationFn, ...mutationOptions };
+};
+
+export type CancelDetectorReviewProxyRepairMutationResult = NonNullable<
+  Awaited<ReturnType<typeof cancelDetectorReviewProxyRepair>>
+>;
+
+export type CancelDetectorReviewProxyRepairMutationError =
+  ErrorType<HTTPValidationError>;
+
+/**
+ * @summary Cancel Detector Review Proxy Repair
+ */
+export const useCancelDetectorReviewProxyRepair = <
+  TError = ErrorType<HTTPValidationError>,
+  TContext = unknown,
+>(options?: {
+  mutation?: UseMutationOptions<
+    Awaited<ReturnType<typeof cancelDetectorReviewProxyRepair>>,
+    TError,
+    { repairId: string },
+    TContext
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}): UseMutationResult<
+  Awaited<ReturnType<typeof cancelDetectorReviewProxyRepair>>,
+  TError,
+  { repairId: string },
+  TContext
+> => {
+  return useMutation(
+    getCancelDetectorReviewProxyRepairMutationOptions(options),
+  );
+};
+
+/**
+ * @summary Retry Detector Review Proxy Repair
+ */
+export const getRetryDetectorReviewProxyRepairUrl = (repairId: string) => {
+  return `/api/detector-review-proxy-repairs/${encodePathSegmented(repairId)}/retry`;
+};
+
+export const retryDetectorReviewProxyRepair = async (
+  repairId: string,
+  detectorReviewProxyRepairRetryRequest: DetectorReviewProxyRepairRetryRequest,
+  options?: RequestInit,
+): Promise<DetectorReviewProxyRepairJobResponse> => {
+  return customFetch<DetectorReviewProxyRepairJobResponse>(
+    getRetryDetectorReviewProxyRepairUrl(repairId),
+    {
+      ...options,
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...options?.headers },
+      body: JSON.stringify(detectorReviewProxyRepairRetryRequest),
+    },
+  );
+};
+
+export const getRetryDetectorReviewProxyRepairMutationOptions = <
+  TError = ErrorType<HTTPValidationError>,
+  TContext = unknown,
+>(options?: {
+  mutation?: UseMutationOptions<
+    Awaited<ReturnType<typeof retryDetectorReviewProxyRepair>>,
+    TError,
+    { repairId: string; data: BodyType<DetectorReviewProxyRepairRetryRequest> },
+    TContext
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}): UseMutationOptions<
+  Awaited<ReturnType<typeof retryDetectorReviewProxyRepair>>,
+  TError,
+  { repairId: string; data: BodyType<DetectorReviewProxyRepairRetryRequest> },
+  TContext
+> => {
+  const mutationKey = ["retryDetectorReviewProxyRepair"];
+  const { mutation: mutationOptions, request: requestOptions } = options
+    ? options.mutation &&
+      "mutationKey" in options.mutation &&
+      options.mutation.mutationKey
+      ? options
+      : { ...options, mutation: { ...options.mutation, mutationKey } }
+    : { mutation: { mutationKey }, request: undefined };
+
+  const mutationFn: MutationFunction<
+    Awaited<ReturnType<typeof retryDetectorReviewProxyRepair>>,
+    { repairId: string; data: BodyType<DetectorReviewProxyRepairRetryRequest> }
+  > = (props) => {
+    const { repairId, data } = props ?? {};
+
+    return retryDetectorReviewProxyRepair(repairId, data, requestOptions);
+  };
+
+  return { mutationFn, ...mutationOptions };
+};
+
+export type RetryDetectorReviewProxyRepairMutationResult = NonNullable<
+  Awaited<ReturnType<typeof retryDetectorReviewProxyRepair>>
+>;
+export type RetryDetectorReviewProxyRepairMutationBody =
+  BodyType<DetectorReviewProxyRepairRetryRequest>;
+export type RetryDetectorReviewProxyRepairMutationError =
+  ErrorType<HTTPValidationError>;
+
+/**
+ * @summary Retry Detector Review Proxy Repair
+ */
+export const useRetryDetectorReviewProxyRepair = <
+  TError = ErrorType<HTTPValidationError>,
+  TContext = unknown,
+>(options?: {
+  mutation?: UseMutationOptions<
+    Awaited<ReturnType<typeof retryDetectorReviewProxyRepair>>,
+    TError,
+    { repairId: string; data: BodyType<DetectorReviewProxyRepairRetryRequest> },
+    TContext
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}): UseMutationResult<
+  Awaited<ReturnType<typeof retryDetectorReviewProxyRepair>>,
+  TError,
+  { repairId: string; data: BodyType<DetectorReviewProxyRepairRetryRequest> },
+  TContext
+> => {
+  return useMutation(getRetryDetectorReviewProxyRepairMutationOptions(options));
 };
 
 /**
@@ -2484,7 +3788,9 @@ export const getAiImprovementStatus = async (
 };
 
 export const getGetAiImprovementStatusQueryKey = (runId: string) => {
-  return [`/api/runs/${encodePathSegmented(runId)}/ai-improvement-status`] as const;
+  return [
+    `/api/runs/${encodePathSegmented(runId)}/ai-improvement-status`,
+  ] as const;
 };
 
 export const getGetAiImprovementStatusQueryOptions = <
@@ -2578,7 +3884,9 @@ export const getAiReviewTriggersReport = async (
 };
 
 export const getGetAiReviewTriggersReportQueryKey = (runId: string) => {
-  return [`/api/runs/${encodePathSegmented(runId)}/ai-review-triggers`] as const;
+  return [
+    `/api/runs/${encodePathSegmented(runId)}/ai-review-triggers`,
+  ] as const;
 };
 
 export const getGetAiReviewTriggersReportQueryOptions = <
@@ -2688,7 +3996,10 @@ export const getListArtifactsQueryKey = (
   runId: string,
   params?: ListArtifactsParams,
 ) => {
-  return [`/api/runs/${encodePathSegmented(runId)}/artifacts`, ...(params ? [params] : [])] as const;
+  return [
+    `/api/runs/${encodePathSegmented(runId)}/artifacts`,
+    ...(params ? [params] : []),
+  ] as const;
 };
 
 export const getListArtifactsQueryOptions = <
@@ -3296,7 +4607,9 @@ export const getBroadcastReviewEvidence = async (
 };
 
 export const getGetBroadcastReviewEvidenceQueryKey = (runId: string) => {
-  return [`/api/runs/${encodePathSegmented(runId)}/broadcast/review-evidence`] as const;
+  return [
+    `/api/runs/${encodePathSegmented(runId)}/broadcast/review-evidence`,
+  ] as const;
 };
 
 export const getGetBroadcastReviewEvidenceQueryOptions = <
@@ -3615,7 +4928,9 @@ export const getBroadcastReviewWindows = async (
 };
 
 export const getGetBroadcastReviewWindowsQueryKey = (runId: string) => {
-  return [`/api/runs/${encodePathSegmented(runId)}/broadcast/review-windows`] as const;
+  return [
+    `/api/runs/${encodePathSegmented(runId)}/broadcast/review-windows`,
+  ] as const;
 };
 
 export const getGetBroadcastReviewWindowsQueryOptions = <

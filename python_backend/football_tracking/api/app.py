@@ -12,6 +12,7 @@ from fastapi.responses import JSONResponse
 
 from football_tracking.api.routes.ai import router as ai_router
 from football_tracking.api.routes.artifacts import router as artifacts_router
+from football_tracking.api.routes.ball_annotations import router as ball_annotations_router
 from football_tracking.api.routes.broadcast import router as broadcast_router
 from football_tracking.api.routes.configs import router as configs_router
 from football_tracking.api.routes.detectors import router as detectors_router
@@ -20,18 +21,28 @@ from football_tracking.api.routes.inputs import router as inputs_router
 from football_tracking.api.routes.runs import router as runs_router
 from football_tracking.api.service import ApiService
 
+_NO_STORE_API_PREFIXES = (
+    "/api/v1/detector-review-proxy-repairs",
+    "/api/v1/ball-annotation-sessions",
+)
+
 
 def create_app(repo_root: Path | None = None, *, initialize_service: bool = True) -> FastAPI:
     resolved_repo_root = repo_root or Path(__file__).resolve().parents[2]
-    service = ApiService(resolved_repo_root) if initialize_service else None
 
     @asynccontextmanager
-    async def lifespan(_: FastAPI):
+    async def lifespan(application: FastAPI):
+        service = ApiService(resolved_repo_root) if initialize_service else None
+        if service is not None:
+            application.state.api_service = service
         try:
             yield
         finally:
             if service is not None:
-                service.close()
+                try:
+                    service.close()
+                finally:
+                    del application.state.api_service
 
     app = FastAPI(
         title="Football Tracking API",
@@ -44,16 +55,21 @@ def create_app(repo_root: Path | None = None, *, initialize_service: bool = True
     async def reject_untrusted_browser_origins(request: Request, call_next):
         origin = request.headers.get("origin")
         if origin is not None and not _is_trusted_loopback_origin(origin):
-            return JSONResponse(
+            response = JSONResponse(
                 status_code=403,
                 content={"detail": "Cross-origin access is not permitted"},
             )
-        return await call_next(request)
+        else:
+            response = await call_next(request)
+        if _is_no_store_api_path(request.url.path):
+            # Repair state and its errors carry live local provenance.  Never
+            # let success, validation, authorization, or conflict responses be
+            # retained by a browser/intermediary cache.
+            response.headers["Cache-Control"] = "no-store"
+        return response
 
     @app.exception_handler(RequestValidationError)
-    async def safe_request_validation_error(
-        _request: Any, error: RequestValidationError
-    ) -> JSONResponse:
+    async def safe_request_validation_error(_request: Any, error: RequestValidationError) -> JSONResponse:
         details = []
         for item in error.errors():
             details.append(
@@ -64,14 +80,23 @@ def create_app(repo_root: Path | None = None, *, initialize_service: bool = True
                 }
             )
         return JSONResponse(status_code=422, content={"detail": details})
-    if service is not None:
-        app.state.api_service = service
+
+    @app.exception_handler(Exception)
+    async def safe_unhandled_error(request: Request, _error: Exception) -> JSONResponse:
+        headers = {"Cache-Control": "no-store"} if _is_no_store_api_path(request.url.path) else None
+        return JSONResponse(
+            status_code=500,
+            content={"detail": "Internal server error"},
+            headers=headers,
+        )
+
     app.include_router(health_router, prefix="/api/v1", tags=["health"])
     app.include_router(inputs_router, prefix="/api/v1", tags=["inputs"])
     app.include_router(configs_router, prefix="/api/v1", tags=["configs"])
     app.include_router(detectors_router, prefix="/api/v1", tags=["detectors"])
     app.include_router(runs_router, prefix="/api/v1", tags=["runs"])
     app.include_router(artifacts_router, prefix="/api/v1", tags=["artifacts"])
+    app.include_router(ball_annotations_router, prefix="/api/v1", tags=["ball-annotations"])
     app.include_router(broadcast_router, prefix="/api/v1", tags=["broadcast"])
     app.include_router(ai_router, prefix="/api/v1", tags=["ai"])
     return app
@@ -87,10 +112,7 @@ def _safe_validation_value(value: Any) -> Any:
     if isinstance(value, (list, tuple)):
         return [_safe_validation_value(item) for item in value]
     if isinstance(value, dict):
-        return {
-            _safe_validation_value(str(key)): _safe_validation_value(item)
-            for key, item in value.items()
-        }
+        return {_safe_validation_value(str(key)): _safe_validation_value(item) for key, item in value.items()}
     return str(value).encode("utf-8", "replace").decode("utf-8")
 
 
@@ -113,6 +135,10 @@ def _is_trusted_loopback_origin(origin: str) -> bool:
     ):
         return False
     return port is None or 1 <= port <= 65_535
+
+
+def _is_no_store_api_path(path: str) -> bool:
+    return any(path == prefix or path.startswith(f"{prefix}/") for prefix in _NO_STORE_API_PREFIXES)
 
 
 app = create_app()

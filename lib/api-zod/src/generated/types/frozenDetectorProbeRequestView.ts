@@ -5,6 +5,7 @@
  * OpenAPI spec version: 0.1.0
  */
 import type { DetectorProbeExecutionBundleView } from "./detectorProbeExecutionBundleView";
+import type { DetectorProbeReviewProxyUpgradeBindingView } from "./detectorProbeReviewProxyUpgradeBindingView";
 import type { DetectorProbeTuningPatchBindingView } from "./detectorProbeTuningPatchBindingView";
 import type { FrozenDetectorProbeRequestViewProfileSha256s } from "./frozenDetectorProbeRequestViewProfileSha256s";
 import type { FrozenDetectorProbeRequestViewRequestedDecodeMode } from "./frozenDetectorProbeRequestViewRequestedDecodeMode";
@@ -68,4 +69,7 @@ export interface FrozenDetectorProbeRequestView {
   top_k: 5;
   requested_decode_mode: FrozenDetectorProbeRequestViewRequestedDecodeMode;
   retry_from_job_id?: string | null;
+  annotation_sampling_manifest_sha256?: string | null;
+  retry_kind?: "review_proxy_decode_upgrade" | null;
+  review_proxy_upgrade?: DetectorProbeReviewProxyUpgradeBindingView | null;
 }

@@ -4,6 +4,7 @@ import errno
 import hashlib
 import math
 import os
+import platform
 import shutil
 import signal
 import stat
@@ -18,12 +19,16 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
+from football_tracking.detector_audited_authority import (
+    AUDITED_T2_LEGACY_PROBE_BINDINGS as _AUDITED_T2_LEGACY_REPORT_BINDINGS,
+)
 from football_tracking.detector_development_common import (
     CorruptProbeFrameError,
     DetectorDevelopmentError,
     ProbeWorkerDiedError,
     atomic_write_json,
     canonical_sha256,
+    exact_regular_tree_snapshot,
     hash_regular_file,
     is_link_or_reparse,
     json_object_from_bytes,
@@ -41,6 +46,11 @@ from football_tracking.detector_probe_runner import (
     ArtifactWriteError,
     probe_execution_environment,
     run_detector_probe,
+)
+from football_tracking.review_proxy_mapping import (
+    ReviewProxyError,
+    build_review_proxy_manifest,
+    validate_review_proxy_manifest,
 )
 
 _TERMINAL_STATUSES = {"ready", "failed", "cancelled", "blocked"}
@@ -68,12 +78,20 @@ _CODE_BUNDLE_FILES = (
     "detector_probe_runner.py",
     "detector_probe_worker.py",
     "media_integrity.py",
+    "review_proxy_mapping.py",
     "tracking_contracts.py",
     "types.py",
 )
-_CODE_BUNDLE_REPO_FILES = tuple(
-    f"python_backend/football_tracking/{name}" for name in _CODE_BUNDLE_FILES
-)
+_AUDITED_T2_CODE_BUNDLE_FILES = tuple(name for name in _CODE_BUNDLE_FILES if name != "review_proxy_mapping.py")
+_AUDITED_T2_EXECUTION_BUNDLE_BINDINGS = {
+    "fe8ffe2aca1d83f5b3ed19d6fff96999fa3224d3688147c23e1622fe58947494": {
+        "code_bundle_sha256": "aa23d207df609403a6abde6de3435914ed4c27bc151498069c2821fa3a6ef5e1",
+        "runtime_environment_sha256": "6ae75ef83b968801c2c0f16a628e9eba94fe88aed27384c2896d08c7e90054d3",
+        "code_commit": "7b8d45e121184f6bebe22e9a1fed4c9dca8a3a50",
+        "code_commit_blob_bundle_sha256": "4d381c6de23caa97e08fb6602e6876d425f2f16043d95aacb8b912eb4f59c59e",
+    },
+}
+_CODE_BUNDLE_REPO_FILES = tuple(f"python_backend/football_tracking/{name}" for name in _CODE_BUNDLE_FILES)
 _MAX_GIT_PROVENANCE_OUTPUT_BYTES = 64 * 1024
 _MAX_CODE_BUNDLE_FILE_BYTES = 4 * 1024 * 1024
 _CODE_COMMIT_BINDING_KIND = "exact_or_crlf_to_lf_commit_blob"
@@ -105,7 +123,114 @@ _REQUEST_FIELDS = {
     "top_k",
     "requested_decode_mode",
     "retry_from_job_id",
+    "annotation_sampling_manifest_sha256",
 }
+
+_SEMANTIC_INTENT_FIELDS = (
+    "parent_trial_id",
+    "source_id",
+    "source_relative_path",
+    "source_sha256",
+    "source_file_identity_sha256",
+    "source_size_bytes",
+    "source_width",
+    "source_height",
+    "source_frame_count",
+    "tracking_contract_relative_path",
+    "tracking_contract_sha256",
+    "base_config_relative_path",
+    "base_config_sha256",
+    "effective_config_relative_path",
+    "effective_config_sha256",
+    "trial_intent_sha256",
+    "tuning_patch_binding",
+    "tuning_patch_sha256",
+    "profile_ids",
+    "frozen_profiles_sha256",
+    "profile_sha256s",
+    "profile_bindings",
+    "frame_indices",
+    "top_k",
+    "requested_decode_mode",
+)
+
+
+def semantic_probe_intent_sha256(frozen_request: dict[str, Any]) -> str:
+    """Hash only detector evidence authority, never attempt/runtime mechanics.
+
+    The explicit field allowlist is intentional: review-proxy upgrades may change
+    the server-observed runtime and execution bundle, but no source, model,
+    candidate-frame, sampling, or decode request authority.
+    """
+
+    missing = [field for field in _SEMANTIC_INTENT_FIELDS if field not in frozen_request]
+    if missing:
+        raise DetectorDevelopmentError(
+            "invalid_probe_intent",
+            f"Detector probe semantic intent is incomplete: {', '.join(missing)}",
+        )
+    payload = {
+        "schema_version": "1.0",
+        **{field: frozen_request[field] for field in _SEMANTIC_INTENT_FIELDS},
+        "annotation_sampling_manifest_sha256": frozen_request.get("annotation_sampling_manifest_sha256"),
+    }
+    return canonical_sha256(payload)
+
+
+def _review_proxy_continuation_execution_binding() -> dict[str, Any]:
+    package_root = Path(__file__).resolve().parent
+    continuation_names = (
+        "api/routes/ball_annotations.py",
+        "api/routes/detectors.py",
+        "api/service.py",
+        "ball_annotation_service.py",
+        "ball_detector_annotations.py",
+        "ball_detector_feasibility.py",
+        "ball_frame_evidence.py",
+        "detector_development.py",
+    )
+    # Child assembly calls the same freeze/catalog/report validators as a
+    # normal current detector probe.  Bind that complete detector execution
+    # closure, then add the annotation/API continuation surface.
+    relative_names = tuple(dict.fromkeys((*_CODE_BUNDLE_FILES, *continuation_names)))
+    code_files: dict[str, str] = {}
+    for relative_name in relative_names:
+        _content, digest = read_regular_bytes(
+            package_root / relative_name,
+            "review-proxy continuation code bundle file",
+            max_bytes=_MAX_CODE_BUNDLE_FILE_BYTES,
+            trusted_root=package_root,
+        )
+        code_files[f"football_tracking/{relative_name}"] = digest
+    try:
+        import fastapi
+        import pydantic
+
+        fastapi_version = str(fastapi.__version__)
+        pydantic_version = str(pydantic.__version__)
+    except (ImportError, AttributeError) as exc:
+        raise DetectorDevelopmentError(
+            "continuation_runtime_unavailable",
+            "Review-proxy continuation runtime identity is unavailable",
+        ) from exc
+    runtime = {
+        "python_implementation": platform.python_implementation(),
+        "python_version": platform.python_version(),
+        "platform_system": platform.system(),
+        "platform_machine": platform.machine(),
+        "fastapi_version": fastapi_version,
+        "pydantic_version": pydantic_version,
+    }
+    binding = {
+        "schema_version": "1.0",
+        "artifact_type": ("detector_review_proxy_continuation_execution_binding"),
+        "code_files": code_files,
+        "code_bundle_sha256": canonical_sha256(code_files),
+        "runtime": runtime,
+        "runtime_sha256": canonical_sha256(runtime),
+    }
+    binding["binding_sha256"] = canonical_sha256(binding)
+    return binding
 
 
 @dataclass(frozen=True)
@@ -273,6 +398,16 @@ def _stable_directory_object_identity(path: Path) -> tuple[int, int]:
     if not stat.S_ISDIR(metadata.st_mode):
         raise DetectorDevelopmentError("not_regular_directory", "Detector probe source ancestor is not a directory")
     return int(metadata.st_dev), int(metadata.st_ino)
+
+
+def _path_entry_is_absent(path: Path) -> bool:
+    try:
+        path.lstat()
+    except FileNotFoundError:
+        return True
+    except OSError:
+        return False
+    return False
 
 
 def _verify_source_digest_cached(
@@ -451,6 +586,7 @@ class DetectorProbeCoordinator:
         self._cancel_root = secure_mkdirs(self._probe_root, "cancel")
         self._results_root = secure_mkdirs(self._probe_root, "results")
         self._leases_root = secure_mkdirs(self._probe_root, "leases")
+        self._review_proxy_child_claims_root = secure_mkdirs(self._probe_root, "review_proxy_child_claims")
         self._execution_lease_path = self._leases_root / "execution.lock"
         self._lock = _root_lock(self._probe_root)
         self._execution_lock = _root_execution_lock(self._probe_root)
@@ -497,14 +633,26 @@ class DetectorProbeCoordinator:
             if recovered:
                 self._dispatch_event.set()
 
-    def create_probe(self, request: dict[str, Any]) -> dict[str, Any]:
+    def create_probe(
+        self,
+        request: dict[str, Any],
+        *,
+        _expected_profile_sha256s: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
         if self._closed:
             raise DetectorDevelopmentError("service_closed", "Detector probe service is closed")
         frozen_request, frozen_profiles = self._freeze_request(request)
+        if _expected_profile_sha256s is not None and frozen_request["profile_sha256s"] != _expected_profile_sha256s:
+            raise DetectorDevelopmentError(
+                "invalid_annotation_check_authority",
+                "Detector profiles changed after the annotation check was locked",
+                status_code=409,
+            )
         retry_from_job_id = frozen_request.get("retry_from_job_id")
         request_sha256 = canonical_sha256(frozen_request)
         intent_request = {key: value for key, value in frozen_request.items() if key != "retry_from_job_id"}
         intent_sha256 = canonical_sha256(intent_request)
+        semantic_intent_sha256 = semantic_probe_intent_sha256(frozen_request)
         resource_sha256 = canonical_sha256(
             {
                 key: frozen_request[key]
@@ -573,6 +721,7 @@ class DetectorProbeCoordinator:
                 "idempotency_key": request_sha256,
                 "request_sha256": request_sha256,
                 "intent_sha256": intent_sha256,
+                "semantic_intent_sha256": semantic_intent_sha256,
                 "resource_sha256": resource_sha256,
                 "frozen_profiles_sha256": frozen_request["frozen_profiles_sha256"],
                 "status": "queued",
@@ -607,6 +756,815 @@ class DetectorProbeCoordinator:
         with self._lock:
             record = self._record(job_id)
             return self._public_record(record)
+
+    def get_verified_probe(self, job_id: str) -> dict[str, Any]:
+        """Return a ready probe only after replaying its sealed result tree."""
+
+        return self._public_record(self.get_verified_probe_job_record(job_id))
+
+    def get_verified_probe_job_record(self, job_id: str) -> dict[str, Any]:
+        """Return the exact persisted job record after replaying its sealed result tree."""
+
+        job_id = require_safe_id(job_id, "detector probe job_id")
+        with self._lock:
+            record = deepcopy(self._record(job_id))
+        if record.get("status") != "ready":
+            return record
+        report, manifest_sha256 = self._validate_result_tree(
+            self._results_root / job_id,
+            record,
+        )
+        if manifest_sha256 != record.get("result_manifest_sha256"):
+            raise DetectorDevelopmentError(
+                "result_manifest_mismatch",
+                "Detector probe result manifest changed after publication",
+            )
+        if record.get("report") != report:
+            raise DetectorDevelopmentError(
+                "result_report_mismatch",
+                "Detector probe job report differs from its sealed result tree",
+            )
+        with self._lock:
+            repeated_record = deepcopy(self._record(job_id))
+        if repeated_record != record:
+            raise DetectorDevelopmentError(
+                "source_changed",
+                "Detector probe job record changed during sealed-result verification",
+            )
+        return record
+
+    def get_review_proxy_upgrade_parent(self, job_id: str) -> dict[str, Any]:
+        """Freeze the one audited legacy parent eligible for proxy repair."""
+
+        job_id = require_safe_id(job_id, "review-proxy parent job_id")
+        verified = self.get_verified_probe(job_id)
+        report = verified.get("report")
+        legacy = _AUDITED_T2_LEGACY_REPORT_BINDINGS.get(job_id)
+        if (
+            verified.get("status") != "ready"
+            or not isinstance(report, dict)
+            or legacy is None
+            or report.get("report_sha256") != legacy["report_sha256"]
+            or report.get("lineage", {}).get("execution_bundle_sha256") != legacy["execution_bundle_sha256"]
+            or report.get("review_proxy_manifest") is not None
+            or report.get("decode", {}).get("frame_timing_observations") is not None
+            or any(
+                not isinstance(frame, dict)
+                or frame.get("decoder_reported_pos_msec") is not None
+                or frame.get("decoder_timing_observation_method") is not None
+                for frame in report.get("frames", [])
+            )
+        ):
+            raise DetectorDevelopmentError(
+                "review_proxy_repair_ineligible",
+                "Review-proxy repair requires the exact audited legacy detector probe",
+                status_code=409,
+            )
+        job_path = self._jobs_root / f"{job_id}.json"
+        _, parent_record_sha256 = read_regular_bytes(
+            job_path,
+            "review-proxy parent detector job",
+            max_bytes=4 * 1024 * 1024,
+            trusted_root=self._jobs_root,
+        )
+        frozen = verified["frozen_request"]
+        candidate_payload = []
+        source_artifact_payload = []
+        for frame in report["frames"]:
+            source_artifact_payload.append(
+                {
+                    "frame_index": frame["frame_index"],
+                    "source_artifact_url": frame["source_artifact_url"],
+                    "source_frame_sha256": frame["source_frame_sha256"],
+                    "source_frame_size_bytes": frame["source_frame_size_bytes"],
+                }
+            )
+            candidate_payload.append(
+                {
+                    "frame_index": frame["frame_index"],
+                    "profile_results": deepcopy(frame["profile_results"]),
+                }
+            )
+        return {
+            "parent_probe_job_id": job_id,
+            "parent_probe_request_sha256": verified["request_sha256"],
+            "parent_probe_intent_sha256": verified["intent_sha256"],
+            "parent_probe_semantic_intent_sha256": semantic_probe_intent_sha256(frozen),
+            "parent_probe_report_sha256": report["report_sha256"],
+            "parent_probe_result_manifest_sha256": verified["result_manifest_sha256"],
+            "parent_probe_record_sha256": parent_record_sha256,
+            "parent_execution_bundle_sha256": frozen["execution_bundle_sha256"],
+            "parent_runtime_environment_sha256": frozen["runtime_environment_sha256"],
+            "source_frame_evidence_sha256": canonical_sha256(source_artifact_payload),
+            "candidate_evidence_sha256": canonical_sha256(candidate_payload),
+            "source": deepcopy(report["source"]),
+            "report_decode_fps": float(report["decode"]["fps"]),
+            "report_effective_decode_mode": report["decode"]["effective_decode_mode"],
+            "frame_indices": deepcopy(frozen["frame_indices"]),
+            "frozen_request": deepcopy(frozen),
+            "frozen_profiles": deepcopy(verified["frozen_profiles"]),
+        }
+
+    def get_review_proxy_upgrade_child(self, parent_job_id: str) -> dict[str, Any] | None:
+        """Return the sole durable proxy-upgrade child for a parent, if any."""
+
+        parent_job_id = require_safe_id(parent_job_id, "review-proxy parent probe job_id")
+        with self._lock:
+            self._refresh_jobs_from_disk()
+            matches = [
+                deepcopy(record)
+                for record in self._jobs.values()
+                if record.get("retry_from_job_id") == parent_job_id
+                and record.get("retry_kind") == "review_proxy_decode_upgrade"
+                and isinstance(
+                    record.get("frozen_request", {}).get("review_proxy_upgrade"),
+                    dict,
+                )
+            ]
+            claim = self._read_review_proxy_child_claim(parent_job_id)
+            if claim is not None:
+                child = self._claimed_review_proxy_child_record(claim)
+                if any(record.get("job_id") != child.get("job_id") for record in matches):
+                    raise DetectorDevelopmentError(
+                        "duplicate_review_proxy_child",
+                        "An audited detector probe has multiple review-proxy children",
+                    )
+                matches = [child]
+        if len(matches) > 1:
+            raise DetectorDevelopmentError(
+                "duplicate_review_proxy_child",
+                "An audited detector probe has multiple review-proxy children",
+            )
+        if not matches:
+            return None
+        child = matches[0]
+        if child.get("status") == "ready":
+            return self.get_verified_probe(child["job_id"])
+        return self._public_record(child)
+
+    def review_proxy_upgrade_child_plan(self, parent_job_id: str, *, repair_evidence: dict[str, Any]) -> dict[str, Any]:
+        """Freeze the exact current-bundle child plan before continuation intent."""
+
+        return deepcopy(
+            self._prepare_review_proxy_upgrade_child(parent_job_id, repair_evidence=repair_evidence)["child_plan"]
+        )
+
+    def _prepare_review_proxy_upgrade_child(
+        self, parent_job_id: str, *, repair_evidence: dict[str, Any]
+    ) -> dict[str, Any]:
+        if self._closed:
+            raise DetectorDevelopmentError("service_closed", "Detector probe service is closed")
+        parent = self.get_review_proxy_upgrade_parent(parent_job_id)
+        parent_job_id = parent["parent_probe_job_id"]
+        from football_tracking.api.schemas import (
+            DetectorProbeRepairEvidenceView,
+            DetectorProbeReviewProxyUpgradeBindingView,
+        )
+
+        try:
+            normalized_repair = DetectorProbeRepairEvidenceView.model_validate(repair_evidence).model_dump(mode="json")
+        except Exception as exc:
+            raise DetectorDevelopmentError(
+                "invalid_review_proxy_repair_evidence",
+                "Review-proxy repair evidence is incomplete or inconsistent",
+            ) from exc
+        request = {
+            key: deepcopy(parent["frozen_request"][key])
+            for key in _REQUEST_FIELDS
+            if key in parent["frozen_request"] and key != "retry_from_job_id"
+        }
+        request["retry_from_job_id"] = parent_job_id
+        frozen, frozen_profiles = self._freeze_request(request)
+        semantic_intent_sha256 = semantic_probe_intent_sha256(frozen)
+        if semantic_intent_sha256 != parent["parent_probe_semantic_intent_sha256"]:
+            raise DetectorDevelopmentError(
+                "retry_lineage_mismatch",
+                "Review-proxy child changed detector semantic intent",
+            )
+        continuation_binding = _review_proxy_continuation_execution_binding()
+        upgrade_without_digest = {
+            "schema_version": "1.0",
+            "retry_kind": "review_proxy_decode_upgrade",
+            "inherited_evidence": {
+                key: deepcopy(parent[key])
+                for key in (
+                    "parent_probe_job_id",
+                    "parent_probe_request_sha256",
+                    "parent_probe_intent_sha256",
+                    "parent_probe_semantic_intent_sha256",
+                    "parent_probe_report_sha256",
+                    "parent_probe_result_manifest_sha256",
+                    "parent_probe_record_sha256",
+                    "parent_execution_bundle_sha256",
+                    "parent_runtime_environment_sha256",
+                    "source_frame_evidence_sha256",
+                    "candidate_evidence_sha256",
+                )
+            },
+            "repair_evidence": normalized_repair,
+            "continuation_execution_binding": continuation_binding,
+        }
+        try:
+            upgrade = DetectorProbeReviewProxyUpgradeBindingView.model_validate(
+                {
+                    **upgrade_without_digest,
+                    "binding_sha256": canonical_sha256(upgrade_without_digest),
+                }
+            ).model_dump(mode="json")
+        except Exception as exc:
+            raise DetectorDevelopmentError(
+                "invalid_review_proxy_upgrade_binding",
+                "Review-proxy child provenance binding is invalid",
+            ) from exc
+        frozen["retry_kind"] = "review_proxy_decode_upgrade"
+        frozen["review_proxy_upgrade"] = upgrade
+        request_sha256 = canonical_sha256(frozen)
+        intent_sha256 = canonical_sha256({key: value for key, value in frozen.items() if key != "retry_from_job_id"})
+        resource_sha256 = canonical_sha256(
+            {
+                key: frozen[key]
+                for key in (
+                    "parent_trial_id",
+                    "source_id",
+                    "source_sha256",
+                    "source_file_identity_sha256",
+                    "tracking_contract_sha256",
+                    "base_config_relative_path",
+                    "base_config_sha256",
+                    "effective_config_relative_path",
+                    "effective_config_sha256",
+                    "trial_intent_sha256",
+                    "tuning_patch_sha256",
+                )
+            }
+        )
+        child_plan_body = {
+            "schema_version": "1.0",
+            "artifact_type": "detector_review_proxy_child_plan",
+            "parent_probe_job_id": parent_job_id,
+            "repair_id": normalized_repair["repair_id"],
+            "request_sha256": request_sha256,
+            "intent_sha256": intent_sha256,
+            "semantic_intent_sha256": semantic_intent_sha256,
+            "resource_sha256": resource_sha256,
+            "execution_bundle_sha256": frozen["execution_bundle_sha256"],
+            "runtime_environment_sha256": frozen["runtime_environment_sha256"],
+            "frozen_profiles_sha256": frozen["frozen_profiles_sha256"],
+            "continuation_execution_binding": continuation_binding,
+        }
+        return {
+            "parent": parent,
+            "normalized_repair": normalized_repair,
+            "frozen": frozen,
+            "frozen_profiles": frozen_profiles,
+            "semantic_intent_sha256": semantic_intent_sha256,
+            "request_sha256": request_sha256,
+            "intent_sha256": intent_sha256,
+            "resource_sha256": resource_sha256,
+            "child_plan": {
+                **child_plan_body,
+                "plan_sha256": canonical_sha256(child_plan_body),
+            },
+        }
+
+    def create_review_proxy_upgrade_child(
+        self,
+        parent_job_id: str,
+        *,
+        repair_evidence: dict[str, Any],
+        proxy_media: dict[str, Any],
+        proxy_sample_bytes: dict[int, bytes],
+        expected_child_plan: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Publish a current-bundle child without rerunning detector inference.
+
+        The historical source frames, candidate rows, and overlays are copied
+        byte-for-byte from the exact audited parent.  Only independently
+        verified review-proxy JPEGs and their mapping are new evidence.
+        """
+
+        prepared = self._prepare_review_proxy_upgrade_child(parent_job_id, repair_evidence=repair_evidence)
+        if expected_child_plan != prepared["child_plan"]:
+            raise DetectorDevelopmentError(
+                "continuation_child_plan_changed",
+                "Current continuation bundle differs from the frozen child plan",
+                status_code=409,
+            )
+        parent = prepared["parent"]
+        parent_job_id = parent["parent_probe_job_id"]
+        parent_record_sha256 = parent["parent_probe_record_sha256"]
+        normalized_repair = prepared["normalized_repair"]
+        frozen = prepared["frozen"]
+        frozen_profiles = prepared["frozen_profiles"]
+        semantic_intent_sha256 = prepared["semantic_intent_sha256"]
+        request_sha256 = prepared["request_sha256"]
+        intent_sha256 = prepared["intent_sha256"]
+        resource_sha256 = prepared["resource_sha256"]
+        expected_indices = parent["frame_indices"]
+        expected_sample_sha256s = {
+            str(index): hashlib.sha256(content).hexdigest()
+            for index, content in sorted(proxy_sample_bytes.items())
+            if isinstance(index, int) and isinstance(content, bytes)
+        }
+        if (
+            sorted(proxy_sample_bytes) != expected_indices
+            or normalized_repair["sampled_frame_sha256s"] != expected_sample_sha256s
+        ):
+            raise DetectorDevelopmentError(
+                "review_proxy_sample_mismatch",
+                "Review-proxy samples do not bind the exact inherited frame set",
+            )
+        normalized_proxy = self._validated_review_proxy_media(proxy_media, parent=parent)
+
+        repair_identity = canonical_sha256(
+            {
+                "request_sha256": request_sha256,
+                "repair_id": normalized_repair["repair_id"],
+            }
+        )
+        job_id = f"probe-{request_sha256[:16]}-{repair_identity[:12]}"
+
+        with self._execution_lock:
+            with self._lock:
+                self._refresh_jobs_from_disk()
+                existing_children = [
+                    existing
+                    for existing in self._jobs.values()
+                    if existing.get("retry_from_job_id") == parent_job_id
+                    and existing.get("retry_kind") == "review_proxy_decode_upgrade"
+                    and isinstance(
+                        existing.get("frozen_request", {}).get("review_proxy_upgrade"),
+                        dict,
+                    )
+                ]
+                claim = self._read_review_proxy_child_claim(parent_job_id)
+                if claim is not None:
+                    claimed_job_path = self._jobs_root / f"{claim['child_probe_job_id']}.json"
+                    exact_unmaterialized_reservation = bool(
+                        claim.get("child_probe_job_id") == job_id
+                        and claim.get("repair_id") == normalized_repair["repair_id"]
+                        and claim.get("child_request_sha256") == request_sha256
+                        and not claimed_job_path.exists()
+                        and not is_link_or_reparse(claimed_job_path)
+                        and not (self._results_root / job_id).exists()
+                        and not is_link_or_reparse(self._results_root / job_id)
+                    )
+                    if exact_unmaterialized_reservation:
+                        if existing_children:
+                            raise DetectorDevelopmentError(
+                                "duplicate_review_proxy_child",
+                                "An audited detector probe has multiple review-proxy children",
+                            )
+                        # A process may die after the immutable reservation is
+                        # published but before its deterministic job row is
+                        # materialized. Only the exact reserved plan may fill
+                        # that empty slot; a malformed row or any result tree
+                        # remains fail-closed.
+                        existing_children = []
+                    else:
+                        claimed_child = self._claimed_review_proxy_child_record(claim)
+                        if any(existing.get("job_id") != claimed_child.get("job_id") for existing in existing_children):
+                            raise DetectorDevelopmentError(
+                                "duplicate_review_proxy_child",
+                                "An audited detector probe has multiple review-proxy children",
+                            )
+                        existing_children = [claimed_child]
+                elif existing_children:
+                    if len(existing_children) > 1:
+                        raise DetectorDevelopmentError(
+                            "duplicate_review_proxy_child",
+                            "An audited detector probe has multiple review-proxy children",
+                        )
+                    existing_upgrade = existing_children[0]["frozen_request"]["review_proxy_upgrade"]
+                    self._publish_review_proxy_child_claim(
+                        parent_job_id=parent_job_id,
+                        child_job_id=existing_children[0]["job_id"],
+                        repair_id=existing_upgrade["repair_evidence"]["repair_id"],
+                        child_request_sha256=existing_children[0]["request_sha256"],
+                    )
+                if len(existing_children) > 1:
+                    raise DetectorDevelopmentError(
+                        "duplicate_review_proxy_child",
+                        "An audited detector probe has multiple review-proxy children",
+                    )
+                for existing in existing_children:
+                    existing_upgrade = existing.get("frozen_request", {}).get("review_proxy_upgrade", {})
+                    if (
+                        existing.get("retry_from_job_id") == parent_job_id
+                        and existing_upgrade.get("repair_evidence", {}).get("repair_id")
+                        == normalized_repair["repair_id"]
+                    ):
+                        if (
+                            existing.get("request_sha256") != request_sha256
+                            or existing.get("frozen_request") != frozen
+                            or existing.get("frozen_profiles") != frozen_profiles
+                        ):
+                            raise DetectorDevelopmentError(
+                                "review_proxy_child_plan_conflict",
+                                "The repair already has a child with a different frozen plan",
+                                status_code=409,
+                            )
+                        if existing.get("status") == "ready":
+                            return self.get_verified_probe(existing["job_id"])
+                        if existing.get("status") in {"running", "committing"}:
+                            raise DetectorDevelopmentError(
+                                "review_proxy_child_in_progress",
+                                "The exact review-proxy child is already being committed",
+                                status_code=409,
+                            )
+                        if existing.get("status") in {
+                            "failed",
+                            "blocked",
+                            "cancelled",
+                        }:
+                            raise DetectorDevelopmentError(
+                                "review_proxy_child_terminal",
+                                "The terminal review-proxy child is immutable; retry the repair as a new attempt",
+                                status_code=409,
+                            )
+                    raise DetectorDevelopmentError(
+                        "review_proxy_parent_child_exists",
+                        "The audited parent already has a child from another repair attempt",
+                        status_code=409,
+                    )
+                # The continuation transaction may be interrupted after its
+                # durable intent is written but before (or while) this record
+                # is assembled.  Bind the child identity to the exact frozen
+                # request and repair instead of allocating a fresh UUID on
+                # every retry, so restart/repeated POST converges on one child.
+                self._publish_review_proxy_child_claim(
+                    parent_job_id=parent_job_id,
+                    child_job_id=job_id,
+                    repair_id=normalized_repair["repair_id"],
+                    child_request_sha256=request_sha256,
+                )
+                now = utc_now_iso()
+                record: dict[str, Any] = {
+                    "schema_version": "1.0",
+                    "artifact_type": "detector_probe_job",
+                    "job_id": job_id,
+                    "idempotency_key": request_sha256,
+                    "request_sha256": request_sha256,
+                    "intent_sha256": intent_sha256,
+                    "semantic_intent_sha256": semantic_intent_sha256,
+                    "resource_sha256": resource_sha256,
+                    "frozen_profiles_sha256": frozen["frozen_profiles_sha256"],
+                    "status": "running",
+                    "stage": "assembling_review_proxy_child",
+                    "progress": {
+                        "completed": 0,
+                        "total": len(expected_indices) * len(frozen_profiles),
+                        "updated_at": now,
+                    },
+                    "frozen_request": frozen,
+                    "frozen_profiles": frozen_profiles,
+                    "retry_from_job_id": parent_job_id,
+                    "retry_kind": "review_proxy_decode_upgrade",
+                    "owner_id": self._owner_id,
+                    "cancel_requested": False,
+                    "error_code": None,
+                    "blocker_code": None,
+                    "recovery_action": None,
+                    "report": None,
+                    "result_manifest_sha256": None,
+                    "created_at": now,
+                    "updated_at": now,
+                }
+                self._persist_record(record)
+                self._jobs[job_id] = record
+
+            staging: Path | None = None
+            published = False
+            destination = self._results_root / job_id
+            try:
+                staging = secure_mkdirs(
+                    self._results_root,
+                    f".{job_id}.staging-{uuid.uuid4().hex}",
+                )
+                runner_output = self._assemble_review_proxy_child_output(
+                    job_id=job_id,
+                    parent=parent,
+                    child_frozen=frozen,
+                    repair_evidence=normalized_repair,
+                    proxy_media=normalized_proxy,
+                    proxy_sample_bytes=proxy_sample_bytes,
+                    staging=staging,
+                )
+                report, manifest = self._build_result(record, runner_output, staging)
+                atomic_write_json(
+                    staging / "detector_probe_report.v1.json",
+                    report,
+                    trusted_root=staging,
+                )
+                report_file_sha256, report_file_size = hash_regular_file(
+                    staging / "detector_probe_report.v1.json",
+                    "review-proxy child detector report",
+                    trusted_root=staging,
+                )
+                manifest["report_file_sha256"] = report_file_sha256
+                manifest["report_file_size_bytes"] = report_file_size
+                atomic_write_json(
+                    staging / "detector_probe_manifest.v1.json",
+                    manifest,
+                    trusted_root=staging,
+                )
+                manifest_sha256, _ = hash_regular_file(
+                    staging / "detector_probe_manifest.v1.json",
+                    "review-proxy child detector manifest",
+                    trusted_root=staging,
+                )
+                self._validate_result_tree(staging, record)
+                with self._lock:
+                    current = self._record(job_id)
+                    current.update(
+                        status="committing",
+                        stage="committing",
+                        owner_id=self._owner_id,
+                        updated_at=utc_now_iso(),
+                    )
+                    current["progress"].update(
+                        completed=current["progress"]["total"],
+                        updated_at=current["updated_at"],
+                    )
+                    self._persist_record(current)
+                try:
+                    _publish_staging_directory(staging, destination)
+                finally:
+                    # os.replace is the immutable commit point.  Even if the
+                    # helper raises during its post-rename identity check, a
+                    # consumed staging path means the destination must never
+                    # be treated as an unpublished tree and deleted.
+                    if staging is not None and not staging.exists():
+                        published = True
+                        staging = None
+                committed_report, committed_manifest_sha256 = self._validate_result_tree(destination, record)
+                if committed_manifest_sha256 != manifest_sha256:
+                    raise DetectorDevelopmentError(
+                        "committed_manifest_mismatch",
+                        "Review-proxy child changed during atomic publication",
+                    )
+                current_parent = self.get_review_proxy_upgrade_parent(parent_job_id)
+                if current_parent["parent_probe_record_sha256"] != parent_record_sha256:
+                    raise DetectorDevelopmentError(
+                        "historical_parent_changed",
+                        "Historical detector probe changed during proxy continuation",
+                    )
+                with self._lock:
+                    current = self._record(job_id)
+                    current.update(
+                        status="ready",
+                        stage="ready",
+                        owner_id=None,
+                        cancel_requested=False,
+                        error_code=None,
+                        blocker_code=None,
+                        recovery_action=None,
+                        report=committed_report,
+                        result_manifest_sha256=committed_manifest_sha256,
+                        updated_at=utc_now_iso(),
+                    )
+                    current["progress"].update(
+                        completed=current["progress"]["total"],
+                        updated_at=current["updated_at"],
+                    )
+                    self._persist_record(current)
+                    return self._public_record(current)
+            except Exception as exc:
+                if not published:
+                    self._remove_tree(destination)
+                    self._record_failure(job_id, exc)
+                # Once atomically published, leave the record committing. The
+                # normal startup recovery validates and finalizes it; it must
+                # never delete a complete destination after the commit point.
+                raise
+            finally:
+                if staging is not None:
+                    self._remove_tree(staging)
+
+    @staticmethod
+    def _validated_review_proxy_media(value: dict[str, Any], *, parent: dict[str, Any]) -> dict[str, Any]:
+        if not isinstance(value, dict) or set(value) != {
+            "sha256",
+            "size_bytes",
+            "width",
+            "height",
+            "frame_count",
+            "fps",
+        }:
+            raise DetectorDevelopmentError("invalid_review_proxy_media", "Review-proxy media binding is invalid")
+        normalized = {
+            "sha256": require_sha256(value.get("sha256"), "review proxy sha256"),
+            "size_bytes": value.get("size_bytes"),
+            "width": value.get("width"),
+            "height": value.get("height"),
+            "frame_count": value.get("frame_count"),
+            "fps": value.get("fps"),
+        }
+        parent_frozen = parent["frozen_request"]
+        if (
+            isinstance(normalized["size_bytes"], bool)
+            or not isinstance(normalized["size_bytes"], int)
+            or normalized["size_bytes"] <= 0
+            or normalized["width"] != 2560
+            or normalized["height"] != 720
+            or normalized["frame_count"] != parent_frozen["source_frame_count"]
+            or isinstance(normalized["fps"], bool)
+            or not isinstance(normalized["fps"], (int, float))
+            or not math.isclose(
+                float(normalized["fps"]),
+                float(parent["report_decode_fps"]),
+                rel_tol=0.0,
+                abs_tol=1e-6,
+            )
+        ):
+            raise DetectorDevelopmentError(
+                "invalid_review_proxy_media",
+                "Review-proxy media does not preserve the exact source timeline",
+            )
+        normalized["fps"] = float(normalized["fps"])
+        return normalized
+
+    def _assemble_review_proxy_child_output(
+        self,
+        *,
+        job_id: str,
+        parent: dict[str, Any],
+        child_frozen: dict[str, Any],
+        repair_evidence: dict[str, Any],
+        proxy_media: dict[str, Any],
+        proxy_sample_bytes: dict[int, bytes],
+        staging: Path,
+    ) -> dict[str, Any]:
+        del job_id
+        parent_job_id = parent["parent_probe_job_id"]
+        verified_parent = self.get_verified_probe(parent_job_id)
+        parent_report = verified_parent["report"]
+        frame_root = secure_mkdirs(staging, "frames")
+        overlay_root = secure_mkdirs(staging, "overlays")
+        proxy_root = secure_mkdirs(staging, "proxy_frames")
+        fps = float(parent["report_decode_fps"])
+        mappings: list[dict[str, Any]] = []
+        runner_frames: list[dict[str, Any]] = []
+        parent_prefix = f"/api/v1/detector-probes/{parent_job_id}/artifacts/"
+
+        for frame in parent_report["frames"]:
+            frame_index = frame["frame_index"]
+            source_artifact_id = self._artifact_id_from_bound_url(frame["source_artifact_url"], parent_prefix)
+            source_bytes, source_media_type, source_digest = self.read_probe_artifact(parent_job_id, source_artifact_id)
+            if source_media_type != "image/jpeg" or source_digest != frame["source_frame_sha256"]:
+                raise DetectorDevelopmentError(
+                    "historical_parent_changed",
+                    "Inherited source-frame evidence changed before continuation",
+                )
+            source_relative = f"frames/frame_{frame_index:010d}.jpg"
+            self._write_exact_child_bytes(
+                frame_root / f"frame_{frame_index:010d}.jpg",
+                source_bytes,
+                staging,
+            )
+
+            proxy_bytes = proxy_sample_bytes[frame_index]
+            proxy_digest = hashlib.sha256(proxy_bytes).hexdigest()
+            if proxy_digest != repair_evidence["sampled_frame_sha256s"][str(frame_index)]:
+                raise DetectorDevelopmentError(
+                    "review_proxy_sample_mismatch",
+                    "Review-proxy sampled JPEG changed before child publication",
+                )
+            proxy_relative = f"proxy_frames/frame_{frame_index:010d}.jpg"
+            self._write_exact_child_bytes(
+                proxy_root / f"frame_{frame_index:010d}.jpg",
+                proxy_bytes,
+                staging,
+            )
+
+            inherited_profiles: list[dict[str, Any]] = []
+            for profile in frame["profile_results"]:
+                profile_id = profile["profile_id"]
+                overlay_artifact_id = self._artifact_id_from_bound_url(
+                    profile["raw_overlay_artifact_url"], parent_prefix
+                )
+                overlay_bytes, overlay_media_type, overlay_digest = self.read_probe_artifact(
+                    parent_job_id, overlay_artifact_id
+                )
+                if overlay_media_type != "image/jpeg" or overlay_digest != profile["raw_overlay_sha256"]:
+                    raise DetectorDevelopmentError(
+                        "historical_parent_changed",
+                        "Inherited detector overlay changed before continuation",
+                    )
+                overlay_relative = f"overlays/frame_{frame_index:010d}_{profile_id}.jpg"
+                self._write_exact_child_bytes(
+                    overlay_root / f"frame_{frame_index:010d}_{profile_id}.jpg",
+                    overlay_bytes,
+                    staging,
+                )
+                inherited = deepcopy(profile)
+                inherited.pop("raw_overlay_artifact_url", None)
+                inherited.pop("raw_overlay_sha256", None)
+                inherited.pop("raw_overlay_size_bytes", None)
+                inherited["raw_overlay_relative_path"] = overlay_relative
+                inherited_profiles.append(inherited)
+
+            proxy_mapped_msec = frame_index / fps * 1000.0
+            mappings.append(
+                {
+                    "source_frame_index": frame_index,
+                    "source_timing_status": "not_collected",
+                    "source_decoder_pos_msec": None,
+                    "proxy_frame_index": frame_index,
+                    "proxy_timing_basis": "verified_cfr_frame_index_time_v1",
+                    "proxy_cfr_time_msec": proxy_mapped_msec,
+                    "source_frame_sha256": source_digest,
+                    "proxy_frame_sha256": proxy_digest,
+                    "media_integrity": {
+                        "status": "ok",
+                        "gray": False,
+                        "low_information": False,
+                        "likely_corrupt": False,
+                    },
+                }
+            )
+            runner_frames.append(
+                {
+                    "frame_index": frame_index,
+                    "source_frame_relative_path": source_relative,
+                    "proxy_frame_relative_path": proxy_relative,
+                    "requested_decode_mode": child_frozen["requested_decode_mode"],
+                    "effective_decode_mode": parent["report_effective_decode_mode"],
+                    "decoded_frame_position": frame_index,
+                    "decoder_reported_pos_msec": None,
+                    "decoder_timing_observation_method": None,
+                    "media_integrity": deepcopy(frame["media_integrity"]),
+                    "profile_results": inherited_profiles,
+                }
+            )
+
+        manifest = build_review_proxy_manifest(
+            source={
+                "sha256": child_frozen["source_sha256"],
+                "file_identity_sha256": child_frozen["source_file_identity_sha256"],
+                "size_bytes": child_frozen["source_size_bytes"],
+                "width": child_frozen["source_width"],
+                "height": child_frozen["source_height"],
+                "fps": fps,
+                "frame_count": child_frozen["source_frame_count"],
+                "codec": "hevc",
+            },
+            proxy={
+                **proxy_media,
+                "codec": "h264",
+            },
+            mappings=mappings,
+            expected_frame_indices=parent["frame_indices"],
+            decoder_fingerprint_sha256=repair_evidence["repair_decoder_fingerprint_sha256"],
+            requested_decode_mode=child_frozen["requested_decode_mode"],
+            effective_decode_mode=parent["report_effective_decode_mode"],
+            map_time_tolerance_msec=0.1,
+            declared_offset_msec=0.0,
+        )
+        execution_environment = child_frozen["execution_bundle"]["execution_environment"]
+        return {
+            "frames": runner_frames,
+            "decode": {
+                "width": child_frozen["source_width"],
+                "height": child_frozen["source_height"],
+                "frame_count": child_frozen["source_frame_count"],
+                "fps": fps,
+                "requested_decode_mode": child_frozen["requested_decode_mode"],
+                "effective_decode_mode": parent["report_effective_decode_mode"],
+                "verified_frame_indices": parent["frame_indices"],
+                "position_verification": ("verified_review_proxy_frame_index_mapping_v1"),
+                "frame_timing_observations": None,
+            },
+            "review_proxy_manifest": manifest,
+            "execution": {
+                "device": execution_environment["device"],
+                "precision": execution_environment["precision"],
+            },
+        }
+
+    @staticmethod
+    def _artifact_id_from_bound_url(value: Any, prefix: str) -> str:
+        if not isinstance(value, str) or not value.startswith(prefix):
+            raise DetectorDevelopmentError(
+                "historical_parent_changed",
+                "Historical detector artifact URL is not canonically bound",
+            )
+        return require_safe_id(value[len(prefix) :], "inherited artifact_id")
+
+    @staticmethod
+    def _write_exact_child_bytes(path: Path, content: bytes, root: Path) -> None:
+        if path.parent.parent != root or is_link_or_reparse(path.parent):
+            raise DetectorDevelopmentError("unsafe_result_tree", "Review-proxy child evidence path is unsafe")
+        try:
+            with path.open("xb") as handle:
+                handle.write(content)
+                handle.flush()
+                os.fsync(handle.fileno())
+        except OSError as exc:
+            raise DetectorDevelopmentError(
+                "artifact_write_failed",
+                "Review-proxy child evidence could not be written",
+            ) from exc
 
     def cancel_probe(self, job_id: str) -> dict[str, Any]:
         job_id = require_safe_id(job_id, "detector probe job_id")
@@ -809,9 +1767,12 @@ class DetectorProbeCoordinator:
 
             # Final narrow-window lineage check immediately before publication.
             self._execution_request(record)
-            _publish_staging_directory(staging, destination)
-            published = True
-            staging = None
+            try:
+                _publish_staging_directory(staging, destination)
+            finally:
+                if staging is not None and not staging.exists():
+                    published = True
+                    staging = None
             committed_report, committed_manifest_sha256 = self._validate_result_tree(destination, record)
             if committed_manifest_sha256 != manifest_sha256:
                 raise DetectorDevelopmentError(
@@ -2176,7 +3137,11 @@ class DetectorProbeCoordinator:
             except Exception:
                 pass
             time.sleep(0.05)
-        self._remove_tree(child.staging)
+        while not _path_entry_is_absent(child.staging):
+            self._remove_tree(child.staging)
+            if _path_entry_is_absent(child.staging):
+                break
+            time.sleep(0.05)
         with self._children_lock:
             if self._children.get(job_id) is child:
                 self._children.pop(job_id, None)
@@ -2232,6 +3197,20 @@ class DetectorProbeCoordinator:
         artifacts: list[dict[str, Any]] = []
         artifact_ids: set[str] = set()
         report_frames: list[dict[str, Any]] = []
+        review_proxy_manifest = runner_output.get("review_proxy_manifest")
+        proxy_dimensions = None
+        if review_proxy_manifest is not None:
+            try:
+                review_proxy_manifest = validate_review_proxy_manifest(review_proxy_manifest)
+            except (ReviewProxyError, DetectorDevelopmentError) as exc:
+                raise DetectorDevelopmentError(
+                    "invalid_review_proxy",
+                    "Detector probe runner returned an invalid review proxy",
+                ) from exc
+            proxy_dimensions = (
+                review_proxy_manifest["proxy"]["width"],
+                review_proxy_manifest["proxy"]["height"],
+            )
         for row in sorted(frame_rows, key=lambda item: item["frame_index"]):
             frame_index = row["frame_index"]
             source_artifact = self._evidence_artifact(
@@ -2244,6 +3223,23 @@ class DetectorProbeCoordinator:
                 expected_height=frozen["source_height"],
             )
             artifacts.append(source_artifact)
+            proxy_artifact = None
+            if proxy_dimensions is not None:
+                proxy_artifact = self._evidence_artifact(
+                    staging,
+                    row.get("proxy_frame_relative_path"),
+                    f"review-proxy-frame-{frame_index:09d}",
+                    {"proxy_frames"},
+                    artifact_ids,
+                    expected_width=proxy_dimensions[0],
+                    expected_height=proxy_dimensions[1],
+                )
+                artifacts.append(proxy_artifact)
+            elif row.get("proxy_frame_relative_path") is not None:
+                raise DetectorDevelopmentError(
+                    "invalid_review_proxy",
+                    "Direct detector probe cannot publish an unbound proxy frame",
+                )
             raw_profile_rows = row.get("profile_results")
             if not isinstance(raw_profile_rows, list):
                 raise DetectorDevelopmentError("partial_probe_result", "Detector probe frame has no profile results")
@@ -2329,10 +3325,22 @@ class DetectorProbeCoordinator:
                     raise DetectorDevelopmentError("partial_probe_result", "Detector probe latency is invalid")
                 filter_reasons = result.get("filter_reasons")
                 if not isinstance(filter_reasons, dict) or any(
-                    not isinstance(key, str) or isinstance(value, bool) or not isinstance(value, int) or value < 0
+                    not isinstance(key, str) or isinstance(value, bool) or not isinstance(value, int) or value <= 0
                     for key, value in filter_reasons.items()
                 ):
                     raise DetectorDevelopmentError("partial_probe_result", "Detector probe filter reasons are invalid")
+                duplicate_count = filter_reasons.get("duplicate_suppressed_iou", 0)
+                deduplicated_count = candidate_count - duplicate_count
+                if (
+                    deduplicated_count < 0
+                    or len(candidates) != min(deduplicated_count, 5)
+                    or filter_reasons.get("top_k_limit", 0) != max(0, deduplicated_count - 5)
+                    or display_candidate != (candidates[0] if candidates else None)
+                ):
+                    raise DetectorDevelopmentError(
+                        "partial_probe_result",
+                        "Detector probe candidate accounting is inconsistent",
+                    )
                 profile_results.append(
                     {
                         "profile_id": profile_id,
@@ -2360,12 +3368,21 @@ class DetectorProbeCoordinator:
                     "requested_decode_mode": row.get("requested_decode_mode", frozen["requested_decode_mode"]),
                     "effective_decode_mode": row.get("effective_decode_mode"),
                     "decoded_frame_position": row.get("decoded_frame_position", frame_index),
+                    "decoder_reported_pos_msec": row.get("decoder_reported_pos_msec"),
+                    "decoder_timing_observation_method": row.get("decoder_timing_observation_method"),
                     "media_integrity": deepcopy(row.get("media_integrity")),
                     "source_artifact_url": (
                         f"/api/v1/detector-probes/{record['job_id']}/artifacts/{source_artifact['artifact_id']}"
                     ),
                     "source_frame_sha256": source_artifact["sha256"],
                     "source_frame_size_bytes": source_artifact["size_bytes"],
+                    "proxy_artifact_url": (
+                        f"/api/v1/detector-probes/{record['job_id']}/artifacts/{proxy_artifact['artifact_id']}"
+                        if proxy_artifact is not None
+                        else None
+                    ),
+                    "proxy_frame_sha256": (proxy_artifact["sha256"] if proxy_artifact is not None else None),
+                    "proxy_frame_size_bytes": (proxy_artifact["size_bytes"] if proxy_artifact is not None else None),
                     "profile_results": profile_results,
                 }
             )
@@ -2403,12 +3420,16 @@ class DetectorProbeCoordinator:
                 "execution_bundle_sha256": frozen["execution_bundle_sha256"],
                 "runtime_environment_sha256": frozen["runtime_environment_sha256"],
                 "intent_sha256": record["intent_sha256"],
+                "semantic_intent_sha256": record.get("semantic_intent_sha256"),
                 "retry_from_job_id": record.get("retry_from_job_id"),
+                "retry_kind": frozen.get("retry_kind"),
+                "review_proxy_upgrade": deepcopy(frozen.get("review_proxy_upgrade")),
             },
             "frozen_profiles": deepcopy(record["frozen_profiles"]),
             "top_k": 5,
             "frames": report_frames,
             "decode": deepcopy(runner_output.get("decode")),
+            "review_proxy_manifest": deepcopy(review_proxy_manifest),
             "execution": deepcopy(runner_output.get("execution")),
             "artifacts": artifacts,
             "created_at": utc_now_iso(),
@@ -2548,6 +3569,22 @@ class DetectorProbeCoordinator:
             )
         return deepcopy(candidate)
 
+    @staticmethod
+    def _is_audited_t2_legacy_report(
+        report: dict[str, Any],
+        frozen: dict[str, Any],
+    ) -> bool:
+        binding = _AUDITED_T2_LEGACY_REPORT_BINDINGS.get(report.get("job_id"))
+        lineage = report.get("lineage")
+        return bool(
+            binding is not None
+            and report.get("report_sha256") == binding["report_sha256"]
+            and frozen.get("execution_bundle_sha256") == binding["execution_bundle_sha256"]
+            and isinstance(lineage, dict)
+            and lineage.get("execution_bundle_sha256") == binding["execution_bundle_sha256"]
+            and "review_proxy_manifest" not in report
+        )
+
     def _validate_report_contract(
         self,
         report: dict[str, Any],
@@ -2567,6 +3604,7 @@ class DetectorProbeCoordinator:
             ) from exc
 
         frozen = record["frozen_request"]
+        legacy_timing_absent = self._is_audited_t2_legacy_report(report, frozen)
         expected_frames = list(frozen["frame_indices"])
         expected_profiles = list(frozen["profile_ids"])
         frozen_profiles = {profile["profile_id"]: profile for profile in record["frozen_profiles"]}
@@ -2599,11 +3637,51 @@ class DetectorProbeCoordinator:
             "intent_sha256": record["intent_sha256"],
             "retry_from_job_id": record.get("retry_from_job_id"),
         }
+        optional_lineage = {
+            "semantic_intent_sha256": record.get("semantic_intent_sha256"),
+            "retry_kind": frozen.get("retry_kind"),
+            "review_proxy_upgrade": frozen.get("review_proxy_upgrade"),
+        }
+        lineage = report.get("lineage")
+        lineage_matches = isinstance(lineage, dict) and all(
+            lineage.get(key) == value for key, value in expected_lineage.items()
+        )
+        if lineage_matches:
+            for key, value in optional_lineage.items():
+                if value is not None and lineage.get(key) != value:
+                    lineage_matches = False
+                    break
+                if value is None and key in lineage and lineage[key] is not None:
+                    lineage_matches = False
+                    break
+            if set(lineage) - set(expected_lineage) - set(optional_lineage):
+                lineage_matches = False
         decode = report.get("decode")
         execution = report.get("execution")
+        timing_observations = decode.get("frame_timing_observations") if isinstance(decode, dict) else None
+        expected_position_verification = (
+            "verified_review_proxy_frame_index_mapping_v1"
+            if report.get("review_proxy_manifest") is not None
+            else "opencv_next_frame_index_with_0.25_tolerance"
+        )
+        raw_proxy_mappings = (
+            report.get("review_proxy_manifest", {}).get("mappings")
+            if isinstance(report.get("review_proxy_manifest"), dict)
+            else None
+        )
+        proxy_source_timing_not_collected = bool(
+            isinstance(raw_proxy_mappings, list)
+            and raw_proxy_mappings
+            and all(
+                isinstance(item, dict)
+                and item.get("source_timing_status") == "not_collected"
+                and item.get("source_decoder_pos_msec") is None
+                for item in raw_proxy_mappings
+            )
+        )
         if (
             report.get("source") != expected_source
-            or report.get("lineage") != expected_lineage
+            or not lineage_matches
             or report.get("frozen_profiles") != record["frozen_profiles"]
             or report.get("top_k") != 5
             or not isinstance(decode, dict)
@@ -2612,7 +3690,18 @@ class DetectorProbeCoordinator:
             or decode.get("frame_count") != frozen["source_frame_count"]
             or decode.get("requested_decode_mode") != frozen["requested_decode_mode"]
             or decode.get("verified_frame_indices") != expected_frames
-            or decode.get("position_verification") != "opencv_next_frame_index_with_0.25_tolerance"
+            or decode.get("position_verification") != expected_position_verification
+            or (legacy_timing_absent and (timing_observations is not None or "frame_timing_observations" in decode))
+            or (
+                not legacy_timing_absent
+                and not proxy_source_timing_not_collected
+                and (
+                    not isinstance(timing_observations, list)
+                    or [item.get("frame_index") for item in timing_observations if isinstance(item, dict)]
+                    != expected_frames
+                )
+            )
+            or (proxy_source_timing_not_collected and timing_observations is not None)
             or not isinstance(execution, dict)
             or execution.get("device") != frozen["execution_bundle"]["execution_environment"]["device"]
             or execution.get("precision") != frozen["execution_bundle"]["execution_environment"]["precision"]
@@ -2634,6 +3723,67 @@ class DetectorProbeCoordinator:
         frames = report.get("frames")
         if not isinstance(frames, list) or [row.get("frame_index") for row in frames] != expected_frames:
             raise DetectorDevelopmentError("invalid_probe_report", "Detector probe report frame set is inconsistent")
+        review_proxy_manifest = report.get("review_proxy_manifest")
+        if review_proxy_manifest is not None:
+            try:
+                verified_proxy = validate_review_proxy_manifest(review_proxy_manifest)
+            except (ReviewProxyError, DetectorDevelopmentError) as exc:
+                raise DetectorDevelopmentError(
+                    "invalid_probe_report",
+                    "Detector probe review proxy manifest is invalid",
+                ) from exc
+            execution_environment = frozen["execution_bundle"].get("execution_environment", {})
+            upgrade_binding = frozen.get("review_proxy_upgrade")
+            expected_decoder_fingerprint = (
+                upgrade_binding["repair_evidence"]["repair_decoder_fingerprint_sha256"]
+                if isinstance(upgrade_binding, dict)
+                else execution_environment.get("decoder_fingerprint_sha256")
+            )
+            proxy_source = verified_proxy["source"]
+            if (
+                verified_proxy["expected_frame_indices"] != expected_frames
+                or verified_proxy["requested_decode_mode"] != frozen["requested_decode_mode"]
+                or verified_proxy["effective_decode_mode"] != effective_mode
+                or verified_proxy["decoder_fingerprint_sha256"] != expected_decoder_fingerprint
+                or proxy_source["sha256"] != expected_source["sha256"]
+                or proxy_source["file_identity_sha256"] != expected_source["file_identity_sha256"]
+                or proxy_source["size_bytes"] != expected_source["size_bytes"]
+                or proxy_source["width"] != expected_source["width"]
+                or proxy_source["height"] != expected_source["height"]
+                or proxy_source["frame_count"] != expected_source["frame_count"]
+                or not math.isclose(
+                    proxy_source["fps"],
+                    float(decode.get("fps")),
+                    rel_tol=0.0,
+                    abs_tol=1e-9,
+                )
+            ):
+                raise DetectorDevelopmentError(
+                    "invalid_probe_report",
+                    "Detector probe review proxy authority changed source/decode lineage",
+                )
+            mappings_by_frame = {item["source_frame_index"]: item for item in verified_proxy["mappings"]}
+            if any(
+                mappings_by_frame[row["frame_index"]]["source_frame_sha256"] != row.get("source_frame_sha256")
+                or (
+                    mappings_by_frame[row["frame_index"]]["source_timing_status"] == "observed"
+                    and not math.isclose(
+                        mappings_by_frame[row["frame_index"]]["source_decoder_pos_msec"],
+                        float(row.get("decoder_reported_pos_msec")),
+                        rel_tol=0.0,
+                        abs_tol=verified_proxy["map_time_tolerance_msec"],
+                    )
+                )
+                or (
+                    mappings_by_frame[row["frame_index"]]["source_timing_status"] == "not_collected"
+                    and row.get("decoder_reported_pos_msec") is not None
+                )
+                for row in frames
+            ):
+                raise DetectorDevelopmentError(
+                    "invalid_probe_report",
+                    "Detector probe review proxy frame map changed exact source evidence",
+                )
         artifacts = report.get("artifacts")
         if not isinstance(artifacts, list):
             raise DetectorDevelopmentError("invalid_probe_report", "Detector probe report artifacts are invalid")
@@ -2642,21 +3792,57 @@ class DetectorProbeCoordinator:
         if (
             len(artifacts_by_id) != len(artifacts)
             or len(relative_paths) != len(artifacts)
-            or len(artifacts) != len(expected_frames) * (len(expected_profiles) + 1)
+            or len(artifacts)
+            != len(expected_frames) * (len(expected_profiles) + 1 + (1 if review_proxy_manifest is not None else 0))
         ):
             raise DetectorDevelopmentError(
                 "invalid_probe_report", "Detector probe artifact references are not one-to-one"
             )
         referenced: set[str] = set()
         url_prefix = f"/api/v1/detector-probes/{record['job_id']}/artifacts/"
-        for row in frames:
+        timing_rows: list[dict[str, Any] | None]
+        if legacy_timing_absent or proxy_source_timing_not_collected:
+            timing_rows = [None] * len(frames)
+        else:
+            timing_rows = timing_observations
+        for row, timing in zip(frames, timing_rows, strict=True):
             integrity = row.get("media_integrity")
+            decoder_pos_msec = row.get("decoder_reported_pos_msec")
+            expected_timing_method = (
+                "verified_review_proxy_frame_index_mapping_v1"
+                if review_proxy_manifest is not None
+                else "opencv_cap_prop_pos_msec_after_verified_frame_read"
+            )
             if (
                 row.get("source_width") != frozen["source_width"]
                 or row.get("source_height") != frozen["source_height"]
                 or row.get("requested_decode_mode") != frozen["requested_decode_mode"]
                 or row.get("effective_decode_mode") != effective_mode
                 or row.get("decoded_frame_position") != row.get("frame_index")
+                or (
+                    (legacy_timing_absent or proxy_source_timing_not_collected)
+                    and (
+                        row.get("decoder_reported_pos_msec") is not None
+                        or row.get("decoder_timing_observation_method") is not None
+                        or timing is not None
+                    )
+                )
+                or (
+                    not legacy_timing_absent
+                    and not proxy_source_timing_not_collected
+                    and (
+                        isinstance(decoder_pos_msec, bool)
+                        or not isinstance(decoder_pos_msec, (int, float))
+                        or not math.isfinite(float(decoder_pos_msec))
+                        or row.get("decoder_timing_observation_method") != expected_timing_method
+                        or timing
+                        != {
+                            "frame_index": row.get("frame_index"),
+                            "decoder_reported_pos_msec": decoder_pos_msec,
+                            "observation_method": expected_timing_method,
+                        }
+                    )
+                )
                 or not isinstance(integrity, dict)
                 or integrity.get("status") != "ok"
                 or integrity.get("width") != frozen["source_width"]
@@ -2683,6 +3869,45 @@ class DetectorProbeCoordinator:
                     "invalid_probe_report", "Detector probe source artifact binding is invalid"
                 )
             referenced.add(source_artifact_id)
+            proxy_url = row.get("proxy_artifact_url")
+            proxy_artifact_id = (
+                proxy_url[len(url_prefix) :] if isinstance(proxy_url, str) and proxy_url.startswith(url_prefix) else ""
+            )
+            if review_proxy_manifest is None:
+                if (
+                    proxy_artifact_id
+                    or row.get("proxy_frame_sha256") is not None
+                    or row.get("proxy_frame_size_bytes") is not None
+                ):
+                    raise DetectorDevelopmentError(
+                        "invalid_probe_report",
+                        "Direct detector probe cannot publish proxy-frame evidence",
+                    )
+            else:
+                mapping = mappings_by_frame[row["frame_index"]]
+                proxy_artifact = artifacts_by_id.get(proxy_artifact_id)
+                if (
+                    not proxy_artifact_id
+                    or proxy_artifact is None
+                    or proxy_artifact.get("sha256") != mapping["proxy_frame_sha256"]
+                    or proxy_artifact.get("sha256") != row.get("proxy_frame_sha256")
+                    or proxy_artifact.get("size_bytes") != row.get("proxy_frame_size_bytes")
+                    or mapping["source_timing_status"] != ("not_collected" if decoder_pos_msec is None else "observed")
+                    or (
+                        decoder_pos_msec is not None
+                        and not math.isclose(
+                            float(decoder_pos_msec),
+                            mapping["source_decoder_pos_msec"],
+                            rel_tol=0.0,
+                            abs_tol=review_proxy_manifest["map_time_tolerance_msec"],
+                        )
+                    )
+                ):
+                    raise DetectorDevelopmentError(
+                        "invalid_probe_report",
+                        "Detector probe proxy-frame artifact binding is invalid",
+                    )
+                referenced.add(proxy_artifact_id)
             profile_rows = row.get("profile_results")
             if (
                 not isinstance(profile_rows, list)
@@ -2696,7 +3921,14 @@ class DetectorProbeCoordinator:
                     raise DetectorDevelopmentError(
                         "invalid_probe_report", "Detector probe profile digest is inconsistent"
                     )
-                for candidate in profile_row.get("raw_candidates", []):
+                raw_candidates = profile_row.get("raw_candidates")
+                if not isinstance(raw_candidates, list):
+                    raise DetectorDevelopmentError(
+                        "invalid_probe_report",
+                        "Detector probe raw candidate evidence is invalid",
+                    )
+                validated_candidates = []
+                for candidate in raw_candidates:
                     self._validated_candidate(
                         candidate,
                         frame_index=row["frame_index"],
@@ -2704,6 +3936,7 @@ class DetectorProbeCoordinator:
                         height=frozen["source_height"],
                         frozen_profile=frozen_profile,
                     )
+                    validated_candidates.append(candidate)
                 display_candidate = profile_row.get("display_candidate")
                 if display_candidate is not None:
                     self._validated_candidate(
@@ -2712,6 +3945,33 @@ class DetectorProbeCoordinator:
                         width=frozen["source_width"],
                         height=frozen["source_height"],
                         frozen_profile=frozen_profile,
+                    )
+                candidate_count = profile_row.get("candidate_count")
+                filter_reasons = profile_row.get("filter_reasons")
+                if (
+                    isinstance(candidate_count, bool)
+                    or not isinstance(candidate_count, int)
+                    or candidate_count < 0
+                    or not isinstance(filter_reasons, dict)
+                    or any(
+                        not isinstance(key, str) or isinstance(value, bool) or not isinstance(value, int) or value <= 0
+                        for key, value in filter_reasons.items()
+                    )
+                ):
+                    raise DetectorDevelopmentError(
+                        "invalid_probe_report",
+                        "Detector probe candidate accounting is invalid",
+                    )
+                deduplicated_count = candidate_count - filter_reasons.get("duplicate_suppressed_iou", 0)
+                if (
+                    deduplicated_count < 0
+                    or len(validated_candidates) != min(deduplicated_count, 5)
+                    or filter_reasons.get("top_k_limit", 0) != max(0, deduplicated_count - 5)
+                    or display_candidate != (validated_candidates[0] if validated_candidates else None)
+                ):
+                    raise DetectorDevelopmentError(
+                        "invalid_probe_report",
+                        "Detector probe candidate accounting is inconsistent",
                     )
                 overlay_url = profile_row.get("raw_overlay_artifact_url")
                 overlay_id = (
@@ -2730,6 +3990,107 @@ class DetectorProbeCoordinator:
                 referenced.add(overlay_id)
         if referenced != set(artifacts_by_id):
             raise DetectorDevelopmentError("invalid_probe_report", "Detector probe report has unreferenced artifacts")
+        if isinstance(frozen.get("review_proxy_upgrade"), dict):
+            self._validate_review_proxy_child_inherited_evidence(
+                report,
+                frozen["review_proxy_upgrade"],
+            )
+
+    def _validate_review_proxy_child_inherited_evidence(
+        self,
+        child_report: dict[str, Any],
+        upgrade: dict[str, Any],
+    ) -> None:
+        """Replay the audited parent behind a proxy-upgrade child.
+
+        Producer URLs legitimately move into the child result tree.  Every
+        semantic candidate row and every copied source/overlay digest and size
+        must otherwise remain identical to the freshly verified parent.
+        """
+
+        inherited = upgrade.get("inherited_evidence")
+        if not isinstance(inherited, dict):
+            raise DetectorDevelopmentError(
+                "invalid_probe_report",
+                "Review-proxy child inherited evidence is missing",
+            )
+        parent_id = require_safe_id(
+            inherited.get("parent_probe_job_id"),
+            "inherited parent probe job_id",
+        )
+        actual_parent = self.get_review_proxy_upgrade_parent(parent_id)
+        inherited_fields = (
+            "parent_probe_job_id",
+            "parent_probe_request_sha256",
+            "parent_probe_intent_sha256",
+            "parent_probe_semantic_intent_sha256",
+            "parent_probe_report_sha256",
+            "parent_probe_result_manifest_sha256",
+            "parent_probe_record_sha256",
+            "parent_execution_bundle_sha256",
+            "parent_runtime_environment_sha256",
+            "source_frame_evidence_sha256",
+            "candidate_evidence_sha256",
+        )
+        if any(inherited.get(field) != actual_parent.get(field) for field in inherited_fields):
+            raise DetectorDevelopmentError(
+                "historical_parent_changed",
+                "Review-proxy child inherited digests differ from its audited parent",
+            )
+        verified_parent = self.get_verified_probe(parent_id)
+        parent_report = verified_parent.get("report")
+        parent_frames = parent_report.get("frames") if isinstance(parent_report, dict) else None
+        child_frames = child_report.get("frames")
+        if not isinstance(parent_frames, list) or not isinstance(child_frames, list):
+            raise DetectorDevelopmentError(
+                "invalid_probe_report",
+                "Review-proxy inherited frame evidence is invalid",
+            )
+        parent_by_index = {row.get("frame_index"): row for row in parent_frames if isinstance(row, dict)}
+        if len(parent_by_index) != len(parent_frames) or [row.get("frame_index") for row in child_frames] != [
+            row.get("frame_index") for row in parent_frames
+        ]:
+            raise DetectorDevelopmentError(
+                "historical_parent_changed",
+                "Review-proxy child frame set differs from its audited parent",
+            )
+
+        def semantic_profile(row: Any) -> dict[str, Any] | None:
+            if not isinstance(row, dict):
+                return None
+            value = deepcopy(row)
+            value.pop("raw_overlay_artifact_url", None)
+            return value
+
+        for child in child_frames:
+            parent = parent_by_index[child["frame_index"]]
+            if any(
+                child.get(field) != parent.get(field)
+                for field in (
+                    "frame_index",
+                    "source_width",
+                    "source_height",
+                    "source_frame_sha256",
+                    "source_frame_size_bytes",
+                    "media_integrity",
+                )
+            ):
+                raise DetectorDevelopmentError(
+                    "historical_parent_changed",
+                    "Review-proxy child source-frame evidence differs from its audited parent",
+                )
+            child_profiles = child.get("profile_results")
+            parent_profiles = parent.get("profile_results")
+            if (
+                not isinstance(child_profiles, list)
+                or not isinstance(parent_profiles, list)
+                or [semantic_profile(row) for row in child_profiles]
+                != [semantic_profile(row) for row in parent_profiles]
+            ):
+                raise DetectorDevelopmentError(
+                    "historical_parent_changed",
+                    "Review-proxy child candidate evidence differs from its audited parent",
+                )
 
     def _validate_result_tree(
         self,
@@ -2752,13 +4113,59 @@ class DetectorProbeCoordinator:
                     "invalid_result_manifest", "Detector probe artifact allowlist is invalid"
                 )
             seen_ids.add(artifact_id)
-            path, _digest, _content = self._validate_result_artifact(root, artifact, record)
+            path = require_trusted_relative_path(
+                root,
+                artifact.get("relative_path"),
+                "detector probe result artifact",
+                allowed_first_parts={"frames", "overlays", "proxy_frames"},
+            )
             expected_files.add(path.relative_to(root).as_posix())
-        actual_files = self._validated_tree_files(root)
-        if actual_files != expected_files:
+        try:
+            tree_before = exact_regular_tree_snapshot(
+                root,
+                expected_files,
+                "detector probe result tree",
+                trusted_root=self._results_root,
+            )
+        except DetectorDevelopmentError as exc:
+            if exc.code in {
+                "unexpected_result_artifact",
+                "invalid_result_allowlist",
+            }:
+                raise DetectorDevelopmentError(
+                    "artifact_allowlist_mismatch",
+                    "Detector probe result contains missing or unlisted files",
+                ) from exc
+            raise
+        repeated_report, repeated_manifest, repeated_manifest_sha256 = self._read_result_documents(root, record)
+        if repeated_report != report or repeated_manifest != manifest or repeated_manifest_sha256 != manifest_sha256:
             raise DetectorDevelopmentError(
-                "artifact_allowlist_mismatch",
-                "Detector probe result contains missing or unlisted files",
+                "source_changed",
+                "Detector probe result documents changed during validation",
+            )
+        for artifact in repeated_manifest["artifacts"]:
+            self._validate_result_artifact(root, artifact, record)
+        try:
+            tree_after = exact_regular_tree_snapshot(
+                root,
+                expected_files,
+                "detector probe result tree",
+                trusted_root=self._results_root,
+            )
+        except DetectorDevelopmentError as exc:
+            if exc.code in {
+                "unexpected_result_artifact",
+                "invalid_result_allowlist",
+            }:
+                raise DetectorDevelopmentError(
+                    "artifact_allowlist_mismatch",
+                    "Detector probe result contains missing or unlisted files",
+                ) from exc
+            raise
+        if tree_after != tree_before:
+            raise DetectorDevelopmentError(
+                "source_changed",
+                "Detector probe result tree changed during validation",
             )
         return report, manifest_sha256
 
@@ -2845,7 +4252,7 @@ class DetectorProbeCoordinator:
             root,
             artifact.get("relative_path"),
             "detector probe result artifact",
-            allowed_first_parts={"frames", "overlays"},
+            allowed_first_parts={"frames", "overlays", "proxy_frames"},
         )
         content, digest = read_regular_bytes(
             path,
@@ -2862,11 +4269,14 @@ class DetectorProbeCoordinator:
         if image is None or getattr(image, "size", 0) == 0:
             raise DetectorDevelopmentError("corrupt_frame", "Detector probe result artifact is not decodable")
         height, width = image.shape[:2]
+        proxy_artifact = path.relative_to(root).parts[0] == "proxy_frames"
+        expected_width = 2560 if proxy_artifact else record["frozen_request"]["source_width"]
+        expected_height = 720 if proxy_artifact else record["frozen_request"]["source_height"]
         if (
             digest != artifact.get("sha256")
             or len(content) != artifact.get("size_bytes")
-            or width != record["frozen_request"]["source_width"]
-            or height != record["frozen_request"]["source_height"]
+            or width != expected_width
+            or height != expected_height
             or width != artifact.get("width")
             or height != artifact.get("height")
         ):
@@ -3052,7 +4462,7 @@ class DetectorProbeCoordinator:
         parent = self._results_root if trusted_parent is None else Path(os.path.abspath(trusted_parent))
         if candidate.parent != parent:
             return
-        if not candidate.exists() and not candidate.is_symlink():
+        if _path_entry_is_absent(candidate):
             return
         try:
             if is_link_or_reparse(candidate):
@@ -3286,6 +4696,12 @@ class DetectorProbeCoordinator:
         retry_from_job_id = request.get("retry_from_job_id")
         if retry_from_job_id is not None:
             retry_from_job_id = require_safe_id(retry_from_job_id, "retry_from_job_id")
+        annotation_sampling_manifest_sha256 = request.get("annotation_sampling_manifest_sha256")
+        if annotation_sampling_manifest_sha256 is not None:
+            annotation_sampling_manifest_sha256 = require_sha256(
+                annotation_sampling_manifest_sha256,
+                "annotation_sampling_manifest_sha256",
+            )
 
         final_source_identity, final_source_size = _source_file_identity(self.repo_root, source_path)
         if final_source_identity != source_file_identity_sha256 or final_source_size != source_size_bytes:
@@ -3335,6 +4751,8 @@ class DetectorProbeCoordinator:
         }
         if retry_from_job_id is not None:
             frozen["retry_from_job_id"] = retry_from_job_id
+        if annotation_sampling_manifest_sha256 is not None:
+            frozen["annotation_sampling_manifest_sha256"] = annotation_sampling_manifest_sha256
         return frozen, frozen_profiles
 
     @staticmethod
@@ -3505,14 +4923,11 @@ class DetectorProbeCoordinator:
             }
         )
         code_commit_blob_bundle_sha256 = (
-            None
-            if code_commit_blob_files is None
-            else canonical_sha256(code_commit_blob_files)
+            None if code_commit_blob_files is None else canonical_sha256(code_commit_blob_files)
         )
         if (
             code_binding.code_commit_blob_files is not None
-            and canonical_sha256(code_binding.code_commit_blob_files)
-            != code_binding.code_commit_blob_bundle_sha256
+            and canonical_sha256(code_binding.code_commit_blob_files) != code_binding.code_commit_blob_bundle_sha256
         ):
             raise DetectorDevelopmentError(
                 "source_changed",
@@ -3572,26 +4987,18 @@ class DetectorProbeCoordinator:
                 code_commit_status=status,
                 code_commit_reason=reason,
                 code_commit_blob_files=(None if blob_files is None else dict(blob_files)),
-                code_commit_blob_bundle_sha256=(
-                    None if blob_files is None else canonical_sha256(blob_files)
-                ),
-                code_commit_binding_kind=(
-                    _CODE_COMMIT_BINDING_KIND if status == "bound" else None
-                ),
+                code_commit_blob_bundle_sha256=(None if blob_files is None else canonical_sha256(blob_files)),
+                code_commit_binding_kind=(_CODE_COMMIT_BINDING_KIND if status == "bound" else None),
             )
 
         provided_worktree_files: dict[str, str] = {}
         if worktree_contents is not None:
             if set(worktree_contents) != set(paths) or any(
-                not isinstance(content, bytes)
-                or len(content) > _MAX_CODE_BUNDLE_FILE_BYTES
+                not isinstance(content, bytes) or len(content) > _MAX_CODE_BUNDLE_FILE_BYTES
                 for content in worktree_contents.values()
             ):
                 return result("unavailable", "repository_commit_unavailable")
-            provided_worktree_files = {
-                path: hashlib.sha256(worktree_contents[path]).hexdigest()
-                for path in paths
-            }
+            provided_worktree_files = {path: hashlib.sha256(worktree_contents[path]).hexdigest() for path in paths}
         if (
             not paths
             or len(set(paths)) != len(paths)
@@ -3614,11 +5021,7 @@ class DetectorProbeCoordinator:
         kwargs: dict[str, Any] = {}
         if os.name == "nt":
             kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-        git_environment = {
-            name: value
-            for name, value in os.environ.items()
-            if not name.upper().startswith("GIT_")
-        }
+        git_environment = {name: value for name, value in os.environ.items() if not name.upper().startswith("GIT_")}
         git_environment["GIT_TERMINAL_PROMPT"] = "0"
         try:
             trusted_root = root.resolve(strict=False)
@@ -3651,11 +5054,7 @@ class DetectorProbeCoordinator:
             except (OSError, subprocess.TimeoutExpired):
                 return None
             stdout = completed.stdout
-            if (
-                completed.returncode != 0
-                or not isinstance(stdout, bytes)
-                or len(stdout) > max_output_bytes
-            ):
+            if completed.returncode != 0 or not isinstance(stdout, bytes) or len(stdout) > max_output_bytes:
                 return None
             return stdout
 
@@ -3686,9 +5085,7 @@ class DetectorProbeCoordinator:
                 "repository_commit_unavailable",
                 captured_worktree_files=provided_worktree_files,
             )
-        if os.path.normcase(str(reported_root)) != os.path.normcase(
-            str(trusted_root)
-        ):
+        if os.path.normcase(str(reported_root)) != os.path.normcase(str(trusted_root)):
             return result(
                 "unavailable",
                 "repository_commit_unavailable",
@@ -3711,10 +5108,7 @@ class DetectorProbeCoordinator:
                 "repository_commit_unavailable",
                 captured_worktree_files=provided_worktree_files,
             )
-        if (
-            len(commit) not in {40, 64}
-            or any(character not in "0123456789abcdef" for character in commit)
-        ):
+        if len(commit) not in {40, 64} or any(character not in "0123456789abcdef" for character in commit):
             return result(
                 "unavailable",
                 "repository_commit_unavailable",
@@ -3745,9 +5139,7 @@ class DetectorProbeCoordinator:
                 captured_worktree_files=provided_worktree_files,
             )
 
-        raw_tree = run(
-            ["--literal-pathspecs", "ls-tree", "-r", "-z", commit, "--", *paths]
-        )
+        raw_tree = run(["--literal-pathspecs", "ls-tree", "-r", "-z", commit, "--", *paths])
         if raw_tree is None:
             return result(
                 "unavailable",
@@ -3849,10 +5241,7 @@ class DetectorProbeCoordinator:
                     captured_worktree_files=captured_worktree_files,
                 )
             worktree_content = captured_contents[path]
-            if (
-                worktree_content != blob
-                and worktree_content.replace(b"\r\n", b"\n") != blob
-            ):
+            if worktree_content != blob and worktree_content.replace(b"\r\n", b"\n") != blob:
                 return result(
                     "unbound",
                     "code_bundle_differs_from_commit",
@@ -3933,6 +5322,29 @@ class DetectorProbeCoordinator:
             owner_state = self._owner_is_active(record.get("owner_id"))
             if status in {"running", "committing"} and owner_state is not False:
                 continue
+            if (
+                status == "running"
+                and record.get("frozen_request", {}).get("retry_kind") == "review_proxy_decode_upgrade"
+            ):
+                self._remove_uncommitted_outputs(job_id)
+                now = utc_now_iso()
+                record.update(
+                    {
+                        "status": "failed",
+                        "stage": "failed",
+                        "owner_id": None,
+                        "cancel_requested": False,
+                        "error_code": "review_proxy_child_assembly_interrupted",
+                        "error_message": ("Review-proxy child assembly stopped before its atomic commit"),
+                        "recovery_action": "retry",
+                        "report": None,
+                        "result_manifest_sha256": None,
+                        "updated_at": now,
+                    }
+                )
+                record["progress"].update(updated_at=now)
+                self._persist_record(record)
+                continue
             if status in {"queued", "running"}:
                 self._remove_uncommitted_outputs(job_id)
                 if status == "running" and record.get("cancel_requested") is True:
@@ -4011,6 +5423,12 @@ class DetectorProbeCoordinator:
                         }
                     )
                 else:
+                    if (
+                        record.get("report") == report
+                        and record.get("result_manifest_sha256") == manifest_sha256
+                        and record.get("owner_id") is None
+                    ):
+                        continue
                     record["report"] = report
                     record["result_manifest_sha256"] = manifest_sha256
                     record["owner_id"] = None
@@ -4035,6 +5453,128 @@ class DetectorProbeCoordinator:
             job_id = str(record["job_id"])
             loaded[job_id] = record
         self._jobs = loaded
+
+    def _read_review_proxy_child_claim(self, parent_job_id: str) -> dict[str, Any] | None:
+        parent_job_id = require_safe_id(parent_job_id, "review-proxy parent probe job_id")
+        path = self._review_proxy_child_claims_root / f"{parent_job_id}.json"
+        if not path.exists() and not is_link_or_reparse(path):
+            return None
+        try:
+            content, _ = read_regular_bytes(
+                path,
+                "review-proxy child claim",
+                max_bytes=16 * 1024,
+                trusted_root=self._review_proxy_child_claims_root,
+            )
+            claim = json_object_from_bytes(content, "review-proxy child claim")
+            claim_body = deepcopy(claim)
+            claim_sha256 = claim_body.pop("claim_sha256", None)
+            expected_keys = {
+                "schema_version",
+                "artifact_type",
+                "parent_probe_job_id",
+                "child_probe_job_id",
+                "repair_id",
+                "child_request_sha256",
+                "created_at",
+            }
+            if (
+                set(claim_body) != expected_keys
+                or claim_body.get("schema_version") != "1.0"
+                or claim_body.get("artifact_type") != "detector_review_proxy_child_claim"
+                or claim_body.get("parent_probe_job_id") != parent_job_id
+                or canonical_sha256(claim_body) != claim_sha256
+            ):
+                raise DetectorDevelopmentError(
+                    "invalid_review_proxy_child_claim",
+                    "Review-proxy child claim is inconsistent",
+                    status_code=409,
+                )
+            require_safe_id(
+                claim_body.get("child_probe_job_id"),
+                "claimed review-proxy child probe job_id",
+            )
+            require_safe_id(
+                claim_body.get("repair_id"),
+                "claimed review-proxy repair_id",
+            )
+            require_sha256(
+                claim_body.get("child_request_sha256"),
+                "claimed review-proxy child request_sha256",
+            )
+            if not isinstance(claim_body.get("created_at"), str) or not claim_body["created_at"]:
+                raise DetectorDevelopmentError(
+                    "invalid_review_proxy_child_claim",
+                    "Review-proxy child claim timestamp is invalid",
+                    status_code=409,
+                )
+            return claim
+        except DetectorDevelopmentError as exc:
+            if exc.code == "invalid_review_proxy_child_claim":
+                raise
+            raise DetectorDevelopmentError(
+                "invalid_review_proxy_child_claim",
+                "Review-proxy child claim cannot be verified",
+                status_code=409,
+            ) from exc
+
+    def _publish_review_proxy_child_claim(
+        self,
+        *,
+        parent_job_id: str,
+        child_job_id: str,
+        repair_id: str,
+        child_request_sha256: str,
+    ) -> dict[str, Any]:
+        parent_job_id = require_safe_id(parent_job_id, "review-proxy parent probe job_id")
+        child_job_id = require_safe_id(child_job_id, "review-proxy child probe job_id")
+        repair_id = require_safe_id(repair_id, "review-proxy repair_id")
+        child_request_sha256 = require_sha256(child_request_sha256, "review-proxy child request_sha256")
+        existing = self._read_review_proxy_child_claim(parent_job_id)
+        if existing is not None:
+            return existing
+        body = {
+            "schema_version": "1.0",
+            "artifact_type": "detector_review_proxy_child_claim",
+            "parent_probe_job_id": parent_job_id,
+            "child_probe_job_id": child_job_id,
+            "repair_id": repair_id,
+            "child_request_sha256": child_request_sha256,
+            "created_at": utc_now_iso(),
+        }
+        claim = {**body, "claim_sha256": canonical_sha256(body)}
+        atomic_write_json(
+            self._review_proxy_child_claims_root / f"{parent_job_id}.json",
+            claim,
+            trusted_root=self._review_proxy_child_claims_root,
+        )
+        return claim
+
+    def _claimed_review_proxy_child_record(self, claim: dict[str, Any]) -> dict[str, Any]:
+        child_job_id = claim["child_probe_job_id"]
+        try:
+            child = self._read_job_file(self._jobs_root / f"{child_job_id}.json")
+            frozen = child.get("frozen_request")
+            upgrade = frozen.get("review_proxy_upgrade") if isinstance(frozen, dict) else None
+            if (
+                child.get("job_id") != child_job_id
+                or child.get("request_sha256") != claim["child_request_sha256"]
+                or child.get("retry_from_job_id") != claim["parent_probe_job_id"]
+                or child.get("retry_kind") != "review_proxy_decode_upgrade"
+                or not isinstance(upgrade, dict)
+                or upgrade.get("repair_evidence", {}).get("repair_id") != claim["repair_id"]
+            ):
+                raise DetectorDevelopmentError(
+                    "invalid_persisted_job",
+                    "Claimed review-proxy child binding is inconsistent",
+                )
+            return child
+        except (DetectorDevelopmentError, OSError) as exc:
+            raise DetectorDevelopmentError(
+                "review_proxy_parent_child_claimed",
+                "The audited parent has a durable child claim whose child cannot be verified",
+                status_code=409,
+            ) from exc
 
     def _read_job_file(self, path: Path) -> dict[str, Any]:
         content, _ = read_regular_bytes(
@@ -4064,6 +5604,7 @@ class DetectorProbeCoordinator:
         frozen = record["frozen_request"]
         request_sha256 = canonical_sha256(frozen)
         intent_sha256 = canonical_sha256({key: value for key, value in frozen.items() if key != "retry_from_job_id"})
+        semantic_intent_sha256 = semantic_probe_intent_sha256(frozen)
         required_resource_fields = (
             "parent_trial_id",
             "source_id",
@@ -4095,8 +5636,14 @@ class DetectorProbeCoordinator:
             record.get("request_sha256") != request_sha256
             or record.get("idempotency_key") != request_sha256
             or record.get("intent_sha256") != intent_sha256
+            or (
+                record.get("semantic_intent_sha256") is not None
+                and record.get("semantic_intent_sha256") != semantic_intent_sha256
+            )
             or record.get("resource_sha256") != resource_sha256
             or record.get("frozen_profiles_sha256") != canonical_sha256(record["frozen_profiles"])
+            or record.get("retry_from_job_id") != frozen.get("retry_from_job_id")
+            or record.get("retry_kind") != frozen.get("retry_kind")
         ):
             raise DetectorDevelopmentError(
                 "persisted_job_digest_mismatch",
@@ -4182,6 +5729,10 @@ class DetectorProbeCoordinator:
             "opencv_ffmpeg_enabled",
             "decoder_fingerprint_sha256",
         }
+        expected_code_bundle_paths = DetectorProbeCoordinator._validated_code_bundle_paths(
+            frozen,
+            bundle,
+        )
         if (
             not isinstance(bundle, dict)
             or set(bundle) != expected_bundle_keys
@@ -4201,7 +5752,7 @@ class DetectorProbeCoordinator:
             or not isinstance(bundle.get("execution_environment"), dict)
             or set(bundle["execution_environment"]) != execution_environment_keys
             or not isinstance(bundle.get("code_bundle_files"), dict)
-            or set(bundle["code_bundle_files"]) != {f"football_tracking/{name}" for name in _CODE_BUNDLE_FILES}
+            or tuple(bundle["code_bundle_files"]) != expected_code_bundle_paths
             or not isinstance(bundle.get("runtime_observation_evidence_sha256s"), dict)
             or set(bundle["runtime_observation_evidence_sha256s"]) != set(frozen.get("profile_ids", []))
         ):
@@ -4228,14 +5779,11 @@ class DetectorProbeCoordinator:
                     "Detector probe frozen execution digest is invalid",
                 ) from exc
         code_commit_blob_files = bundle.get("code_commit_blob_files")
-        code_commit_blob_bundle_sha256 = bundle.get(
-            "code_commit_blob_bundle_sha256"
-        )
+        code_commit_blob_bundle_sha256 = bundle.get("code_commit_blob_bundle_sha256")
         if code_commit_blob_files is not None:
             if (
                 not isinstance(code_commit_blob_files, dict)
-                or set(code_commit_blob_files)
-                != {f"football_tracking/{name}" for name in _CODE_BUNDLE_FILES}
+                or tuple(code_commit_blob_files) != expected_code_bundle_paths
             ):
                 raise DetectorDevelopmentError(
                     "invalid_persisted_job",
@@ -4259,10 +5807,7 @@ class DetectorProbeCoordinator:
                     "invalid_persisted_job",
                     "Detector probe commit blob bundle digest is invalid",
                 ) from exc
-            if (
-                canonical_sha256(code_commit_blob_files)
-                != code_commit_blob_bundle_sha256
-            ):
+            if canonical_sha256(code_commit_blob_files) != code_commit_blob_bundle_sha256:
                 raise DetectorDevelopmentError(
                     "persisted_job_digest_mismatch",
                     "Detector probe commit blob bundle digest is inconsistent",
@@ -4328,8 +5873,7 @@ class DetectorProbeCoordinator:
                 or any(character not in "0123456789abcdef" for character in code_commit)
                 or bundle.get("code_commit_reason") is not None
                 or code_commit_blob_files is None
-                or bundle.get("code_commit_binding_kind")
-                != _CODE_COMMIT_BINDING_KIND
+                or bundle.get("code_commit_binding_kind") != _CODE_COMMIT_BINDING_KIND
             ):
                 raise DetectorDevelopmentError(
                     "invalid_persisted_job",
@@ -4338,8 +5882,7 @@ class DetectorProbeCoordinator:
         elif bundle.get("code_commit_status") == "unbound":
             if (
                 code_commit is not None
-                or bundle.get("code_commit_reason")
-                != "code_bundle_differs_from_commit"
+                or bundle.get("code_commit_reason") != "code_bundle_differs_from_commit"
                 or code_commit_blob_files is not None
                 or code_commit_blob_bundle_sha256 is not None
                 or bundle.get("code_commit_binding_kind") is not None
@@ -4385,6 +5928,33 @@ class DetectorProbeCoordinator:
                 "persisted_job_digest_mismatch",
                 "Detector probe frozen execution bundle digest is inconsistent",
             )
+
+    @staticmethod
+    def _validated_code_bundle_paths(
+        frozen: dict[str, Any],
+        bundle: Any,
+    ) -> tuple[str, ...]:
+        if not isinstance(bundle, dict) or not isinstance(bundle.get("code_bundle_files"), dict):
+            raise DetectorDevelopmentError(
+                "invalid_persisted_job",
+                "Detector probe frozen execution bundle is invalid",
+            )
+        current_paths = tuple(f"football_tracking/{name}" for name in _CODE_BUNDLE_FILES)
+        observed_paths = tuple(bundle["code_bundle_files"])
+        if observed_paths == current_paths:
+            return current_paths
+        historical = _AUDITED_T2_EXECUTION_BUNDLE_BINDINGS.get(frozen.get("execution_bundle_sha256"))
+        historical_paths = tuple(f"football_tracking/{name}" for name in _AUDITED_T2_CODE_BUNDLE_FILES)
+        if (
+            historical is None
+            or observed_paths != historical_paths
+            or any(bundle.get(field) != value for field, value in historical.items())
+        ):
+            raise DetectorDevelopmentError(
+                "invalid_persisted_job",
+                "Detector probe frozen execution bundle paths are invalid",
+            )
+        return historical_paths
 
     def _record(self, job_id: str) -> dict[str, Any]:
         job_id = require_safe_id(job_id, "detector probe job_id")

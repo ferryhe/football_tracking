@@ -45,7 +45,13 @@ low-information, corrupt, short, or wrong-index frame was accepted.
 | Binding | First run | Exact retry |
 | --- | --- | --- |
 | Job ID | `probe-308adcc1feaa99cc-bddecb26d127` | `probe-b59e904ee0b8a14f-e2aee08f414e` |
+| Durable job-record path | `data/ball_detector_development_v1/probes/jobs/probe-308adcc1feaa99cc-bddecb26d127.json` | `data/ball_detector_development_v1/probes/jobs/probe-b59e904ee0b8a14f-e2aee08f414e.json` |
+| Committed audit-metadata fixture | `python_backend/tests/fixtures/audited_t2_probe_308.job.json.gz.b64` | `python_backend/tests/fixtures/audited_t2_probe_b59.job.json.gz.b64` |
 | Retry parent | none | `probe-308adcc1feaa99cc-bddecb26d127` |
+| Canonical parsed full job record SHA-256 | `9fc18e56adbfc1cb4577746d807494e533aa5fbea2ce45b5fe4e05e3fc8a25df` | `5032ed68a95659a2321255e3815dc49d6b755260026870d3ed1e0b390c6edc8b` |
+| Raw job file SHA-256 | `b5653d93474786328a182f504a7e590d1f3cff67b3d547c45234fba844cb6cb3` | `2b826bc4c6b97f3568530e42391900eb4f3537dea4d1b046e76a0d47743c2066` |
+| Raw job file size | 164,074 bytes | 164,201 bytes |
+| Recorded semantic intent SHA-256 | `null` (historical record; not backfilled) | `null` (historical record; not backfilled) |
 | Request SHA-256 | `308adcc1feaa99cc818ed05abba3d960ffe5a724439d2b86eddcc1b823954eb1` | `b59e904ee0b8a14fd8ee61d4d26909b2c4c08be8d2d8787687d19e3f6b2ca293` |
 | Report content SHA-256 | `9f422a6b0270e7e4e933505949cab5aabc32eaa0d4e36ebe28a269bdcf083644` | `bc339d742993075849a0b892d90e36800ea7c4bcab1be0349b601056bfc67bcc` |
 | Report file SHA-256 | `958d2f1b2744a657eb455d26eaa727b056ea217fceb3f0631225586f54afc92f` | `e24dba86446c8bb83453f1ce2494cff0ff0f8dd177b30de089087fa221e9621b` |
@@ -55,6 +61,17 @@ low-information, corrupt, short, or wrong-index frame was accepted.
 | Source verification stage | 14.085477 s | 1.354360 s |
 | Inference stage | 286.582867 s | 317.498270 s |
 | Atomic commit stage | 3.288458 s | 3.459625 s |
+
+The two job-record digests deliberately prove different things. `Raw job file
+SHA-256` hashes the exact durable JSON bytes. To reproduce it from a committed
+fixture, remove ASCII whitespace from the fixture, strict-base64 decode it,
+gzip-decompress it, and hash the resulting bytes. `Canonical parsed full job
+record SHA-256` first parses those bytes as JSON, then serializes the entire
+value as UTF-8 with non-ASCII characters preserved, non-finite numbers
+rejected, object keys sorted, and separators fixed to `,` and `:` with no
+extra whitespace; SHA-256 is applied to those canonical bytes. The raw digest
+detects any byte-level change, while the canonical digest anchors the parsed
+full-record authority independently of harmless JSON formatting.
 
 The first run performed exactly one full source hash in 12.769377 seconds. The
 retry reused the identity-bound in-process digest cache; the hash-call list was
@@ -106,7 +123,10 @@ be silently interpreted as proof.
 | Official COCO YOLO11n | `yolo11n-coco-v8.4.0` | `0ebbc80d4a7680d14987a577cd21342b65ecfd94632bd9a8da63ae6417644ee1` | 5,613,764 | direct, SAHI |
 | Official COCO YOLO11s | `yolo11s-coco-v8.4.0` | `85a76fe86dd8afe384648546b56a7a78580c7cb7b404fc595f97969322d502d5` | 19,313,732 | direct, SAHI |
 
-No weight, generated probe result, or source media is committed to Git.
+No weight, source media, or generated JPEG/overlay artifact is committed to
+Git. The two compressed fixtures above are committed audit metadata: each
+contains the byte-faithful durable job record (including its report and
+lineage) needed to reproduce both full-record digests offline.
 
 ## Fixed profile results
 
