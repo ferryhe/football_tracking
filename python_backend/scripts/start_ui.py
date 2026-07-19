@@ -21,6 +21,8 @@ DEFAULT_HOST = "127.0.0.1"
 DEFAULT_BACKEND_PORT = 8000
 DEFAULT_FRONTEND_PORT = 5173
 PORT_SEARCH_SPAN = 20
+HTTP_READY_TIMEOUT_SECONDS = 45.0
+BACKEND_STARTUP_TIMEOUT_SECONDS = 180.0
 STATE_PATH = Path(".run") / "ui_processes.json"
 LOG_DIR = Path(".run") / "ui"
 STATE_SCHEMA_VERSION = 2
@@ -97,7 +99,11 @@ def find_available_port(preferred_port: int, host: str = DEFAULT_HOST, search_sp
     raise RuntimeError(f"No available port found starting at {preferred_port}.")
 
 
-def wait_for_http_ok(url: str, timeout_seconds: float = 45.0, poll_interval: float = 0.5) -> bool:
+def wait_for_http_ok(
+    url: str,
+    timeout_seconds: float = HTTP_READY_TIMEOUT_SECONDS,
+    poll_interval: float = 0.5,
+) -> bool:
     deadline = time.monotonic() + timeout_seconds
     while time.monotonic() < deadline:
         remaining = max(0.1, deadline - time.monotonic())
@@ -761,7 +767,10 @@ def start_ui(
         if backend_root_identity is None:
             raise RuntimeError("Backend root process identity could not be verified.")
         backend_health_url = f"http://{host}:{chosen_backend_port}/api/v1/health"
-        if not wait_for_http_ok(backend_health_url):
+        if not wait_for_http_ok(
+            backend_health_url,
+            timeout_seconds=BACKEND_STARTUP_TIMEOUT_SECONDS,
+        ):
             raise RuntimeError(f"Backend failed health check. See {root_dir / LOG_DIR / 'backend.log'}")
         backend_listener_candidate = wait_for_listener_identity(
             chosen_backend_port,
@@ -797,10 +806,16 @@ def start_ui(
         if frontend_root_identity is None:
             raise RuntimeError("Frontend root process identity could not be verified.")
         frontend_url = f"http://{host}:{chosen_frontend_port}/broadcast"
-        if not wait_for_http_ok(frontend_url):
+        if not wait_for_http_ok(
+            frontend_url,
+            timeout_seconds=HTTP_READY_TIMEOUT_SECONDS,
+        ):
             raise RuntimeError(f"Frontend failed route check. See {root_dir / LOG_DIR / 'frontend.log'}")
         frontend_api_health_url = f"http://{host}:{chosen_frontend_port}/api/healthz"
-        if not wait_for_http_ok(frontend_api_health_url):
+        if not wait_for_http_ok(
+            frontend_api_health_url,
+            timeout_seconds=HTTP_READY_TIMEOUT_SECONDS,
+        ):
             raise RuntimeError(f"Frontend API proxy failed health check. See {root_dir / LOG_DIR / 'frontend.log'}")
         frontend_listener_candidate = wait_for_listener_identity(
             chosen_frontend_port,

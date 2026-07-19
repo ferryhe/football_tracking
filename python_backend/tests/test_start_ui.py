@@ -163,6 +163,14 @@ class StartUiScriptTests(unittest.TestCase):
                 ],
                 [call.args[0] for call in wait.call_args_list],
             )
+            self.assertEqual(
+                [
+                    {"timeout_seconds": 180.0},
+                    {"timeout_seconds": 45.0},
+                    {"timeout_seconds": 45.0},
+                ],
+                [call.kwargs for call in wait.call_args_list],
+            )
             state = load_state(root / ".run" / "ui_processes.json")
             self.assertIsNotNone(state)
             self.assertEqual(101, state["backend_pid"] if state else None)

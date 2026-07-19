@@ -18,6 +18,8 @@ The entrypoint selects the root virtual environment, prepends the absolute backe
 
 Before starting, make sure the root `.venv`, pnpm dependencies, `python_backend/data/`, `python_backend/config/`, and config-referenced detector weights are present. `pnpm check` must pass.
 
+`pnpm start` gives the backend up to 180 seconds to finish bounded durable-state recovery. A cold start after detector or review-proxy work can remain at `Waiting for application startup` for more than a minute; keep it running unless the launcher reaches the bounded health-check failure and points to `backend.log`.
+
 ## P3 broadcast workflow
 
 Use `/broadcast` for full-match P3 delivery. `/baseline`, `/ai`, and `/deliverable` remain useful for legacy baselines, tuning, follow-cam, and highlight work, but they do not replace the evidence-bound broadcast flow.
