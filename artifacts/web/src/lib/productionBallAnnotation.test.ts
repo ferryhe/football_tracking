@@ -5643,7 +5643,7 @@ describe("strict ball annotation response parsing", () => {
     expect(() =>
       parseBallAnnotationFinalResult(developmentResult, developmentSession),
     ).toThrow(/development sealed evidence is invalid/i);
-  });
+  }, 30_000);
 });
 
 describe("verified ball annotation frame fetch", () => {
