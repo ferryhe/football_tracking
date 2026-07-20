@@ -1,6 +1,6 @@
 # Step 3 Tiny-Ball Detection, Tuning, and Camera-Adaptation Plan
 
-**Status:** Execution active · PR-T3, PR-T3R, and PR-T3E merged · PR-T4 held at the feasibility gate
+**Status:** Execution active · PR-T3, PR-T3R, and PR-T3E merged · bounded PR-T3F local gates complete and publication in progress · PR-T4 held at the feasibility gate
 
 **Date:** 2026-07-17
 
@@ -12,9 +12,9 @@
 
 - Program status: active
 - Delivery order: `PR-T1 → PR-T2 → PR-T3 → PR-T4 → PR-T5`
-- Current PR: none · PR-T4 not started and not authorized
-- Current branch: `main` (active product baseline) · no PR-T4 implementation branch exists; administrative closeout branches do not advance the product sequence
-- Current phase: PR-T3E merged as GitHub PR #118 / `a55c2e5bfb38a72035c925249356ebc1a6720e87`, its local and remote product branches were removed, and the sealed `insufficient_evidence` result remains unchanged · the next activity is a new bounded trial and development-evidence batch, not PR-T4
+- Current PR: PR-T3F · pending-submission reconciliation and safe return to field setup
+- Current branch: `codex/tiny-ball-pending-reconciliation-return`
+- Current phase: local implementation and review gates complete · publication commit created and pull-request publication in progress; PR-T4 remains unauthorized
 - Managed workflow authorized: 2026-07-17
 - Heartbeat: active · `tiny-ball-step3-managed-pr-heartbeat` · every 15 minutes
 - Merge rule: implementation, specification review, quality review, and local checks must finish before the final push; CI and the complete 10-minute remote-feedback window may then run concurrently, but both must finish successfully before merge; any material corrective push restarts that window
@@ -49,6 +49,7 @@
 | PR-T3 | `codex/tiny-ball-annotation-feasibility` | completed · spec COMPLIANT · frontend/backend/final quality APPROVE · replacement Node/Python CI passed · branches cleaned | https://github.com/ferryhe/football_tracking/pull/114 | gate 2026-07-19T16:48:00Z–16:58:00Z · final fetch 16:58:40Z · zero actionable feedback | `8bd18841` · 2026-07-19T16:59:13Z |
 | PR-T3R | `codex/tiny-ball-startup-budget` | completed · independent spec COMPLIANT · independent quality APPROVE · Node/Python CI passed · branches cleaned · PR-T4 remains unauthorized | https://github.com/ferryhe/football_tracking/pull/116 | complete 2026-07-19T18:10:16Z–18:20:16Z · final fetch 18:23:28Z · zero actionable feedback | `89e1912d` · 2026-07-19T18:24:03Z |
 | PR-T3E | `codex/tiny-ball-evidence-continuation-ux` | completed · replacement Node/Python CI passed · spec COMPLIANT · quality/security APPROVE · branches cleaned · PR-T4 remains unauthorized | https://github.com/ferryhe/football_tracking/pull/118 | complete 2026-07-19T19:42:00Z–19:52:00Z · final fetch 19:52:23Z · zero actionable feedback | `a55c2e5b` · 2026-07-19T19:53:08Z |
+| PR-T3F | `codex/tiny-ball-pending-reconciliation-return` | local gates complete · spec COMPLIANT · quality APPROVE · frontend 1,259/1,259 · build/type/format/browser checks passed · PR-T4 remains unauthorized | pending | not started | pending |
 | PR-T4 | pending | not started | pending | not started | pending |
 | PR-T5 | pending | not started | pending | not started | pending |
 
@@ -661,6 +662,25 @@ Each branch starts only after its predecessor is merged and from that latest cle
 - Final replacement run `29695366761` passed the Node job in 5m42s and Python job in 13m10s; the official Python verification step ran in 11m17s. The final head completed the full 2026-07-19T16:48:00Z–16:58:00Z remote-feedback window with no actionable feedback, and PR #114 merged at 2026-07-19T16:59:13Z as `8bd18841f707c283c2dd039284b024c3da99cc2d`.
 - The real source was annotated and sealed honestly: the 20-frame check produced five metric-eligible positives, Top-1/Top-5 recall of 3/5, insufficient support/interval bounds, and status `insufficient_evidence`.
 - PR-T3 therefore demonstrated the required fail-closed contract and completed review/merge. PR-T4 remains unauthorized until a new frozen unseen check returns `feasibility_passed` with `may_expand_to_100_300_boxes=true`; no check labels may enter training.
+
+### PR-T3F · Pending-Submission Reconciliation and Safe Step-2 Return
+
+**Reason for the bounded repair**
+
+- The first post-PR-T3E evidence-continuation attempt exposed an orphaned `trial.pending_submission`: the generic Back control appeared enabled but the discard gate kept the workspace on Step 3, while the only visible retry action would create a real trial. This blocks the next required evidence batch without changing the sealed feasibility result.
+
+**Deliverables**
+
+- Generic Back and Start New controls are visibly disabled, accessibly described, and non-mutating while a trial or full-run submission is awaiting reconciliation; queued/running controls retain their existing cancel-focus behavior.
+- A trial-only explicit reconcile-and-return action refreshes authoritative health and run state, binds an exact matching run when present, refuses unavailable/conflicting/active state, and clears only the unchanged exact pending identity when the authoritative state proves that no run exists.
+- After a successful clear is rendered, the action enters the existing upstream invalidation confirmation before reopening Step 2; it never posts a replacement run, bypasses confirmation, rewrites sealed evidence, or changes any PR-T4 authorization.
+
+**Tests and gates**
+
+- Pending trial/full-run workspace navigation and accessible explanation tests.
+- Stale pending success, exact-run recovery, unhealthy/list-failure, conflicting-active-run, no-duplicate-POST, CAS/race, and existing queued/running behavior tests.
+- Focused component suites, application/test TypeScript checks, scoped formatting, production build, independent specification review, independent quality/security review, GitHub CI, and the complete managed remote-feedback window.
+- Local publication checkpoint: 98/98 focused/page tests and the full 1,259/1,259 frontend suite pass with S/B/F/L 93.20/90.69/97.48/94.26; both TypeScript checks, production build, cutover-bundle verification, scoped Prettier, and diff check pass. Independent reviews are COMPLIANT and APPROVE with P0=0/P1=0/P2=0. Read-only browser inspection confirms the protected controls and explicit recovery entry without invoking the destructive clear.
 
 ### PR-T4 · 100–300-Box Training and Source-Segment Evaluation
 

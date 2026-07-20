@@ -54,9 +54,10 @@ vi.mock(
   "@/components/production/ProductionWorkspace",
   async (importOriginal) => {
     const React = await import("react");
-    const actual = await importOriginal<
-      typeof import("@/components/production/ProductionWorkspace")
-    >();
+    const actual =
+      await importOriginal<
+        typeof import("@/components/production/ProductionWorkspace")
+      >();
     type WorkspaceProps = Parameters<typeof actual.ProductionWorkspace>[0];
     return {
       ...actual,
@@ -252,13 +253,19 @@ describe("ProductionPage", () => {
     expect(screen.getByRole("status")).toHaveTextContent(
       /baseline link moved here.*original video/i,
     );
-    expect(screen.getByRole("heading", { name: /choose the original video/i })).toBeVisible();
+    expect(
+      screen.getByRole("heading", { name: /choose the original video/i }),
+    ).toBeVisible();
   });
 
   it("saves and exits to Production History instead of looping to Production", async () => {
     const view = renderPage();
-    await view.user.click(screen.getByRole("button", { name: "Save and exit" }));
-    expect(`${window.location.pathname}${window.location.search}`).toBe("/history");
+    await view.user.click(
+      screen.getByRole("button", { name: "Save and exit" }),
+    );
+    expect(`${window.location.pathname}${window.location.search}`).toBe(
+      "/history",
+    );
   });
 
   it("applies sequential async trial callbacks to the latest persisted draft", () => {
@@ -586,9 +593,10 @@ describe("ProductionPage", () => {
     );
   });
 
-  it("preserves a pending slow submission through upstream and Start New attempts", async () => {
+  it("disables upstream and Start New while preserving a pending slow submission", async () => {
     const pending = await draftWithUnsettledTrial("pending");
     saveProductionDraft(localStorage, pending);
+    const persistedBefore = localStorage.getItem(PRODUCTION_DRAFT_STORAGE_KEY);
     queryResult = {
       ...queryResult,
       data: {
@@ -598,19 +606,31 @@ describe("ProductionPage", () => {
     };
     const { user } = renderPage();
     const heading = screen.getByRole("heading", { name: "Trial and tuning" });
+    const explanation = screen.getByText(/still being checked/i);
+    const back = screen.getByRole("button", { name: "Back" });
+    const startNew = screen.getByRole("button", {
+      name: "Start new production",
+    });
     expect(
       screen.queryByTestId("production-source-select"),
     ).not.toBeInTheDocument();
+    expect(explanation).toBeVisible();
+    expect(back).toBeDisabled();
+    expect(startNew).toBeDisabled();
+    expect(back).toHaveAttribute("aria-describedby", explanation.id);
+    expect(startNew).toHaveAttribute("aria-describedby", explanation.id);
 
-    await user.click(screen.getByRole("button", { name: "Back" }));
-    expect(screen.getByText(/still being checked/i)).toBeVisible();
-    expect(heading).toHaveFocus();
-    await user.click(
-      screen.getByRole("button", { name: "Start new production" }),
-    );
+    await user.click(back);
+    await user.click(startNew);
+    expect(heading).toBeVisible();
     expect(
       screen.queryByText("Replace unfinished production?"),
     ).not.toBeInTheDocument();
+    expect(workspaceLifecycle.mounts).toBe(1);
+    expect(workspaceLifecycle.unmounts).toBe(0);
+    expect(localStorage.getItem(PRODUCTION_DRAFT_STORAGE_KEY)).toBe(
+      persistedBefore,
+    );
 
     const persisted = JSON.parse(
       localStorage.getItem(PRODUCTION_DRAFT_STORAGE_KEY) ?? "null",
