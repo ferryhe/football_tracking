@@ -42,7 +42,10 @@ import {
 } from "@/lib/productionWorkflow";
 import { ProductionCalibrationStep } from "./ProductionCalibrationStep";
 import { ProductionFullRunStep } from "./ProductionFullRunStep";
-import { ProductionTrialStep } from "./ProductionTrialStep";
+import {
+  ProductionTrialStep,
+  type PendingTrialReturnSnapshot,
+} from "./ProductionTrialStep";
 
 const USER_STAGES: ProductionUserStage[] = [
   "source",
@@ -84,7 +87,10 @@ export interface ProductionWorkspaceProps {
     expectedRevision: number,
   ) => boolean;
   onParentRunIdChange: (runId: string) => void;
-  onInvalidate: (from: "calibration") => boolean;
+  onInvalidate: (
+    from: "calibration",
+    expectedPendingTrial?: PendingTrialReturnSnapshot,
+  ) => boolean;
   onSaveExit: () => void;
   onStartNew: () => void;
   startNewButtonRef?: Ref<HTMLButtonElement>;
@@ -147,7 +153,12 @@ export function ProductionWorkspace({
     useState(false);
   const [trialUsable, setTrialUsable] = useState(false);
   const [pendingUpstreamEdit, setPendingUpstreamEdit] = useState<
-    { kind: "calibration" } | { kind: "source"; source: SourceSignature } | null
+    | {
+        kind: "calibration";
+        expectedPendingTrial?: PendingTrialReturnSnapshot;
+      }
+    | { kind: "source"; source: SourceSignature }
+    | null
   >(null);
   const [activeStopFocusRequest, setActiveStopFocusRequest] = useState(0);
   const [fullRunFocusRequest, setFullRunFocusRequest] = useState(0);
@@ -294,9 +305,11 @@ export function ProductionWorkspace({
     setViewStage(USER_STAGES[currentIndex - 1]);
   }
 
-  function requestCalibrationEdit() {
+  function requestCalibrationEdit(
+    expectedPendingTrial?: PendingTrialReturnSnapshot,
+  ) {
     upstreamFocusTargetRef.current = "back";
-    setPendingUpstreamEdit({ kind: "calibration" });
+    setPendingUpstreamEdit({ kind: "calibration", expectedPendingTrial });
   }
 
   function summaryDetail(stage: ProductionUserStage): string {
@@ -645,7 +658,9 @@ export function ProductionWorkspace({
                   setPendingUpstreamEdit(null);
                   return;
                 }
-                if (!onInvalidate("calibration")) {
+                if (
+                  !onInvalidate("calibration", pending.expectedPendingTrial)
+                ) {
                   event.preventDefault();
                   return;
                 }

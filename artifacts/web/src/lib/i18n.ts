@@ -181,6 +181,8 @@ export const translations = {
       trialSubmissionUncertain:
         "The previous submission result is not confirmed. Refresh to reconcile it, or explicitly retry with a new submission.",
       trialReconcileAndReturn: "Reconcile and return to field setup",
+      trialRetryRequiresWorkflowRotation:
+        "A safe parent trial could not be verified, so no retry was submitted. Use “Reconcile and return to field setup” to rotate the workflow before retrying.",
       trialReconcileUnavailable:
         "The run service and run list could not be verified. The pending submission was kept; try again after the service recovers.",
       trialPendingIdentityConflict: (runId: string) =>
@@ -1685,6 +1687,8 @@ export const translations = {
       trialSubmissionUncertain:
         "上一次提交结果尚未确认。请刷新以对账，或明确新建一次重试。",
       trialReconcileAndReturn: "核对并返回球场设置",
+      trialRetryRequiresWorkflowRotation:
+        "无法核验安全的上一次试跑，因此未提交重试。请使用“核对并返回球场设置”轮换工作流后再试。",
       trialReconcileUnavailable:
         "无法核验运行服务和任务列表，待核对提交已保留；请在服务恢复后重试。",
       trialPendingIdentityConflict: (runId: string) =>

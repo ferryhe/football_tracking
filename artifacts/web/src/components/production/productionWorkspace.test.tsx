@@ -17,6 +17,7 @@ import {
 } from "@/lib/productionWorkflow";
 import type { ProductionTrialState } from "@/lib/productionTrial";
 import { ProductionWorkspace } from "./ProductionWorkspace";
+import type { PendingTrialReturnSnapshot } from "./ProductionTrialStep";
 import { ACCEPTABLE_TRIAL_SIGNAL_GATE } from "@/test/productionTrialFixtures";
 
 const fullRunMock = vi.hoisted(() => ({
@@ -43,12 +44,16 @@ vi.mock("./ProductionCalibrationStep", () => ({
 
 vi.mock("./ProductionTrialStep", () => ({
   ProductionTrialStep: ({
+    trial,
     onUsabilityChange,
     onPendingReconciledReturnToFieldSetup,
     stopButtonRef,
   }: {
+    trial: ProductionTrialState | null;
     onUsabilityChange: (usable: boolean) => void;
-    onPendingReconciledReturnToFieldSetup: () => void;
+    onPendingReconciledReturnToFieldSetup: (
+      expected: PendingTrialReturnSnapshot,
+    ) => void;
     stopButtonRef?: React.Ref<HTMLButtonElement>;
   }) => (
     <div>
@@ -62,7 +67,15 @@ vi.mock("./ProductionTrialStep", () => ({
       <button type="button" onClick={() => onUsabilityChange(false)}>
         mark trial unusable
       </button>
-      <button type="button" onClick={onPendingReconciledReturnToFieldSetup}>
+      <button
+        type="button"
+        onClick={() =>
+          onPendingReconciledReturnToFieldSetup({
+            trial: trial!,
+            pending_submission: trial!.pending_submission!,
+          })
+        }
+      >
         mark pending reconciled and return
       </button>
     </div>
@@ -737,8 +750,13 @@ describe("ProductionWorkspace", () => {
   });
 
   it("uses the existing invalidation confirmation before returning a reconciled pending trial to Step 2", async () => {
+    const draft = draftAtPendingTrial();
+    const expected = {
+      trial: draft.trial!,
+      pending_submission: draft.trial!.pending_submission!,
+    };
     const onInvalidate = vi.fn(() => true);
-    const { user } = renderWorkspace(draftAtPendingTrial(), { onInvalidate });
+    const { user } = renderWorkspace(draft, { onInvalidate });
 
     await user.click(
       screen.getByRole("button", {
@@ -753,12 +771,46 @@ describe("ProductionWorkspace", () => {
     expect(onInvalidate).not.toHaveBeenCalled();
 
     await user.click(
+      screen.getByRole("button", { name: "Keep current evidence" }),
+    );
+    expect(onInvalidate).not.toHaveBeenCalled();
+    expect(screen.getByText("interactive trial")).toBeVisible();
+
+    await user.click(
+      screen.getByRole("button", {
+        name: "mark pending reconciled and return",
+      }),
+    );
+
+    await user.click(
       screen.getByRole("button", { name: "Invalidate and edit" }),
     );
-    expect(onInvalidate).toHaveBeenCalledWith("calibration");
+    expect(onInvalidate).toHaveBeenCalledWith("calibration", expected);
     expect(
       screen.getByRole("heading", { name: "Field calibration" }),
     ).toBeVisible();
+  });
+
+  it("keeps the invalidation dialog open when the pending snapshot is stale", async () => {
+    const onInvalidate = vi.fn(() => false);
+    const { user } = renderWorkspace(draftAtPendingTrial(), { onInvalidate });
+
+    await user.click(
+      screen.getByRole("button", {
+        name: "mark pending reconciled and return",
+      }),
+    );
+    await user.click(
+      screen.getByRole("button", { name: "Invalidate and edit" }),
+    );
+
+    expect(onInvalidate).toHaveBeenCalledOnce();
+    expect(
+      screen.getByRole("alertdialog", {
+        name: "Edit locked upstream inputs?",
+      }),
+    ).toBeVisible();
+    expect(screen.getByText("interactive trial")).toBeVisible();
   });
 
   it("returns focus to the source selector after cancelling or confirming source invalidation", async () => {

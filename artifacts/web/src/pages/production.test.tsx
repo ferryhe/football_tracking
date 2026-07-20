@@ -2,6 +2,7 @@ import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+import type { PendingTrialReturnSnapshot } from "@/components/production/ProductionTrialStep";
 import { LanguageProvider, useLanguage } from "@/contexts/LanguageContext";
 import {
   createSafeBrowserStorage,
@@ -36,6 +37,9 @@ const trialStepCapture = vi.hoisted(() => ({
       trial: ReturnType<typeof createProductionTrialState>,
       expected: ReturnType<typeof createProductionTrialState> | null,
     ) => boolean;
+    onPendingReconciledReturnToFieldSetup: (
+      expected: PendingTrialReturnSnapshot,
+    ) => void;
     stopButtonRef?: React.Ref<HTMLButtonElement>;
   },
 }));
@@ -86,6 +90,9 @@ vi.mock("@/components/production/ProductionTrialStep", () => ({
       trial: ReturnType<typeof createProductionTrialState>,
       expected: ReturnType<typeof createProductionTrialState> | null,
     ) => boolean;
+    onPendingReconciledReturnToFieldSetup: (
+      expected: PendingTrialReturnSnapshot,
+    ) => void;
     stopButtonRef?: React.Ref<HTMLButtonElement>;
   }) => {
     trialStepCapture.props = props;
@@ -316,6 +323,99 @@ describe("ProductionPage", () => {
       localStorage.getItem(PRODUCTION_DRAFT_STORAGE_KEY) ?? "null",
     );
     expect(persisted.trial.settings.start_frame).toBe(0);
+  });
+
+  it("preserves an orphan pending trial on cancel and atomically rotates its workflow on confirm", async () => {
+    const pending = await draftWithUnsettledTrial("pending");
+    const expected = {
+      trial: pending.trial!,
+      pending_submission: pending.trial!.pending_submission!,
+    };
+    saveProductionDraft(localStorage, pending);
+    const view = renderPage();
+
+    act(() => {
+      trialStepCapture.props!.onPendingReconciledReturnToFieldSetup(expected);
+    });
+    expect(
+      screen.getByRole("alertdialog", {
+        name: "Edit locked upstream inputs?",
+      }),
+    ).toBeVisible();
+    await view.user.click(
+      screen.getByRole("button", { name: "Keep current evidence" }),
+    );
+
+    let persisted = JSON.parse(
+      localStorage.getItem(PRODUCTION_DRAFT_STORAGE_KEY) ?? "null",
+    );
+    expect(persisted.workflow_id).toBe(pending.workflow_id);
+    expect(persisted.trial.pending_submission).toEqual(
+      expected.pending_submission,
+    );
+
+    act(() => {
+      trialStepCapture.props!.onPendingReconciledReturnToFieldSetup(expected);
+    });
+    await view.user.click(
+      screen.getByRole("button", { name: "Invalidate and edit" }),
+    );
+
+    persisted = JSON.parse(
+      localStorage.getItem(PRODUCTION_DRAFT_STORAGE_KEY) ?? "null",
+    );
+    expect(persisted.workflow_id).not.toBe(pending.workflow_id);
+    expect(persisted.source).toEqual(source);
+    expect(persisted.calibration).toBeNull();
+    expect(persisted.trial).toBeNull();
+    expect(persisted.pending_config_confirmation).toBeNull();
+    expect(persisted.confirmed_config).toBeNull();
+    expect(persisted.full_run).toBeNull();
+    expect(persisted.verified_product).toBeNull();
+  });
+
+  it("refuses a stale pending-return snapshot without closing the dialog", async () => {
+    const pending = await draftWithUnsettledTrial("pending");
+    const expected = {
+      trial: pending.trial!,
+      pending_submission: pending.trial!.pending_submission!,
+    };
+    saveProductionDraft(localStorage, pending);
+    const view = renderPage();
+
+    act(() => {
+      trialStepCapture.props!.onPendingReconciledReturnToFieldSetup(expected);
+    });
+    const reconciled = appendProductionTrialAttempt(pending.trial!, {
+      run: {
+        run_id: `production_trial_${expected.pending_submission.output_id}`,
+        status: "completed",
+      },
+      pending: expected.pending_submission,
+      observed_at: "2026-07-14T12:06:00Z",
+    });
+    act(() => {
+      expect(
+        trialStepCapture.props!.onTrialChange(reconciled, pending.trial),
+      ).toBe(true);
+    });
+
+    await view.user.click(
+      screen.getByRole("button", { name: "Invalidate and edit" }),
+    );
+
+    expect(
+      screen.getByRole("alertdialog", {
+        name: "Edit locked upstream inputs?",
+      }),
+    ).toBeVisible();
+    const persisted = JSON.parse(
+      localStorage.getItem(PRODUCTION_DRAFT_STORAGE_KEY) ?? "null",
+    );
+    expect(persisted.workflow_id).toBe(pending.workflow_id);
+    expect(persisted.calibration).toEqual(pending.calibration);
+    expect(persisted.trial.pending_submission).toBeNull();
+    expect(persisted.trial.attempts).toHaveLength(1);
   });
   it("renders loading, error, and empty catalog states", async () => {
     queryResult = { ...queryResult, data: undefined, isLoading: true };
