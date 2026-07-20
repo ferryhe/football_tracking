@@ -1144,7 +1144,7 @@ describe("ProductionTrialStep mutation safety", () => {
     );
   });
 
-  it("invalidates a deferred start after unmount and lets the remounted pending trial retry once", async () => {
+  it("invalidates a deferred start after unmount and preserves the remounted zero-attempt pending trial", async () => {
     let releaseOldHealth!: (value: {
       data: { status: string; active_run_id: null };
     }) => void;
@@ -1180,20 +1180,22 @@ describe("ProductionTrialStep mutation safety", () => {
     const retry = await screen.findByRole("button", {
       name: "Retry as a new trial",
     });
-    await newView.user.dblClick(retry);
-    await waitFor(() => expect(createMutate).toHaveBeenCalledOnce());
+    await newView.user.click(retry);
+    expect(
+      await screen.findByText(
+        "A safe parent trial could not be verified, so no retry was submitted. Use “Reconcile and return to field setup” to rotate the workflow before retrying.",
+      ),
+    ).toBeVisible();
+    expect(createMutate).not.toHaveBeenCalled();
+    expect(newOnTrialChange).not.toHaveBeenCalled();
 
     await act(async () => {
       releaseOldHealth({ data: { status: "ok", active_run_id: null } });
       await Promise.resolve();
     });
-    expect(createMutate).toHaveBeenCalledOnce();
+    expect(createMutate).not.toHaveBeenCalled();
     expect(oldOnTrialChange).toHaveBeenCalledOnce();
-    expect(
-      newOnTrialChange.mock.calls.filter(
-        ([state]) => (state as ProductionTrialState).pending_submission,
-      ),
-    ).toHaveLength(1);
+    expect(newOnTrialChange).not.toHaveBeenCalled();
   });
 
   it("keeps the pending snapshot while the create response is slow", async () => {
@@ -1410,7 +1412,7 @@ describe("ProductionTrialStep mutation safety", () => {
     expect(persisted.pending_submission).not.toBeNull();
   });
 
-  it("retries an uncertain pending result only after an explicit click and uses a fresh submission", async () => {
+  it("keeps an uncertain zero-attempt pending result when only a nonmatching production trial exists", async () => {
     const { submission } = await trialWithAttempt("queued");
     const pending = setPendingProductionTrial(
       createProductionTrialState({
@@ -1423,21 +1425,125 @@ describe("ProductionTrialStep mutation safety", () => {
       }),
       submission.pending,
     );
-    createMutate.mockResolvedValue(run("queued"));
+    runsRefetch.mockResolvedValueOnce({
+      data: [
+        run("completed", {
+          run_id: "production_trial_nonmatching-output",
+        }),
+      ],
+      isError: false,
+    });
     const { user, onTrialChange } = renderStep({ trial: pending });
     expect(createMutate).not.toHaveBeenCalled();
     const retry = screen.getByRole("button", {
       name: "Retry as a new trial",
     });
     await waitFor(() => expect(retry).toBeEnabled());
-    await user.dblClick(retry);
-    await waitFor(() => expect(createMutate).toHaveBeenCalledOnce());
-    const pendingWrites = onTrialChange.mock.calls
-      .map(([state]) => state as ProductionTrialState)
-      .filter((state) => state.pending_submission);
-    expect(pendingWrites.at(-1)?.pending_submission?.submission_id).not.toBe(
+    await user.click(retry);
+
+    expect(
+      await screen.findByText(
+        "A safe parent trial could not be verified, so no retry was submitted. Use “Reconcile and return to field setup” to rotate the workflow before retrying.",
+      ),
+    ).toBeVisible();
+    expect(pending.pending_submission).toEqual(submission.pending);
+    expect(pending.pending_submission?.submission_id).toBe(
       submission.pending.submission_id,
     );
+    expect(pending.pending_submission?.request_sha256).toBe(
+      submission.pending.request_sha256,
+    );
+    expect(onTrialChange).not.toHaveBeenCalled();
+    expect(createMutate).not.toHaveBeenCalled();
+  });
+
+  it("clears a stale active-run link before a zero-attempt retry fails closed", async () => {
+    const { state } = await pendingTrial();
+    const nonmatching = run("completed", {
+      run_id: "production_trial_nonmatching-output",
+    });
+    healthRefetch
+      .mockResolvedValueOnce({
+        data: {
+          status: "ok",
+          active_run_id: "occupying-run",
+          config_count: 1,
+          run_count: 1,
+        },
+      })
+      .mockResolvedValueOnce({
+        data: {
+          status: "ok",
+          active_run_id: null,
+          config_count: 1,
+          run_count: 1,
+        },
+      });
+    runsRefetch.mockResolvedValue({
+      data: [nonmatching],
+      isError: false,
+    });
+    const view = renderStep({ trial: state });
+    const retry = screen.getByRole("button", {
+      name: "Retry as a new trial",
+    });
+
+    await view.user.click(retry);
+    expect(
+      await screen.findByRole("link", { name: "View occupying run" }),
+    ).toHaveAttribute("href", "/history?run=occupying-run");
+
+    await view.user.click(retry);
+    expect(
+      await screen.findByText(
+        "A safe parent trial could not be verified, so no retry was submitted. Use “Reconcile and return to field setup” to rotate the workflow before retrying.",
+      ),
+    ).toBeVisible();
+    expect(
+      screen.queryByRole("link", { name: "View occupying run" }),
+    ).not.toBeInTheDocument();
+    expect(view.onTrialChange).not.toHaveBeenCalled();
+    expect(createMutate).not.toHaveBeenCalled();
+  });
+
+  it("retries once from a locally known terminal modern attempt with a fresh child identity", async () => {
+    const { state, submission } =
+      await pendingTrialAfterTerminalAttempt("completed");
+    const latestAttempt = state.attempts.at(-1)!;
+    const authoritative = run("completed", {
+      run_id: latestAttempt.run_id,
+      config_name: latestAttempt.request.config_name,
+      config_sha256: "b".repeat(64),
+    });
+    runData = authoritative;
+    runsData = [authoritative];
+    runsRefetch.mockResolvedValueOnce({
+      data: [authoritative],
+      isError: false,
+    });
+    createMutate.mockResolvedValue(
+      run("queued", {
+        run_id: "production_trial_22222222-2222-4222-8222-222222222222",
+      }),
+    );
+    const view = renderStep({ trial: state });
+
+    await view.user.click(
+      screen.getByRole("button", { name: "Retry as a new trial" }),
+    );
+    await waitFor(() => expect(createMutate).toHaveBeenCalledOnce());
+
+    const request = createMutate.mock.calls[0][0].data;
+    const identity = JSON.parse(request.notes ?? "{}");
+    expect(request.parent_run_id).toBe(latestAttempt.run_id);
+    expect(identity.generation).toBe(latestAttempt.generation + 1);
+    expect(identity.submission_id).toBe("11111111-1111-4111-8111-111111111111");
+    expect(identity.output_id).toBe("22222222-2222-4222-8222-222222222222");
+    expect(identity.submission_id).not.toBe(submission.pending.submission_id);
+    expect(identity.output_id).not.toBe(submission.pending.output_id);
+    expect(
+      screen.queryByText(/safe parent trial could not be verified/i),
+    ).not.toBeInTheDocument();
   });
 
   it("reconciles an exact pending run before retry and sends no duplicate POST", async () => {
@@ -1470,7 +1576,7 @@ describe("ProductionTrialStep mutation safety", () => {
     expect(createMutate).not.toHaveBeenCalled();
   });
 
-  it("clears a stale pending trial by CAS and returns only after the cleared state is rendered", async () => {
+  it("preserves an orphan pending trial and returns its exact snapshot without posting", async () => {
     const { state } = await pendingTrial();
     const view = renderStep({ trial: state });
 
@@ -1479,17 +1585,14 @@ describe("ProductionTrialStep mutation safety", () => {
         name: "Reconcile and return to field setup",
       }),
     );
-    await waitFor(() => expect(view.onTrialChange).toHaveBeenCalledOnce());
-    const [cleared, expected] = view.onTrialChange.mock.calls[0];
-    expect(cleared.pending_submission).toBeNull();
-    expect(expected).toEqual(state);
-    expect(view.onPendingReconciledReturnToFieldSetup).not.toHaveBeenCalled();
-    expect(createMutate).not.toHaveBeenCalled();
-
-    view.rerenderStep({ trial: cleared });
     await waitFor(() =>
       expect(view.onPendingReconciledReturnToFieldSetup).toHaveBeenCalledOnce(),
     );
+    expect(view.onPendingReconciledReturnToFieldSetup).toHaveBeenCalledWith({
+      trial: state,
+      pending_submission: state.pending_submission,
+    });
+    expect(view.onTrialChange).not.toHaveBeenCalled();
     expect(createMutate).not.toHaveBeenCalled();
   });
 

@@ -134,9 +134,18 @@ interface ProductionTrialStepProps {
     expectedPending: ProductionPendingConfigConfirmation,
   ) => boolean;
   onReturnToFieldSetup: () => void;
-  onPendingReconciledReturnToFieldSetup: () => void;
+  onPendingReconciledReturnToFieldSetup: (
+    expected: PendingTrialReturnSnapshot,
+  ) => void;
   onUsabilityChange: (usable: boolean) => void;
   stopButtonRef?: Ref<HTMLButtonElement>;
+}
+
+export interface PendingTrialReturnSnapshot {
+  readonly trial: ProductionTrialState;
+  readonly pending_submission: NonNullable<
+    ProductionTrialState["pending_submission"]
+  >;
 }
 
 function errorStatus(error: unknown): number | null {
@@ -289,8 +298,6 @@ export function ProductionTrialStep({
   const [startRequestInFlight, setStartRequestInFlight] = useState(false);
   const [retryInFlight, setRetryInFlight] = useState(false);
   const [returnReconcileInFlight, setReturnReconcileInFlight] = useState(false);
-  const [returnAfterPendingClear, setReturnAfterPendingClear] =
-    useState<ProductionTrialState | null>(null);
   const startInFlightRef = useRef(false);
   const retryInFlightRef = useRef(false);
   const returnReconcileInFlightRef = useRef(false);
@@ -329,17 +336,6 @@ export function ProductionTrialStep({
       }
     };
   }, []);
-
-  useEffect(() => {
-    if (
-      !returnAfterPendingClear ||
-      !trial ||
-      !sameTrial(returnAfterPendingClear, trial)
-    )
-      return;
-    setReturnAfterPendingClear(null);
-    onPendingReconciledReturnToFieldSetup();
-  }, [onPendingReconciledReturnToFieldSetup, returnAfterPendingClear, trial]);
 
   function currentOperationEpoch(): number | null {
     const current = operationEpochRef.current;
@@ -1249,6 +1245,7 @@ export function ProductionTrialStep({
     setRetryInFlight(true);
     try {
       setMessage(null);
+      setConflictRunId(null);
       const expectedContext = operationContextRef.current;
       const [healthResult, runsResult] = await Promise.all([
         health.refetch(),
@@ -1289,6 +1286,10 @@ export function ProductionTrialStep({
         setMessage(
           t.production.trialActiveConflict(healthResult.data.active_run_id),
         );
+        return;
+      }
+      if (current.attempts.length === 0) {
+        setMessage(t.production.trialRetryRequiresWorkflowRotation);
         return;
       }
       const cleared = { ...current, pending_submission: null };
@@ -1391,15 +1392,12 @@ export function ProductionTrialStep({
         return;
       }
 
-      const cleared: ProductionTrialState = {
-        ...current,
-        pending_submission: null,
-      };
-      if (!onTrialChange(cleared, current)) return;
       if (!operationEpochIsActive(operationEpoch)) return;
-      latestTrialRef.current = cleared;
       startInFlightRef.current = false;
-      setReturnAfterPendingClear(cleared);
+      onPendingReconciledReturnToFieldSetup({
+        trial: current,
+        pending_submission: current.pending_submission,
+      });
     } finally {
       if (operationEpochIsActive(operationEpoch)) {
         returnReconcileInFlightRef.current = false;

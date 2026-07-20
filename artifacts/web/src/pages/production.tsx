@@ -3,6 +3,7 @@ import { AlertTriangle, RefreshCw } from "lucide-react";
 import { Link, useLocation, useSearch } from "wouter";
 import { useListInputVideos } from "@workspace/api-client-react";
 
+import type { PendingTrialReturnSnapshot } from "@/components/production/ProductionTrialStep";
 import { ProductionWorkspace } from "@/components/production/ProductionWorkspace";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import {
@@ -249,7 +250,25 @@ export function ProductionPageContent({
     );
   }
 
-  function handleInvalidate(from: "calibration"): boolean {
+  function handleInvalidate(
+    from: "calibration",
+    expectedPendingTrial?: PendingTrialReturnSnapshot,
+  ): boolean {
+    if (expectedPendingTrial) {
+      if (
+        !sameSnapshot(
+          expectedPendingTrial.trial.pending_submission,
+          expectedPendingTrial.pending_submission,
+        ) ||
+        !sameSnapshot(draftRef.current.trial, expectedPendingTrial.trial) ||
+        !sameSnapshot(
+          draftRef.current.trial?.pending_submission,
+          expectedPendingTrial.pending_submission,
+        )
+      )
+        return false;
+      return commitDraft((current) => invalidateProductionDraft(current, from));
+    }
     if (blockActiveWorkDiscard()) return false;
     return commitDraft((current) => invalidateProductionDraft(current, from));
   }

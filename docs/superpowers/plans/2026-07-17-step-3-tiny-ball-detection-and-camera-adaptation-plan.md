@@ -1,6 +1,6 @@
 # Step 3 Tiny-Ball Detection, Tuning, and Camera-Adaptation Plan
 
-**Status:** Execution active · PR-T3, PR-T3R, PR-T3E, and bounded repair PR-T3F merged · PR-T4 held at the feasibility gate
+**Status:** Execution active · bounded repair PR-T3G in progress · PR-T4 held at the feasibility gate
 
 **Date:** 2026-07-17
 
@@ -12,9 +12,9 @@
 
 - Program status: active
 - Delivery order: `PR-T1 → PR-T2 → PR-T3 → PR-T4 → PR-T5`
-- Current PR: none · PR-T4 not started and not authorized
-- Current branch: `main` (active product baseline) · no PR-T4 implementation branch exists; administrative closeout branches do not advance the product sequence
-- Current phase: PR-T3F merged as GitHub PR #120 / `7caa2e9e0f81f9272b30c02e25942cc6486c7f26`, and its local and remote product branches were removed while the user's dirty baseline was preserved · the repaired Step 3 continuation is available, but the next activity remains a new bounded trial and development-evidence batch, not PR-T4
+- Current PR: PR-T3G · pending-submission workflow-root rotation repair · PR-T4 not started and not authorized
+- Current branch: `codex/tiny-ball-pending-workflow-rotation`
+- Current phase: the first post-PR-T3F operator retry exposed HTTP 400 `production_trial existing workflow requires parent_run_id`. The backend guard is correct: a new calibration cannot silently reuse a workflow that already owns a modern trial root. PR-T3G will keep the exact pending identity intact until the existing upstream invalidation confirmation and then CAS-bind clearing plus workflow rotation in one commit; it will not infer a parent, relax backend lineage, post during reconciliation, or alter PR-T4 authorization.
 - Managed workflow authorized: 2026-07-17
 - Heartbeat: active · `tiny-ball-step3-managed-pr-heartbeat` · every 15 minutes
 - Merge rule: implementation, specification review, quality review, and local checks must finish before the final push; CI and the complete 10-minute remote-feedback window may then run concurrently, but both must finish successfully before merge; any material corrective push restarts that window
@@ -40,6 +40,7 @@
 - Latest PR-T3E CI checkpoint: exact head `397ac07a294db6a2a02aeda53d8affd10f0e2333` passed Python, and the complete 2026-07-19T19:22:23Z–19:32:23Z remote-feedback window found zero issue comments, zero inline comments, zero review threads, and a Copilot 8/8 review with no comments. Initial and failed-job-only Node attempts each passed every PR-T3E suite but stopped at the same pre-existing `GroupedProductionHistory` assertion because the element appeared while its mocked async re-verification still showed the pending state. The minimal test-only correction waits for the intended lineage-mismatch terminal text; the history suite passes 28/28 and the full frontend regression passes 1,245/1,245. Independent correction reviews are COMPLIANT and APPROVE with P0=0/P1=0/P2=0; replacement gates are recorded in the merge checkpoint.
 - Latest PR-T3E merge checkpoint: exact final head `10156a4c6e5d7dd9fc13c902764fff172bcd48d6` passed GitHub Actions run `29701114752`, with Node completing at 2026-07-19T19:47:49Z and Python at 19:50:33Z. The complete replacement feedback window 19:42:00Z–19:52:00Z and final 19:52:23Z audit found zero issue comments, zero inline comments, zero review threads, and no new actionable review; merge state was CLEAN. PR #118 merged at 19:53:08Z as `a55c2e5bfb38a72035c925249356ebc1a6720e87`; local and remote product branches were removed while the user's dirty baseline was preserved.
 - Latest PR-T3F merge checkpoint: exact final head `a1b17b9c180c50a766151a8f640ddedbd5ad429e` passed GitHub Actions run `29722962025`; Node completed successfully at 2026-07-20T06:59:55Z and Python at 07:06:59Z. The complete 2026-07-20T06:54:04Z–07:04:04Z remote-feedback window and final 07:08:00Z controller audit found zero issue comments, zero inline comments, zero review threads, and a Copilot 8/8 review with no comments; merge state was CLEAN. PR #120 merged at 07:08:22Z as `7caa2e9e0f81f9272b30c02e25942cc6486c7f26`; local and remote product branches were removed while the user's dirty baseline was preserved.
+- Latest PR-T3G local checkpoint: the initial implementation made pending reconciliation and confirmed upstream invalidation atomic, but independent specification review found one valid P1: the separate zero-attempt Retry path could still create another generation-1 root. That path now performs exact reconciliation first and otherwise preserves pending with zero POST plus bilingual return guidance; known terminal parent retries remain explicit children. Independent quality review then found two valid P2s: a stale active-run link and missing positive child-retry coverage. Both are fixed. Final specification review is COMPLIANT and final quality review is APPROVE with P0=0/P1=0/P2=0. Focused suites pass 198/198, full Web Vitest passes 1,264/1,264 with S/B/F/L 93.20/90.69/97.48/94.26, both TypeScript checks pass, production build and cutover verification pass, scoped Prettier passes, and `git diff --check` passes.
 - Latest cross-process and Windows hardening checkpoint: native registry/execution/job/owner leases have stable identity guards, continuous owner/execution/job lifetime fencing, monotonic record-generation CAS, atomic guarded publish/delete, bounded stale-owner cleanup, and exactly-once crash recovery. Windows quarantine deletion is pinned before every mutation with parent/root/recursive no-share-delete handles; both pre-pin replacement and post-pin rename attacks preserve external trees. The strict review-proxy discovery set passes 132 tests with one Windows symlink-permission skip under `-X dev -W error::ResourceWarning`, with no dispatcher traceback or leaked handle. An import probe proves `api.app` creates no service/thread/lease before ASGI lifespan startup; shutdown closes and removes the service. Independent backend security and final whole-diff reviews are APPROVE with P0=0, P1=0, and P2=0.
 - Blockers: the real-video result is intentionally not a PR-T3 failure: PR-T3 correctly produced and preserved an `insufficient_evidence` decision. It remains a fail-closed program gate for PR-T4, which must not start training or 100–300-box expansion until a new disjoint frozen check satisfies support/interval rules and explicitly authorizes expansion. The next activity is evidence collection and feasibility re-evaluation, not PR-T4 implementation.
 
@@ -51,6 +52,7 @@
 | PR-T3R | `codex/tiny-ball-startup-budget` | completed · independent spec COMPLIANT · independent quality APPROVE · Node/Python CI passed · branches cleaned · PR-T4 remains unauthorized | https://github.com/ferryhe/football_tracking/pull/116 | complete 2026-07-19T18:10:16Z–18:20:16Z · final fetch 18:23:28Z · zero actionable feedback | `89e1912d` · 2026-07-19T18:24:03Z |
 | PR-T3E | `codex/tiny-ball-evidence-continuation-ux` | completed · replacement Node/Python CI passed · spec COMPLIANT · quality/security APPROVE · branches cleaned · PR-T4 remains unauthorized | https://github.com/ferryhe/football_tracking/pull/118 | complete 2026-07-19T19:42:00Z–19:52:00Z · final fetch 19:52:23Z · zero actionable feedback | `a55c2e5b` · 2026-07-19T19:53:08Z |
 | PR-T3F | `codex/tiny-ball-pending-reconciliation-return` | completed · Node/Python CI passed · spec COMPLIANT · quality APPROVE · branches cleaned · PR-T4 remains unauthorized | https://github.com/ferryhe/football_tracking/pull/120 | complete 2026-07-20T06:54:04Z–07:04:04Z · final audit 07:08:00Z · zero actionable feedback | `7caa2e9e` · 2026-07-20T07:08:22Z |
+| PR-T3G | `codex/tiny-ball-pending-workflow-rotation` | local gates passed · spec COMPLIANT · quality APPROVE · publication pending · PR-T4 remains unauthorized | pending | not started | pending |
 | PR-T4 | pending | not started | pending | not started | pending |
 | PR-T5 | pending | not started | pending | not started | pending |
 
@@ -682,6 +684,24 @@ Each branch starts only after its predecessor is merged and from that latest cle
 - Stale pending success, exact-run recovery, unhealthy/list-failure, conflicting-active-run, no-duplicate-POST, CAS/race, and existing queued/running behavior tests.
 - Focused component suites, application/test TypeScript checks, scoped formatting, production build, independent specification review, independent quality/security review, GitHub CI, and the complete managed remote-feedback window.
 - Local publication checkpoint: 98/98 focused/page tests and the full 1,259/1,259 frontend suite pass with S/B/F/L 93.20/90.69/97.48/94.26; both TypeScript checks, production build, cutover-bundle verification, scoped Prettier, and diff check pass. Independent reviews are COMPLIANT and APPROVE with P0=0/P1=0/P2=0. Read-only browser inspection confirms the protected controls and explicit recovery entry without invoking the destructive clear.
+
+### PR-T3G · Pending-Reconciliation Workflow-Root Rotation
+
+**Reason for the bounded repair**
+
+- A pending submission may be absent from the local attempt list while the backend already retains an older modern trial for the same workflow. PR-T3F safely clears only the missing exact pending identity, but the subsequent calibration invalidation currently decides workflow rotation from the already-cleared local state. That can reuse the occupied workflow ID and make the next generation-1 submission fail with HTTP 400.
+
+**Deliverables**
+
+- Keep the exact pending submission intact after authoritative no-run reconciliation and carry its immutable identity into the existing upstream invalidation confirmation; cancel/refresh therefore remains recoverable.
+- On confirmation, compare-and-swap the unchanged pending identity and atomically clear calibration/trial/config/full-run/product state while creating a new workflow ID. The old server run remains immutable history.
+- Keep ordinary calibration edits unchanged, keep cancellation/active-run and CAS protections fail-closed, and do not infer or synthesize a `parent_run_id`, relax the backend validator, auto-confirm destructive invalidation, or submit a replacement run.
+
+**Tests and gates**
+
+- Red-first tests must reproduce the empty-local-attempt/occupied-server-workflow boundary and prove that pending reconciliation preserves the pending snapshot while confirmed upstream invalidation rotates the workflow exactly once before the next trial root.
+- Assert canceling or refreshing leaves the pending snapshot intact, stale/racing identity cannot invalidate, ordinary no-lineage calibration editing preserves the existing workflow, and established local lineage still rotates through the existing path.
+- Run focused workspace/page/workflow tests, both frontend TypeScript checks, scoped formatting, production build/cutover verification, independent specification and quality reviews, GitHub CI, and a complete 10-minute remote-feedback window after every material push.
 
 ### PR-T4 · 100–300-Box Training and Source-Segment Evaluation
 
