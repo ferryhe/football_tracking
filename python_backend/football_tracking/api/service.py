@@ -956,7 +956,25 @@ class ApiService:
         source_path = self._detector_probe_source_path(parent)
         config_snapshot = self._detector_probe_config_snapshot(parent, note, source_path)
         base_config_sha256, base_config_path = self._detector_probe_base_config_binding(config_snapshot.raw)
-        tuning_patch_binding, tuning_patch_sha256 = self._detector_probe_tuning_binding(config_snapshot.raw)
+        resolved_effective_config = config_snapshot.raw
+        if _value_at_dotted_path(config_snapshot.raw, "metadata.production_tuning") is not _MISSING_VALUE:
+            try:
+                resolved_effective_config = _jsonable(
+                    load_config(
+                        config_snapshot.path,
+                        raw_config=config_snapshot.raw,
+                    )
+                )
+            except (OSError, TypeError, ValueError) as exc:
+                raise DetectorDevelopmentError(
+                    "invalid_parent_tuning_lineage",
+                    "The parent tuning lineage could not be resolved for canonical validation",
+                    status_code=409,
+                ) from exc
+        tuning_patch_binding, tuning_patch_sha256 = self._detector_probe_tuning_binding(
+            config_snapshot.raw,
+            base_config=resolved_effective_config,
+        )
         output_dir = self._detector_probe_output_dir(parent)
         contract_path = self._detector_probe_contract_path(output_dir)
         try:
@@ -3725,6 +3743,8 @@ class ApiService:
     @staticmethod
     def _detector_probe_tuning_binding(
         config: dict[str, Any],
+        *,
+        base_config: dict[str, Any],
     ) -> tuple[dict[str, Any], str]:
         tuning = _value_at_dotted_path(config, "metadata.production_tuning")
         if tuning is _MISSING_VALUE:
@@ -3745,7 +3765,7 @@ class ApiService:
         try:
             normalized = normalize_production_trial_config_patch(
                 {"metadata": {"production_tuning": deepcopy(tuning)}},
-                base_config=config,
+                base_config=base_config,
             )
         except ValueError as exc:
             raise DetectorDevelopmentError(

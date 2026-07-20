@@ -192,6 +192,19 @@ function getStringField(value: unknown, key: string): string | undefined {
   return trimmed === "" ? undefined : trimmed;
 }
 
+function getObjectField(
+  value: unknown,
+  key: string,
+): Record<string, unknown> | undefined {
+  if (!value || typeof value !== "object") return undefined;
+
+  const candidate = (value as Record<string, unknown>)[key];
+  if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) {
+    return undefined;
+  }
+  return candidate as Record<string, unknown>;
+}
+
 function truncate(text: string, maxLength = 300): string {
   return text.length > maxLength ? `${text.slice(0, maxLength - 1)}…` : text;
 }
@@ -206,6 +219,9 @@ function buildErrorMessage(response: Response, data: unknown): string {
 
   const title = getStringField(data, "title");
   const detail = getStringField(data, "detail");
+  const structuredDetail = getObjectField(data, "detail");
+  const detailCode = getStringField(structuredDetail, "code");
+  const detailMessage = getStringField(structuredDetail, "message");
   const message =
     getStringField(data, "message") ??
     getStringField(data, "error_description") ??
@@ -213,6 +229,11 @@ function buildErrorMessage(response: Response, data: unknown): string {
 
   if (title && detail) return `${prefix}: ${title} — ${detail}`;
   if (detail) return `${prefix}: ${detail}`;
+  if (detailCode && detailMessage) {
+    return `${prefix}: ${truncate(detailCode)} — ${truncate(detailMessage)}`;
+  }
+  if (detailCode) return `${prefix}: ${truncate(detailCode)}`;
+  if (detailMessage) return `${prefix}: ${truncate(detailMessage)}`;
   if (message) return `${prefix}: ${message}`;
   if (title) return `${prefix}: ${title}`;
 

@@ -1,6 +1,6 @@
 # Step 3 Tiny-Ball Detection, Tuning, and Camera-Adaptation Plan
 
-**Status:** Execution active · bounded repair PR-T3G complete · PR-T4 held at the feasibility gate
+**Status:** Execution active · bounded repair PR-T3H in progress · PR-T3I queued · PR-T4 held at the feasibility gate
 
 **Date:** 2026-07-17
 
@@ -11,10 +11,10 @@
 ## 0. Managed Execution Status
 
 - Program status: active
-- Delivery order: `PR-T1 → PR-T2 → PR-T3 → PR-T4 → PR-T5`
-- Current PR: none · PR-T3G complete · PR-T4 not started and not authorized
-- Current branch: `main` at `ed960a5fbc5d6cb96e43a08ec74b2e6c0421d35e` (active product baseline); the docs-only closeout branch does not advance the product sequence
-- Current phase: PR-T3G merged as GitHub PR #122. The product and status heads passed Node/Python CI, the complete 10-minute remote-feedback window, Copilot 9/9 review with no comments, and independent specification/quality review; product branches are cleaned and the user's dirty baseline remains preserved. The next activity is the operator recovery path and a new bounded trial, not PR-T4.
+- Delivery order: `PR-T1 → PR-T2 → PR-T3 → PR-T3H → PR-T3I → PR-T4 → PR-T5`
+- Current PR: PR-T3H · detector-probe sparse/resolved lineage compatibility and typed API errors
+- Current branch: `codex/tiny-ball-probe-lineage-compatibility` from `main` at `8d0fd8b93a18e1bb50fa2aac01ecf8717724f825`
+- Current phase: PR-T3H implementation, independent specification review, independent quality/security review, and local validation are complete. Publication, GitHub Node/Python CI, and the first complete 10-minute remote-feedback window are next. PR-T3I remains queued; PR-T4 remains unauthorized.
 - Managed workflow authorized: 2026-07-17
 - Heartbeat: active · `tiny-ball-step3-managed-pr-heartbeat` · every 15 minutes
 - Merge rule: implementation, specification review, quality review, and local checks must finish before the final push; CI and the complete 10-minute remote-feedback window may then run concurrently, but both must finish successfully before merge; any material corrective push restarts that window
@@ -43,6 +43,9 @@
 - Latest PR-T3G local checkpoint: the initial implementation made pending reconciliation and confirmed upstream invalidation atomic, but independent specification review found one valid P1: the separate zero-attempt Retry path could still create another generation-1 root. That path now performs exact reconciliation first and otherwise preserves pending with zero POST plus bilingual return guidance; known terminal parent retries remain explicit children. Independent quality review then found two valid P2s: a stale active-run link and missing positive child-retry coverage. Both are fixed. Final specification review is COMPLIANT and final quality review is APPROVE with P0=0/P1=0/P2=0. Focused suites pass 198/198, full Web Vitest passes 1,264/1,264 with S/B/F/L 93.20/90.69/97.48/94.26, both TypeScript checks pass, production build and cutover verification pass, scoped Prettier passes, and `git diff --check` passes.
 - Latest PR-T3G publication checkpoint: product head `84f5a93d6a224dd667717089dce7a673fd1c3ad2` was published as GitHub PR #122. Initial mergeability was MERGEABLE; Node and Python CI started at 2026-07-20T13:52:30Z. The later merge checkpoint records the completed remote-feedback audit and merge.
 - Latest PR-T3G merge checkpoint: exact final head `4544a7ad4fe5fe620ffd6a3f8edc24ae3ed95927` completed the full 2026-07-20T13:53:22Z–14:03:22Z remote-feedback window. Node passed at 13:59:32Z; Python passed at 14:05:12Z; the final 14:05:30Z audit found zero issue comments, zero inline review comments, zero review threads, and Copilot reviewed 9/9 files with no comments. PR #122 merged CLEAN at 14:06:18Z as `ed960a5fbc5d6cb96e43a08ec74b2e6c0421d35e`; local and remote product branches were removed while the user's dirty baseline was preserved.
+- Latest PR-T3H diagnostic checkpoint: a read-only preflight against parent `production_trial_52ab3887-7aed-46f8-8031-0eda863050cc` reproduced exact code `invalid_parent_tuning_lineage`: its valid sparse generated YAML omits unchanged `selection.priors.*` leaves while immutable tuning metadata records the complete canonical values. Trial creation resolves defaults before validation, but probe creation supplied the sparse raw object as the resolved base. No detector-probe job exists for this parent, so the failure occurred before coordinator publication and the browser's durable exact-create intent remains safe to retry after repair.
+- Latest PR-T3H local checkpoint: the probe path now resolves only the already hash-verified raw snapshot for canonical value validation while retaining raw bytes, digest, metadata, source/contract authority, final snapshot re-verification, and coordinator idempotency unchanged. Nested FastAPI errors expose only bounded `detail.code/message`; exact pending create remains durable. Detector API passes 16 tests plus 27 subtests; the controller passes 40/40; full Web Vitest passes 1,265/1,265 with S/B/F/L 93.20/90.69/97.48/94.26; API-client and both Web TypeScript checks, Ruff lint/format, scoped Prettier, production build/cutover verification, and diff check pass. Independent specification review is COMPLIANT and quality/security review is APPROVE with P0=0/P1=0/P2=0.
+- Latest PR-T3I product checkpoint: the same 300-frame result is structurally readable but not acceptable: 10,354 raw objects, zero class-mapped candidates, zero tracklets, and 300 lost frames produce authoritative V2 `retune_required / all_candidates_class_rejected`. The displayed legacy `stable` evaluates only gaps between existing tracklets and is non-applicable with zero tracklets; “evidence ready” currently means only that diagnostic artifacts are readable. The existing ready-probe annotation API already supports an empty candidate list and manual human boxes, so no unsafe parent-trial annotation bypass is authorized.
 - Latest cross-process and Windows hardening checkpoint: native registry/execution/job/owner leases have stable identity guards, continuous owner/execution/job lifetime fencing, monotonic record-generation CAS, atomic guarded publish/delete, bounded stale-owner cleanup, and exactly-once crash recovery. Windows quarantine deletion is pinned before every mutation with parent/root/recursive no-share-delete handles; both pre-pin replacement and post-pin rename attacks preserve external trees. The strict review-proxy discovery set passes 132 tests with one Windows symlink-permission skip under `-X dev -W error::ResourceWarning`, with no dispatcher traceback or leaked handle. An import probe proves `api.app` creates no service/thread/lease before ASGI lifespan startup; shutdown closes and removes the service. Independent backend security and final whole-diff reviews are APPROVE with P0=0, P1=0, and P2=0.
 - Blockers: the real-video result is intentionally not a PR-T3 failure: PR-T3 correctly produced and preserved an `insufficient_evidence` decision. It remains a fail-closed program gate for PR-T4, which must not start training or 100–300-box expansion until a new disjoint frozen check satisfies support/interval rules and explicitly authorizes expansion. The next activity is evidence collection and feasibility re-evaluation, not PR-T4 implementation.
 
@@ -55,6 +58,8 @@
 | PR-T3E | `codex/tiny-ball-evidence-continuation-ux` | completed · replacement Node/Python CI passed · spec COMPLIANT · quality/security APPROVE · branches cleaned · PR-T4 remains unauthorized | https://github.com/ferryhe/football_tracking/pull/118 | complete 2026-07-19T19:42:00Z–19:52:00Z · final fetch 19:52:23Z · zero actionable feedback | `a55c2e5b` · 2026-07-19T19:53:08Z |
 | PR-T3F | `codex/tiny-ball-pending-reconciliation-return` | completed · Node/Python CI passed · spec COMPLIANT · quality APPROVE · branches cleaned · PR-T4 remains unauthorized | https://github.com/ferryhe/football_tracking/pull/120 | complete 2026-07-20T06:54:04Z–07:04:04Z · final audit 07:08:00Z · zero actionable feedback | `7caa2e9e` · 2026-07-20T07:08:22Z |
 | PR-T3G | `codex/tiny-ball-pending-workflow-rotation` | completed · Node/Python CI passed · spec COMPLIANT · quality APPROVE · branches cleaned · PR-T4 remains unauthorized | https://github.com/ferryhe/football_tracking/pull/122 | complete 2026-07-20T13:53:22Z–14:03:22Z · final audit 14:05:30Z · zero actionable feedback | `ed960a5f` · 2026-07-20T14:06:18Z |
+| PR-T3H | `codex/tiny-ball-probe-lineage-compatibility` | implementation complete · spec COMPLIANT · quality/security APPROVE · local gates passed · publication pending · PR-T4 remains unauthorized | pending | not started | pending |
+| PR-T3I | pending | queued after PR-T3H · Step 3 operator UX and truthful gate semantics · PR-T4 remains unauthorized | pending | not started | pending |
 | PR-T4 | pending | not started | pending | not started | pending |
 | PR-T5 | pending | not started | pending | not started | pending |
 
@@ -704,6 +709,46 @@ Each branch starts only after its predecessor is merged and from that latest cle
 - Red-first tests must reproduce the empty-local-attempt/occupied-server-workflow boundary and prove that pending reconciliation preserves the pending snapshot while confirmed upstream invalidation rotates the workflow exactly once before the next trial root.
 - Assert canceling or refreshing leaves the pending snapshot intact, stale/racing identity cannot invalidate, ordinary no-lineage calibration editing preserves the existing workflow, and established local lineage still rotates through the existing path.
 - Run focused workspace/page/workflow tests, both frontend TypeScript checks, scoped formatting, production build/cutover verification, independent specification and quality reviews, GitHub CI, and a complete 10-minute remote-feedback window after every material push.
+
+### PR-T3H · Detector-Probe Sparse/Resolved Lineage Compatibility
+
+**Reason for the bounded repair**
+
+- A generated trial configuration intentionally stores unchanged defaults sparsely while its immutable production-tuning metadata records the complete canonical control set. Trial creation validates this against a resolved configuration, but detector-probe creation currently validates the sparse raw object as the resolved base and rejects the valid parent with `invalid_parent_tuning_lineage` before any job is created.
+
+**Deliverables**
+
+- Preserve the exact raw configuration bytes, digest, tuning metadata, parent trial identity, and coordinator idempotency authority while resolving configuration defaults solely for canonical tuning-value validation.
+- Accept a valid sparse raw configuration only when its immutable tuning metadata matches the resolved effective values; continue rejecting metadata/default mismatch, changed config bytes, stale source/contract authority, and every existing retry-lineage violation.
+- Decode the existing nested FastAPI development error `{detail:{code,message}}` in the shared generated-client fetcher so the operator sees a typed actionable error rather than a generic HTTP status.
+- Keep the browser's exact pending-create intent across ambiguous or rejected POSTs and replace it with a job pointer only after a verified successful response. Do not clear pending state on arbitrary 409, create a second root, rewrite historical YAML, or relax the canonical leaf validator.
+
+**Tests and gates**
+
+- Red-first backend tests cover sparse raw plus resolved defaults reaching a fake coordinator, canonical metadata mismatch remaining 409, and existing digest/tamper cases remaining fail-closed.
+- Frontend fetcher/controller tests cover nested typed errors, byte-identical exact retry, locked controls while pending, and pointer replacement only after success.
+- Run focused Python and frontend suites, Ruff, generated-client TypeScript, application/test TypeScript, scoped formatting, production build/cutover verification, independent specification and quality/security reviews, GitHub Node/Python CI, and the complete 10-minute remote-feedback window after every material push.
+
+### PR-T3I · Step 3 Operator Controls, Truthful Gate, and Recovery Guidance
+
+**Reason for the bounded repair**
+
+- The current 39 tuning controls are rendered as one long technical-path form; generic descriptions, a blocked probe panel, and legacy `stable`/artifact-readiness wording obscure what the operator should do after an all-lost trial.
+
+**Deliverables**
+
+- Render the six existing tuning sections as keyboard-accessible in-panel tabs and one parameter per row, with localized human labels, unchanged current/proposed state, and responsive stacking.
+- Add a clickable/touchable information button for every parameter. Its localized popover explains the effect and direction/risk, safe range or options, runtime impact, and technical path. Tabs and help remain inspectable while mutation controls are locked.
+- Preserve the backend-approved patch schema, validation, immutable version history, save/rerun payload, and model-selection separation; expand the 39 per-path descriptions without changing OpenAPI shape.
+- Make authoritative V2 diagnosis the sole user-facing acceptance state. Artifact readability remains visible as diagnostic readiness, while retune-required results explicitly say they cannot be confirmed; legacy inter-tracklet status is hidden or labeled non-applicable when there are zero tracklets.
+- Explain the bounded comparison as a same-frame, non-full-video comparison; restore profile selection through PR-T3H; and show the safe recovery sequence from model/profile comparison to verified-frame development annotation. State explicitly that zero detector suggestions can still be hand-boxed after a ready probe, and that development annotation cannot authorize training or PR-T4.
+
+**Tests and gates**
+
+- Component/accessibility tests cover tab keyboard navigation, one-row layout, Enter/Space/Escape help behavior and focus return, localization, locked-but-readable help, draft persistence across tabs, and unchanged tuning payloads.
+- Gate tests cover the exact `legacy stable + V2 retune_required + zero tracklets` shape: no generic stable, no ready-for-confirmation, no visual confirmation or Accept; acceptable V2 still exposes the established confirmation path.
+- Probe/annotation tests cover plain-language comparison guidance, empty-candidate ready probe entry into manual development annotation, manual-human provenance, and no automatic positive or training authorization.
+- Run focused frontend/backend tests, full Web Vitest and Python routes proportionate to the touched scope, both TypeScript checks, Ruff/scoped formatting, production build/cutover verification, relevant Chromium accessibility/responsive scenarios, independent specification and quality/security reviews, GitHub CI, and the complete 10-minute remote-feedback window after every material push.
 
 ### PR-T4 · 100–300-Box Training and Source-Segment Evaluation
 

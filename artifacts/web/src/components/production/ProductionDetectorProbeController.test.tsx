@@ -625,6 +625,50 @@ describe("ProductionDetectorProbeController", () => {
     ).toBe(true);
   });
 
+  it("keeps the exact pending create while showing a typed nested 409", async () => {
+    const storageKey = detectorProbeStorageKey("workflow-1", "trial-1");
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url === "/api/detector-models") return json(catalogFixture());
+        if (url === "/api/detector-probes" && init?.method === "POST") {
+          return json(
+            {
+              detail: {
+                code: "invalid_parent_tuning_lineage",
+                message:
+                  "The parent tuning lineage failed canonical validation",
+                private_context: "must-not-leak",
+              },
+            },
+            409,
+          );
+        }
+        throw new Error(`Unexpected request: ${init?.method ?? "GET"} ${url}`);
+      }),
+    );
+
+    const { user } = renderController();
+    await user.click(
+      await screen.findByRole("button", { name: "Run bounded comparison" }),
+    );
+
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent("invalid_parent_tuning_lineage");
+    expect(alert).toHaveTextContent(
+      "The parent tuning lineage failed canonical validation",
+    );
+    expect(alert).not.toHaveTextContent("must-not-leak");
+    expect(alert).not.toHaveTextContent("[object Object]");
+    expect(
+      screen.getByRole("button", { name: "Retry the exact create request" }),
+    ).toBeVisible();
+    expect(JSON.parse(localStorage.getItem(storageKey) ?? "{}")).toEqual(
+      storedPendingCreate(),
+    );
+  });
+
   it("recovers a stored running job, polls to terminal, then stops polling", async () => {
     localStorage.setItem(
       detectorProbeStorageKey("workflow-1", "trial-1"),
