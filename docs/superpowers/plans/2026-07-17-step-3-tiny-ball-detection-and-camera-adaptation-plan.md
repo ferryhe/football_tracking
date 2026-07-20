@@ -1,6 +1,6 @@
 # Step 3 Tiny-Ball Detection, Tuning, and Camera-Adaptation Plan
 
-**Status:** Execution active · PR-T3, PR-T3R, and PR-T3E merged · bounded PR-T3F local gates complete and publication in progress · PR-T4 held at the feasibility gate
+**Status:** Execution active · PR-T3, PR-T3R, and PR-T3E merged · bounded PR-T3F open as PR #120 with remote gates starting · PR-T4 held at the feasibility gate
 
 **Date:** 2026-07-17
 
@@ -14,7 +14,7 @@
 - Delivery order: `PR-T1 → PR-T2 → PR-T3 → PR-T4 → PR-T5`
 - Current PR: PR-T3F · pending-submission reconciliation and safe return to field setup
 - Current branch: `codex/tiny-ball-pending-reconciliation-return`
-- Current phase: local implementation and review gates complete · publication commit created and pull-request publication in progress; PR-T4 remains unauthorized
+- Current phase: PR #120 open · publishing the final status checkpoint before the required ten-minute remote-feedback window; PR-T4 remains unauthorized
 - Managed workflow authorized: 2026-07-17
 - Heartbeat: active · `tiny-ball-step3-managed-pr-heartbeat` · every 15 minutes
 - Merge rule: implementation, specification review, quality review, and local checks must finish before the final push; CI and the complete 10-minute remote-feedback window may then run concurrently, but both must finish successfully before merge; any material corrective push restarts that window
@@ -49,7 +49,7 @@
 | PR-T3 | `codex/tiny-ball-annotation-feasibility` | completed · spec COMPLIANT · frontend/backend/final quality APPROVE · replacement Node/Python CI passed · branches cleaned | https://github.com/ferryhe/football_tracking/pull/114 | gate 2026-07-19T16:48:00Z–16:58:00Z · final fetch 16:58:40Z · zero actionable feedback | `8bd18841` · 2026-07-19T16:59:13Z |
 | PR-T3R | `codex/tiny-ball-startup-budget` | completed · independent spec COMPLIANT · independent quality APPROVE · Node/Python CI passed · branches cleaned · PR-T4 remains unauthorized | https://github.com/ferryhe/football_tracking/pull/116 | complete 2026-07-19T18:10:16Z–18:20:16Z · final fetch 18:23:28Z · zero actionable feedback | `89e1912d` · 2026-07-19T18:24:03Z |
 | PR-T3E | `codex/tiny-ball-evidence-continuation-ux` | completed · replacement Node/Python CI passed · spec COMPLIANT · quality/security APPROVE · branches cleaned · PR-T4 remains unauthorized | https://github.com/ferryhe/football_tracking/pull/118 | complete 2026-07-19T19:42:00Z–19:52:00Z · final fetch 19:52:23Z · zero actionable feedback | `a55c2e5b` · 2026-07-19T19:53:08Z |
-| PR-T3F | `codex/tiny-ball-pending-reconciliation-return` | local gates complete · spec COMPLIANT · quality APPROVE · frontend 1,259/1,259 · build/type/format/browser checks passed · PR-T4 remains unauthorized | pending | not started | pending |
+| PR-T3F | `codex/tiny-ball-pending-reconciliation-return` | PR #120 open · local gates complete · GitHub CI started · PR-T4 remains unauthorized | https://github.com/ferryhe/football_tracking/pull/120 | begins after final publication-status push | pending |
 | PR-T4 | pending | not started | pending | not started | pending |
 | PR-T5 | pending | not started | pending | not started | pending |
 
