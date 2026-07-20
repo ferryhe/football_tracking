@@ -180,6 +180,11 @@ export const translations = {
       trialViewRun: "View occupying run",
       trialSubmissionUncertain:
         "The previous submission result is not confirmed. Refresh to reconcile it, or explicitly retry with a new submission.",
+      trialReconcileAndReturn: "Reconcile and return to field setup",
+      trialReconcileUnavailable:
+        "The run service and run list could not be verified. The pending submission was kept; try again after the service recovers.",
+      trialPendingIdentityConflict: (runId: string) =>
+        `Run ${runId} uses the expected pending ID, but its identity does not match or is ambiguous. The pending submission was kept.`,
       trialHealthUnavailable:
         "Run service health could not be verified. No trial was submitted; try again after the service recovers.",
       trialInvalidFrameRange:
@@ -1679,6 +1684,11 @@ export const translations = {
       trialViewRun: "查看占用任务",
       trialSubmissionUncertain:
         "上一次提交结果尚未确认。请刷新以对账，或明确新建一次重试。",
+      trialReconcileAndReturn: "核对并返回球场设置",
+      trialReconcileUnavailable:
+        "无法核验运行服务和任务列表，待核对提交已保留；请在服务恢复后重试。",
+      trialPendingIdentityConflict: (runId: string) =>
+        `任务 ${runId} 使用了预期的待核对 ID，但身份不匹配或存在歧义。待核对提交已保留。`,
       trialHealthUnavailable:
         "无法核验运行服务健康状态，本次未提交试跑；请在服务恢复后重试。",
       trialInvalidFrameRange: "起始帧必须是非负整数，试跑帧数必须是正整数。",

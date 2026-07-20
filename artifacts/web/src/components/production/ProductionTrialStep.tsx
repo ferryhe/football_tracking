@@ -134,6 +134,7 @@ interface ProductionTrialStepProps {
     expectedPending: ProductionPendingConfigConfirmation,
   ) => boolean;
   onReturnToFieldSetup: () => void;
+  onPendingReconciledReturnToFieldSetup: () => void;
   onUsabilityChange: (usable: boolean) => void;
   stopButtonRef?: Ref<HTMLButtonElement>;
 }
@@ -217,6 +218,7 @@ export function ProductionTrialStep({
   onPendingConfigChange,
   onConfirmedConfigChange,
   onReturnToFieldSetup,
+  onPendingReconciledReturnToFieldSetup,
   onUsabilityChange,
   stopButtonRef,
 }: ProductionTrialStepProps) {
@@ -286,8 +288,12 @@ export function ProductionTrialStep({
   const [tuningMessage, setTuningMessage] = useState<string | null>(null);
   const [startRequestInFlight, setStartRequestInFlight] = useState(false);
   const [retryInFlight, setRetryInFlight] = useState(false);
+  const [returnReconcileInFlight, setReturnReconcileInFlight] = useState(false);
+  const [returnAfterPendingClear, setReturnAfterPendingClear] =
+    useState<ProductionTrialState | null>(null);
   const startInFlightRef = useRef(false);
   const retryInFlightRef = useRef(false);
+  const returnReconcileInFlightRef = useRef(false);
   const cancelInFlightRef = useRef(false);
   const acceptInFlightRef = useRef(false);
   const configInFlightRef = useRef(false);
@@ -323,6 +329,17 @@ export function ProductionTrialStep({
       }
     };
   }, []);
+
+  useEffect(() => {
+    if (
+      !returnAfterPendingClear ||
+      !trial ||
+      !sameTrial(returnAfterPendingClear, trial)
+    )
+      return;
+    setReturnAfterPendingClear(null);
+    onPendingReconciledReturnToFieldSetup();
+  }, [onPendingReconciledReturnToFieldSetup, returnAfterPendingClear, trial]);
 
   function currentOperationEpoch(): number | null {
     const current = operationEpochRef.current;
@@ -580,6 +597,12 @@ export function ProductionTrialStep({
 
   useEffect(() => {
     if (!trial?.pending_submission || !runs.data) return;
+    const expectedRunId = `production_trial_${trial.pending_submission.output_id}`;
+    if (
+      runs.data.filter((candidate) => candidate.run_id === expectedRunId)
+        .length !== 1
+    )
+      return;
     const reconciled = reconcilePendingProductionTrial(trial, {
       workflow_id: workflowId,
       expected_generation: trial.pending_submission.generation,
@@ -1216,6 +1239,7 @@ export function ProductionTrialStep({
     if (
       operationEpoch === null ||
       retryInFlightRef.current ||
+      returnReconcileInFlightRef.current ||
       startInFlightRef.current ||
       !current?.pending_submission ||
       current.active_run_id
@@ -1277,6 +1301,109 @@ export function ProductionTrialStep({
       if (operationEpochIsActive(operationEpoch)) {
         retryInFlightRef.current = false;
         setRetryInFlight(false);
+      }
+    }
+  }
+
+  async function handleReconcileAndReturnToFieldSetup() {
+    const operationEpoch = currentOperationEpoch();
+    const current = latestTrialRef.current;
+    if (
+      operationEpoch === null ||
+      returnReconcileInFlightRef.current ||
+      retryInFlightRef.current ||
+      startInFlightRef.current ||
+      !current?.pending_submission ||
+      current.active_run_id
+    )
+      return;
+    returnReconcileInFlightRef.current = true;
+    setReturnReconcileInFlight(true);
+    setMessage(null);
+    setConflictRunId(null);
+    try {
+      const expectedContext = operationContextRef.current;
+      let healthResult: Awaited<ReturnType<typeof health.refetch>>;
+      let runsResult: Awaited<ReturnType<typeof runs.refetch>>;
+      try {
+        [healthResult, runsResult] = await Promise.all([
+          health.refetch(),
+          runs.refetch(),
+        ]);
+      } catch {
+        if (operationEpochIsActive(operationEpoch)) {
+          setMessage(t.production.trialReconcileUnavailable);
+        }
+        return;
+      }
+      const latestPending = latestTrialRef.current?.pending_submission;
+      if (
+        !operationEpochIsActive(operationEpoch) ||
+        operationContextRef.current !== expectedContext ||
+        !sameSnapshot(latestPending, current.pending_submission)
+      )
+        return;
+      if (
+        healthResult.isError ||
+        runsResult.isError ||
+        !healthResult.data ||
+        healthResult.data.status !== "ok" ||
+        !runsResult.data
+      ) {
+        setMessage(t.production.trialReconcileUnavailable);
+        return;
+      }
+
+      const expectedRunId = `production_trial_${current.pending_submission.output_id}`;
+      const expectedRunRecords = runsResult.data.filter(
+        (candidate) => candidate.run_id === expectedRunId,
+      );
+      const reconciled = reconcilePendingProductionTrial(current, {
+        workflow_id: workflowId,
+        expected_generation: current.pending_submission.generation,
+        runs: runsResult.data,
+        observed_at: new Date().toISOString(),
+      });
+      if (
+        expectedRunRecords.length > 1 ||
+        (expectedRunRecords.length === 1 && sameTrial(reconciled, current))
+      ) {
+        setConflictRunId(expectedRunId);
+        setMessage(t.production.trialPendingIdentityConflict(expectedRunId));
+        return;
+      }
+      if (!sameTrial(reconciled, current)) {
+        if (onTrialChange(reconciled, current)) {
+          latestTrialRef.current = reconciled;
+        }
+        return;
+      }
+
+      const listedActiveRun = runsResult.data.find(
+        (candidate) =>
+          candidate.status === "queued" || candidate.status === "running",
+      );
+      const conflictRunId =
+        healthResult.data.active_run_id ?? listedActiveRun?.run_id ?? null;
+      if (conflictRunId) {
+        setConflictRunId(conflictRunId);
+        setMessage(t.production.trialActiveConflict(conflictRunId));
+        return;
+      }
+
+      const cleared: ProductionTrialState = {
+        ...current,
+        pending_submission: null,
+      };
+      if (!onTrialChange(cleared, current)) return;
+      if (!operationEpochIsActive(operationEpoch)) return;
+      latestTrialRef.current = cleared;
+      startInFlightRef.current = false;
+      setReturnAfterPendingClear(cleared);
+    } finally {
+      if (operationEpochIsActive(operationEpoch)) {
+        returnReconcileInFlightRef.current = false;
+        setReturnReconcileInFlight(false);
       }
     }
   }
@@ -2070,7 +2197,7 @@ export function ProductionTrialStep({
             <Lock className="mr-2 h-4 w-4" aria-hidden="true" />
             {t.production.trialEditSettings}
           </Button>
-        ) : (
+        ) : trial?.pending_submission ? null : (
           <Button
             type="button"
             onClick={() => void handleStartTrial()}
@@ -2103,7 +2230,7 @@ export function ProductionTrialStep({
         )}
       </div>
 
-      {trial?.pending_submission && !run && (
+      {trial?.pending_submission && (
         <Alert>
           <AlertDescription className="space-y-3">
             <p>{t.production.trialSubmissionUncertain}</p>
@@ -2112,10 +2239,37 @@ export function ProductionTrialStep({
               size="sm"
               variant="outline"
               onClick={() => void handleRetryPending()}
-              disabled={startRequestInFlight || retryInFlight}
+              disabled={
+                startRequestInFlight ||
+                retryInFlight ||
+                returnReconcileInFlight ||
+                running ||
+                Boolean(trial.active_run_id)
+              }
             >
               <RotateCcw className="mr-2 h-4 w-4" aria-hidden="true" />
               {t.production.trialRetry}
+            </Button>
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              onClick={() => void handleReconcileAndReturnToFieldSetup()}
+              disabled={
+                startRequestInFlight ||
+                retryInFlight ||
+                returnReconcileInFlight ||
+                running ||
+                Boolean(trial.active_run_id)
+              }
+            >
+              {returnReconcileInFlight && (
+                <Loader2
+                  className="mr-2 h-4 w-4 animate-spin"
+                  aria-hidden="true"
+                />
+              )}
+              {t.production.trialReconcileAndReturn}
             </Button>
           </AlertDescription>
         </Alert>

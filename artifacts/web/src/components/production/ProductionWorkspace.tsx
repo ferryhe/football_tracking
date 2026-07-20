@@ -123,6 +123,13 @@ export function ProductionWorkspace({
   const fullRunDiscardBlocked = productionFullRunRequiresStop(draft.full_run);
   const workDiscardBlocked = trialDiscardBlocked || fullRunDiscardBlocked;
   const pendingTrialNeedsReconcile = Boolean(draft.trial?.pending_submission);
+  const pendingFullRunNeedsReconcile = Boolean(
+    draft.full_run?.pending_submission,
+  );
+  const pendingSubmissionNeedsReconcile =
+    pendingTrialNeedsReconcile || pendingFullRunNeedsReconcile;
+  const pendingReconciliationExplanationId =
+    "production-pending-reconciliation-explanation";
   const activeTrialNeedsStop =
     trialDiscardBlocked && !pendingTrialNeedsReconcile;
   const [viewStage, setViewStage] = useState<ProductionUserStage>(() =>
@@ -281,11 +288,15 @@ export function ProductionWorkspace({
         draft.confirmed_config ||
         draft.pending_config_confirmation)
     ) {
-      upstreamFocusTargetRef.current = "back";
-      setPendingUpstreamEdit({ kind: "calibration" });
+      requestCalibrationEdit();
       return;
     }
     setViewStage(USER_STAGES[currentIndex - 1]);
+  }
+
+  function requestCalibrationEdit() {
+    upstreamFocusTargetRef.current = "back";
+    setPendingUpstreamEdit({ kind: "calibration" });
   }
 
   function summaryDetail(stage: ProductionUserStage): string {
@@ -437,6 +448,7 @@ export function ProductionWorkspace({
             onPendingConfigChange={onPendingConfigChange}
             onConfirmedConfigChange={onConfirmedConfigChange}
             onReturnToFieldSetup={handleBack}
+            onPendingReconciledReturnToFieldSetup={requestCalibrationEdit}
             onUsabilityChange={setTrialUsable}
             stopButtonRef={stopButtonRef}
           />
@@ -477,6 +489,12 @@ export function ProductionWorkspace({
               type="button"
               variant="outline"
               onClick={handleBack}
+              disabled={pendingSubmissionNeedsReconcile}
+              aria-describedby={
+                pendingSubmissionNeedsReconcile
+                  ? pendingReconciliationExplanationId
+                  : undefined
+              }
             >
               <ChevronLeft className="mr-2 h-4 w-4" aria-hidden="true" />
               {t.production.back}
@@ -523,6 +541,12 @@ export function ProductionWorkspace({
           ref={startNewButtonRef}
           type="button"
           variant="outline"
+          disabled={pendingSubmissionNeedsReconcile}
+          aria-describedby={
+            pendingSubmissionNeedsReconcile
+              ? pendingReconciliationExplanationId
+              : undefined
+          }
           onClick={() => {
             if (!blockActiveWorkDiscard()) onStartNew();
           }}
@@ -547,6 +571,15 @@ export function ProductionWorkspace({
       {error && (
         <Alert variant="destructive">
           <AlertDescription>{error}</AlertDescription>
+        </Alert>
+      )}
+      {pendingSubmissionNeedsReconcile && (
+        <Alert>
+          <AlertDescription id={pendingReconciliationExplanationId}>
+            {pendingFullRunNeedsReconcile
+              ? t.production.pendingFullRunMustReconcile
+              : t.production.pendingTrialMustReconcile}
+          </AlertDescription>
         </Alert>
       )}
       {workDiscardBlocked &&

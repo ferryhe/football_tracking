@@ -44,9 +44,11 @@ vi.mock("./ProductionCalibrationStep", () => ({
 vi.mock("./ProductionTrialStep", () => ({
   ProductionTrialStep: ({
     onUsabilityChange,
+    onPendingReconciledReturnToFieldSetup,
     stopButtonRef,
   }: {
     onUsabilityChange: (usable: boolean) => void;
+    onPendingReconciledReturnToFieldSetup: () => void;
     stopButtonRef?: React.Ref<HTMLButtonElement>;
   }) => (
     <div>
@@ -59,6 +61,9 @@ vi.mock("./ProductionTrialStep", () => ({
       </button>
       <button type="button" onClick={() => onUsabilityChange(false)}>
         mark trial unusable
+      </button>
+      <button type="button" onClick={onPendingReconciledReturnToFieldSetup}>
+        mark pending reconciled and return
       </button>
     </div>
   ),
@@ -508,18 +513,22 @@ describe("ProductionWorkspace", () => {
     ).toBeVisible();
   });
 
-  it("blocks replacement for pending full submission and focuses reconciliation", async () => {
-    const { user, onStartNew } = renderWorkspace(draftAtPendingFullRun());
-    await user.click(
-      screen.getByRole("button", { name: "Start new production" }),
+  it("visibly disables Back and Start New for a pending full submission with an accessible explanation", () => {
+    const { onStartNew } = renderWorkspace(draftAtPendingFullRun());
+    const explanation = screen.getByText(
+      /submission is still being reconciled/i,
     );
+    const back = screen.getByRole("button", { name: "Back" });
+    const startNew = screen.getByRole("button", {
+      name: "Start new production",
+    });
+
+    expect(explanation).toBeVisible();
+    expect(back).toBeDisabled();
+    expect(startNew).toBeDisabled();
+    expect(back).toHaveAttribute("aria-describedby", explanation.id);
+    expect(startNew).toHaveAttribute("aria-describedby", explanation.id);
     expect(onStartNew).not.toHaveBeenCalled();
-    expect(
-      screen.getByRole("heading", { name: "Full run reconciliation" }),
-    ).toHaveFocus();
-    expect(
-      screen.getByText(/submission is still being reconciled/i),
-    ).toBeVisible();
   });
 
   it("shows only the current source step and guards Next", async () => {
@@ -668,6 +677,10 @@ describe("ProductionWorkspace", () => {
         onInvalidate,
         onStartNew,
       });
+      expect(screen.getByRole("button", { name: "Back" })).toBeEnabled();
+      expect(
+        screen.getByRole("button", { name: "Start new production" }),
+      ).toBeEnabled();
       const stop = screen.getByRole("button", { name: "Cancel trial" });
       await user.click(screen.getByRole("button", { name: "Back" }));
       expect(screen.getByText(/still queued or running/i)).toBeVisible();
@@ -693,35 +706,59 @@ describe("ProductionWorkspace", () => {
     ).not.toBeInTheDocument();
   });
 
-  it("keeps a pending submission while blocking Back, Start New, and source replacement", async () => {
+  it("visibly disables Back and Start New for a pending trial with an accessible explanation", () => {
     const onInvalidate = vi.fn(() => true);
     const onStartNew = vi.fn();
     const onSourceChange = vi.fn();
-    const { user } = renderWorkspace(draftAtPendingTrial(), {
+    renderWorkspace(draftAtPendingTrial(), {
       sourceIssue: "changed",
       onInvalidate,
       onStartNew,
       onSourceChange,
     });
-    const heading = screen.getByRole("heading", { name: "Trial and tuning" });
+    const explanation = screen.getByText(/still being checked/i);
+    const back = screen.getByRole("button", { name: "Back" });
+    const startNew = screen.getByRole("button", {
+      name: "Start new production",
+    });
+
+    expect(explanation).toBeVisible();
+    expect(back).toBeDisabled();
+    expect(startNew).toBeDisabled();
+    expect(back).toHaveAttribute("aria-describedby", explanation.id);
+    expect(startNew).toHaveAttribute("aria-describedby", explanation.id);
     expect(
       screen.queryByTestId("production-source-select"),
     ).not.toBeInTheDocument();
-
-    await user.click(screen.getByRole("button", { name: "Back" }));
-    expect(screen.getByText(/still being checked/i)).toBeVisible();
-    expect(heading).toHaveFocus();
-    expect(
-      screen.getByRole("button", { name: "Cancel trial" }),
-    ).not.toHaveFocus();
-
-    await user.click(
-      screen.getByRole("button", { name: "Start new production" }),
-    );
     expect(onInvalidate).not.toHaveBeenCalled();
     expect(onStartNew).not.toHaveBeenCalled();
     expect(onSourceChange).not.toHaveBeenCalled();
     expect(screen.getByText("interactive trial")).toBeVisible();
+  });
+
+  it("uses the existing invalidation confirmation before returning a reconciled pending trial to Step 2", async () => {
+    const onInvalidate = vi.fn(() => true);
+    const { user } = renderWorkspace(draftAtPendingTrial(), { onInvalidate });
+
+    await user.click(
+      screen.getByRole("button", {
+        name: "mark pending reconciled and return",
+      }),
+    );
+    expect(
+      screen.getByRole("alertdialog", {
+        name: "Edit locked upstream inputs?",
+      }),
+    ).toBeVisible();
+    expect(onInvalidate).not.toHaveBeenCalled();
+
+    await user.click(
+      screen.getByRole("button", { name: "Invalidate and edit" }),
+    );
+    expect(onInvalidate).toHaveBeenCalledWith("calibration");
+    expect(
+      screen.getByRole("heading", { name: "Field calibration" }),
+    ).toBeVisible();
   });
 
   it("returns focus to the source selector after cancelling or confirming source invalidation", async () => {

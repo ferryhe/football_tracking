@@ -475,6 +475,56 @@ async function trialWithAttempt(status: RunRecord["status"] = "running") {
   return { state, submission };
 }
 
+async function pendingTrial() {
+  const settings = {
+    base_config_name: "default.yaml",
+    start_frame: 0,
+    max_frames: 300,
+    enable_postprocess: true,
+    enable_follow_cam: true,
+    tuning_patch: {},
+  };
+  const submission = await buildProductionTrialSubmission({
+    workflow_id: "workflow-a",
+    source: SOURCE,
+    calibration: CALIBRATION,
+    settings,
+    parent_run_id: null,
+    submission_id: "submission-pending-return",
+    output_id: "output-pending-return",
+    generation: 1,
+    created_at: NOW,
+  });
+  return {
+    state: setPendingProductionTrial(
+      createProductionTrialState(settings),
+      submission.pending,
+    ),
+    submission,
+  };
+}
+
+async function pendingTrialAfterTerminalAttempt(
+  status: "completed" | "failed" | "cancelled" = "completed",
+) {
+  const { state } = await trialWithAttempt(status);
+  const submission = await buildProductionTrialSubmission({
+    workflow_id: "workflow-a",
+    source: SOURCE,
+    calibration: CALIBRATION,
+    settings: state.settings,
+    parent_run_id: state.attempts[0].run_id,
+    submission_id: "submission-after-terminal",
+    output_id: "output-after-terminal",
+    generation: 2,
+    created_at: NOW,
+  });
+  return {
+    state: setPendingProductionTrial(state, submission.pending),
+    submission,
+  };
+}
+
 async function acceptedTrial(): Promise<ProductionTrialState> {
   const { state, submission } = await trialWithAttempt("completed");
   installReadableEvidence();
@@ -585,6 +635,7 @@ function renderStep(
     (_confirmed: ProductionConfigEvidence) => true,
   );
   const onReturnToFieldSetup = vi.fn();
+  const onPendingReconciledReturnToFieldSetup = vi.fn();
   const onUsabilityChange = vi.fn((_usable: boolean) => undefined);
   const props: React.ComponentProps<typeof ProductionTrialStep> = {
     workflowId: "workflow-a",
@@ -597,6 +648,7 @@ function renderStep(
     onPendingConfigChange,
     onConfirmedConfigChange,
     onReturnToFieldSetup,
+    onPendingReconciledReturnToFieldSetup,
     onUsabilityChange,
     ...changes,
   };
@@ -622,6 +674,7 @@ function renderStep(
     onPendingConfigChange,
     onConfirmedConfigChange,
     onReturnToFieldSetup,
+    onPendingReconciledReturnToFieldSetup,
     onUsabilityChange,
   };
 }
@@ -930,6 +983,7 @@ describe("ProductionTrialStep mutation safety", () => {
           onPendingConfigChange={() => true}
           onConfirmedConfigChange={() => true}
           onReturnToFieldSetup={() => undefined}
+          onPendingReconciledReturnToFieldSetup={() => undefined}
           onUsabilityChange={() => undefined}
         />
       );
@@ -1413,6 +1467,288 @@ describe("ProductionTrialStep mutation safety", () => {
         pending,
       ),
     );
+    expect(createMutate).not.toHaveBeenCalled();
+  });
+
+  it("clears a stale pending trial by CAS and returns only after the cleared state is rendered", async () => {
+    const { state } = await pendingTrial();
+    const view = renderStep({ trial: state });
+
+    await view.user.click(
+      screen.getByRole("button", {
+        name: "Reconcile and return to field setup",
+      }),
+    );
+    await waitFor(() => expect(view.onTrialChange).toHaveBeenCalledOnce());
+    const [cleared, expected] = view.onTrialChange.mock.calls[0];
+    expect(cleared.pending_submission).toBeNull();
+    expect(expected).toEqual(state);
+    expect(view.onPendingReconciledReturnToFieldSetup).not.toHaveBeenCalled();
+    expect(createMutate).not.toHaveBeenCalled();
+
+    view.rerenderStep({ trial: cleared });
+    await waitFor(() =>
+      expect(view.onPendingReconciledReturnToFieldSetup).toHaveBeenCalledOnce(),
+    );
+    expect(createMutate).not.toHaveBeenCalled();
+  });
+
+  it.each(["completed", "failed", "cancelled"] as const)(
+    "keeps pending recovery actions visible over a prior %s run and fails closed",
+    async (status) => {
+      const { state } = await pendingTrialAfterTerminalAttempt(status);
+      runData = run(status);
+      healthRefetch.mockResolvedValueOnce({
+        data: undefined,
+        isError: true,
+        error: new Error("offline"),
+      });
+      const view = renderStep({ trial: state });
+
+      const retry = screen.getByRole("button", {
+        name: "Retry as a new trial",
+      });
+      expect(retry).toBeEnabled();
+      expect(
+        screen.queryByRole("button", { name: "Start bounded trial" }),
+      ).not.toBeInTheDocument();
+      await view.user.click(
+        screen.getByRole("button", {
+          name: "Reconcile and return to field setup",
+        }),
+      );
+
+      expect(
+        await screen.findByText(
+          /run service and run list could not be verified/i,
+        ),
+      ).toBeVisible();
+      expect(view.onTrialChange).not.toHaveBeenCalled();
+      expect(view.onPendingReconciledReturnToFieldSetup).not.toHaveBeenCalled();
+      expect(createMutate).not.toHaveBeenCalled();
+    },
+  );
+
+  it("binds an exact pending run for monitoring instead of returning or posting", async () => {
+    const { state, submission } = await pendingTrial();
+    const matching = recoveredRun(submission.pending, "queued");
+    runsRefetch.mockResolvedValueOnce({ data: [matching], isError: false });
+    const view = renderStep({ trial: state });
+
+    await view.user.click(
+      screen.getByRole("button", {
+        name: "Reconcile and return to field setup",
+      }),
+    );
+    await waitFor(() => expect(view.onTrialChange).toHaveBeenCalledOnce());
+    const [reconciled] = view.onTrialChange.mock.calls[0];
+    expect(reconciled).toEqual(
+      expect.objectContaining({
+        pending_submission: null,
+        active_run_id: matching.run_id,
+      }),
+    );
+    expect(view.onPendingReconciledReturnToFieldSetup).not.toHaveBeenCalled();
+    expect(createMutate).not.toHaveBeenCalled();
+
+    runData = matching;
+    view.rerenderStep({ trial: reconciled });
+    expect(await screen.findByTestId("trial-run-status")).toHaveTextContent(
+      "Queued",
+    );
+    expect(view.onPendingReconciledReturnToFieldSetup).not.toHaveBeenCalled();
+    expect(createMutate).not.toHaveBeenCalled();
+  });
+
+  it("binds one exact terminal pending run and then exposes the ordinary field-setup return", async () => {
+    const { state, submission } = await pendingTrial();
+    const matching = recoveredRun(submission.pending, "completed");
+    runsRefetch.mockResolvedValueOnce({ data: [matching], isError: false });
+    const view = renderStep({ trial: state });
+
+    await view.user.click(
+      screen.getByRole("button", {
+        name: "Reconcile and return to field setup",
+      }),
+    );
+    await waitFor(() => expect(view.onTrialChange).toHaveBeenCalledOnce());
+    const [reconciled] = view.onTrialChange.mock.calls[0];
+    expect(reconciled.pending_submission).toBeNull();
+    expect(reconciled.active_run_id).toBeNull();
+    expect(reconciled.attempts).toHaveLength(1);
+    expect(view.onPendingReconciledReturnToFieldSetup).not.toHaveBeenCalled();
+    expect(createMutate).not.toHaveBeenCalled();
+
+    runData = matching;
+    view.rerenderStep({ trial: reconciled });
+    expect(
+      screen.queryByRole("button", {
+        name: "Reconcile and return to field setup",
+      }),
+    ).not.toBeInTheDocument();
+    const ordinaryReturn = screen.getByRole("button", {
+      name: "Return to field setup",
+    });
+    expect(ordinaryReturn).toBeEnabled();
+    await view.user.click(ordinaryReturn);
+    expect(view.onReturnToFieldSetup).toHaveBeenCalledOnce();
+    expect(view.onPendingReconciledReturnToFieldSetup).not.toHaveBeenCalled();
+    expect(createMutate).not.toHaveBeenCalled();
+  });
+
+  it("fails closed when the expected terminal run id has a mismatched identity", async () => {
+    const { state, submission } = await pendingTrial();
+    const expectedRunId = `production_trial_${submission.pending.output_id}`;
+    const mismatched = recoveredRun(submission.pending, "completed");
+    runsRefetch.mockResolvedValueOnce({
+      data: [{ ...mismatched, notes: "identity-mismatch" }],
+      isError: false,
+    });
+    const view = renderStep({ trial: state });
+
+    await view.user.click(
+      screen.getByRole("button", {
+        name: "Reconcile and return to field setup",
+      }),
+    );
+
+    expect(await screen.findByText(/identity does not match/i)).toBeVisible();
+    expect(
+      screen.getByRole("link", { name: "View occupying run" }),
+    ).toHaveAttribute("href", `/history?run=${expectedRunId}`);
+    expect(view.onTrialChange).not.toHaveBeenCalled();
+    expect(view.onPendingReconciledReturnToFieldSetup).not.toHaveBeenCalled();
+    expect(createMutate).not.toHaveBeenCalled();
+  });
+
+  it("fails closed when duplicate expected run records make reconciliation ambiguous", async () => {
+    const { state, submission } = await pendingTrial();
+    const matching = recoveredRun(submission.pending, "completed");
+    runsRefetch.mockResolvedValueOnce({
+      data: [matching, { ...matching }],
+      isError: false,
+    });
+    const view = renderStep({ trial: state });
+
+    await view.user.click(
+      screen.getByRole("button", {
+        name: "Reconcile and return to field setup",
+      }),
+    );
+
+    expect(await screen.findByText(/identity does not match/i)).toBeVisible();
+    expect(view.onTrialChange).not.toHaveBeenCalled();
+    expect(view.onPendingReconciledReturnToFieldSetup).not.toHaveBeenCalled();
+    expect(createMutate).not.toHaveBeenCalled();
+  });
+
+  it("does not auto-bind an exact run when cached expected-id evidence is ambiguous", async () => {
+    const { state, submission } = await pendingTrial();
+    const matching = recoveredRun(submission.pending, "completed");
+    runsData = [
+      matching,
+      { ...matching, notes: "same-run-id-different-identity" },
+    ];
+    const view = renderStep({ trial: state });
+
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(view.onTrialChange).not.toHaveBeenCalled();
+    expect(
+      screen.getByRole("button", {
+        name: "Reconcile and return to field setup",
+      }),
+    ).toBeVisible();
+    expect(createMutate).not.toHaveBeenCalled();
+  });
+
+  it.each(["health", "runs"] as const)(
+    "keeps the pending trial when authoritative %s reconciliation is unavailable",
+    async (unavailable) => {
+      const { state } = await pendingTrial();
+      if (unavailable === "health") {
+        healthRefetch.mockResolvedValueOnce({
+          data: undefined,
+          isError: true,
+          error: new Error("offline"),
+        });
+      } else {
+        runsRefetch.mockResolvedValueOnce({
+          data: undefined,
+          isError: true,
+          error: new Error("offline"),
+        });
+      }
+      const view = renderStep({ trial: state });
+
+      await view.user.click(
+        screen.getByRole("button", {
+          name: "Reconcile and return to field setup",
+        }),
+      );
+      expect(
+        await screen.findByText(
+          /run service and run list could not be verified/i,
+        ),
+      ).toBeVisible();
+      expect(view.onTrialChange).not.toHaveBeenCalled();
+      expect(view.onPendingReconciledReturnToFieldSetup).not.toHaveBeenCalled();
+      expect(createMutate).not.toHaveBeenCalled();
+    },
+  );
+
+  it("keeps the pending trial when an unrelated active run conflicts", async () => {
+    const { state } = await pendingTrial();
+    runsRefetch.mockResolvedValueOnce({
+      data: [run("running", { run_id: "other-active-run" })],
+      isError: false,
+    });
+    const view = renderStep({ trial: state });
+
+    await view.user.click(
+      screen.getByRole("button", {
+        name: "Reconcile and return to field setup",
+      }),
+    );
+    expect(await screen.findByText(/other-active-run/)).toBeVisible();
+    expect(view.onTrialChange).not.toHaveBeenCalled();
+    expect(view.onPendingReconciledReturnToFieldSetup).not.toHaveBeenCalled();
+    expect(createMutate).not.toHaveBeenCalled();
+  });
+
+  it("does not clear or return when the pending identity changes during reconciliation", async () => {
+    const { state } = await pendingTrial();
+    let releaseRuns!: (value: { data: RunRecord[]; isError: false }) => void;
+    runsRefetch.mockReturnValueOnce(
+      new Promise((resolve) => {
+        releaseRuns = resolve;
+      }),
+    );
+    const view = renderStep({ trial: state });
+
+    await view.user.click(
+      screen.getByRole("button", {
+        name: "Reconcile and return to field setup",
+      }),
+    );
+    await waitFor(() => expect(runsRefetch).toHaveBeenCalledOnce());
+    view.rerenderStep({
+      trial: {
+        ...state,
+        pending_submission: {
+          ...state.pending_submission!,
+          submission_id: "newer-pending-identity",
+        },
+      },
+    });
+    await act(async () => {
+      releaseRuns({ data: [], isError: false });
+    });
+
+    expect(view.onTrialChange).not.toHaveBeenCalled();
+    expect(view.onPendingReconciledReturnToFieldSetup).not.toHaveBeenCalled();
     expect(createMutate).not.toHaveBeenCalled();
   });
 });
