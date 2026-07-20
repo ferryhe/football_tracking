@@ -5,6 +5,7 @@ import json
 import tempfile
 import unittest
 from copy import deepcopy
+from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest import mock
@@ -21,12 +22,14 @@ from football_tracking.api.schemas import (
     DetectorProbeJobResponse,
 )
 from football_tracking.api.service import ApiService
+from football_tracking.config import load_config
 from football_tracking.detector_development import DetectorDevelopmentService
 from football_tracking.detector_development_common import (
     DetectorDevelopmentError,
     canonical_sha256,
 )
 from football_tracking.detector_model_registry import build_builtin_model_catalog
+from football_tracking.trial_diagnosis import normalize_production_trial_config_patch
 
 
 def _sha256(path: Path) -> str:
@@ -296,6 +299,30 @@ class DetectorApiTests(unittest.TestCase):
         ]
         self.service._write_registry(registry)
 
+    def _install_sparse_versioned_tuning(self, *, include_changed_leaf: bool) -> bytes:
+        raw_config = yaml.safe_load(self.config_path.read_text(encoding="utf-8"))
+        effective_raw = deepcopy(raw_config)
+        effective_raw["selection"] = {"priors": {"player_foot_bonus": 0.09}}
+        resolved_config = asdict(load_config(self.config_path, raw_config=effective_raw))
+        patch = normalize_production_trial_config_patch(
+            {"selection": {"priors": {"player_foot_bonus": 0.09}}},
+            base_config=resolved_config,
+            legacy_created_at="2026-07-17T12:00:00+00:00",
+        )
+        materialized = deepcopy(raw_config)
+        materialized["metadata"].update(patch["metadata"])
+        if include_changed_leaf:
+            materialized["selection"] = effective_raw["selection"]
+        self.config_path.write_text(
+            yaml.safe_dump(materialized, sort_keys=False),
+            encoding="utf-8",
+        )
+        self.config_sha256 = _sha256(self.config_path)
+        registry = self.service._read_registry()
+        registry["runs"][0]["config_sha256"] = self.config_sha256
+        self.service._write_registry(registry)
+        return self.config_path.read_bytes()
+
     def _probe_catalog(self) -> dict[str, object]:
         source_root = Path(__file__).resolve().parents[1]
         catalog = build_builtin_model_catalog(source_root)
@@ -558,6 +585,35 @@ class DetectorApiTests(unittest.TestCase):
         finally:
             self.contract_path.write_bytes(original_contract)
             self.config_path.write_bytes(original_config)
+
+    def test_sparse_versioned_tuning_uses_resolved_defaults_before_probe_creation(self) -> None:
+        original_materialized_bytes = self._install_sparse_versioned_tuning(include_changed_leaf=True)
+        expected_tuning = yaml.safe_load(original_materialized_bytes)["metadata"]["production_tuning"]
+        created = {"job_id": "probe-sparse-tuning"}
+
+        with mock.patch.object(self.development, "create_probe", return_value=created) as create_probe:
+            result = self.service.create_detector_probe(self._request())
+
+        self.assertIs(created, result)
+        create_probe.assert_called_once()
+        frozen_request = create_probe.call_args.args[0]
+        self.assertEqual("versioned", frozen_request["tuning_patch_binding"]["state"])
+        self.assertEqual(
+            expected_tuning["values_sha256"],
+            frozen_request["tuning_patch_binding"]["values_sha256"],
+        )
+        self.assertEqual(original_materialized_bytes, self.config_path.read_bytes())
+        self.assertEqual(self.config_sha256, _sha256(self.config_path))
+
+    def test_sparse_versioned_tuning_metadata_must_match_resolved_effective_config(self) -> None:
+        self._install_sparse_versioned_tuning(include_changed_leaf=False)
+
+        with mock.patch.object(self.development, "create_probe") as create_probe:
+            response = self.client.post("/api/v1/detector-probes", json=self._request())
+
+        self.assertEqual(409, response.status_code)
+        self.assertEqual("invalid_parent_tuning_lineage", response.json()["detail"]["code"])
+        create_probe.assert_not_called()
 
     def test_parent_contract_must_exactly_match_the_trial_frame_window(self) -> None:
         original = json.loads(self.contract_path.read_text(encoding="utf-8"))
