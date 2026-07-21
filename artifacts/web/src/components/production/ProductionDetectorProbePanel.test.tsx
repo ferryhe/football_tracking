@@ -263,11 +263,31 @@ describe("ProductionDetectorProbePanel", () => {
     }
   });
 
-  it("shows exact immutable model/profile identity, lifecycle, licenses, availability, and egress", () => {
-    renderPanel();
+  it("puts profile selection before collapsed immutable model details", async () => {
+    const { user } = renderPanel();
 
     const panel = screen.getByTestId("production-detector-probe-panel");
     expect(panel).toHaveClass("min-w-0", "w-full");
+    const firstModel = within(panel)
+      .getByText("Official COCO YOLO11n")
+      .closest("article");
+    expect(firstModel).not.toBeNull();
+    const firstProfile = within(firstModel!).getByRole("checkbox", {
+      name: /official-coco-yolo11n-direct/i,
+    });
+    const firstTechnicalSummary = within(firstModel!).getByText(
+      "Technical details",
+    );
+    expect(
+      firstProfile.compareDocumentPosition(firstTechnicalSummary) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).not.toBe(0);
+    expect(within(firstModel!).getByText(sha("a"))).not.toBeVisible();
+
+    for (const summary of within(panel).getAllByText("Technical details")) {
+      await user.click(summary);
+    }
+
     expect(within(panel).getByText("Official COCO YOLO11n")).toBeVisible();
     expect(panel).toHaveTextContent("v8.4.0:yolo11n.pt");
     expect(panel).toHaveTextContent("ultralytics==8.4.31");
@@ -304,6 +324,36 @@ describe("ProductionDetectorProbePanel", () => {
         name: /public-soccer-ball-yolo11n/i,
       }),
     ).toBeNull();
+  });
+
+  it("explains the bounded three-step workflow and makes exact-profile selection obvious", async () => {
+    const { user } = renderPanel();
+
+    expect(
+      screen.getByText("Select 2–6 available exact profiles."),
+    ).toBeVisible();
+    expect(
+      screen.getByText(
+        "Compare them on the same small set of source frames—not the full video—and do not change trial settings.",
+      ),
+    ).toBeVisible();
+    expect(
+      screen.getByText(
+        "After every evidence image is verified, continue to development annotation to confirm the ball.",
+      ),
+    ).toBeVisible();
+    expect(
+      screen.getByTestId("detector-probe-selected-count"),
+    ).toHaveTextContent("Selected exact profiles: 2 / 6");
+    expect(screen.getAllByText("Selected")).toHaveLength(2);
+
+    await user.click(
+      screen.getByRole("checkbox", { name: /official-coco-yolo11n-direct/i }),
+    );
+    expect(
+      screen.getByTestId("detector-probe-selected-count"),
+    ).toHaveTextContent("Selected exact profiles: 1 / 6");
+    expect(screen.getAllByText("Selected")).toHaveLength(1);
   });
 
   it("requires two exact profiles and starts only the immutable profile IDs", async () => {
@@ -657,6 +707,7 @@ describe("ProductionDetectorProbePanel", () => {
 
   it("honestly routes an all-profile zero result toward T3 with lineage-bound retry and no acceptance", async () => {
     const onRetry = vi.fn();
+    const onStartDevelopmentAnnotation = vi.fn();
     const { user } = renderPanel({
       job: {
         ...readyJob,
@@ -672,7 +723,13 @@ describe("ProductionDetectorProbePanel", () => {
         })),
       },
       onRetry,
+      onStartDevelopmentAnnotation,
     });
+    expect(
+      screen.queryByText(
+        "Zero suggestions does not mean the source frame contains no ball. In development annotation, choose Present and draw the box manually around the ball.",
+      ),
+    ).toBeNull();
     loadAllEvidenceImages();
 
     expect(
@@ -685,7 +742,19 @@ describe("ProductionDetectorProbePanel", () => {
       "No selected profile produced retained candidate boxes",
     );
     expect(
-      screen.getByText(/freeze a new 20–50-frame unseen-frame check manifest/i),
+      screen.getByText(
+        "First use these revealed frames for development annotation. After development, a data-isolated action must freeze a new 20–50-frame unseen-frame check manifest and start a new background probe; no displayed frame may be reselected.",
+      ),
+    ).toBeVisible();
+    expect(
+      screen.getByText(
+        "Zero suggestions does not mean the source frame contains no ball. In development annotation, choose Present and draw the box manually around the ball.",
+      ),
+    ).toBeVisible();
+    expect(
+      screen.getByText(
+        "This creates development evidence only. It does not automatically pass the trial or authorize training or PR-T4.",
+      ),
     ).toBeVisible();
     expect(screen.queryByRole("button", { name: /accept trial/i })).toBeNull();
     expect(
@@ -846,6 +915,33 @@ describe("ProductionDetectorProbePanel", () => {
     expect(screen.queryByText("probe-job-made-up")).toBeNull();
   });
 
+  it("labels an exact-create reconciliation as locked and only offers the original request", async () => {
+    const onRetryCreate = vi.fn();
+    const { user } = renderPanel({
+      operationError: "HTTP 503: create result was not confirmed",
+      exactCreatePending: true,
+      actionsBlocked: true,
+      onRetryCreate,
+    });
+
+    const alert = screen
+      .getByText("Reconciling the submitted exact request")
+      .closest('[role="alert"]');
+    expect(alert).toHaveTextContent(
+      "Profile selection and new or replacement jobs are locked until the server confirms this request.",
+    );
+    expect(alert).toHaveTextContent(
+      "Retry uses the original exact request; it does not create a different comparison.",
+    );
+    expect(
+      screen.getByRole("button", { name: "Run bounded comparison" }),
+    ).toBeDisabled();
+    await user.click(
+      screen.getByRole("button", { name: "Retry the exact create request" }),
+    );
+    expect(onRetryCreate).toHaveBeenCalledOnce();
+  });
+
   it("only allows discard for malformed local pointers", async () => {
     const onRefreshRecovery = vi.fn();
     const onDiscardRecovery = vi.fn();
@@ -903,6 +999,15 @@ describe("ProductionDetectorProbePanel", () => {
       expect(
         screen.getByRole("heading", { name: "模型与有界探针对比" }),
       ).toBeVisible();
+      expect(screen.getByText("选择 2–6 个可用的精确配置。")).toBeVisible();
+      expect(
+        screen.getByText(
+          "在同一小组原片帧上对比，不处理全片，也不会修改试跑参数。",
+        ),
+      ).toBeVisible();
+      expect(
+        screen.getByTestId("detector-probe-selected-count"),
+      ).toHaveTextContent("已选择 2 / 6 个精确配置");
       expect(screen.getAllByText("仅限探针；不能用于接受试跑。")).toHaveLength(
         3,
       );

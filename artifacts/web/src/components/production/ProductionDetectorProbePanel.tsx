@@ -229,6 +229,11 @@ function detectorProbeLabels(language: "en" | "zh") {
       title: "模型与有界探针对比",
       description:
         "在同一组原片帧上比较至少两个精确模型配置；这里只做有界探针，不会改写试跑参数或接受状态。",
+      workflowSteps: [
+        "选择 2–6 个可用的精确配置。",
+        "在同一小组原片帧上对比，不处理全片，也不会修改试跑参数。",
+        "证据图片全部验证后，进入开发标注确认足球。",
+      ],
       loading: "正在读取精确模型注册表…",
       unavailable: "精确模型注册表不可用，当前不能运行可信的模型对比。",
       selectAtLeastTwo: "请选择 2–6 个可用的精确配置。",
@@ -266,7 +271,9 @@ function detectorProbeLabels(language: "en" | "zh") {
       evidenceProfileSha: "本次证据绑定的配置 SHA-256",
       notAcquired: "未获取",
       selected: "已选择",
+      selectedCount: (count: number) => `已选择 ${count} / 6 个精确配置`,
       recommended: "推荐",
+      technicalDetails: "技术详情",
       sourceFrame: (frame: number) => `原片帧 ${frame}`,
       sourceSha: "原片帧 SHA-256",
       sourceDimensions: "原片尺寸",
@@ -310,6 +317,10 @@ function detectorProbeLabels(language: "en" | "zh") {
         "已保留当前任务指针。重新读取成功前不会启动或替换后台任务。",
       reloadCatalog: "重新加载模型目录",
       retryCreate: "按原请求重试创建",
+      exactCreatePendingTitle: "正在对账已提交的精确请求",
+      exactCreatePendingLock:
+        "服务器确认本次请求前，配置选择以及新建或替换任务均已锁定。",
+      exactCreatePendingRetry: "重试只会使用原始精确请求，不会创建不同的对比。",
       lineageLocked:
         "该探针已进入标注续接链路。这里只保留历史证据与父子谱系；普通探针重试已禁用，请使用标注会话中由服务器授权的恢复操作。",
       previousFrame: "上一帧",
@@ -322,6 +333,10 @@ function detectorProbeLabels(language: "en" | "zh") {
         "这些帧已经展示，只能用于开发标注；模型建议仍然是未确认项。",
       dataIsolatedCheckBoundary:
         "开发标注完成后，必须通过数据隔离动作先冻结一份全新的 20–50 帧未见帧检查清单，再启动新的后台探针；本页展示帧不得进入该检查。",
+      zeroCandidateManualAnnotation:
+        "零建议不等于原片里没有球。进入开发标注后，请选择“出现（present）”，再在原片中手动画出足球边界框。",
+      developmentEvidenceOnly:
+        "这些操作只生成开发证据；不会自动通过试跑，也不会授权训练或 PR-T4。",
       startDevelopmentAnnotation: "用已展示帧开始开发标注",
     };
   }
@@ -329,6 +344,11 @@ function detectorProbeLabels(language: "en" | "zh") {
     title: "Model and bounded probe comparison",
     description:
       "Compare at least two exact profiles on the same source frames. This bounded probe does not change trial tuning or acceptance.",
+    workflowSteps: [
+      "Select 2–6 available exact profiles.",
+      "Compare them on the same small set of source frames—not the full video—and do not change trial settings.",
+      "After every evidence image is verified, continue to development annotation to confirm the ball.",
+    ],
     loading: "Loading the exact model registry…",
     unavailable:
       "The exact model registry is unavailable, so a trustworthy comparison cannot run.",
@@ -367,7 +387,9 @@ function detectorProbeLabels(language: "en" | "zh") {
     evidenceProfileSha: "Evidence-bound profile SHA-256",
     notAcquired: "Not acquired",
     selected: "Selected",
+    selectedCount: (count: number) => `Selected exact profiles: ${count} / 6`,
     recommended: "Recommended",
+    technicalDetails: "Technical details",
     sourceFrame: (frame: number) => `Source frame ${frame}`,
     sourceSha: "Source frame SHA-256",
     sourceDimensions: "Source dimensions",
@@ -412,6 +434,11 @@ function detectorProbeLabels(language: "en" | "zh") {
       "The current job pointer is retained. No backend job will be started or replaced until refresh succeeds.",
     reloadCatalog: "Reload model registry",
     retryCreate: "Retry the exact create request",
+    exactCreatePendingTitle: "Reconciling the submitted exact request",
+    exactCreatePendingLock:
+      "Profile selection and new or replacement jobs are locked until the server confirms this request.",
+    exactCreatePendingRetry:
+      "Retry uses the original exact request; it does not create a different comparison.",
     lineageLocked:
       "This probe is now part of an annotation continuation. Its historical evidence and parent/child lineage remain visible, but ordinary probe retry is disabled; use only the server-authorized recovery action in the annotation session.",
     previousFrame: "Previous frame",
@@ -424,6 +451,10 @@ function detectorProbeLabels(language: "en" | "zh") {
       "These displayed frames are already revealed. They can support development annotation only; suggestions remain unconfirmed.",
     dataIsolatedCheckBoundary:
       "After development annotation, a data-isolated action must first freeze a new 20–50-frame unseen-frame check manifest, then run a new background probe. None of these displayed frames may be selected into that check.",
+    zeroCandidateManualAnnotation:
+      "Zero suggestions does not mean the source frame contains no ball. In development annotation, choose Present and draw the box manually around the ball.",
+    developmentEvidenceOnly:
+      "This creates development evidence only. It does not automatically pass the trial or authorize training or PR-T4.",
     startDevelopmentAnnotation:
       "Start development annotation on displayed frames",
   };
@@ -658,6 +689,11 @@ export function ProductionDetectorProbePanel({
           <h3 id="production-detector-probe-title">{labels.title}</h3>
         </CardTitle>
         <CardDescription>{labels.description}</CardDescription>
+        <ol className="list-decimal space-y-1 pl-5 text-sm text-muted-foreground">
+          {labels.workflowSteps.map((step) => (
+            <li key={step}>{step}</li>
+          ))}
+        </ol>
       </CardHeader>
       <CardContent className="min-w-0 space-y-5">
         <div role="status" aria-live="polite" aria-atomic="true">
@@ -702,11 +738,13 @@ export function ProductionDetectorProbePanel({
           </Alert>
         )}
 
-        {operationError && (
+        {exactCreatePending ? (
           <Alert variant="destructive">
-            <AlertTitle>{labels.failure}</AlertTitle>
+            <AlertTitle>{labels.exactCreatePendingTitle}</AlertTitle>
             <AlertDescription className="space-y-3">
-              <p>{operationError}</p>
+              <p>{labels.exactCreatePendingLock}</p>
+              <p>{labels.exactCreatePendingRetry}</p>
+              {operationError && <p>{operationError}</p>}
               {onRetryCreate && (
                 <Button type="button" variant="outline" onClick={onRetryCreate}>
                   {labels.retryCreate}
@@ -714,6 +752,24 @@ export function ProductionDetectorProbePanel({
               )}
             </AlertDescription>
           </Alert>
+        ) : (
+          operationError && (
+            <Alert variant="destructive">
+              <AlertTitle>{labels.failure}</AlertTitle>
+              <AlertDescription className="space-y-3">
+                <p>{operationError}</p>
+                {onRetryCreate && (
+                  <Button
+                    type="button"
+                    variant="outline"
+                    onClick={onRetryCreate}
+                  >
+                    {labels.retryCreate}
+                  </Button>
+                )}
+              </AlertDescription>
+            </Alert>
+          )
         )}
 
         {recoveryError && (
@@ -755,6 +811,16 @@ export function ProductionDetectorProbePanel({
         )}
 
         {catalogState === "ready" && (
+          <p
+            className="rounded-lg border-2 border-primary/40 bg-primary/5 px-4 py-3 text-sm font-semibold"
+            data-testid="detector-probe-selected-count"
+            aria-live="polite"
+          >
+            {labels.selectedCount(selectedProfileIds.length)}
+          </p>
+        )}
+
+        {catalogState === "ready" && (
           <div className="grid min-w-0 gap-4 xl:grid-cols-2">
             {models.map((model) => (
               <article
@@ -780,103 +846,6 @@ export function ProductionDetectorProbePanel({
                   </Badge>
                 </div>
 
-                <dl className="grid min-w-0 gap-2 text-xs sm:grid-cols-2">
-                  <div className="min-w-0 rounded-md bg-muted p-2">
-                    <dt>{labels.lifecycle}</dt>
-                    <dd className="break-all font-mono">{model.lifecycle}</dd>
-                  </div>
-                  <div className="min-w-0 rounded-md bg-muted p-2">
-                    <dt>{labels.availability}</dt>
-                    <dd className="break-words font-mono">
-                      {model.availability}
-                    </dd>
-                  </div>
-                  <div className="min-w-0 rounded-md bg-muted p-2 sm:col-span-2">
-                    <dt>{labels.weightsSha}</dt>
-                    <dd className="break-all font-mono">
-                      {model.weightsSha256 ?? labels.notAcquired}
-                    </dd>
-                  </div>
-                  <div className="min-w-0 rounded-md bg-muted p-2 sm:col-span-2">
-                    <dt>{labels.manifestSha}</dt>
-                    <dd className="break-all font-mono">
-                      {model.manifestSha256 ?? labels.notAcquired}
-                    </dd>
-                  </div>
-                </dl>
-
-                <dl className="space-y-1 text-xs">
-                  <div>
-                    <dt>{labels.sourceIdentity}</dt>
-                    <dd className="break-words font-mono">
-                      {model.sourceProject} · {model.sourceVersion} ·{" "}
-                      {model.acquisitionMethod}
-                    </dd>
-                  </div>
-                  <div>
-                    <dt>{labels.access}</dt>
-                    <dd className="break-words">{model.accessRequirement}</dd>
-                  </div>
-                </dl>
-
-                {!model.trialEligible && (
-                  <p className="text-xs font-medium text-amber-700 dark:text-amber-300">
-                    {labels.probeOnly}
-                  </p>
-                )}
-                <dl className="grid gap-1 text-xs sm:grid-cols-3">
-                  <div>
-                    <dt>{labels.trialEligible}</dt>
-                    <dd className="font-mono">{String(model.trialEligible)}</dd>
-                  </div>
-                  <div>
-                    <dt>{labels.sourceQualified}</dt>
-                    <dd className="font-mono">
-                      {String(model.sourceSegmentQualified)}
-                    </dd>
-                  </div>
-                  <div>
-                    <dt>{labels.cameraQualified}</dt>
-                    <dd className="font-mono">
-                      {String(model.cameraQualified)}
-                    </dd>
-                  </div>
-                </dl>
-
-                <div className="space-y-1 text-xs">
-                  <p className="font-medium">{labels.licenses}</p>
-                  <p>
-                    {labels.dataset}: {model.datasetLicense}
-                  </p>
-                  <p>
-                    {labels.model}: {model.modelLicense}
-                  </p>
-                  <p>
-                    {labels.runtime}: {model.runtimeLicense}
-                  </p>
-                  <p>
-                    {labels.deployment}: {model.deploymentLicense}
-                  </p>
-                  <p>
-                    {labels.runtimeVersion}: {model.runtimeVersion}
-                  </p>
-                </div>
-
-                <div className="text-xs">
-                  {model.egress.leavesDevice === true ? (
-                    <p>
-                      {labels.egress}: {model.egress.destination ?? "—"} ·{" "}
-                      {model.egress.consent}
-                    </p>
-                  ) : model.egress.leavesDevice === false ? (
-                    <p>{labels.localOnly}</p>
-                  ) : (
-                    <p>
-                      {labels.egressUnknown} · {model.egress.consent}
-                    </p>
-                  )}
-                </div>
-
                 {model.availabilityReason && (
                   <p className="text-xs text-destructive">
                     {model.availabilityReason}
@@ -886,26 +855,30 @@ export function ProductionDetectorProbePanel({
                 <div className="space-y-2">
                   {model.profiles.map((profile) => {
                     const inputId = `detector-profile-${profile.profileId}`;
+                    const selected = selectedProfileIds.includes(
+                      profile.profileId,
+                    );
                     const enabled =
                       model.availability === "available" &&
                       profile.probeSelectable;
                     return (
                       <div
                         key={profile.profileId}
-                        className="flex min-w-0 items-start gap-3 rounded-md border p-3"
+                        className={`flex min-w-0 items-start gap-3 rounded-md border p-3 ${
+                          selected
+                            ? "border-primary bg-primary/5 ring-1 ring-primary"
+                            : ""
+                        }`}
                       >
                         <Checkbox
                           id={inputId}
-                          checked={selectedProfileIds.includes(
-                            profile.profileId,
-                          )}
+                          checked={selected}
                           disabled={
                             !enabled ||
                             Boolean(active) ||
                             mutationPending ||
                             actionsBlocked ||
-                            (!selectedProfileIds.includes(profile.profileId) &&
-                              selectedProfileIds.length >= 6)
+                            (!selected && selectedProfileIds.length >= 6)
                           }
                           onCheckedChange={(checked) =>
                             toggleProfile(profile.profileId, checked === true)
@@ -919,9 +892,9 @@ export function ProductionDetectorProbePanel({
                             {profile.profileId} · {profile.version}
                           </span>
                           <span className="block text-xs font-normal text-muted-foreground">
-                            {profile.mode.toUpperCase()} · {profile.inputSize}px
-                            · {labels.confidence} {profile.confidenceThreshold}{" "}
-                            · top {profile.topK}
+                            {profile.mode.toUpperCase()} · {profile.inputSize}
+                            px · {labels.confidence}{" "}
+                            {profile.confidenceThreshold} · top {profile.topK}
                           </span>
                           {profile.tile && (
                             <span className="block text-xs font-normal text-muted-foreground">
@@ -934,6 +907,7 @@ export function ProductionDetectorProbePanel({
                           <span className="block break-all font-mono text-[11px] font-normal text-muted-foreground">
                             {labels.profileSha}: {profile.digest}
                           </span>
+                          {selected && <Badge>{labels.selected}</Badge>}
                           {profile.recommended && (
                             <Badge variant="outline">
                               {labels.recommended}
@@ -949,6 +923,116 @@ export function ProductionDetectorProbePanel({
                     );
                   })}
                 </div>
+
+                <details className="rounded-md border bg-muted/30 p-3">
+                  <summary className="cursor-pointer text-sm font-medium">
+                    {labels.technicalDetails}
+                  </summary>
+                  <div className="mt-3 space-y-3">
+                    <dl className="grid min-w-0 gap-2 text-xs sm:grid-cols-2">
+                      <div className="min-w-0 rounded-md bg-muted p-2">
+                        <dt>{labels.lifecycle}</dt>
+                        <dd className="break-all font-mono">
+                          {model.lifecycle}
+                        </dd>
+                      </div>
+                      <div className="min-w-0 rounded-md bg-muted p-2">
+                        <dt>{labels.availability}</dt>
+                        <dd className="break-words font-mono">
+                          {model.availability}
+                        </dd>
+                      </div>
+                      <div className="min-w-0 rounded-md bg-muted p-2 sm:col-span-2">
+                        <dt>{labels.weightsSha}</dt>
+                        <dd className="break-all font-mono">
+                          {model.weightsSha256 ?? labels.notAcquired}
+                        </dd>
+                      </div>
+                      <div className="min-w-0 rounded-md bg-muted p-2 sm:col-span-2">
+                        <dt>{labels.manifestSha}</dt>
+                        <dd className="break-all font-mono">
+                          {model.manifestSha256 ?? labels.notAcquired}
+                        </dd>
+                      </div>
+                    </dl>
+
+                    <dl className="space-y-1 text-xs">
+                      <div>
+                        <dt>{labels.sourceIdentity}</dt>
+                        <dd className="break-words font-mono">
+                          {model.sourceProject} · {model.sourceVersion} ·{" "}
+                          {model.acquisitionMethod}
+                        </dd>
+                      </div>
+                      <div>
+                        <dt>{labels.access}</dt>
+                        <dd className="break-words">
+                          {model.accessRequirement}
+                        </dd>
+                      </div>
+                    </dl>
+
+                    {!model.trialEligible && (
+                      <p className="text-xs font-medium text-amber-700 dark:text-amber-300">
+                        {labels.probeOnly}
+                      </p>
+                    )}
+                    <dl className="grid gap-1 text-xs sm:grid-cols-3">
+                      <div>
+                        <dt>{labels.trialEligible}</dt>
+                        <dd className="font-mono">
+                          {String(model.trialEligible)}
+                        </dd>
+                      </div>
+                      <div>
+                        <dt>{labels.sourceQualified}</dt>
+                        <dd className="font-mono">
+                          {String(model.sourceSegmentQualified)}
+                        </dd>
+                      </div>
+                      <div>
+                        <dt>{labels.cameraQualified}</dt>
+                        <dd className="font-mono">
+                          {String(model.cameraQualified)}
+                        </dd>
+                      </div>
+                    </dl>
+
+                    <div className="space-y-1 text-xs">
+                      <p className="font-medium">{labels.licenses}</p>
+                      <p>
+                        {labels.dataset}: {model.datasetLicense}
+                      </p>
+                      <p>
+                        {labels.model}: {model.modelLicense}
+                      </p>
+                      <p>
+                        {labels.runtime}: {model.runtimeLicense}
+                      </p>
+                      <p>
+                        {labels.deployment}: {model.deploymentLicense}
+                      </p>
+                      <p>
+                        {labels.runtimeVersion}: {model.runtimeVersion}
+                      </p>
+                    </div>
+
+                    <div className="text-xs">
+                      {model.egress.leavesDevice === true ? (
+                        <p>
+                          {labels.egress}: {model.egress.destination ?? "—"} ·{" "}
+                          {model.egress.consent}
+                        </p>
+                      ) : model.egress.leavesDevice === false ? (
+                        <p>{labels.localOnly}</p>
+                      ) : (
+                        <p>
+                          {labels.egressUnknown} · {model.egress.consent}
+                        </p>
+                      )}
+                    </div>
+                  </div>
+                </details>
               </article>
             ))}
           </div>
@@ -1140,6 +1224,19 @@ export function ProductionDetectorProbePanel({
                   ))}
                 </select>
               </div>
+              {job.noProfilesProducedCandidates && (
+                <div
+                  className="space-y-2 rounded-lg border border-amber-500/50 bg-amber-500/10 p-3"
+                  data-testid="zero-candidate-manual-annotation-guidance"
+                >
+                  <p className="text-sm font-medium">
+                    {labels.zeroCandidateManualAnnotation}
+                  </p>
+                  <p className="text-sm text-muted-foreground">
+                    {labels.developmentEvidenceOnly}
+                  </p>
+                </div>
+              )}
               <Button
                 type="button"
                 variant="outline"

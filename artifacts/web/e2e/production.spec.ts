@@ -5212,7 +5212,30 @@ test("blocks acceptance and exposes bounded tuning when every trial frame is los
   await expect(page.getByTestId("trial-evidence-ready")).toBeAttached({
     timeout: 15_000,
   });
-  await expect(page.getByText("Quality gate: stable")).toBeVisible();
+  await expect(page.getByTestId("trial-evidence-outcome")).toContainText(
+    "Trial result requires adjustment",
+  );
+  await expect(page.getByTestId("trial-evidence-outcome")).toContainText(
+    "This trial cannot be confirmed or accepted.",
+  );
+  await expect(page.getByTestId("trial-quality-signals")).toContainText(
+    "Authoritative V2 decision: Adjustment required",
+  );
+  await expect(page.getByTestId("trial-quality-signals")).toContainText(
+    "Legacy inter-tracklet continuity: Not applicable (no tracklets)",
+  );
+  await expect(page.getByText("Quality gate: stable")).toHaveCount(0);
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () =>
+          document.documentElement.scrollWidth <=
+          document.documentElement.clientWidth,
+      ),
+    )
+    .toBe(true);
+  await page.setViewportSize({ width: 1440, height: 900 });
   expect(scenario.runs[0]).toMatchObject({
     stats: {
       quality_gate: { status: "stable" },
@@ -5242,6 +5265,14 @@ test("blocks acceptance and exposes bounded tuning when every trial frame is los
   await expect(
     detectorProbe.getByText("Official YOLO11s", { exact: true }),
   ).toBeVisible();
+  await expect(
+    detectorProbe.getByText("Selected exact profiles: 2 / 6"),
+  ).toBeVisible();
+  await expect(
+    detectorProbe.getByText(
+      "Compare them on the same small set of source frames—not the full video—and do not change trial settings.",
+    ),
+  ).toBeVisible();
   await detectorProbe
     .getByRole("button", { name: "Run bounded comparison" })
     .click();
@@ -5262,6 +5293,16 @@ test("blocks acceptance and exposes bounded tuning when every trial frame is los
   await expect(
     detectorProbe.getByText(
       /data-isolated action must first freeze a new 20–50-frame unseen-frame check manifest/,
+    ),
+  ).toBeVisible();
+  await expect(
+    detectorProbe.getByText(
+      "Zero suggestions does not mean the source frame contains no ball. In development annotation, choose Present and draw the box manually around the ball.",
+    ),
+  ).toBeVisible();
+  await expect(
+    detectorProbe.getByText(
+      "This creates development evidence only. It does not automatically pass the trial or authorize training or PR-T4.",
     ),
   ).toBeVisible();
   await expect(

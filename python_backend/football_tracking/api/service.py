@@ -428,6 +428,202 @@ _CONFIG_EXPLAIN_DESCRIPTIONS_EN: dict[str, str] = {
 }
 
 
+_TRIAL_TUNING_DESCRIPTIONS: dict[str, tuple[str, str]] = {
+    "detector.allowed_labels": (
+        "Only detections with a selected class name can become ball candidates; a label mismatch rejects every box "
+        "even if the model saw the ball.",
+        "只有类别名在所选列表中的检测框才能成为球候选；即使模型看到了球，类别名不匹配也会让所有框被拒绝。",
+    ),
+    "detector.inference_mode": (
+        "Choose full-frame YOLO or tiled SAHI inference. SAHI often helps distant tiny balls but runs much slower.",
+        "选择整帧 YOLO 或 SAHI 切片推理；SAHI 通常更利于远距离小球，但运行速度会明显变慢。",
+    ),
+    "detector.device": (
+        "Choose CPU or the first CUDA GPU for inference. CUDA is usually faster but requires a compatible GPU and "
+        "runtime.",
+        "选择 CPU 或第一块 CUDA GPU 进行推理；CUDA 通常更快，但需要兼容的显卡和运行环境。",
+    ),
+    "detector.use_half": (
+        "Use half-precision inference where the device and backend support it. This can reduce GPU memory and time, "
+        "but may slightly change scores and gives no CPU speedup.",
+        "在设备和后端支持时使用半精度推理；可减少显存和耗时，但可能轻微改变分数，并且不会加速 CPU。",
+    ),
+    "detector.confidence_threshold": (
+        "Set the detector-level confidence floor before class mapping and filtering. Lower values recover weaker balls "
+        "but create more noise and downstream work.",
+        "设置类别映射和过滤之前的检测置信度下限；调低可找回更弱的小球，但会增加噪声和后续处理量。",
+    ),
+    "detector.image_size": (
+        "Resize detector inference to this square size. Larger values can reveal tiny balls but use more GPU memory "
+        "and processing time.",
+        "将检测推理缩放到这个方形尺寸；调大可能看清更小的球，但会占用更多显存和处理时间。",
+    ),
+    "sahi.slice_height": (
+        "Set each SAHI tile height. Smaller tiles make small objects larger relative to a tile but create more tiles "
+        "and take longer.",
+        "设置每个 SAHI 切片的高度；调小会让小目标在切片中相对更大，但切片更多、耗时更长。",
+    ),
+    "sahi.slice_width": (
+        "Set each SAHI tile width. Smaller tiles can improve tiny-object visibility but create more tiles and take "
+        "longer.",
+        "设置每个 SAHI 切片的宽度；调小可能提升小目标可见度，但切片更多、耗时更长。",
+    ),
+    "sahi.overlap_height_ratio": (
+        "Set vertical overlap between SAHI tiles. Higher overlap reduces horizontal-boundary misses but repeats more "
+        "work and boxes.",
+        "设置 SAHI 切片的垂直重叠比例；调高可减少横向边界漏检，但会增加重复计算和重复框。",
+    ),
+    "sahi.overlap_width_ratio": (
+        "Set horizontal overlap between SAHI tiles. Higher overlap reduces vertical-boundary misses but repeats more "
+        "work and boxes.",
+        "设置 SAHI 切片的水平重叠比例；调高可减少纵向边界漏检，但会增加重复计算和重复框。",
+    ),
+    "sahi.postprocess_match_threshold": (
+        "Merge duplicate slice boxes when their match metric reaches this threshold. Lower values merge more "
+        "aggressively; higher values retain more duplicates.",
+        "当切片框的匹配指标达到此阈值时进行合并；调低会更积极地合并，调高会保留更多重复框。",
+    ),
+    "filtering.min_confidence": (
+        "Apply a second confidence floor after detector output and class mapping. Lower values retain weak candidates "
+        "but also more false positives.",
+        "在检测输出和类别映射后应用第二道置信度下限；调低可保留弱候选，但也会保留更多误检。",
+    ),
+    "filtering.min_width": (
+        "Reject boxes narrower than this pixel width. Lower values improve tiny-ball recall but admit more small noise.",
+        "拒绝宽度小于该像素值的框；调低有利于小球召回，但也会放入更多细小噪声。",
+    ),
+    "filtering.max_width": (
+        "Reject boxes wider than this pixel width. Higher values retain larger or nearer balls but admit more non-ball "
+        "objects.",
+        "拒绝宽度大于该像素值的框；调高可保留更大或更近的球，但也会放入更多非球目标。",
+    ),
+    "filtering.min_height": (
+        "Reject boxes shorter than this pixel height. Lower values retain smaller balls but admit more tiny artifacts.",
+        "拒绝高度小于该像素值的框；调低可保留更小的球，但也会放入更多微小伪影。",
+    ),
+    "filtering.max_height": (
+        "Reject boxes taller than this pixel height. Higher values retain larger ball boxes but admit more unrelated "
+        "objects.",
+        "拒绝高度大于该像素值的框；调高可保留更大的球框，但也会放入更多无关目标。",
+    ),
+    "filtering.min_aspect_ratio": (
+        "Reject boxes whose width-to-height ratio is below this value. Lower values allow taller, narrower candidates "
+        "but increase shape noise.",
+        "拒绝宽高比低于该值的框；调低会允许更高、更窄的候选，但会增加形状噪声。",
+    ),
+    "filtering.max_aspect_ratio": (
+        "Reject boxes whose width-to-height ratio is above this value. Higher values allow wider, flatter candidates "
+        "but increase shape noise.",
+        "拒绝宽高比高于该值的框；调高会允许更宽、更扁的候选，但会增加形状噪声。",
+    ),
+    "selection.min_accept_score": (
+        "When track history exists, reject the best candidate if its total score is below this value. Lower values "
+        "reacquire more easily but accept more false candidates; cold start bypasses this gate.",
+        "已有轨迹时，最佳候选总分低于该值就会被拒绝；调低更容易重新找回球，但也更易接入误检，冷启动不受此门限制。",
+    ),
+    "selection.stable_history_length": (
+        "Set how many history frames are needed for the trajectory-length bonus to reach full strength. Lower values "
+        "reward short tracks sooner; higher values demand longer consistency.",
+        "设置轨迹长度奖励达到满值所需的历史帧数；调低会更早奖励短轨迹，调高则要求更长时间的一致性。",
+    ),
+    "selection.weights.distance_score": (
+        "Weight proximity to the predicted position. Higher values favor nearby candidates but can reject legitimate "
+        "fast jumps or reacquisition farther away.",
+        "设置候选靠近预测位置的评分权重；调高会偏向近处候选，但可能压低真实的快速跳跃或远处重获。",
+    ),
+    "selection.weights.direction_score": (
+        "Weight continuity with the recent movement direction. Higher values stabilize straight motion but can miss "
+        "real turns and deflections.",
+        "设置候选延续近期运动方向的评分权重；调高可稳定直线运动，但可能错过真实转向和折射。",
+    ),
+    "selection.weights.velocity_score": (
+        "Weight similarity to the recent ball speed. Higher values prefer steady speed but can penalize real "
+        "accelerations, stops, or kicks.",
+        "设置候选速度接近近期球速的评分权重；调高会偏向稳定速度，但可能惩罚真实加速、停球或踢球。",
+    ),
+    "selection.weights.acceleration_penalty": (
+        "Scale the negative penalty for abrupt acceleration changes. Higher values suppress jumps more strongly but "
+        "can reject real bounces and direction changes.",
+        "放大突发加速度变化的负向扣分；调高会更强地抑制跳点，但可能拒绝真实弹跳和变向。",
+    ),
+    "selection.weights.trajectory_length_bonus": (
+        "Weight the bonus for an established trajectory. Higher values favor continuity but make switching or "
+        "reacquiring a new trajectory harder.",
+        "设置已有轨迹长度奖励的权重；调高会偏向连续轨迹，但会让切换目标或重新起轨更困难。",
+    ),
+    "selection.weights.confidence": (
+        "Weight the detector's raw confidence. Higher values trust confident detections more but let confident false "
+        "positives dominate more easily.",
+        "设置检测器原始置信度的权重；调高会更信任高置信检测，但高置信误检也更容易占优。",
+    ),
+    "selection.priors.enabled": (
+        "Use available player-foot tracks and pitch calibration as candidate priors. Missing evidence contributes no "
+        "score, while noisy evidence can bias selection.",
+        "使用可用的球员脚点轨迹和球场校准作为候选先验；证据缺失时不加分，证据有噪声时可能带偏选择。",
+    ),
+    "selection.priors.player_foot_radius_px": (
+        "Set how far from a recent player-foot point a candidate can receive a proximity bonus. Larger radii cover "
+        "more loose balls but also more nearby clutter.",
+        "设置候选距离近期球员脚点多远仍可获得邻近奖励；调大可覆盖更多离脚球，也会覆盖更多附近杂物。",
+    ),
+    "selection.priors.player_foot_bonus": (
+        "Set the maximum score bonus for a candidate at a recent player-foot point. Higher values help possession "
+        "scenes but can lock onto shoes or body detections.",
+        "设置候选位于近期球员脚点时的最高加分；调高有利于持球场景，但可能锁到球鞋或人体检测。",
+    ),
+    "selection.priors.recent_player_frame_window": (
+        "Allow player-foot samples from this many previous frames. Larger windows tolerate player-tracking gaps but "
+        "use increasingly stale positions.",
+        "允许使用此前这些帧内的球员脚点样本；调大可容忍球员追踪缺口，但会使用更陈旧的位置。",
+    ),
+    "tracking.max_lost_frames": (
+        "Keep emitting predicted ball points for this many missing frames before declaring loss. Higher values bridge "
+        "longer gaps but extend ghost tracks.",
+        "在宣告丢失前，最多连续这些缺失帧输出预测球点；调高可跨越更长缺口，但会延长幽灵轨迹。",
+    ),
+    "tracking.match_distance": (
+        "Set the base distance-score scale and fallback matching radius around the prediction. Higher values give "
+        "farther candidates more score but increase wrong-track matches.",
+        "设置预测点周围的基础距离评分尺度和回退匹配半径；调高会给更远候选更多分，也会增加错误接轨。",
+    ),
+    "tracking.max_speed": (
+        "Set the reference speed used by velocity scoring, not a hard cutoff. Higher values penalize fast jumps less "
+        "and can increase false matches.",
+        "设置速度评分使用的参考上限，不是硬过滤阈值；调高会减轻快速跳点的惩罚，也可能增加误接。",
+    ),
+    "tracking.max_acceleration": (
+        "Set the scale used to normalize acceleration penalty. Larger values tolerate more abrupt motion but also make "
+        "false jumps look more plausible.",
+        "设置加速度惩罚的归一化尺度；调大可容忍更突然的运动，但也会让错误跳点看起来更合理。",
+    ),
+    "tracking.predicted_confidence_decay": (
+        "Multiply prediction confidence by this factor for each lost frame. Values nearer one preserve confidence "
+        "longer but keep stale predictions credible.",
+        "每丢失一帧都用该系数衰减预测置信度；越接近 1，置信度保留越久，但陈旧预测也会显得更可信。",
+    ),
+    "postprocess.max_detected_island_length": (
+        "Allow detected islands up to this length to be considered for cleanup when other checks also fail. Higher "
+        "values can remove longer false islands but may erase brief real sightings.",
+        "当其他检查也失败时，最长这些帧的检测孤岛可进入清理；调高可删除更长误检段，但可能擦掉短暂真实检测。",
+    ),
+    "postprocess.stable_segment_min_length": (
+        "Require neighboring detected segments to be at least this long before cleaning an island. Higher values need "
+        "stronger anchors and therefore produce fewer cleanups.",
+        "清理孤岛前，要求两侧检测段至少达到这些帧；调高需要更强的锚点，因此实际清理更少。",
+    ),
+    "postprocess.min_jump_distance": (
+        "Require jumps on both sides of an island to reach this pixel distance before cleanup. Lower values clean more "
+        "islands but risk removing real motion.",
+        "清理孤岛前，要求其两侧跳跃都达到该像素距离；调低会清理更多孤岛，但可能误删真实运动。",
+    ),
+    "postprocess.low_confidence_threshold": (
+        "Treat an island as low-confidence when its mean score is at or below this value. Higher values make cleanup "
+        "more aggressive and can remove real detections.",
+        "当孤岛平均分不高于该值时视为低置信；调高会让清理更激进，也可能删除真实检测。",
+    ),
+}
+
+
 def _describe_config_path(path: str, value: Any, language: str) -> str:
     normalized = _normalize_config_explain_path(path)
     if language != "zh":
@@ -4376,12 +4572,26 @@ class ApiService:
         controls = schema.get("controls")
         if not isinstance(controls, list):
             raise RuntimeError("Production trial tuning schema is unavailable")
+        control_paths: list[str] = []
         for control in controls:
             if not isinstance(control, dict) or not isinstance(control.get("path"), str):
                 raise RuntimeError("Production trial tuning schema is invalid")
-            path = control["path"]
-            control["description"] = _describe_config_path(path, None, "en")
-            control["description_zh"] = _describe_config_path(path, None, "zh")
+            control_paths.append(control["path"])
+        if len(control_paths) != len(set(control_paths)):
+            raise RuntimeError("Production trial tuning schema contains duplicate paths")
+        description_paths = set(_TRIAL_TUNING_DESCRIPTIONS)
+        if set(control_paths) != description_paths:
+            missing = sorted(set(control_paths) - description_paths)
+            extra = sorted(description_paths - set(control_paths))
+            raise RuntimeError(
+                f"Production trial tuning description coverage mismatch: missing={missing}, extra={extra}"
+            )
+        for control in controls:
+            description, description_zh = _TRIAL_TUNING_DESCRIPTIONS[control["path"]]
+            if not description.strip() or not description_zh.strip():
+                raise RuntimeError("Production trial tuning description is invalid")
+            control["description"] = description
+            control["description_zh"] = description_zh
         return schema
 
     def list_artifacts(

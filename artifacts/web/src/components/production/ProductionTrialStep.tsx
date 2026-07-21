@@ -91,7 +91,6 @@ import {
   selectProductionTrialVideo,
   sha256Text,
   isTrialSignalGateV2,
-  type ProductionTrialTuningControl,
   type ProductionTrialReadinessSummary,
   type ProductionTrialSettings,
   type ProductionTrialState,
@@ -102,6 +101,7 @@ import {
 import type { SourceSignature } from "@/lib/productionWorkflow";
 
 import { ProductionDetectorProbeController } from "./ProductionDetectorProbeController";
+import { ProductionTrialTuningControls } from "./ProductionTrialTuningControls";
 
 const NO_STORE_REQUEST = {
   cache: "no-store" as const,
@@ -179,22 +179,14 @@ function sameSnapshot(left: unknown, right: unknown): boolean {
   }
 }
 
-function tuningValueLabel(value: unknown) {
-  if (value === undefined || value === null || value === "") return "—";
-  if (Array.isArray(value)) return value.join(", ");
-  return String(value);
-}
-
-function tuningControlGroups(
-  controls: readonly ProductionTrialTuningControl[],
+function tuningValueLabel(
+  value: unknown,
+  optionLabel: (value: string) => string = (option) => option,
 ) {
-  const groups = new Map<string, ProductionTrialTuningControl[]>();
-  for (const control of controls) {
-    const group = groups.get(control.section) ?? [];
-    group.push(control);
-    groups.set(control.section, group);
-  }
-  return Array.from(groups.entries());
+  if (value === undefined || value === null || value === "") return "—";
+  if (Array.isArray(value)) return value.map(optionLabel).join(", ");
+  if (typeof value === "string") return optionLabel(value);
+  return String(value);
 }
 
 const TRACK_DIAGNOSTIC_KEYS = [
@@ -231,7 +223,7 @@ export function ProductionTrialStep({
   onUsabilityChange,
   stopButtonRef,
 }: ProductionTrialStepProps) {
-  const { language, t } = useLanguage();
+  const { t } = useLanguage();
   const configs = useListConfigs();
   const health = useGetHealth({
     query: { queryKey: getGetHealthQueryKey(), refetchInterval: 3_000 },
@@ -291,7 +283,9 @@ export function ProductionTrialStep({
   const [configDeriveActive, setConfigDeriveActive] = useState(false);
   const [acceptRefreshing, setAcceptRefreshing] = useState(false);
   const [visualConfirmed, setVisualConfirmed] = useState(false);
-  const [tuningDraft, setTuningDraft] = useState<Record<string, unknown>>({});
+  const [tuningDraft, setTuningDraft] = useState<
+    Record<string, ProductionTuningValue>
+  >({});
   const [tuningDiff, setTuningDiff] = useState<ProductionTuningDiff[]>([]);
   const [tuningSaving, setTuningSaving] = useState(false);
   const [tuningMessage, setTuningMessage] = useState<string | null>(null);
@@ -560,10 +554,6 @@ export function ProductionTrialStep({
           })
         : {},
     [tuningBaseConfig, tuningControls, tuningPatch],
-  );
-  const tuningGroups = useMemo(
-    () => tuningControlGroups(tuningControls),
-    [tuningControls],
   );
   const tuningHistory = useMemo(
     () => productionTuningHistory(tuningPatch),
@@ -1756,6 +1746,16 @@ export function ProductionTrialStep({
     !evidenceRefreshing;
   const canAcceptTrial =
     evidenceReadyForAction && diagnosisAcceptable && visualConfirmed;
+  const evidenceOutcomeTitle = diagnosisAcceptable
+    ? t.production.trialEvidenceOutcomeReadyTitle
+    : diagnosisGate
+      ? t.production.trialEvidenceOutcomeBlockedTitle
+      : t.production.trialEvidenceOutcomeMissingTitle;
+  const evidenceOutcomeDescription = diagnosisAcceptable
+    ? t.production.trialEvidenceOutcomeReadyDescription
+    : diagnosisGate
+      ? t.production.trialEvidenceOutcomeBlockedDescription
+      : t.production.trialEvidenceOutcomeMissingDescription;
 
   const verificationMessage = (() => {
     switch (configVerification?.status) {
@@ -1934,158 +1934,18 @@ export function ProductionTrialStep({
             </p>
           </CardHeader>
           <CardContent className="space-y-5">
-            <fieldset
-              className="space-y-5"
+            <ProductionTrialTuningControls
+              controls={tuningControls}
+              currentValues={tuningCurrentValues}
+              draft={tuningDraft}
               disabled={requestIntentLocked || tuningSaving}
-            >
-              <legend className="sr-only">
-                {t.production.trialTuningTitle}
-              </legend>
-              {tuningGroups.map(([section, controls]) => (
-                <section key={section} className="space-y-3">
-                  <h3 className="text-sm font-semibold">
-                    {t.production.trialTuningSection(section)}
-                  </h3>
-                  <div className="grid gap-3 sm:grid-cols-2">
-                    {controls.map((control) => {
-                      const id = `trial-tuning-${control.path.replaceAll(".", "-")}`;
-                      const currentValue = tuningCurrentValues[control.path];
-                      const proposedValue = tuningDraft[control.path];
-                      const changed = !sameSnapshot(
-                        currentValue,
-                        proposedValue,
-                      );
-                      const description =
-                        language === "zh"
-                          ? control.description_zh
-                          : control.description;
-                      return (
-                        <div
-                          key={control.path}
-                          className={`space-y-2 rounded-md border p-3 ${changed ? "border-primary" : ""}`}
-                        >
-                          <div className="flex items-start justify-between gap-2">
-                            <Label htmlFor={id}>{control.path}</Label>
-                            <Badge variant={changed ? "default" : "secondary"}>
-                              {changed
-                                ? t.production.trialTuningChanged
-                                : t.production.trialTuningUnchanged}
-                            </Badge>
-                          </div>
-                          <p className="text-xs text-muted-foreground">
-                            {description}
-                          </p>
-                          {control.kind === "boolean" ? (
-                            <div className="flex items-center gap-2">
-                              <Checkbox
-                                id={id}
-                                checked={proposedValue === true}
-                                onCheckedChange={(checked) =>
-                                  setTuningDraft((current) => ({
-                                    ...current,
-                                    [control.path]: checked === true,
-                                  }))
-                                }
-                              />
-                              <span className="text-sm">
-                                {t.production.trialTuningBoolean(
-                                  proposedValue === true,
-                                )}
-                              </span>
-                            </div>
-                          ) : control.kind === "select" ? (
-                            <select
-                              id={id}
-                              value={String(proposedValue ?? "")}
-                              onChange={(event) =>
-                                setTuningDraft((current) => ({
-                                  ...current,
-                                  [control.path]: event.target.value,
-                                }))
-                              }
-                              className="flex h-10 w-full rounded-md border border-input bg-background px-3 text-sm"
-                            >
-                              {(control.options ?? []).map((option) => (
-                                <option key={option} value={option}>
-                                  {option}
-                                </option>
-                              ))}
-                            </select>
-                          ) : control.kind === "multi_select" ? (
-                            <select
-                              id={id}
-                              multiple
-                              size={Math.min(
-                                Math.max(control.options?.length ?? 2, 2),
-                                5,
-                              )}
-                              value={
-                                Array.isArray(proposedValue)
-                                  ? proposedValue
-                                  : []
-                              }
-                              onChange={(event) =>
-                                setTuningDraft((current) => ({
-                                  ...current,
-                                  [control.path]: Array.from(
-                                    event.target.selectedOptions,
-                                    (option) => option.value,
-                                  ),
-                                }))
-                              }
-                              className="flex w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
-                            >
-                              {(control.options ?? []).map((option) => (
-                                <option key={option} value={option}>
-                                  {option}
-                                </option>
-                              ))}
-                            </select>
-                          ) : (
-                            <Input
-                              id={id}
-                              type="number"
-                              value={String(proposedValue ?? "")}
-                              min={control.minimum ?? undefined}
-                              max={control.maximum ?? undefined}
-                              step={control.step ?? undefined}
-                              onChange={(event) =>
-                                setTuningDraft((current) => ({
-                                  ...current,
-                                  [control.path]:
-                                    event.target.value === ""
-                                      ? ""
-                                      : Number(event.target.value),
-                                }))
-                              }
-                            />
-                          )}
-                          <p className="text-xs">
-                            {t.production.trialTuningRange(
-                              control.minimum,
-                              control.maximum,
-                              control.step,
-                            )}
-                          </p>
-                          <p className="text-xs">
-                            {t.production.trialTuningRuntime}:{" "}
-                            {t.production.trialTuningRuntimeImpact(
-                              control.runtime_impact,
-                            )}
-                          </p>
-                          <p className="text-xs font-mono">
-                            {t.production.trialTuningCurrent}:{" "}
-                            {tuningValueLabel(currentValue)} ·{" "}
-                            {t.production.trialTuningProposed}:{" "}
-                            {tuningValueLabel(proposedValue)}
-                          </p>
-                        </div>
-                      );
-                    })}
-                  </div>
-                </section>
-              ))}
-            </fieldset>
+              onValueChange={(path, value) =>
+                setTuningDraft((current) => ({
+                  ...current,
+                  [path]: value,
+                }))
+              }
+            />
 
             {tuningDiff.length > 0 && (
               <div
@@ -2096,8 +1956,14 @@ export function ProductionTrialStep({
                 <ul className="list-disc pl-5 font-mono">
                   {tuningDiff.map((item) => (
                     <li key={item.path}>
-                      {item.path}: {tuningValueLabel(item.previous_value)} →{" "}
-                      {tuningValueLabel(item.next_value)}
+                      {t.production.trialTuningControlLabel(item.path)}:{" "}
+                      {tuningValueLabel(item.previous_value, (value) =>
+                        t.production.trialTuningOptionLabel(item.path, value),
+                      )}{" "}
+                      →{" "}
+                      {tuningValueLabel(item.next_value, (value) =>
+                        t.production.trialTuningOptionLabel(item.path, value),
+                      )}
                     </li>
                   ))}
                 </ul>
@@ -2714,59 +2580,86 @@ export function ProductionTrialStep({
         </section>
       )}
       {evidence?.ready && (
-        <Card>
+        <Alert
+          variant={diagnosisAcceptable ? undefined : "destructive"}
+          data-testid="trial-evidence-outcome"
+        >
+          <AlertTitle>{evidenceOutcomeTitle}</AlertTitle>
+          <AlertDescription>{evidenceOutcomeDescription}</AlertDescription>
+        </Alert>
+      )}
+      {evidence?.ready && (
+        <Card data-testid="trial-quality-signals">
           <CardHeader>
             <CardTitle className="text-base">
               {t.production.trialQualitySignals}
             </CardTitle>
           </CardHeader>
-          <CardContent className="grid gap-2 text-sm sm:grid-cols-2">
-            <p>
-              {t.production.trialQuality.detected}:{" "}
-              {(evidence.quality.detected_ratio * 100).toFixed(1)}%
-            </p>
-            <p>
-              {t.production.trialQuality.predicted}:{" "}
-              {(evidence.quality.predicted_ratio * 100).toFixed(1)}%
-            </p>
-            <p>
-              {t.production.trialQuality.lost}:{" "}
-              {(evidence.quality.lost_ratio * 100).toFixed(1)}%
-            </p>
-            <p>
-              {t.production.trialQuality.longestLost}:{" "}
-              {evidence.quality.longest_lost_streak ?? "—"}
-            </p>
-            <p>
-              {t.production.trialQuality.falsePositiveIslands}:{" "}
-              {evidence.quality.false_positive_island_count ?? "—"}
-            </p>
-            <p>
-              {t.production.trialQuality.maxStep}:{" "}
-              {evidence.quality.max_step_px ?? "—"}
-            </p>
-            <p>
-              {t.production.trialQuality.tracklets}:{" "}
-              {evidence.quality.audit_tracklet_count}
-            </p>
-            <p>
-              {t.production.trialQuality.suspicious}:{" "}
-              {evidence.quality.audit_suspicious_tracklet_count}
-            </p>
-            <p>
-              {t.production.trialQuality.reviewEvents}:{" "}
-              {evidence.quality.audit_review_event_count}
-            </p>
-            <p>
-              {t.production.trialQuality.lostGaps}:{" "}
-              {evidence.quality.audit_lost_gap_count}
-            </p>
-            {evidence.quality.quality_gate_status && (
+          <CardContent className="space-y-3 text-sm">
+            <div className="space-y-1 rounded-md border p-3">
               <p>
-                {t.production.trialQuality.qualityGate}:{" "}
-                {evidence.quality.quality_gate_status}
+                <span className="font-semibold">
+                  {t.production.trialQuality.authoritativeGate}:
+                </span>{" "}
+                {diagnosisGate
+                  ? t.production.trialDiagnosisStatus(diagnosisGate.status)
+                  : t.production.trialQuality.authoritativeUnavailable}
               </p>
-            )}
+              {evidence.quality.quality_gate_status && (
+                <p>
+                  <span className="font-semibold">
+                    {t.production.trialQuality.legacyContinuity}:
+                  </span>{" "}
+                  {evidence.quality.audit_tracklet_count === 0
+                    ? t.production.trialQuality.legacyNotApplicable
+                    : t.production.trialQuality.legacyDiagnosticOnly(
+                        evidence.quality.quality_gate_status,
+                      )}
+                </p>
+              )}
+            </div>
+            <div className="grid gap-2 sm:grid-cols-2">
+              <p>
+                {t.production.trialQuality.detected}:{" "}
+                {(evidence.quality.detected_ratio * 100).toFixed(1)}%
+              </p>
+              <p>
+                {t.production.trialQuality.predicted}:{" "}
+                {(evidence.quality.predicted_ratio * 100).toFixed(1)}%
+              </p>
+              <p>
+                {t.production.trialQuality.lost}:{" "}
+                {(evidence.quality.lost_ratio * 100).toFixed(1)}%
+              </p>
+              <p>
+                {t.production.trialQuality.longestLost}:{" "}
+                {evidence.quality.longest_lost_streak ?? "—"}
+              </p>
+              <p>
+                {t.production.trialQuality.falsePositiveIslands}:{" "}
+                {evidence.quality.false_positive_island_count ?? "—"}
+              </p>
+              <p>
+                {t.production.trialQuality.maxStep}:{" "}
+                {evidence.quality.max_step_px ?? "—"}
+              </p>
+              <p>
+                {t.production.trialQuality.tracklets}:{" "}
+                {evidence.quality.audit_tracklet_count}
+              </p>
+              <p>
+                {t.production.trialQuality.suspicious}:{" "}
+                {evidence.quality.audit_suspicious_tracklet_count}
+              </p>
+              <p>
+                {t.production.trialQuality.reviewEvents}:{" "}
+                {evidence.quality.audit_review_event_count}
+              </p>
+              <p>
+                {t.production.trialQuality.lostGaps}:{" "}
+                {evidence.quality.audit_lost_gap_count}
+              </p>
+            </div>
           </CardContent>
         </Card>
       )}
@@ -2776,7 +2669,7 @@ export function ProductionTrialStep({
           role="status"
           data-testid="trial-evidence-ready"
         >
-          {t.production.trialEvidenceReady}
+          {evidenceOutcomeTitle}
         </span>
       )}
       {readiness &&

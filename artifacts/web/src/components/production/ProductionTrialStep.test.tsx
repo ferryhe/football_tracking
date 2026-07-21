@@ -834,7 +834,7 @@ describe("ProductionTrialStep mutation safety", () => {
       screen.getByLabelText("Generate follow-camera evidence"),
     ).toBeDisabled();
     expect(
-      await screen.findByLabelText("detector.confidence_threshold"),
+      await screen.findByLabelText("Detection confidence threshold"),
     ).toBeDisabled();
     expect(
       screen.getByRole("button", { name: "Save adjustments" }),
@@ -887,7 +887,7 @@ describe("ProductionTrialStep mutation safety", () => {
       });
     const view = renderStep({ trial: initial });
     const threshold = await screen.findByLabelText(
-      "detector.confidence_threshold",
+      "Detection confidence threshold",
     );
     await view.user.clear(threshold);
     await view.user.type(threshold, "0.15");
@@ -2103,6 +2103,9 @@ describe("ProductionTrialStep evidence and configuration", () => {
     expect(
       screen.queryByRole("button", { name: "Accept this trial" }),
     ).not.toBeInTheDocument();
+    expect(
+      await screen.findByTestId("trial-evidence-outcome"),
+    ).toHaveTextContent("Evidence is ready for visual confirmation");
     await user.click(
       await screen.findByLabelText(
         /I visually reviewed this evidence and confirm/i,
@@ -2247,6 +2250,13 @@ describe("ProductionTrialStep evidence and configuration", () => {
     const { state } = await trialWithAttempt("completed");
     installReadableEvidence();
     installTrialGate(ALL_LOST_GATE);
+    const stats = runData?.stats as Record<string, unknown>;
+    stats.quality_gate = { status: "stable" };
+    const metrics = artifactBodies["metrics_report.json"] as Record<
+      string,
+      unknown
+    >;
+    metrics.quality_gate = { status: "stable" };
     renderStep({ trial: state });
     await makeLiveEvidenceReady();
 
@@ -2267,6 +2277,16 @@ describe("ProductionTrialStep evidence and configuration", () => {
     expect(
       screen.getByRole("button", { name: "Save and rerun" }),
     ).toBeVisible();
+    expect(screen.getByTestId("trial-evidence-outcome")).toHaveTextContent(
+      "Trial result requires adjustment",
+    );
+    expect(screen.getByTestId("trial-quality-signals")).toHaveTextContent(
+      "Authoritative V2 decision: Adjustment required",
+    );
+    expect(screen.getByTestId("trial-quality-signals")).toHaveTextContent(
+      "Legacy inter-tracklet continuity: Not applicable (no tracklets)",
+    );
+    expect(screen.queryByText("Quality gate: stable")).toBeNull();
     expect(screen.getByTestId("detector-probe-controller")).toBeVisible();
     expect(detectorControllerRender).toHaveBeenLastCalledWith({
       workflowId: "workflow-a",
@@ -2548,7 +2568,7 @@ describe("ProductionTrialStep evidence and configuration", () => {
 
   it("saves only selected backend-approved detector labels", async () => {
     const { user, onTrialChange } = renderStep();
-    const labels = await screen.findByLabelText("detector.allowed_labels");
+    const labels = await screen.findByLabelText("Accepted football labels");
 
     await user.selectOptions(labels, ["sports ball", "ball"]);
     await user.click(screen.getByRole("button", { name: "Save adjustments" }));
@@ -2588,6 +2608,9 @@ describe("ProductionTrialStep evidence and configuration", () => {
     expect(
       screen.queryByRole("button", { name: "Accept this trial" }),
     ).not.toBeInTheDocument();
+    expect(screen.getByTestId("trial-evidence-outcome")).toHaveTextContent(
+      "Trial diagnosis is unavailable",
+    );
   });
 
   it("localizes blocking diagnosis prose and evidence states in Chinese", async () => {
@@ -2630,7 +2653,7 @@ describe("ProductionTrialStep evidence and configuration", () => {
     createMutate.mockResolvedValue(run("queued"));
     const { user, onTrialChange } = renderStep();
     const threshold = await screen.findByLabelText(
-      "detector.confidence_threshold",
+      "Detection confidence threshold",
     );
     expect(threshold).toHaveValue(0.25);
     await user.clear(threshold);
@@ -2664,7 +2687,7 @@ describe("ProductionTrialStep evidence and configuration", () => {
   it("rejects a tuning value outside the backend-approved range", async () => {
     const { user, onTrialChange } = renderStep();
     const threshold = await screen.findByLabelText(
-      "detector.confidence_threshold",
+      "Detection confidence threshold",
     );
     await user.clear(threshold);
     await user.type(threshold, "0.95");
@@ -2799,6 +2822,7 @@ describe("ProductionTrialStep evidence and configuration", () => {
       name: "Unlock trial settings",
     });
     expect(screen.getByLabelText("Start frame")).toBeDisabled();
+    expect(screen.queryByTestId("trial-tuning-editor")).not.toBeInTheDocument();
     await user.click(unlock);
     await user.click(screen.getByRole("button", { name: "Keep locked" }));
     expect(onTrialChange).not.toHaveBeenCalled();
