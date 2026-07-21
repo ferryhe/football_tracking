@@ -6140,7 +6140,7 @@ test("shows class-mapping rejection, missing budgets, bounded labels, and the St
   await openTrialFromDraft(page);
 
   await page
-    .getByLabel("detector.allowed_labels")
+    .getByLabel("Accepted football labels", { exact: true })
     .selectOption(["sports ball", "ball"]);
   await page.getByRole("button", { name: "Save adjustments" }).click();
   await expect(page.getByText(/Current patch version:/)).toBeVisible();
