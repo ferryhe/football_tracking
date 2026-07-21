@@ -203,6 +203,73 @@ export const translations = {
           tracking: "Tracking",
           postprocess: "Post-processing",
         })[section] ?? section,
+      trialTuningCategories: "Bounded trial parameter categories",
+      trialTuningControlLabel: (path: string) =>
+        ({
+          "detector.allowed_labels": "Accepted football labels",
+          "detector.inference_mode": "Inference mode",
+          "detector.device": "Compute device",
+          "detector.use_half": "Half-precision inference",
+          "detector.confidence_threshold": "Detection confidence threshold",
+          "detector.image_size": "Detector input size",
+          "sahi.slice_height": "Slice height",
+          "sahi.slice_width": "Slice width",
+          "sahi.overlap_height_ratio": "Vertical overlap",
+          "sahi.overlap_width_ratio": "Horizontal overlap",
+          "sahi.postprocess_match_threshold": "Slice merge threshold",
+          "filtering.min_confidence": "Minimum candidate confidence",
+          "filtering.min_width": "Minimum candidate width",
+          "filtering.max_width": "Maximum candidate width",
+          "filtering.min_height": "Minimum candidate height",
+          "filtering.max_height": "Maximum candidate height",
+          "filtering.min_aspect_ratio": "Minimum aspect ratio",
+          "filtering.max_aspect_ratio": "Maximum aspect ratio",
+          "selection.min_accept_score": "Minimum selection score",
+          "selection.stable_history_length": "Stable history length",
+          "selection.weights.distance_score": "Distance score weight",
+          "selection.weights.direction_score": "Direction score weight",
+          "selection.weights.velocity_score": "Velocity score weight",
+          "selection.weights.acceleration_penalty":
+            "Acceleration penalty weight",
+          "selection.weights.trajectory_length_bonus": "Track length bonus",
+          "selection.weights.confidence": "Confidence weight",
+          "selection.priors.enabled": "Player-foot prior",
+          "selection.priors.player_foot_radius_px": "Player-foot radius",
+          "selection.priors.player_foot_bonus": "Player-foot bonus",
+          "selection.priors.recent_player_frame_window":
+            "Recent-player frame window",
+          "tracking.max_lost_frames": "Maximum lost frames",
+          "tracking.match_distance": "Match distance",
+          "tracking.max_speed": "Maximum speed",
+          "tracking.max_acceleration": "Maximum acceleration",
+          "tracking.predicted_confidence_decay": "Predicted confidence decay",
+          "postprocess.max_detected_island_length":
+            "Maximum detected-island length",
+          "postprocess.stable_segment_min_length":
+            "Minimum stable-segment length",
+          "postprocess.min_jump_distance": "Minimum jump distance",
+          "postprocess.low_confidence_threshold": "Low-confidence threshold",
+        })[path] ?? path,
+      trialTuningOptionLabel: (path: string, option: string) => {
+        const labels: Record<string, Record<string, string>> = {
+          "detector.allowed_labels": {
+            "sports ball": "Sports ball (COCO)",
+            ball: "Generic ball",
+          },
+          "detector.inference_mode": {
+            direct_full_frame: "Full-frame direct inference",
+            sahi: "Small-object slicing",
+          },
+          "detector.device": {
+            cpu: "CPU",
+            "cuda:0": "GPU (CUDA 0)",
+          },
+        };
+        return labels[path]?.[option] ?? option;
+      },
+      trialTuningHelp: (label: string) => `Explain ${label}`,
+      trialTuningOptions: (options: string) => `Options: ${options}`,
+      trialTuningTechnicalPath: "Technical path",
       trialTuningChanged: "Changed",
       trialTuningUnchanged: "Current",
       trialTuningBoolean: (enabled: boolean) =>
@@ -497,6 +564,16 @@ export const translations = {
       trialEvidenceLoading: "Loading and checking trial evidence…",
       trialEvidenceBlocked: "This completed trial cannot be accepted yet.",
       trialEvidenceReady: "Trial evidence is ready for confirmation.",
+      trialEvidenceOutcomeReadyTitle:
+        "Evidence is ready for visual confirmation",
+      trialEvidenceOutcomeReadyDescription:
+        "Artifacts and playable media are readable, and the authoritative V2 gate passed.",
+      trialEvidenceOutcomeBlockedTitle: "Trial result requires adjustment",
+      trialEvidenceOutcomeBlockedDescription:
+        "Artifacts and playable media are readable, but the authoritative V2 gate did not pass. This trial cannot be confirmed or accepted.",
+      trialEvidenceOutcomeMissingTitle: "Trial diagnosis is unavailable",
+      trialEvidenceOutcomeMissingDescription:
+        "Artifacts and playable media are readable, but the authoritative V2 decision is unavailable. This trial cannot be confirmed or accepted.",
       trialEvidenceRefreshFailed:
         "The latest trial evidence could not be verified. Review the evidence and try again.",
       trialEvidenceChanged:
@@ -530,6 +607,12 @@ export const translations = {
         "I visually reviewed this evidence and confirm the ball remains usable across the trial.",
       trialQualitySignals: "Quality signals for operator review",
       trialQuality: {
+        authoritativeGate: "Authoritative V2 decision",
+        authoritativeUnavailable: "Unavailable",
+        legacyContinuity: "Legacy inter-tracklet continuity",
+        legacyNotApplicable: "Not applicable (no tracklets)",
+        legacyDiagnosticOnly: (status: string) =>
+          `${status} (diagnostic only; not the acceptance gate)`,
         detected: "Detected",
         predicted: "Predicted",
         lost: "Lost",
@@ -540,7 +623,6 @@ export const translations = {
         suspicious: "Suspicious tracklets",
         reviewEvents: "Review events",
         lostGaps: "Lost gaps",
-        qualityGate: "Quality gate",
       },
       trialVideoEvidence: "Playable trial evidence",
       trialEditSettings: "Unlock trial settings",
@@ -1708,6 +1790,69 @@ export const translations = {
           tracking: "轨迹追踪",
           postprocess: "后处理",
         })[section] ?? section,
+      trialTuningCategories: "有限试跑参数分类",
+      trialTuningControlLabel: (path: string) =>
+        ({
+          "detector.allowed_labels": "接受的足球类别",
+          "detector.inference_mode": "推理方式",
+          "detector.device": "计算设备",
+          "detector.use_half": "半精度推理",
+          "detector.confidence_threshold": "检测置信度",
+          "detector.image_size": "检测输入尺寸",
+          "sahi.slice_height": "切片高度",
+          "sahi.slice_width": "切片宽度",
+          "sahi.overlap_height_ratio": "垂直重叠比例",
+          "sahi.overlap_width_ratio": "水平重叠比例",
+          "sahi.postprocess_match_threshold": "切片合并阈值",
+          "filtering.min_confidence": "候选最低置信度",
+          "filtering.min_width": "候选最小宽度",
+          "filtering.max_width": "候选最大宽度",
+          "filtering.min_height": "候选最小高度",
+          "filtering.max_height": "候选最大高度",
+          "filtering.min_aspect_ratio": "最小宽高比",
+          "filtering.max_aspect_ratio": "最大宽高比",
+          "selection.min_accept_score": "候选最低通过分",
+          "selection.stable_history_length": "稳定历史长度",
+          "selection.weights.distance_score": "距离得分权重",
+          "selection.weights.direction_score": "方向得分权重",
+          "selection.weights.velocity_score": "速度得分权重",
+          "selection.weights.acceleration_penalty": "加速度惩罚权重",
+          "selection.weights.trajectory_length_bonus": "轨迹长度奖励",
+          "selection.weights.confidence": "置信度权重",
+          "selection.priors.enabled": "球员脚部先验",
+          "selection.priors.player_foot_radius_px": "球员脚部半径",
+          "selection.priors.player_foot_bonus": "球员脚部奖励",
+          "selection.priors.recent_player_frame_window": "近期球员帧窗口",
+          "tracking.max_lost_frames": "最大丢失帧数",
+          "tracking.match_distance": "匹配距离",
+          "tracking.max_speed": "最大速度",
+          "tracking.max_acceleration": "最大加速度",
+          "tracking.predicted_confidence_decay": "预测置信度衰减",
+          "postprocess.max_detected_island_length": "最大检测孤岛长度",
+          "postprocess.stable_segment_min_length": "最小稳定轨迹段长度",
+          "postprocess.min_jump_distance": "最小跳变距离",
+          "postprocess.low_confidence_threshold": "低置信度阈值",
+        })[path] ?? path,
+      trialTuningOptionLabel: (path: string, option: string) => {
+        const labels: Record<string, Record<string, string>> = {
+          "detector.allowed_labels": {
+            "sports ball": "足球（COCO sports ball）",
+            ball: "通用球类（ball）",
+          },
+          "detector.inference_mode": {
+            direct_full_frame: "整帧直接识别",
+            sahi: "小目标切片识别",
+          },
+          "detector.device": {
+            cpu: "CPU",
+            "cuda:0": "GPU（CUDA 0）",
+          },
+        };
+        return labels[path]?.[option] ?? option;
+      },
+      trialTuningHelp: (label: string) => `查看“${label}”说明`,
+      trialTuningOptions: (options: string) => `可选项：${options}`,
+      trialTuningTechnicalPath: "技术参数路径",
       trialTuningChanged: "已修改",
       trialTuningUnchanged: "当前值",
       trialTuningBoolean: (enabled: boolean) => (enabled ? "启用" : "停用"),
@@ -1966,6 +2111,15 @@ export const translations = {
       trialEvidenceLoading: "正在加载并核验试跑证据…",
       trialEvidenceBlocked: "该试跑虽已完成，但暂时不能接受。",
       trialEvidenceReady: "试跑证据已就绪，可以确认。",
+      trialEvidenceOutcomeReadyTitle: "证据已就绪，可以进行人工视觉确认",
+      trialEvidenceOutcomeReadyDescription:
+        "产物和可播放媒体均可读取，且权威 V2 门禁已通过。",
+      trialEvidenceOutcomeBlockedTitle: "本次试跑需要调整",
+      trialEvidenceOutcomeBlockedDescription:
+        "产物和可播放媒体均可读取，但权威 V2 门禁未通过，因此不能确认或接受本次试跑。",
+      trialEvidenceOutcomeMissingTitle: "试跑诊断不可用",
+      trialEvidenceOutcomeMissingDescription:
+        "产物和可播放媒体均可读取，但权威 V2 结论不可用，因此不能确认或接受本次试跑。",
       trialEvidenceRefreshFailed: "无法核验最新试跑证据，请检查证据后重试。",
       trialEvidenceChanged: "最终核验时试跑证据发生变化，请重新检查后再接受。",
       trialVisualConfirmationChanged:
@@ -1997,6 +2151,12 @@ export const translations = {
         "我已目视检查本次证据，并确认足球在整个试跑片段中可用。",
       trialQualitySignals: "供人工判断的质量信号",
       trialQuality: {
+        authoritativeGate: "权威 V2 结论",
+        authoritativeUnavailable: "不可用",
+        legacyContinuity: "旧版轨迹段间连续性",
+        legacyNotApplicable: "不适用（没有轨迹段）",
+        legacyDiagnosticOnly: (status: string) =>
+          `${status}（仅供诊断，不是接受门禁）`,
         detected: "系统识别",
         predicted: "预测补点",
         lost: "丢失",
@@ -2007,7 +2167,6 @@ export const translations = {
         suspicious: "可疑轨迹段",
         reviewEvents: "复核事件",
         lostGaps: "丢失区间",
-        qualityGate: "质量门",
       },
       trialVideoEvidence: "可播放的试跑证据",
       trialEditSettings: "解锁试跑参数",

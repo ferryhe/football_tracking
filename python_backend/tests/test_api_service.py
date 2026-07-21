@@ -395,14 +395,75 @@ class ApiServiceSmokeTests(unittest.TestCase):
 
         self.assertEqual("1.0", schema["schema_version"])
         controls = schema["controls"]
-        self.assertGreater(len(controls), 10)
-        self.assertNotIn("detector.model_path", {control["path"] for control in controls})
+        self.assertEqual(39, len(controls))
+        paths = {control["path"] for control in controls}
+        self.assertEqual(len(controls), len(paths))
+        self.assertNotIn("detector.model_path", paths)
+        generic_descriptions = {
+            "Detector setting that affects ball detection quality or speed.",
+            "Tiled detection setting for finding small balls in large frames.",
+            "Candidate filtering rule applied after detection.",
+            "Selection scoring weight; higher values make this factor more important.",
+            "Candidate scoring and acceptance rule.",
+            "Temporal tracking and prediction rule.",
+            "Postprocess cleanup option for raw tracks.",
+        }
+        generic_descriptions_zh = {
+            "\u68c0\u6d4b\u5668\u53c2\u6570\uff0c\u5f71\u54cd\u627e\u7403\u8d28\u91cf\u6216\u63a8\u7406\u901f\u5ea6\u3002",
+            "\u5207\u7247\u68c0\u6d4b\u53c2\u6570\uff0c\u7528\u6765\u5728\u5927\u753b\u9762\u91cc\u627e\u5c0f\u7403\u3002",
+            "\u68c0\u6d4b\u540e\u7684\u5019\u9009\u8fc7\u6ee4\u89c4\u5219\u3002",
+            "\u5019\u9009\u70b9\u7efc\u5408\u8bc4\u5206\u6743\u91cd\uff0c\u6570\u503c\u8d8a\u5927\u8fd9\u4e2a\u56e0\u7d20\u8d8a\u91cd\u8981\u3002",
+            "\u5019\u9009\u70b9\u8bc4\u5206\u548c\u63a5\u53d7\u89c4\u5219\u3002",
+            "\u8de8\u5e27\u8ffd\u8e2a\u3001\u5339\u914d\u548c\u9884\u6d4b\u89c4\u5219\u3002",
+            "\u539f\u59cb\u8f68\u8ff9\u7684\u540e\u5904\u7406\u6e05\u6d17\u9009\u9879\u3002",
+        }
         for control in controls:
-            self.assertTrue(control["description"])
-            self.assertTrue(control["description_zh"])
+            description = control["description"]
+            description_zh = control["description_zh"]
+            self.assertEqual(description.strip(), description)
+            self.assertEqual(description_zh.strip(), description_zh)
+            self.assertNotIn(description, generic_descriptions)
+            self.assertNotIn(description_zh, generic_descriptions_zh)
+            self.assertNotIn("<", description)
+            self.assertNotIn(">", description)
+            self.assertNotIn("<", description_zh)
+            self.assertNotIn(">", description_zh)
             if control["kind"] in {"number", "integer"}:
                 self.assertLess(control["minimum"], control["maximum"])
                 self.assertGreater(control["step"], 0)
+
+        self.assertEqual(len(controls), len({control["description"] for control in controls}))
+        self.assertEqual(len(controls), len({control["description_zh"] for control in controls}))
+
+        by_path = {control["path"]: control for control in controls}
+        semantic_markers = {
+            "detector.allowed_labels": (("label mismatch",), ("\u7c7b\u522b\u540d\u4e0d\u5339\u914d",)),
+            "detector.image_size": (("GPU memory",), ("\u663e\u5b58",)),
+            "sahi.postprocess_match_threshold": (("Lower values merge",), ("\u8c03\u4f4e", "\u5408\u5e76")),
+            "filtering.min_width": (("tiny-ball",), ("\u5c0f\u7403",)),
+            "selection.min_accept_score": (("track history",), ("\u5df2\u6709\u8f68\u8ff9",)),
+            "selection.weights.acceleration_penalty": (("negative penalty",), ("\u8d1f\u5411\u6263\u5206",)),
+            "selection.priors.enabled": (("available player-foot",), ("\u53ef\u7528\u7684\u7403\u5458\u811a\u70b9",)),
+            "tracking.max_speed": (("not a hard cutoff",), ("\u4e0d\u662f\u786c\u8fc7\u6ee4",)),
+            "tracking.max_acceleration": (("Larger values tolerate",), ("\u8c03\u5927", "\u5bb9\u5fcd")),
+            "postprocess.stable_segment_min_length": (("fewer cleanups",), ("\u6e05\u7406\u66f4\u5c11",)),
+            "postprocess.low_confidence_threshold": (("more aggressive",), ("\u66f4\u6fc0\u8fdb",)),
+        }
+        for path, (markers_en, markers_zh) in semantic_markers.items():
+            with self.subTest(path=path):
+                for marker in markers_en:
+                    self.assertIn(marker, by_path[path]["description"])
+                for marker in markers_zh:
+                    self.assertIn(marker, by_path[path]["description_zh"])
+
+    def test_production_trial_tuning_schema_description_coverage_is_fail_closed(self) -> None:
+        with mock.patch.dict(
+            "football_tracking.api.service._TRIAL_TUNING_DESCRIPTIONS",
+            {"unsupported.path": ("Unsupported.", "\u4e0d\u652f\u6301\u3002")},
+            clear=True,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "description coverage mismatch"):
+                self.service.get_trial_tuning_schema()
 
     def write_video(self, relative_path: str) -> Path:
         path = self.repo_root / relative_path
